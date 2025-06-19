@@ -1,0 +1,11 @@
+selenium~=4.30.0
+webdriver-manager~=4.0.2
+requests~=2.32.3
+pandas~=2.2.3
+bs4~=0.0.2
+beautifulsoup4~=4.13.3
+ShopifyAPI~=12.7.0
+PyYAML~=6.0.2
+six~=1.17.0
+pyxnat~=1.6.3
+Flask~=3.1.0
