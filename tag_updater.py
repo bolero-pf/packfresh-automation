@@ -1,10 +1,14 @@
 import requests
 import time
 import re
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 API_VERSION = "2023-10"
-SHOPIFY_TOKEN = "***REMOVED******REMOVED***"
-SHOPIFY_STORE = "***REMOVED***.myshopify.com"
+SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN")
+SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
 
 HEADERS = {
     "Content-Type": "application/json",

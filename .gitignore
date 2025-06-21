@@ -1,0 +1,43 @@
+# Secrets and local environment
+.env
+*.env
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+run_output.log
+
+# Local data/output files
+*.csv
+*.xlsx
+*.sqlite3
+*.db
+
+# Jupyter notebooks (optional)
+*.ipynb
+
+# VSCode/IDE config (optional)
+.vscode/
+.idea/
+
+# OS-specific files
+ehthumbs.db
+Icon?

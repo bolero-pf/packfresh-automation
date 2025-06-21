@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Inventory Reconciliation</title>
+       <style>
+              body {
+            font-family: 'Segoe UI', sans-serif;
+            background-color: #fcf7e1;
+            color: #2a361c;
+            padding: 40px;
+            }
+
+            h1, h2 {
+                color: #616d39;
+            }
+
+            .nav a {
+                margin-right: 15px;
+                text-decoration: none;
+                color: #2a361c;
+                font-weight: bold;
+            }
+
+            table {
+                border-collapse: collapse;
+                width: 100%;
+                font-size: 14px;
+                margin-top: 20px;
+            }
+
+            th, td {
+                border: 1px solid #ba6b29;
+                padding: 8px;
+                text-align: left;
+            }
+
+            th {
+                background-color: #dfa260;
+                color: #000;
+                cursor: pointer;
+            }
+
+            tr:nth-child(even) {
+                background-color: #fff9ef;
+            }
+
+            tr:hover {
+                background-color: #ffeacc;
+            }
+
+            input[type=text] {
+                width: 80px;
+                padding: 4px;
+            }
+
+            button {
+                background-color: #616d39;
+                color: white;
+                padding: 8px 12px;
+                border: none;
+                cursor: pointer;
+                font-weight: bold;
+            }
+
+            button:hover {
+                background-color: #2a361c;
+            }
+            .dataframe {
+                width: 100%;
+                border-collapse: collapse;
+            }
+            .dataframe th, .dataframe td {
+                border: 1px solid #ddd;
+                padding: 8px;
+                text-align: left; /* Ensures both headers and cells are left-aligned */
+                vertical-align: top;
+            }
+            .dataframe th {
+                background-color: #f2f2f2;
+            }
+        </style>
+</head>
+<body>
+    <h2>Inventory Reconciliation</h2>
+    {% for table in tables %}
+        {{ table|safe }}
+    {% endfor %}
+</body>
+</html>

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Log Stream</title>
+    <style>
+        #log {
+            white-space: pre-wrap;
+            font-family: monospace;
+            background-color: #111;
+            color: #0f0;
+            padding: 1em;
+            height: 90vh;
+            overflow-y: scroll;
+        }
+    </style>
+</head>
+<body>
+    <h1>🚀 Live Script Log</h1>
+    <div id="log"></div>
+
+    <script>
+        const logEl = document.getElementById("log");
+        const eventSource = new EventSource("/run-live/standard");  // or /run-live/upload
+
+        eventSource.onmessage = function(event) {
+            logEl.textContent += event.data + "\n";
+            logEl.scrollTop = logEl.scrollHeight;
+        };
+
+        eventSource.onerror = function(err) {
+            logEl.textContent += "\n[Error connecting to log stream]";
+            eventSource.close();
+        };
+    </script>
+</body>
+</html>

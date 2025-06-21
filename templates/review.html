@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Price Sync Dashboard</title>
+  <style>
+    body {
+        font-family: 'Segoe UI', sans-serif;
+        background-color: #fcf7e1;
+        color: #2a361c;
+        padding: 40px;
+    }
+
+    h1, h2 {
+        color: #616d39;
+    }
+
+    .nav a {
+        margin-right: 15px;
+        text-decoration: none;
+        color: #2a361c;
+        font-weight: bold;
+    }
+
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+        margin-top: 20px;
+    }
+
+    th, td {
+        border: 1px solid #ba6b29;
+        padding: 8px;
+        text-align: left;
+    }
+
+    th {
+        background-color: #dfa260;
+        color: #000;
+        cursor: pointer;
+    }
+
+    tr:nth-child(even) {
+        background-color: #fff9ef;
+    }
+
+    tr:hover {
+        background-color: #ffeacc;
+    }
+
+    input[type=text] {
+        width: 80px;
+        padding: 4px;
+    }
+
+    button {
+        background-color: #616d39;
+        color: white;
+        padding: 8px 12px;
+        border: none;
+        cursor: pointer;
+        font-weight: bold;
+    }
+
+    button:hover {
+        background-color: #2a361c;
+    }
+  </style>
+</head>
+<body>
+  <h1>📊 Price Sync Dashboard</h1>
+  <div class="nav">
+    <a href="{{ url_for('dashboard', view='review') }}">Needs Review</a>
+    <a href="{{ url_for('dashboard', view='pushed') }}">Auto-Updated</a>
+    <a href="{{ url_for('dashboard', view='missing') }}">Missing Listings</a>
+    <a href="{{ url_for('dashboard', view='untouched') }}">Untouched</a>
+    <form method="post" action="/run" style="display:inline;">
+      <input type="hidden" name="action" value="refresh">
+      <input type="hidden" name="source" value="{{ view }}">
+      <button type="submit">🔄 Full Refresh</button>
+    </form>
+  </div>
+
+  <h2>{{ title }}</h2>
+
+  {% if df.empty %}
+    <p>No entries found.</p>
+  {% else %}
+ <form method="POST" action="{{ url_for('save_csv', view=view) }}">
+  <!-- Buttons above the table -->
+  <div style="display: flex; align-items: center; gap: 20px; margin-bottom: 20px;">
+    <button type="submit">💾 Save Changes</button>
+    <a href="/download" style="text-decoration: none; font-weight: bold; color: #2a361c;">📥 Download CSV</a>
+    <button type="button" id="uploadBtn">🚀 Push Reviewed Prices to Shopify</button>
+  </div>
+
+  <!-- Editable table -->
+  <table>
+    <thead>
+  <tr>
+    <th>Title</th>
+    {% if 'tcgplayer_id' in df.columns %}
+      <th>TCG Link</th>
+    {% endif %}
+    {% if 'price' in df.columns %}
+      <th>Current Price</th>
+    {% endif %}
+    {% if 'tcg_price' in df.columns %}
+      <th>TCG Price</th>
+    {% endif %}
+    {% if 'suggested_price' in df.columns %}
+      <th>Suggested</th>
+    {% endif %}
+    {% if 'new_price' in df.columns %}
+      <th>Uploaded Price</th>
+    {% endif %}
+    {% if 'percent_diff' in df.columns %}
+      <th>% Diff</th>
+    {% endif %}
+    {% if 'reason' in df.columns %}
+      <th>Reason</th>
+    {% endif %}
+    {% if 'price_to_upload' in df.columns %}
+      <th>Price to Upload</th>
+    {% endif %}
+    {% if view in ['review', 'missing'] %}
+      <th>Edit</th>
+    {% endif %}
+  </tr>
+</thead>
+<tbody>
+  {% for i, row in df.iterrows() %}
+  <tr>
+    <td>{{ row.get('title', '') }}</td>
+
+    {% if 'tcgplayer_id' in df.columns %}
+      <td>
+        <a href="https://www.tcgplayer.com/product/{{ row.get('tcgplayer_id', '') }}?Language=English" target="_blank">
+          {{ row.get('tcgplayer_id', '') }}
+        </a>
+      </td>
+    {% endif %}
+
+    {% if 'price' in df.columns %}
+      <td>{{ row.get('price', '') }}</td>
+    {% endif %}
+    {% if 'tcg_price' in df.columns %}
+      <td>{{ row.get('tcg_price', '') }}</td>
+    {% endif %}
+    {% if 'suggested_price' in df.columns %}
+      <td>{{ row.get('suggested_price', '') }}</td>
+    {% endif %}
+    {% if 'new_price' in df.columns %}
+      <td>{{ row.get('new_price', '') }}</td>
+    {% endif %}
+    {% if 'percent_diff' in df.columns %}
+      <td>{{ "%.2f"|format(row.get('percent_diff', 0.0)|float) }}</td>
+    {% endif %}
+    {% if 'reason' in df.columns %}
+      <td>{{ row.get('reason', '') }}</td>
+    {% endif %}
+    {% if 'price_to_upload' in df.columns %}
+      <td>{{ row.get('price_to_upload', '') }}</td>
+    {% endif %}
+    {% if view in ['review', 'missing'] %}
+      <td>
+        <input type="text" name="price_to_upload_{{ i }}" value="{{ row.get('price_to_upload', '') }}" id="price_input_{{ i }}">
+        {% if row.get('suggested_price') is not none and row.get('suggested_price') != '' %}
+          <button type="button" onclick="document.getElementById('price_input_{{ i }}').value = '{{ "%.2f"|format(row.get("suggested_price")|float) }}'">✔ Accept</button>
+        {% endif %}
+      </td>
+    {% endif %}
+    {% if row.get('sku') %}
+      <td>
+        <button type="button" onclick="ignoreRow('{{ row['sku'] | escape }}', this)">🛑 Ignore</button>
+      </td>
+    {% endif %}
+  </tr>
+  {% endfor %}
+</tbody>
+
+
+  </table>
+</form>
+
+<!-- Upload log -->
+<div id="log" style="white-space:pre-wrap; background:#111; color:#0f0; padding:1em; margin-top:1em; height:40vh; overflow-y:auto;"></div>
+
+<script>
+  document.getElementById("uploadBtn").addEventListener("click", () => {
+    const logEl = document.getElementById("log");
+    logEl.innerText = "[Uploading reviewed prices...]\n";
+    const source = new EventSource("/run-live/upload");
+
+    source.onmessage = (event) => {
+      logEl.innerText += event.data + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    source.onerror = (err) => {
+      logEl.innerText += "\n[⚠️ Log stream ended or encountered an error]";
+      source.close();
+    };
+  });
+</script>
+  {% endif %}
+<script>
+   document.addEventListener("DOMContentLoaded", function () {
+    const table = document.querySelector("table");
+    const getCellValue = (tr, idx) => tr.children[idx].innerText || tr.children[idx].textContent;
+
+    const comparer = (idx, asc) => (a, b) => ((v1, v2) =>
+      v1 !== '' && v2 !== '' && !isNaN(v1) && !isNaN(v2) ?
+        v1 - v2 : v1.toString().localeCompare(v2)
+    )(getCellValue(asc ? a : b, idx), getCellValue(asc ? b : a, idx));
+
+    const headers = table.querySelectorAll("th");
+    headers.forEach((th, i) => {
+  th.addEventListener("click", () => {
+    const tbody = table.querySelector("tbody");
+    const asc = !th.classList.contains("asc");
+
+    // Clear all sort markers
+    headers.forEach(h => h.classList.remove("asc", "desc"));
+    th.classList.add(asc ? "asc" : "desc");
+
+    Array.from(tbody.querySelectorAll("tr"))
+      .sort(comparer(i, asc))
+      .forEach(tr => tbody.appendChild(tr));
+
+    localStorage.setItem("sortColumnIndex", i);
+    localStorage.setItem("sortDirection", asc ? "asc" : "desc");
+  });
+});
+
+// Restore previous sort order on page load
+window.addEventListener("load", () => {
+  const sortIndex = localStorage.getItem("sortColumnIndex");
+  const sortDirection = localStorage.getItem("sortDirection");
+
+  if (sortIndex !== null && sortDirection) {
+    const header = headers[sortIndex];
+    header.click();
+
+    const currentClass = header.classList.contains("asc") ? "asc" : "desc";
+    if (currentClass !== sortDirection) {
+      header.click();
+    }
+  }
+});
+
+  });
+</script>
+<script>
+  function ignoreRow(sku, btn) {
+    if (!confirm(`Ignore SKU: ${sku}? This will hide it going forward.`)) return;
+
+    fetch("/ignore", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: `sku=${encodeURIComponent(sku)}`
+    }).then(res => {
+      if (res.ok) {
+        // Remove the row from the table
+        const row = btn.closest("tr");
+        row.parentNode.removeChild(row);
+      } else {
+        alert("Failed to ignore SKU.");
+      }
+    });
+  }
+</script>
+
+</body>
+</html>

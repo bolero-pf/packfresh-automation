@@ -1,8 +1,13 @@
 import pandas as pd
 import requests
+import os
+from dotenv import load_dotenv
 
-SHOPIFY_ADMIN_TOKEN = "***REMOVED******REMOVED***"
-SHOPIFY_STORE = "***REMOVED***.myshopify.com"
+load_dotenv()
+
+
+SHOPIFY_ADMIN_TOKEN = os.environ.get("SHOPIFY_TOKEN")
+SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
 API_VERSION = "2023-10"
 GRAPHQL_ENDPOINT = f"https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/graphql.json"
 CSV_PATH = ".venv/Scripts/shopifyupdate.csv"

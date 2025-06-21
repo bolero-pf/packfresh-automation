@@ -8,12 +8,15 @@ import flask
 import requests
 from dailyrunner import get_shopify_products
 from flask import Flask, render_template_string, request, render_template, redirect, flash, get_flashed_messages, send_file
+from dotenv import load_dotenv
+
+load_dotenv()
 print("Flask version:", flask.__version__)
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = "something-super-secret-and-unique"
-SHOPIFY_TOKEN = "***REMOVED******REMOVED***"
-SHOPIFY_STORE = "***REMOVED***.myshopify.com"
-LOCATION_ID = 80312369372
+SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN")
+SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
+LOCATION_ID = os.environ.get("LOCATION_ID")
 API_VERSION = "2023-07"
 VISIBLE_COLUMNS = [
     "name",
@@ -52,11 +55,11 @@ NAV_BUTTONS = [
 def working_dir_path(filename):
     if getattr(sys, 'frozen', False):
         return os.path.join(os.path.dirname(sys.executable), filename)
-    return os.path.join(os.path.abspath(".venv/Scripts"), filename)
+    return os.path.abspath(filename)
 
 inventory_path = working_dir_path(".venv/Scripts/InventoryFinal.csv")
 
-BEARER_TOKEN = "***REMOVED***.eyJ1c2VybmFtZSI6IlBhY2tGcmVzaFNTWiIsInN1YiI6MjI5NzM2LCJ1c2VySWQiOjIyOTczNiwicm9sZXMiOlsiU1RPUkVfT1dORVIiXSwicGVybWlzc2lvbnMiOlsiQ1JFQVRFX1NUT1JFIl0sImF1dGgwSWQiOm51bGwsImlhdCI6MTc0MDM3MDg5OCwiZXhwIjoxNzcxOTA2ODk4fQ.8vKRvkS1eP59Xren3tY0e_cto9mrsYpNIBidY_OUTK8"
+BEARER_TOKEN = os.environ.get("RC_BEARER")
 # Load inventory and export files
 def parse_bool(val):
     if isinstance(val, bool):

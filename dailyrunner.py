@@ -15,6 +15,9 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 
@@ -24,8 +27,8 @@ MAX_WORKERS = 5
 REVIEW_CSV = "price_updates_needs_review.csv"
 MISSING_CSV = "price_updates_missing_listing.csv"
 # === CONFIG ===
-SHOPIFY_TOKEN = "***REMOVED******REMOVED***"
-SHOPIFY_STORE = "***REMOVED***.myshopify.com"
+SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN")
+SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
 GRAPHQL_ENDPOINT = f"https://{SHOPIFY_STORE}/admin/api/2023-07/graphql.json"
 HEADERS = {
     "Content-Type": "application/json",
@@ -180,7 +183,7 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
     options.add_argument("--headless=new")  # Optional: comment this out to see browser
     options.add_argument(f"--user-agent={random.choice(user_agents)}")
 
-    service = Service(".venv/Scripts/chromedriver.exe")
+    service = Service("chromedriver.exe")
     try:
         driver = webdriver.Chrome(service=service, options=options)
         print("✅ Browser launched. Navigating to:", url)
@@ -311,7 +314,9 @@ def process_product(product):
         print(f"🚫 Ignoring {product['title']} (SKU: {product['sku']})")
         return "untouched", product
 
-    if any(tag in (product.get("tags") or []) for tag in ["weekly_deals", "ignore_update"]):
+    tags = [t.strip() for t in (product.get("tags") or "").split(",")]
+
+    if any(tag in tags for tag in ["weekly_deals", "ignore_update"]):
         print(f"🛑 Skipping {product['title']} (tagged as Weekly Deals or Ignore Update)")
         return "untouched", product
 
@@ -438,9 +443,9 @@ def run_price_sync():
             print("😴 Batch complete. Sleeping for 5 minutes to avoid bot detection...", flush=True)
             time.sleep(300)
 
-    pd.DataFrame(updated_rows).to_csv(".venv/Scripts/price_updates_pushed.csv", index=False)
+    pd.DataFrame(updated_rows).to_csv("price_updates_pushed.csv", index=False)
     pd.DataFrame(flagged_rows).to_csv(REVIEW_CSV, index=False)
-    pd.DataFrame(untouched_rows).to_csv(".venv/Scripts/price_updates_untouched.csv", index=False)
+    pd.DataFrame(untouched_rows).to_csv("price_updates_untouched.csv", index=False)
     pd.DataFrame(missing_rows).assign(price_to_upload="").to_csv(MISSING_CSV, index=False)
 
     print(f"\n✅ Updates pushed: {len(updated_rows)}")

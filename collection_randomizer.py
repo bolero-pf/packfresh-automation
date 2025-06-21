@@ -1,9 +1,13 @@
 import requests
 import random
 import json
+from dotenv import load_dotenv
+import os
 
-SHOPIFY_DOMAIN = '***REMOVED***.myshopify.com'
-ACCESS_TOKEN = '***REMOVED******REMOVED***'
+load_dotenv()
+
+SHOPIFY_DOMAIN = os.environ.get("SHOPIFY_STORE")
+ACCESS_TOKEN = os.environ.get("SHOPIFY_TOKEN")
 BASE_URL = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04"
 THEME_ID = 147343704284
 
@@ -186,20 +190,22 @@ def curated_random_carousel_blocks(index_json_string):
     product_type_blocks = {
         "collection_block_dJVnUz",  # ETBs
         "collection_block_PHE4Xi",  # Tins
-        "collection_block_6GMPLP",  # Booster Boxes
-        "collection_block_AfdRQH",  # Booster Packs
-        "collection_block_RtKEAG",  # Collection Boxes
+        "collection_block_R4WJRB",  # Booster Boxes
+        "collection_block_7mejda",  # Booster Packs
+        "collection_block_GEemDK",  # Collection Boxes
     }
+
     ip_blocks = {
-        "collection_block_jyNWYw",  # MTG
-        "collection_block_mA4p6n",  # Lorcana
-        "collection_block_6zfnAf",  # One Piece
+        "collection_block_CVm8CT",  # MTG
+        "collection_block_aM6Yrr",  # Lorcana
+        "collection_block_CdCAWt",  # One Piece
         "collection_block_EexjnG",  # All Pokémon
     }
+
     curated_blocks = {
-        "collection_block_cCwXh4",  # Hot Pokémon Sets
+        "collection_block_WfYULP",  # Hot Pokémon Sets
         "collection_block_HPihgx",  # Premium Sealed
-        "collection_block_nzUciF",  # Modern Sealed
+        "collection_block_j6Dtjp",  # Modern Sealed
     }
 
     # Sample according to strategy
@@ -209,7 +215,9 @@ def curated_random_carousel_blocks(index_json_string):
     selected += random.sample(list(curated_blocks & block_map.keys()), 1)
 
     random.shuffle(selected)
-    index_data['sections'][section_id]['block_order'] = selected
+    existing_order = index_data['sections'][section_id]['block_order']
+    remaining = [b for b in existing_order if b not in selected]
+    index_data['sections'][section_id]['block_order'] = selected + remaining
 
     return json.dumps(index_data, indent=2)
 
@@ -312,9 +320,9 @@ def get_theme_id():
         print(f"{'[✔️ LIVE]' if theme['role'] == 'main' else '       '} {theme['name']} — ID: {theme['id']}")
 
 
-#index_data = get_index_data(THEME_ID)
-#shuffled_data = curated_random_carousel_blocks(json.dumps(index_data))
-#update_index_data(json.loads(shuffled_data), THEME_ID)
-#sync_homepage_collections()
+index_data = get_index_data(THEME_ID)
+shuffled_data = curated_random_carousel_blocks(json.dumps(index_data))
+update_index_data(json.loads(shuffled_data), THEME_ID)
+sync_homepage_collections()
 _, smart_collections = get_collections()
 sync_featured_picks_for_all_collections(smart_collections)

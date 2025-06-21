@@ -1,11 +1,15 @@
 import requests
 import time
 import re
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 API_VERSION = "2023-10"
-SHOPIFY_TOKEN = "***REMOVED******REMOVED***"
-SHOPIFY_STORE = "***REMOVED***.myshopify.com"
-RC_BEARER = "***REMOVED***.eyJ1c2VybmFtZSI6IlBhY2tGcmVzaFNTWiIsInN1YiI6MjI5NzM2LCJ1c2VySWQiOjIyOTczNiwicm9sZXMiOlsiU1RPUkVfT1dORVIiXSwicGVybWlzc2lvbnMiOlsiQ1JFQVRFX1NUT1JFIl0sImF1dGgwSWQiOm51bGwsImlhdCI6MTc0MDM3MDg5OCwiZXhwIjoxNzcxOTA2ODk4fQ.8vKRvkS1eP59Xren3tY0e_cto9mrsYpNIBidY_OUTK8"
+SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN")
+SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
+RC_BEARER = os.environ.get("RC_BEARER")
 import pandas as pd
 
 HEADERS = {
@@ -111,6 +115,29 @@ def update_rc_gtin(rc_bearer_token, inventory_item_id, gtin):
     print(f"✅ RC GTIN updated: {inventory_item_id} → {gtin}")
     return True
 
+def fetch_rc_gtin(rc_bearer_token, inventory_item_id):
+    url = "https://api.rarecandy.com/graphql"
+    headers = {
+        "Authorization": f"Bearer {rc_bearer_token}",
+        "Content-Type": "application/json"
+    }
+
+    query = """
+    query GetInventoryItem($id: Int!) {
+      inventoryItem(id: $id) {
+        id
+        gtin
+      }
+    }
+    """
+
+    response = requests.post(url, headers=headers, json={"query": query, "variables": {"id": inventory_item_id}})
+    if response.status_code != 200:
+        print(f"❌ Failed to fetch RC GTIN for {inventory_item_id}: {response.status_code}")
+        return None
+
+    data = response.json().get("data", {}).get("inventoryItem", {})
+    return data.get("gtin")
 def sync_gtins_to_rc(gtin_records, df_csv, rc_bearer_token):
     success_count = 0
     skip_missing_title = 0
@@ -141,6 +168,12 @@ def sync_gtins_to_rc(gtin_records, df_csv, rc_bearer_token):
             continue
 
         rc_id = int(rc_id_series.iloc[0])
+        rc_gtin = fetch_rc_gtin(rc_bearer_token, rc_id)
+
+        if rc_gtin == gtin:
+            print(f"⏭️ Skipped GTIN update for {rc_id} — already up to date.")
+            continue
+
         updated = update_rc_gtin(rc_bearer_token, rc_id, gtin)
         if updated:
             success_count += 1
