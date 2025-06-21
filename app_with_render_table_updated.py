@@ -1352,16 +1352,17 @@ def filter_and_deduplicate_export(export_df):
 
 
 if __name__ == "__main__":
+    # Only run this block in local development
     with app.app_context():
         with app.test_request_context():
             try:
-                # Load the inventory, process the export, and perform the merges
                 global inventory_df
                 inventory_df = load_inventory(inventory_path)
-                # Run your sync routines.
-                rc_sync_logic()  # Make sure this function uses inventory_df as needed.
-                shopify_sync_logic()  # Likewise for Shopify.
+                rc_sync_logic()
+                shopify_sync_logic()
                 print("Initial sync complete.")
             except Exception as e:
                 print("Error during initial sync:", e)
+
+    # Dev server only — Gunicorn will not trigger this
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
