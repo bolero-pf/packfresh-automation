@@ -41,3 +41,13 @@ run_output.log
 # OS-specific files
 ehthumbs.db
 Icon?
+
+chrome/
+*.exe
+*.dmg
+*.app
+*.bin
+*.deb
+*.zip
+*.tar
+*.gz-e "\n# Local debug and cleanup files\n*.txt\n*.jar" 
