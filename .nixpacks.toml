@@ -1,0 +1,2 @@
+[start]
+cmd = "gunicorn app_with_render_table_updated:app"
