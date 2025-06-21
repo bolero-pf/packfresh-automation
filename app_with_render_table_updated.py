@@ -60,6 +60,8 @@ def working_dir_path(filename):
 inventory_path = os.path.join(os.getcwd(), "InventoryFinal.csv")
 
 BEARER_TOKEN = os.environ.get("RC_BEARER")
+
+
 # Load inventory and export files
 def parse_bool(val):
     if isinstance(val, bool):
@@ -1349,7 +1351,14 @@ def filter_and_deduplicate_export(export_df):
     export_df = export_df.sort_values(by=["__key__", "is published"], ascending=[True, False])
     return export_df.drop_duplicates(subset="__key__", keep="first")
 
-
+try:
+    inventory_df = load_inventory(inventory_path)
+    rc_sync_logic()
+    shopify_sync_logic()
+    print("✅ Initial sync complete.")
+except Exception as e:
+    print(f"❌ Failed to load inventory at startup: {e}")
+    inventory_df = pd.DataFrame()  # fallback to empty
 
 if __name__ == "__main__":
     # Only run this block in local development
