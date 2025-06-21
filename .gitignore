@@ -50,4 +50,5 @@ chrome/
 *.deb
 *.zip
 *.tar
+*.dll
 *.gz-e "\n# Local debug and cleanup files\n*.txt\n*.jar" 
