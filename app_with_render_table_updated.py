@@ -57,7 +57,7 @@ def working_dir_path(filename):
         return os.path.join(os.path.dirname(sys.executable), filename)
     return os.path.abspath(filename)
 
-inventory_path = working_dir_path(".venv/Scripts/InventoryFinal.csv")
+inventory_path = os.path.join(os.getcwd(), "InventoryFinal.csv")
 
 BEARER_TOKEN = os.environ.get("RC_BEARER")
 # Load inventory and export files
@@ -1364,4 +1364,4 @@ if __name__ == "__main__":
                 print("Initial sync complete.")
             except Exception as e:
                 print("Error during initial sync:", e)
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

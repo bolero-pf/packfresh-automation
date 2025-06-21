@@ -314,7 +314,9 @@ def process_product(product):
         print(f"🚫 Ignoring {product['title']} (SKU: {product['sku']})")
         return "untouched", product
 
-    tags = [t.strip() for t in (product.get("tags") or "").split(",")]
+    raw_tags = product.get("tags") or []
+    tags = [t.strip().lower() for t in raw_tags] if isinstance(raw_tags, list) else [t.strip().lower() for t in
+                                                                                     raw_tags.split(",")]
 
     if any(tag in tags for tag in ["weekly_deals", "ignore_update"]):
         print(f"🛑 Skipping {product['title']} (tagged as Weekly Deals or Ignore Update)")

@@ -52,3 +52,5 @@ chrome/
 *.tar
 *.dll
 *.gz-e "\n# Local debug and cleanup files\n*.txt\n*.jar" 
+bfg-1.15.0.jar 
+replacements.txt 
