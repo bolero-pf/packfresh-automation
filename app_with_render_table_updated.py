@@ -1368,8 +1368,8 @@ if __name__ == "__main__":
         with app.test_request_context():
             try:
                 inventory_df = load_inventory(inventory_path)
-                rc_sync_logic()
-                shopify_sync_logic()
+                #rc_sync_logic()
+                #shopify_sync_logic()
                 print("Initial sync complete.")
             except Exception as e:
                 print("Error during initial sync:", e)
