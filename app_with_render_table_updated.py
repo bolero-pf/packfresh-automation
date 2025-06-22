@@ -9,6 +9,8 @@ import requests
 from dailyrunner import get_shopify_products
 from flask import Flask, render_template_string, request, render_template, redirect, flash, get_flashed_messages, send_file
 from dotenv import load_dotenv
+from flask import request, Response
+from functools import wraps
 
 load_dotenv()
 print("Flask version:", flask.__version__)
@@ -16,6 +18,8 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = "something-super-secret-and-unique"
 SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN")
 SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
+USERNAME = os.environ.get("INVENTORY_USER")
+PASSWORD = os.environ.get("INVENTORY_PASS")
 LOCATION_ID = os.environ.get("LOCATION_ID")
 API_VERSION = "2023-07"
 VISIBLE_COLUMNS = [
@@ -60,7 +64,23 @@ def working_dir_path(filename):
 inventory_path = os.path.join(os.getcwd(), "InventoryFinal.csv")
 
 BEARER_TOKEN = os.environ.get("RC_BEARER")
+def check_auth(u, p):
+    return u == USERNAME and p == PASSWORD
 
+def authenticate():
+    return Response(
+        'Unauthorized', 401,
+        {'WWW-Authenticate': 'Basic realm="Login Required"'}
+    )
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
 
 # Load inventory and export files
 def parse_bool(val):
@@ -257,6 +277,7 @@ def merge_inventory(inventory_df, export_df):
 
 def save_inventory(inventory_df, csv_path):
     inventory_df.to_csv(csv_path, index=False)
+
 def do_usercontext_query(session, bearer_token):
     graphql_url = "https://api.rarecandy.com/graphql"
     headers = {
@@ -775,6 +796,7 @@ def update_shopify_item(variant_id, inventory_item_id, new_price=None, new_quant
 
     return results
 @app.route("/commit_merge", methods=["POST"])
+@requires_auth
 def commit_merge():
     global inventory_df
 
@@ -801,6 +823,7 @@ def commit_merge():
     return redirect(f"/?q={search}")
 
 @app.route("/export_csv")
+@requires_auth
 def export_csv():
     global inventory_df
     buffer = io.StringIO()
@@ -954,6 +977,7 @@ def process_inventory_save(filtered_df):
     inventory_df.to_csv(inventory_path, index=False)
     flash("💾 Changes saved successfully!", "success")
 @app.route("/sync_rc")
+@requires_auth
 def sync_rc():
     rc_sync_logic()
     return redirect("/")
@@ -1064,10 +1088,12 @@ def shopify_sync_logic():
     print(f"✅ Shopify Sync Complete — {updated} updated, {added} added")
 
 @app.route("/sync_shopify")
+@requires_auth
 def sync_shopify():
     shopify_sync_logic()
     return redirect("/")
 @app.route("/merge_preview", methods=["GET", "POST"])
+@requires_auth
 def preview_merge():
 
     search = request.args.get("q", "")
@@ -1088,6 +1114,7 @@ def preview_merge():
         search=search
     )
 @app.route("/untouched", methods=["GET", "POST"])
+@requires_auth
 def view_untouched():
     if "save" in request.form:
         return index()
@@ -1114,6 +1141,7 @@ def sanitize_boolean(val):
     return pd.NA
 # Flask route
 @app.route("/", methods=["GET", "POST"])
+@requires_auth
 def index():
     global inventory_df
     search = request.values.get("q", "").lower()
@@ -1307,6 +1335,7 @@ def index():
     filtered_df = filtered_df[[col for col in filtered_df.columns if not col.startswith("touched_")]]
     return render_inventory_table(filtered_df, "📋 Inventory Viewer", hidden_buttons=["back"], show_columns=VISIBLE_COLUMNS)
 @app.route("/only_rc", methods=["GET", "POST"])
+@requires_auth
 def only_rc():
     df = inventory_df.copy()
     filtered = df[
@@ -1319,6 +1348,7 @@ def only_rc():
     filtered = filtered[["name", "total amount (4/1)", "rc_qty", "rc_price", "shopify_qty", "shopify_price", "notes"]]
     return render_inventory_table(filtered, "🛒 Only Published on Rare Candy")
 @app.route("/only_shopify", methods=["GET", "POST"])
+@requires_auth
 def only_shopify():
     df = inventory_df.copy()
     filtered = df[
@@ -1331,6 +1361,7 @@ def only_shopify():
     filtered = filtered[["name", "total amount (4/1)", "rc_qty", "rc_price", "shopify_qty", "shopify_price", "notes"]]
     return render_inventory_table(filtered, "🛍️ Only Published on Shopify")
 @app.route("/unpublished", methods=["GET", "POST"])
+@requires_auth
 def unpublished():
     df = inventory_df.copy()
 
