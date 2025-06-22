@@ -1355,8 +1355,8 @@ def filter_and_deduplicate_export(export_df):
 with app.app_context():
     try:
         inventory_df = load_inventory(inventory_path)
-        rc_sync_logic()
-        shopify_sync_logic()
+        #rc_sync_logic()
+        #shopify_sync_logic()
         print("✅ Initial sync complete.")
     except Exception as e:
         print(f"❌ Failed to load inventory at startup: {e}")
