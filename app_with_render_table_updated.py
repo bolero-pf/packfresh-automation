@@ -905,6 +905,7 @@ def rc_sync_logic():
     print(f"✅ Rare Candy sync complete: {updated_count} updated, {added_count} added")
     flash(f"Rare Candy sync complete: {updated_count} updated, {added_count} added.", "success")
 def process_inventory_save(filtered_df):
+    global inventory_df
     updates = request.form.to_dict()
 
     for i, row in filtered_df.iterrows():
@@ -1365,7 +1366,6 @@ if __name__ == "__main__":
     with app.app_context():
         with app.test_request_context():
             try:
-                global inventory_df
                 inventory_df = load_inventory(inventory_path)
                 rc_sync_logic()
                 shopify_sync_logic()
