@@ -11,6 +11,7 @@ from flask import Flask, render_template_string, request, render_template, redir
 from dotenv import load_dotenv
 from flask import request, Response
 from functools import wraps
+from sqlalchemy import create_engine
 
 load_dotenv()
 print("Flask version:", flask.__version__)
@@ -92,6 +93,34 @@ def parse_bool(val):
 
 def get_bearer_token():
     return BEARER_TOKEN
+
+def load_inventory_fallback():
+    engine = create_engine("sqlite:////data/inventory.db")
+
+    if os.path.exists("/data/inventory.db"):
+        print("📂 Loading inventory from SQLite...")
+        df = pd.read_sql("SELECT * FROM inventory", engine)
+    else:
+        print("📂 SQLite not found — loading from CSV and seeding database...")
+        df = pd.read_csv(inventory_path)
+        df.to_sql("inventory", engine, if_exists="replace", index=False)
+
+    # Run your cleanup regardless of source
+    df = df.drop(columns=["unnamed: 10"], errors="ignore")
+    df["touched_rc"] = False
+    df["touched_shopify"] = False
+    for col in ["rare_find_id", "pending_rc_update", "inventory_item_id", "rc_qty", "rc_price", "variant_id", "pending_shopify_update", "shopify_inventory_id"]:
+        if col not in df.columns:
+            df[col] = None
+    df.columns = df.columns.str.strip().str.lower()
+    df["__key__"] = df["name"].apply(normalize_name)
+    return df
+
+def save_inventory_to_db(df):
+    engine = create_engine("sqlite:////data/inventory.db")
+    df.to_sql("inventory", engine, if_exists="replace", index=False)
+
+
 def fetch_rc_inventory_via_graphql(bearer_token):
     headers = {
         "Authorization": f"Bearer {bearer_token}",
@@ -818,7 +847,7 @@ def commit_merge():
     inventory_df = pd.concat([inventory_df, survivor_df], ignore_index=True)
 
     # Save and redirect
-    inventory_df.to_csv(inventory_path, index=False)
+    save_inventory_to_db(inventory_df)
     flash("✅ Merged items by choosing one version.", "success")
     return redirect(f"/?q={search}")
 
@@ -923,7 +952,7 @@ def rc_sync_logic():
 
     # Replace global inventory
     inventory_df = merged_df
-    save_inventory(inventory_df, inventory_path)
+    save_inventory_to_db(inventory_df)
 
     print(f"✅ Rare Candy sync complete: {updated_count} updated, {added_count} added")
     flash(f"Rare Candy sync complete: {updated_count} updated, {added_count} added.", "success")
@@ -974,7 +1003,7 @@ def process_inventory_save(filtered_df):
     inventory_df["pending_rc_update"] = inventory_df["pending_rc_update"].apply(parse_bool)
     inventory_df["pending_shopify_update"] = inventory_df["pending_shopify_update"].apply(parse_bool)
 
-    inventory_df.to_csv(inventory_path, index=False)
+    save_inventory_to_db(inventory_df)
     flash("💾 Changes saved successfully!", "success")
 @app.route("/sync_rc")
 @requires_auth
@@ -1083,8 +1112,7 @@ def shopify_sync_logic():
             }
             inventory_df = pd.concat([inventory_df, pd.DataFrame([new_row])], ignore_index=True)
             added += 1
-
-    inventory_df.to_csv(inventory_path, index=False)
+    save_inventory_to_db(inventory_df)
     print(f"✅ Shopify Sync Complete — {updated} updated, {added} added")
 
 @app.route("/sync_shopify")
@@ -1188,7 +1216,7 @@ def index():
             }
 
             inventory_df = pd.concat([inventory_df, pd.DataFrame([new_row])], ignore_index=True)
-            inventory_df.to_csv(inventory_path, index=False)
+            save_inventory_to_db(inventory_df)
             flash(f"➕ Added item '{new_name}'", "success")
             search = request.args.get("q", "")
             return redirect(f"/?q={search}")
@@ -1216,7 +1244,7 @@ def index():
         ids_to_delete = request.form.getlist("merge_ids")
         inventory_df.drop(index=[int(i) for i in ids_to_delete], inplace=True)
         inventory_df.reset_index(drop=True, inplace=True)
-        inventory_df.to_csv(inventory_path, index=False)
+        save_inventory_to_db(inventory_df)
         flash(f"🗑️ Deleted {len(ids_to_delete)} rows.", "success")
         search = request.args.get("q", "")
         return redirect(f"/?q={search}")
@@ -1325,7 +1353,7 @@ def index():
                 except Exception as e:
                     print(f"❌ Failed to update {row['name']} on Shopify: {e}")
 
-        inventory_df.to_csv(inventory_path, index=False)
+        save_inventory_to_db(inventory_df)
         flash("💾 Changes saved successfully!", "success")
     filtered_df = inventory_df.copy()
     if search:
@@ -1385,7 +1413,7 @@ def filter_and_deduplicate_export(export_df):
 
 with app.app_context():
     try:
-        inventory_df = load_inventory(inventory_path)
+        inventory_df = load_inventory_fallback()
         #rc_sync_logic()
         #shopify_sync_logic()
         print("✅ Initial sync complete.")
@@ -1398,7 +1426,7 @@ if __name__ == "__main__":
     with app.app_context():
         with app.test_request_context():
             try:
-                inventory_df = load_inventory(inventory_path)
+                inventory_df = load_inventory_fallback()
                 #rc_sync_logic()
                 #shopify_sync_logic()
                 print("Initial sync complete.")
