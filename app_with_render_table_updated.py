@@ -6,7 +6,6 @@ import shopify
 import sys, os
 import flask
 import requests
-from dailyrunner import get_shopify_products
 from flask import Flask, render_template_string, request, render_template, redirect, flash, get_flashed_messages, send_file
 from dotenv import load_dotenv
 from flask import request, Response
@@ -106,6 +105,10 @@ def load_inventory_fallback():
         df.to_sql("inventory", engine, if_exists="replace", index=False)
 
     # Run your cleanup regardless of source
+    # Force ID columns to int where possible (avoids float-style `.0` problems)
+    for id_col in ["variant_id", "inventory_item_id", "shopify_inventory_id", "rare_find_id"]:
+        if id_col in df.columns:
+            df[id_col] = pd.to_numeric(df[id_col], errors="coerce").dropna().astype("Int64")
     df = df.drop(columns=["unnamed: 10"], errors="ignore")
     df["touched_rc"] = False
     df["touched_shopify"] = False
@@ -783,9 +786,9 @@ def update_inventory_level(inventory_item_id, location_id, new_available):
     """
     url = f"https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/inventory_levels/set.json"
     data = {
-        "inventory_item_id": inventory_item_id,
-        "location_id": location_id,
-        "available": new_available
+        "inventory_item_id": int(inventory_item_id),
+        "location_id": int(location_id),
+        "available": int(new_available)
     }
     headers = {
         "Content-Type": "application/json",
@@ -820,7 +823,7 @@ def update_shopify_item(variant_id, inventory_item_id, new_price=None, new_quant
     if new_quantity is not None:
         #print(
         #    f"DEBUG: Updating quantity for inventory item {inventory_item_id} to {new_quantity} at location {LOCATION_ID}")
-        qty_result = update_inventory_level(inventory_item_id, LOCATION_ID, new_quantity)
+        qty_result = update_inventory_level(int(inventory_item_id), int(LOCATION_ID), int(new_quantity))
         results['quantity'] = qty_result
 
     return results
