@@ -1039,6 +1039,9 @@ def shopify_sync_logic():
                 # Collect the fields from the variant.
                 # Check that the variant object has inventory_item_id in its attributes.
                 variant_data = variant.to_dict()
+                print(
+                    f"[DEBUG] Variant ID {variant.id} → inventory_item_id: {variant_data.get('inventory_item_id')} (type: {type(variant_data.get('inventory_item_id'))})")
+
                 shopify_inventory_id = variant_data.get("inventory_item_id")
                 shopify_qty = variant_data.get("inventory_quantity")
                 shopify_price = variant_data.get("price")
