@@ -108,7 +108,7 @@ def load_inventory_fallback():
     # Force ID columns to int where possible (avoids float-style `.0` problems)
     for id_col in ["variant_id", "inventory_item_id", "shopify_inventory_id", "rare_find_id"]:
         if id_col in df.columns:
-            df[id_col] = pd.to_numeric(df[id_col], errors="coerce").dropna().astype("Int64")
+            df[id_col] = pd.to_numeric(df[id_col], errors="coerce").astype("Int64")
     df = df.drop(columns=["unnamed: 10"], errors="ignore")
     df["touched_rc"] = False
     df["touched_shopify"] = False
