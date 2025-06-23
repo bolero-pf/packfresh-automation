@@ -1349,6 +1349,12 @@ def index():
             if pd.notna(row.get("variant_id")):
                 print(f"🛠️ Updating Shopify: {row['name']} (ID {row['variant_id']})")
                 try:
+                    print(f"📦 {row['name']}")
+                    print(f"  variant_id: {row['variant_id']} ({type(row['variant_id'])})")
+                    print(
+                        f"  shopify_inventory_id: {row['shopify_inventory_id']} ({type(row['shopify_inventory_id'])})")
+                    print(f"  shopify_qty: {row['shopify_qty']} ({type(row['shopify_qty'])})")
+                    print(f"  shopify_price: {row['shopify_price']} ({type(row['shopify_price'])})")
                     update_shopify_item(
                         variant_id=int(row["variant_id"]),
                         inventory_item_id = int(row["shopify_inventory_id"]),
