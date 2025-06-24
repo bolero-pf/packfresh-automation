@@ -167,7 +167,8 @@ def home():
 def runlog():
     return render_template("runlog.html")
 
-@app.route('/run-dailyrunner')
+
+@app.route('/run-dailyrunner', methods=["GET", "POST"])
 def run_dailyrunner():
     def launch_script():
         with open("run_output.log", "w") as f:
@@ -176,8 +177,15 @@ def run_dailyrunner():
                 stdout=f,
                 stderr=f
             )
+
     threading.Thread(target=launch_script).start()
-    return redirect(url_for("runlog_page"))
+
+    # If it's a browser visit, go to logs page
+    if request.method == "GET":
+        return redirect(url_for("runlog_page"))
+
+    # If it's a cron POST, just return OK
+    return "✅ dailyrunner.py triggered\n", 200
 
 @app.route('/stream-log')
 def stream_log():
