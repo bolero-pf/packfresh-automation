@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import sys
+from functools import wraps
 import subprocess
 import threading
 import time
@@ -182,15 +183,36 @@ TEMPLATE = """
 </body>
 </html>
 """
+USERNAME = os.environ.get("DASHBOARD_USER", "admin")
+PASSWORD = os.environ.get("DASHBOARD_PASS", "secret")
 
+def check_auth(user, pwd):
+    return user == USERNAME and pwd == PASSWORD
+
+def authenticate():
+    return Response(
+        "🚫 Access Denied. You must provide valid credentials.", 401,
+        {"WWW-Authenticate": 'Basic realm="Login Required"'}
+    )
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
 def load_csv(path):
     return pd.read_csv(path) if os.path.exists(path) else pd.DataFrame()
 
 @app.route("/")
+@requires_auth
 def home():
     return redirect("/dashboard/review")
 
 @app.route("/dashboard/runlog")
+@requires_auth
 def runlog():
     return render_template("runlog.html")
 
@@ -215,6 +237,7 @@ def run_dailyrunner():
     return "✅ dailyrunner.py triggered\n", 200
 
 @app.route('/stream-log')
+@requires_auth
 def stream_log():
     def generate():
         with open("run_output.log", "r") as f:
@@ -228,6 +251,7 @@ def stream_log():
     return Response(generate(), mimetype="text/event-stream")
 
 @app.route("/dashboard/<view>")
+@requires_auth
 def dashboard(view):
     files = {
         "review": REVIEW_CSV,
@@ -256,6 +280,7 @@ def dashboard(view):
 
 
 @app.route("/save/<view>", methods=["POST"], endpoint='save_csv')
+@requires_auth
 def save_csv(view):
     file_map = {
         "review": REVIEW_CSV,
@@ -274,6 +299,7 @@ def save_csv(view):
     return redirect(f"/dashboard/{view}")
 
 @app.route("/run", methods=["POST"])
+@requires_auth
 def run():
     action = request.form.get("action")
     source = request.form.get("source", "review")  # default to review
@@ -291,6 +317,7 @@ def run():
     return redirect(f"/dashboard/{source}")
 
 @app.route("/ignore", methods=["POST"])
+@requires_auth
 def ignore_sku():
     sku = request.form.get("sku")
     if not sku:
@@ -301,6 +328,7 @@ def ignore_sku():
 
     return "OK", 200
 @app.route("/run-live/upload")
+@requires_auth
 def run_live_upload():
     def generate():
         process = subprocess.Popen(
