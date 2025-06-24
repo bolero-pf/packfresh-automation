@@ -31,7 +31,8 @@ if not os.path.exists(REVIEW_CSV):
 def call_dailyrunner():
     try:
         import requests
-        response = requests.get("http://localhost:5000/run-dailyrunner")
+        auth = (os.environ.get("DASHBOARD_USER"), os.environ.get("DASHBOARD_PASS"))
+        response = requests.get("http://localhost:5000/run-dailyrunner", auth=auth)
         print(f"🔁 Cron called /run-dailyrunner, status: {response.status_code}")
     except Exception as e:
         print(f"❌ Cron call failed: {e}")
@@ -218,6 +219,7 @@ def runlog():
 
 
 @app.route('/run-dailyrunner', methods=["GET", "POST"])
+@requires_auth
 def run_dailyrunner():
     def launch_script():
         with open("run_output.log", "w") as f:
@@ -237,7 +239,6 @@ def run_dailyrunner():
     return "✅ dailyrunner.py triggered\n", 200
 
 @app.route('/stream-log')
-@requires_auth
 def stream_log():
     def generate():
         with open("run_output.log", "r") as f:
