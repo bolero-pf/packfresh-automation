@@ -7,10 +7,8 @@ commands = [
   "apt-get update",
   "apt-get install -y google-chrome-stable unzip wget",
 
-  # ✅ Combined into one valid TOML string
-  "CHROME_VERSION=$(google-chrome-stable --version | awk '{ print $3 }' | cut -d. -f1) && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${CHROME_VERSION}.0.0/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /usr/local/bin/ && chmod +x /usr/local/bin/chromedriver"
+  "CHROME_VERSION=$(google-chrome-stable --version | awk '{ print $3 }' | cut -d. -f1) && CHROMEDRIVER_VERSION=$(curl -s \"https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION}\") && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /usr/local/bin/ && chmod +x /usr/local/bin/chromedriver"
 ]
-
 [phases.build]
 cmds = ["pip install --no-cache-dir -r requirements.txt"]
 
