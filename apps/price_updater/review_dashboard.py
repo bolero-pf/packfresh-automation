@@ -14,6 +14,12 @@ PUSHED_CSV = "price_updates_pushed.csv"
 MISSING_CSV = "price_updates_missing_listing.csv"
 UNTOUCHED_CSV = "price_updates_untouched.csv"
 
+if not os.path.exists(REVIEW_CSV):
+    pd.DataFrame(columns=[
+        "name", "tcgplayer_id", "shopify_price", "suggested_price", "price_to_upload",
+        "shopify_qty", "variant_id", "shopify_inventory_id", "pending_shopify_update",
+        "price_last_updated", "notes"
+    ]).to_csv(REVIEW_CSV, index=False)
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
