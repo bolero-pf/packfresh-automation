@@ -183,7 +183,7 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
     options.add_argument("--headless=new")  # Optional: comment this out to see browser
     options.add_argument(f"--user-agent={random.choice(user_agents)}")
 
-    service = Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"))
+    service = Service(os.environ.get("CHROMEDRIVER", "/usr/local/bin/chromedriver"))
     try:
         driver = webdriver.Chrome(service=service, options=options)
         print("✅ Browser launched. Navigating to:", url)
