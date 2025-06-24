@@ -449,7 +449,7 @@ def run_price_sync():
         # ✅ Sleep after each batch, except the last one
         if batch_start + len(batch) < len(products):
             print(f"🟡 Cooling down to avoid IP rate limit", flush=True)
-            for i in range(3, 0, -1):
+            for i in range(10, 0, -1):
                 print(f"💤 Still alive… sleeping {i} more minute(s)", flush=True)
                 time.sleep(60)
 
