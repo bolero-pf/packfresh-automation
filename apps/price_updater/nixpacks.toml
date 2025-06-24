@@ -8,7 +8,8 @@ commands = [
   "apt-get install -y google-chrome-stable unzip wget",
 
   # ✅ Hardcode a known compatible ChromeDriver version
-  "wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/124.0.6367.207/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /usr/local/bin/ && chmod +x /usr/local/bin/chromedriver"
+  "wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/125.0.6422.141/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /usr/local/bin/ && chmod +x /usr/local/bin/chromedriver"
+
 ]
 
 [phases.build]
