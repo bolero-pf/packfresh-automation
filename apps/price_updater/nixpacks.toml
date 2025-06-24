@@ -1,23 +1,10 @@
-[phases.setup]
-nixPkgs = ["bash", "curl", "unzip", "wget", "gnupg", "python310"]
-
 commands = [
   "curl -sSL https://dl.google.com/linux/linux_signing_key.pub | apt-key add -",
   "echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list",
   "apt-get update",
-  "apt-get install -y google-chrome-stable unzip wget",
+  # 👇 lock to Chrome 125
+  "apt-get install -y google-chrome-stable=125.0.6422.141-1 unzip wget",
 
-  # ✅ Download and explicitly install ChromeDriver
-  "CHROMEDRIVER_VERSION=$(curl -s https://chromedriver.storage.googleapis.com/LATEST_RELEASE) && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /tmp && install -m 755 /tmp/chromedriver /usr/local/bin/chromedriver",
-
-  # ✅ Explicitly call binary instead of relying on PATH
-  "google-chrome-stable --version",
-  "/usr/local/bin/chromedriver --version"
+  # 👇 install matching Chromedriver
+  "wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/125.0.6422.141/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /tmp && install -m 755 /tmp/chromedriver /usr/local/bin/chromedriver"
 ]
-
-
-[phases.build]
-cmds = ["pip install --no-cache-dir -r requirements.txt"]
-
-[start]
-cmd = "gunicorn --bind 0.0.0.0:5000 review_dashboard:app"
