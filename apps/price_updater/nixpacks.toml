@@ -1,0 +1,22 @@
+[phases.setup]
+aptPkgs = [
+  "chromium",
+  "chromium-driver",
+  "libglib2.0-0",
+  "libnss3",
+  "libgconf-2-4",
+  "libxss1",
+  "libasound2",
+  "libx11-xcb1",
+  "libxcomposite1",
+  "libxcursor1",
+  "libxdamage1",
+  "libxi6",
+  "libxtst6",
+  "libxrandr2",
+  "libatk-bridge2.0-0",
+  "libgtk-3-0"
+]
+
+[start]
+cmd = "gunicorn --bind 0.0.0.0:5000 review_dashboard:app"

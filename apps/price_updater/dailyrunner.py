@@ -442,8 +442,10 @@ def run_price_sync():
 
         # ✅ Sleep after each batch, except the last one
         if batch_start + len(batch) < len(products):
-            print("😴 Batch complete. Sleeping for 5 minutes to avoid bot detection...", flush=True)
-            time.sleep(300)
+            print(f"🟡 Cooling down to avoid IP rate limit", flush=True)
+            for i in range(3, 0, -1):
+                print(f"💤 Still alive… sleeping {i} more minute(s)", flush=True)
+                time.sleep(60)
 
     pd.DataFrame(updated_rows).to_csv("price_updates_pushed.csv", index=False)
     pd.DataFrame(flagged_rows).to_csv(REVIEW_CSV, index=False)
