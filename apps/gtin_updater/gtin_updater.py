@@ -196,6 +196,6 @@ def sync_gtins_to_rc(gtin_records, df_csv, rc_bearer_token):
         for title in missing_rcid_titles:
             print(f" - {title}")
 
-df = pd.read_csv(".venv/Scripts/InventoryFinal.csv")
+df = pd.read_csv("InventoryFinal.csv")
 gtin_records = get_all_shopify_gtins()
 sync_gtins_to_rc(gtin_records, df, RC_BEARER)
