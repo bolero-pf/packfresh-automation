@@ -171,7 +171,7 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
     ]
     print(f"Options check")
     options = Options()
-    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
+    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
     print("Resolved chrome path:", chrome_path)
     print("Exists?", os.path.exists(chrome_path))
     options.add_argument("--disable-blink-features=AutomationControlled")
