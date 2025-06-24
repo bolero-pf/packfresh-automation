@@ -171,7 +171,7 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
     ]
     print(f"Options check")
     options = Options()
-    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
+    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium-browser")
     print("Resolved chrome path:", chrome_path)
     print("Exists?", os.path.exists(chrome_path))
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -183,7 +183,7 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
     options.add_argument("--headless=new")  # Optional: comment this out to see browser
     options.add_argument(f"--user-agent={random.choice(user_agents)}")
 
-    service = Service(os.environ.get("CHROMEDRIVER", "/usr/local/bin/chromedriver"))
+    service = Service(os.environ.get("CHROMEDRIVER", "/usr/lib/chromium-browser/chromedriver"))
     try:
         driver = webdriver.Chrome(service=service, options=options)
         print("✅ Browser launched. Navigating to:", url)

@@ -1,15 +1,14 @@
 [phases.setup]
-nixPkgs = ["bash", "curl", "unzip", "wget", "gnupg", "python310"]
+nixPkgs = ["bash", "curl", "wget", "unzip", "gnupg", "python310"]
 
 commands = [
-  "curl -sSL https://dl.google.com/linux/linux_signing_key.pub | apt-key add -",
-  "echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list",
   "apt-get update",
-  # 👇 lock to Chrome 125
-  "apt-get install -y google-chrome-stable=125.0.6422.141-1 unzip wget",
+  # ✅ Install Chromium + matching chromedriver from Ubuntu
+  "apt-get install -y chromium-browser chromium-chromedriver",
 
-  # 👇 install matching Chromedriver
-  "wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/125.0.6422.141/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /tmp && install -m 755 /tmp/chromedriver /usr/local/bin/chromedriver"
+  # ✅ Debug output
+  "chromium-browser --version",
+  "chromedriver --version"
 ]
 
 
