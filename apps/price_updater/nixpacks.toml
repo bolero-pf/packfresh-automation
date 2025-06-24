@@ -2,14 +2,17 @@
 nixPkgs = ["bash", "curl", "wget", "gnupg", "python310"]
 
 commands = [
+  # Add Google signing key and repo
   "curl -sSL https://dl.google.com/linux/linux_signing_key.pub | apt-key add -",
   "echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list",
   "apt-get update",
-  "apt-get install -y google-chrome-stable unzip wget",
 
-  # ✅ Hardcode a known compatible ChromeDriver version
-  "wget -q -O /tmp/chromedriver.zip https://storage.googleapis.com/chromedriver-bucket/125.0.6422.141/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /usr/local/bin/ && chmod +x /usr/local/bin/chromedriver"
+  # ✅ Install matching Chrome + ChromeDriver from official Google .deb packages
+  "apt-get install -y google-chrome-stable google-chrome-stable-driver",
 
+  # ✅ Confirm paths (optional logging)
+  "echo '✅ Installed Chrome:' && google-chrome-stable --version",
+  "echo '✅ Installed ChromeDriver:' && chromedriver --version"
 ]
 
 [phases.build]
