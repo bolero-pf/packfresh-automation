@@ -297,5 +297,25 @@ def run_live_upload():
         yield "data: ✅ Upload complete.\n\n"
 
     return Response(generate(), mimetype="text/event-stream")
+
+from apscheduler.schedulers.background import BackgroundScheduler
+import requests
+import time
+import os
+from datetime import datetime
+
+def call_dailyrunner():
+    try:
+        print(f"⏰ Auto-triggering /run-dailyrunner at {datetime.utcnow().isoformat()} UTC")
+        requests.get("http://localhost:5000/run-dailyrunner", timeout=30)
+    except Exception as e:
+        print(f"🔥 Scheduled /run-dailyrunner failed: {e}")
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
+
+if os.environ.get("ENABLE_CRON", "").lower() == "true":
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(call_dailyrunner, "cron", hour=3)  # run at 3 AM UTC
+    scheduler.start()
+    print("✅ Scheduler started — /run-dailyrunner will fire daily at 3 AM UTC")
