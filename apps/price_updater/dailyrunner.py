@@ -391,8 +391,13 @@ def upload_missing_csv():
         except Exception as e:
             print(f"❌ Failed to update variant {variant_id}: {e}")
 
-def process_product_with_delay(product):
-    time.sleep(random.uniform(0.8, 2.5))  # small delay per thread
+def process_product_with_delay(product_and_index):
+    product, index = product_and_index
+
+    # Scale delay as batch progresses
+    delay = random.uniform(2.5, 5.0) + (index / 700.0) * 2.5  # starts ~3s, ends ~5.5s
+    time.sleep(delay)
+
     return process_product(product)
 
 def run_price_sync():
@@ -418,7 +423,8 @@ def run_price_sync():
         print(f"\n📦 Starting batch {batch_start + 1} to {batch_start + len(batch)}...")
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(process_product_with_delay, product): product for product in batch}
+            indexed_batch = [(product, batch_start + i) for i, product in enumerate(batch)]
+            futures = {executor.submit(process_product_with_delay, p): p[0] for p in indexed_batch}
             completed = 0
             for future in concurrent.futures.as_completed(futures):
                 try:
