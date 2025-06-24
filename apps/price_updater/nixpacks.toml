@@ -1,18 +1,19 @@
 [phases.setup]
-nixPkgs = ["bash", "curl", "wget", "gnupg", "python310"]
+nixPkgs = ["bash", "curl", "unzip", "wget", "gnupg", "python310"]
 
 commands = [
-  # Add Google signing key and repo
+  # Google signing key + Chrome repo
   "curl -sSL https://dl.google.com/linux/linux_signing_key.pub | apt-key add -",
   "echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list",
   "apt-get update",
+  "apt-get install -y google-chrome-stable",
 
-  # ✅ Install matching Chrome + ChromeDriver from official Google .deb packages
-  "apt-get install -y google-chrome-stable google-chrome-stable-driver",
+  # ✅ Download known-working LATEST ChromeDriver directly from Google's canonical source
+  "CHROMEDRIVER_VERSION=$(curl -s https://chromedriver.storage.googleapis.com/LATEST_RELEASE) && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /usr/local/bin && chmod +x /usr/local/bin/chromedriver",
 
-  # ✅ Confirm paths (optional logging)
-  "echo '✅ Installed Chrome:' && google-chrome-stable --version",
-  "echo '✅ Installed ChromeDriver:' && chromedriver --version"
+  # ✅ Debug output (optional)
+  "google-chrome-stable --version",
+  "chromedriver --version"
 ]
 
 [phases.build]
