@@ -1,3 +1,6 @@
+[phases.setup]
+nixPkgs = ["bash", "curl", "unzip", "wget", "gnupg", "python310"]
+
 commands = [
   "curl -sSL https://dl.google.com/linux/linux_signing_key.pub | apt-key add -",
   "echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list",
@@ -8,3 +11,11 @@ commands = [
   # 👇 install matching Chromedriver
   "wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/125.0.6422.141/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /tmp && install -m 755 /tmp/chromedriver /usr/local/bin/chromedriver"
 ]
+
+
+
+[phases.build]
+cmds = ["pip install --no-cache-dir -r requirements.txt"]
+
+[start]
+cmd = "gunicorn --bind 0.0.0.0:5000 review_dashboard:app"
