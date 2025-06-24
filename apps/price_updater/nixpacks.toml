@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["bash", "curl", "wget", "gnupg", "ca-certificates"]
+nixPkgs = ["bash", "curl", "wget", "gnupg"]
 
 commands = [
   "curl -sSL https://dl.google.com/linux/linux_signing_key.pub | apt-key add -",
