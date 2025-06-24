@@ -7,13 +7,12 @@ commands = [
   "apt-get update",
   "apt-get install -y google-chrome-stable unzip wget",
 
-  # ✅ This one is guaranteed to install and permission correctly
+  # ✅ Download and explicitly install ChromeDriver
   "CHROMEDRIVER_VERSION=$(curl -s https://chromedriver.storage.googleapis.com/LATEST_RELEASE) && wget -q -O /tmp/chromedriver.zip https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip && unzip /tmp/chromedriver.zip -d /tmp && install -m 755 /tmp/chromedriver /usr/local/bin/chromedriver",
 
-  # Confirm both are installed
+  # ✅ Explicitly call binary instead of relying on PATH
   "google-chrome-stable --version",
-  "ls -la /usr/local/bin/chromedriver",
-  "chromedriver --version"
+  "/usr/local/bin/chromedriver --version"
 ]
 
 
