@@ -206,6 +206,7 @@ def curated_random_carousel_blocks(index_json_string):
         "collection_block_WfYULP",  # Hot Pokémon Sets
         "collection_block_HPihgx",  # Premium Sealed
         "collection_block_j6Dtjp",  # Modern Sealed
+        "collection_block_EVY4XF",  # Newly Added
     }
 
     # Sample according to strategy
