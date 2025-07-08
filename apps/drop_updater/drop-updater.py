@@ -39,6 +39,70 @@ def fetch_products(after_cursor=None):
     response = requests.post(API_URL, headers=HEADERS, json={"query": query, "variables": variables})
     response.raise_for_status()
     return response.json()["data"]["products"]
+def get_shop_publication_id():
+    query = '''
+    query {
+      publications(first: 10) {
+        edges {
+          node {
+            id
+            name
+          }
+        }
+      }
+    }
+    '''
+    response = requests.post(API_URL, headers=HEADERS, json={"query": query})
+    response.raise_for_status()
+    data = response.json()
+
+    if "data" not in data or "publications" not in data["data"]:
+        print("❌ Unexpected response from API:")
+        print(data)
+        raise Exception("Failed to fetch publications.")
+
+    for edge in data["data"]["publications"]["edges"]:
+        if edge["node"]["name"] == "Shop":
+            print (edge["node"]["id"])
+            return edge["node"]["id"]
+
+    raise Exception("Shop publication ID not found.")
+def publish_product(product_id, publication_id):
+    mutation = '''
+    mutation PublishablePublish($id: ID!, $input: [PublicationInput!]!) {
+      publishablePublish(id: $id, input: $input) {
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    '''
+    variables = {
+        "id": product_id,
+        "input": [{
+            "publicationId": publication_id
+        }]
+    }
+
+    resp = requests.post(API_URL, headers=HEADERS, json={"query": mutation, "variables": variables})
+    resp.raise_for_status()
+    data = resp.json()
+
+    if "errors" in data:
+        print("❌ Top-level GraphQL error:", data["errors"])
+        return
+
+    errors = data["data"]["publishablePublish"]["userErrors"]
+    if errors:
+        print("❌ Error publishing", product_id, errors)
+    else:
+        print("✅ Published", product_id)
+
+
+
+
+
 
 def update_product_tags(product_id, tags):
     mutation = '''
@@ -88,6 +152,7 @@ def run():
             if changed:
                 print(f"Updating {product['title']} ({product['id']})")
                 update_product_tags(product["id"], new_tags)
+                publish_product(product["id"], get_shop_publication_id())
 
         if not data["pageInfo"]["hasNextPage"]:
             break
