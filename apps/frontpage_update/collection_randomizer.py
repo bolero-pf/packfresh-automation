@@ -208,13 +208,14 @@ def curated_random_carousel_blocks(index_json_string):
         "collection_block_j6Dtjp",  # Modern Sealed
         "collection_block_EVY4XF",  # Newly Added
         "collection_block_pbWfhy",  # Graded Cards
+        "collection_block_yegXtE",  # Clearance
     }
 
     # Sample according to strategy
     selected = []
     selected += random.sample(list(product_type_blocks & block_map.keys()), 2)
-    selected += random.sample(list(ip_blocks & block_map.keys()), 1)
-    selected += random.sample(list(curated_blocks & block_map.keys()), 1)
+    #selected += random.sample(list(ip_blocks & block_map.keys()), 1)
+    selected += random.sample(list(curated_blocks & block_map.keys()), 2)
 
     random.shuffle(selected)
     existing_order = index_data['sections'][section_id]['block_order']
