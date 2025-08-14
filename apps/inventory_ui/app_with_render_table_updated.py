@@ -126,15 +126,16 @@ def load_inventory_fallback():
         if os.path.exists("/data/inventory.db"):
             print("📂 Loading inventory from SQLite...")
             # Check table exists before SELECT
-            with engine.connect() as conn:
-                exists = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='inventory'"
-                ).fetchone() is not None
-            if not exists:
-                print("⚠️ SQLite file present but no 'inventory' table.")
-                df = seed_from_csv_or_empty()
-            else:
+            from sqlalchemy.exc import OperationalError
+
+            try:
                 df = pd.read_sql("SELECT * FROM inventory", engine)
+            except OperationalError as e:
+                if "no such table: inventory" in str(e).lower():
+                    print("⚠️ No 'inventory' table — seeding…")
+                    df = seed_from_csv_or_empty()
+                else:
+                    raise
         else:
             print("📂 SQLite file not found — creating and seeding…")
             df = seed_from_csv_or_empty()
