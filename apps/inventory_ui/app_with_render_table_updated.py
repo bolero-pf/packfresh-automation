@@ -65,8 +65,7 @@ inventory_path = os.path.join(os.getcwd(), "InventoryFinal.csv")
 
 BEARER_TOKEN = os.environ.get("RC_BEARER")
 def check_auth(u, p):
-    return True
-    #return u == USERNAME and p == PASSWORD
+    return u == USERNAME and p == PASSWORD
 
 def authenticate():
     return Response(
