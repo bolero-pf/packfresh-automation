@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.10-slim-bookworm
 
 # Install Chrome dependencies and headless Chromium
 RUN apt-get update && apt-get install -y \
@@ -6,7 +6,6 @@ RUN apt-get update && apt-get install -y \
     chromium-driver \
     libglib2.0-0 \
     libnss3 \
-    libgconf-2-4 \
     libxss1 \
     libasound2 \
     libx11-xcb1 \
