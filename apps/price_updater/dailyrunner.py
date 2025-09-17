@@ -318,8 +318,8 @@ def process_product(product):
     tags = [t.strip().lower() for t in raw_tags] if isinstance(raw_tags, list) else [t.strip().lower() for t in
                                                                                      raw_tags.split(",")]
 
-    if any(tag in tags for tag in ["weekly_deals", "ignore_update"]):
-        print(f"🛑 Skipping {product['title']} (tagged as Weekly Deals or Ignore Update)")
+    if any(tag in tags for tag in ["weekly deals", "ignore_update", "slab"]):
+        print(f"🛑 Skipping {product['title']} (tagged as Weekly Deals or Ignore Update or a graded card)")
         return "untouched", product
 
     print(f"[{tcg_id}] Checking {product['title']}...")
