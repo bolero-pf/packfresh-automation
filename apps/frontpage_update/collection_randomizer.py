@@ -209,6 +209,7 @@ def curated_random_carousel_blocks(index_json_string):
         "collection_block_EVY4XF",  # Newly Added
         "collection_block_pbWfhy",  # Graded Cards
         "collection_block_yegXtE",  # Clearance
+        "collection_block_zLMMbE",  # International Version
     }
 
     # Sample according to strategy
