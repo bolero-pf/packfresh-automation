@@ -16,6 +16,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from dotenv import load_dotenv
+from selenium.common.exceptions import TimeoutException
 
 load_dotenv()
 
@@ -29,7 +30,7 @@ MISSING_CSV = "price_updates_missing_listing.csv"
 # === CONFIG ===
 SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN")
 SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
-GRAPHQL_ENDPOINT = f"https://{SHOPIFY_STORE}/admin/api/2023-07/graphql.json"
+GRAPHQL_ENDPOINT = f"https://{SHOPIFY_STORE}/admin/api/2025-10/graphql.json"
 HEADERS = {
     "Content-Type": "application/json",
     "X-Shopify-Access-Token": SHOPIFY_TOKEN,
@@ -139,6 +140,7 @@ def get_shopify_products(first=100):
                 if "inventoryItem" in variant and variant["inventoryItem"]:
                     inventory_item_id = variant["inventoryItem"]["id"].split("/")[-1]
                 products.append({
+                    "product_gid": node["id"],
                     "title": node["title"],
                     "handle": node["handle"],
                     "variant_id": variant["id"].split("/")[-1],
@@ -278,31 +280,25 @@ def get_featured_price_tcgplayer(tcgplayer_id: str, timeout=30):
             print(f"⏱️ Timeout: skipping Selenium scrape for {tcgplayer_id}")
             return None
 
-def update_variant_price(variant_id, new_price):
+def update_variant_price(product_gid: str, variant_id: str, new_price: float):
     mutation = """
-    mutation variantUpdate($input: ProductVariantInput!) {
-      productVariantUpdate(input: $input) {
-        productVariant {
-          id
-          price
-        }
-        userErrors {
-          field
-          message
-        }
+    mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants { id price }
+        userErrors { field message }
       }
     }
     """
     variables = {
-        "input": {
+        "productId": product_gid,  # full gid, e.g., "gid://shopify/Product/1234567890"
+        "variants": [{
             "id": f"gid://shopify/ProductVariant/{variant_id}",
-            "price": str(new_price),
-        }
+            "price": str(new_price)
+        }]
     }
-
-    response = requests.post(GRAPHQL_ENDPOINT, headers=HEADERS, json={"query": mutation, "variables": variables})
-    response.raise_for_status()
-    return response.json()
+    r = requests.post(GRAPHQL_ENDPOINT, headers=HEADERS, json={"query": mutation, "variables": variables})
+    r.raise_for_status()
+    return r.json()
 
 def process_product(product):
     tcg_id = product["tcgplayer_id"]
@@ -331,13 +327,25 @@ def process_product(product):
 
     if current_price > tcg_price:
         percent_diff = round(100 * (current_price - tcg_price) / current_price, 2)
-        return "review", {**product, "tcg_price": tcg_price, "suggested_price": new_price, "price_to_upload": "", "percent_diff": percent_diff, "reason": "TCGPrice now lower"}
+        return "review", {**product, "product_gid": product["product_gid"], "tcg_price": tcg_price, "suggested_price": new_price, "price_to_upload": "", "percent_diff": percent_diff, "reason": "TCGPrice now lower"}
+
 
     elif new_price > current_price:
-        update_variant_price(product["variant_id"], new_price)
+        update_variant_price(product["product_gid"], product["variant_id"], new_price)
         return "updated", {**product, "tcg_price": tcg_price, "new_price": new_price}
 
     return "untouched", {**product, "tcg_price": tcg_price, "note": "No update needed"}
+
+def _variant_product_gid_from_graphql(variant_id: str) -> str:
+    # Fallback resolver if CSV lacks product_gid (should be rare once we write it)
+    q = """
+    query($id: ID!) { productVariant(id: $id) { product { id } } }
+    """
+    vid = f"gid://shopify/ProductVariant/{variant_id}"
+    r = requests.post(GRAPHQL_ENDPOINT, headers=HEADERS, json={"query": q, "variables": {"id": vid}})
+    r.raise_for_status()
+    data = r.json()
+    return data["data"]["productVariant"]["product"]["id"]
 
 def upload_reviewed_csv():
     try:
@@ -349,22 +357,20 @@ def upload_reviewed_csv():
     print(f"🚀 Uploading reviewed prices from {REVIEW_CSV}...")
 
     for _, row in df.iterrows():
-        variant_id = row.get("variant_id")
-        new_price = row.get("price_to_upload")
-
-        if pd.isna(variant_id) or pd.isna(new_price) or str(new_price).strip() == "":
-            print(f"⚠️ Skipping row with missing or invalid data: {row.get('title')}")
+        variant_id = str(row.get("variant_id") or "").strip()
+        new_price = str(row.get("price_to_upload") or "").strip()
+        if not variant_id or not new_price:
+            print(f"⚠️ Skipping row with missing data: {row.get('title')}")
             continue
 
-        try:
-            try:
-                new_price_float = float(new_price)
-            except (ValueError, TypeError):
-                print(f"⚠️ Invalid price format for {row.get('title')}: {new_price}")
-                continue
+        product_gid = row.get("product_gid")
+        if not isinstance(product_gid, str) or not product_gid.startswith("gid://shopify/Product/"):
+            # fallback lookup
+            product_gid = _variant_product_gid_from_graphql(variant_id)
 
-            update_variant_price(variant_id, new_price_float)
-            print(f"✅ Updated {row.get('title')} to ${new_price_float:.2f}")
+        try:
+            update_variant_price(product_gid, variant_id, float(new_price))
+            print(f"✅ Updated {row.get('title')} to ${float(new_price):.2f}")
         except Exception as e:
             print(f"❌ Failed to update variant {variant_id}: {e}")
 
