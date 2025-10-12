@@ -348,8 +348,10 @@ def _variant_product_gid_from_graphql(variant_id: str) -> str:
     return data["data"]["productVariant"]["product"]["id"]
 
 def upload_reviewed_csv():
+    import math
     try:
-        df = pd.read_csv(REVIEW_CSV)
+        # Keep empty strings as "" instead of NaN
+        df = pd.read_csv(REVIEW_CSV, keep_default_na=False)
     except Exception as e:
         print(f"❌ Failed to read review CSV: {e}")
         return
@@ -358,44 +360,81 @@ def upload_reviewed_csv():
 
     for _, row in df.iterrows():
         variant_id = str(row.get("variant_id") or "").strip()
-        new_price = str(row.get("price_to_upload") or "").strip()
-        if not variant_id or not new_price:
-            print(f"⚠️ Skipping row with missing data: {row.get('title')}")
+        raw = row.get("price_to_upload", "")
+
+        # Normalize to a clean string
+        s = ("" if raw is None else str(raw)).strip()
+        if s == "" or s.lower() == "nan":
+            print(f"⚠️ Skipping row with missing/NaN price: {row.get('title')}")
+            continue
+
+        # Validate numeric + finite
+        try:
+            new_price = float(s)
+            if not math.isfinite(new_price) or new_price <= 0:
+                print(f"⚠️ Skipping non-finite/invalid price '{s}' for {row.get('title')}")
+                continue
+        except Exception:
+            print(f"⚠️ Skipping non-numeric price '{s}' for {row.get('title')}")
+            continue
+
+        if not variant_id:
+            print(f"⚠️ Skipping row without variant_id: {row.get('title')}")
             continue
 
         product_gid = row.get("product_gid")
         if not isinstance(product_gid, str) or not product_gid.startswith("gid://shopify/Product/"):
-            # fallback lookup
             product_gid = _variant_product_gid_from_graphql(variant_id)
 
         try:
-            update_variant_price(product_gid, variant_id, float(new_price))
-            print(f"✅ Updated {row.get('title')} to ${float(new_price):.2f}")
+            update_variant_price(product_gid, variant_id, new_price)
+            print(f"✅ Updated {row.get('title')} to ${new_price:.2f}")
         except Exception as e:
             print(f"❌ Failed to update variant {variant_id}: {e}")
 
 def upload_missing_csv():
+    import math
     try:
-        df = pd.read_csv(MISSING_CSV)
+        df = pd.read_csv(MISSING_CSV, keep_default_na=False)
     except Exception as e:
-        print(f"❌ Failed to read review CSV: {e}")
+        print(f"❌ Failed to read missing CSV: {e}")
         return
 
-    print(f"🚀 Uploading reviewed prices from {REVIEW_CSV}...")
+    print(f"🚀 Uploading reviewed prices from {MISSING_CSV}...")
 
     for _, row in df.iterrows():
-        variant_id = row.get("variant_id")
-        new_price = row.get("price_to_upload")
+        variant_id = str(row.get("variant_id") or "").strip()
+        raw = row.get("price_to_upload", "")
 
-        if pd.isna(variant_id) or pd.isna(new_price):
-            print(f"⚠️ Skipping row with missing data: {row.get('title')}")
+        s = ("" if raw is None else str(raw)).strip()
+        if s == "" or s.lower() == "nan":
+            print(f"⚠️ Skipping row with missing/NaN price: {row.get('title')}")
             continue
 
         try:
-            update_variant_price(variant_id, float(new_price))
+            new_price = float(s)
+            if not math.isfinite(new_price) or new_price <= 0:
+                print(f"⚠️ Skipping non-finite/invalid price '{s}' for {row.get('title')}")
+                continue
+        except Exception:
+            print(f"⚠️ Skipping non-numeric price '{s}' for {row.get('title')}")
+            continue
+
+        if not variant_id:
+            print(f"⚠️ Skipping row without variant_id: {row.get('title')}")
+            continue
+
+        # ensure we have product_gid for this variant
+        product_gid = row.get("product_gid")
+        if not isinstance(product_gid, str) or not product_gid.startswith("gid://shopify/Product/"):
+            product_gid = _variant_product_gid_from_graphql(variant_id)
+
+        try:
+            update_variant_price(product_gid, variant_id, new_price)
             print(f"✅ Updated {row.get('title')} to ${new_price:.2f}")
         except Exception as e:
             print(f"❌ Failed to update variant {variant_id}: {e}")
+
 
 def process_product_with_delay(product_and_index):
     product, index = product_and_index
