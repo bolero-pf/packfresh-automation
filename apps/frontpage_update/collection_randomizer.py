@@ -212,11 +212,39 @@ def curated_random_carousel_blocks(index_json_string):
         "collection_block_zLMMbE",  # International Version
     }
 
+    fandom_blocks = {
+        "collection_block_pcfXCh",  # Charizard Fans
+        "collection_block_JMKRJ7",  # Pikachu Fans
+        "collection_block_eDYNx4",  # Eevee Fans
+    }
+
+    era_blocks = {
+        "collection_block_MUHGzi",  # Mega Evolution
+        "collection_block_fpHhpC",  # Scarlet & Violet
+        "collection_block_W6eamh",  # Sword & Shield
+        "collection_block_nNUrFC",  # Sun & Moon
+        "collection_block_QdnMGm",  # X&Y
+        "collection_block_JeGbi3",  # Vintage
+    }
+
+    seasonal_blocks = {
+        "collection_block_tXiMKf",  # Vault Worthy
+        "collection_block_qRRdLA",  # New Trainers
+        "collection_block_7xX4Ge",  # Just For Fun
+    }
+
+
+
+
+
     # Sample according to strategy
     selected = []
     selected += random.sample(list(product_type_blocks & block_map.keys()), 2)
     #selected += random.sample(list(ip_blocks & block_map.keys()), 1)
-    selected += random.sample(list(curated_blocks & block_map.keys()), 2)
+    selected += random.sample(list(curated_blocks & block_map.keys()), 1)
+    selected += random.sample(list(seasonal_blocks & block_map.keys()), 1)
+    selected += random.sample(list(era_blocks & block_map.keys()), 1)
+    selected += random.sample(list(fandom_blocks & block_map.keys()), 1)
 
     random.shuffle(selected)
     existing_order = index_data['sections'][section_id]['block_order']
