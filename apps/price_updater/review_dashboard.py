@@ -14,7 +14,8 @@ import os
 
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
-
+from vip.routes import bp as vip_bp
+app.register_blueprint(vip_bp)
 REVIEW_CSV = "price_updates_needs_review.csv"
 PUSHED_CSV = "price_updates_pushed.csv"
 MISSING_CSV = "price_updates_missing_listing.csv"
