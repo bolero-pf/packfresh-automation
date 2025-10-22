@@ -252,21 +252,13 @@ query($first:Int!, $after:String) {
 }
 """
 
-def iterate_customer_ids(limit: Optional[int]=None) -> Iterable[str]:
-    first = 100
-    after = None
-    count = 0
-    while True:
-        data = shopify_gql(CUSTOMERS_QUERY, {"first": first, "after": after})
-        cs = data["data"]["customers"]
-        for edge in cs["edges"]:
-            yield edge["node"]["id"]
-            count += 1
-            if limit and count >= limit:
-                return
-        if not cs["pageInfo"]["hasNextPage"]:
-            break
-        after = cs["pageInfo"]["endCursor"]
+def fetch_customer_ids_page(first: int = 250, after: str | None = None):
+    """Return (ids, next_cursor_or_None)."""
+    data = shopify_gql(CUSTOMERS_QUERY, {"first": first, "after": after})
+    cs = data["data"]["customers"]
+    ids = [e["node"]["id"] for e in cs["edges"]]
+    next_cursor = cs["pageInfo"]["endCursor"] if cs["pageInfo"]["hasNextPage"] else None
+    return ids, next_cursor
 # ---------- STATE HELPERS ----------
 CUSTOMER_STATE_Q = """
 query($id:ID!){

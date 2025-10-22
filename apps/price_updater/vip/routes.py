@@ -1,7 +1,7 @@
 # vip/routes.py
 from flask import Blueprint, jsonify
 from flask import request
-from .service import backfill_customer, iterate_customer_ids
+from .service import fetch_customer_ids_page
 from datetime import date
 from .verify import verify_flow_signature
 bp = Blueprint("vip", __name__, url_prefix="/vip")
@@ -14,29 +14,45 @@ def ping():
 @bp.post("/backfill")
 def vip_backfill():
     """
-    One-time initialization. POST JSON: {"limit": 50, "dry_run": true}
-    - limit: optional int to cap how many customers to process
-    - dry_run: if true, only computes (no writes) -> useful to test shopify_gql wiring
+    Paged backfill.
+    POST JSON like:
+      {"page_size": 250, "cursor": null, "dry_run": false}
+    Returns:
+      {"ok":true, "processed": N, "next_cursor": "...", "items":[...first10]}
+    You can call repeatedly, passing next_cursor until it returns null.
     """
     payload = request.get_json(silent=True) or {}
-    limit = payload.get("limit")
+    page_size = int(payload.get("page_size", 250))
+    after = payload.get("cursor")
     dry_run = bool(payload.get("dry_run", False))
 
+    ids, next_cursor = fetch_customer_ids_page(first=page_size, after=after)
+
     results = []
-    for gid in iterate_customer_ids(limit=limit):
-        if dry_run:
-            # compute only
-            from .service import compute_rolling_90d_spend, tier_from_spend, current_quarter_window
-            spend = compute_rolling_90d_spend(gid)
+    if dry_run:
+        from .service import compute_rolling_90d_spend, tier_from_spend, current_quarter_window
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc)
+        for gid in ids:
+            spend = compute_rolling_90d_spend(gid, today=today)
             tier = tier_from_spend(spend)
             lock = None
-            if tier in ("VIP1", "VIP2", "VIP3"):
-                win = current_quarter_window(date.today())
+            if tier in ("VIP1","VIP2","VIP3"):
+                win = current_quarter_window(today.date())
                 lock = {"start": win["start"], "end": win["end"], "tier": tier}
             results.append({"customer": gid, "spend90d": spend, "tier": tier, "lock": lock})
-        else:
+    else:
+        from .service import backfill_customer
+        for gid in ids:
             results.append(backfill_customer(gid))
-    return jsonify({"ok": True, "count": len(results), "items": results[:10]})  # show first 10 for sanity
+
+    return jsonify({
+        "ok": True,
+        "processed": len(ids),
+        "next_cursor": next_cursor,
+        "items": results[:10]  # sample first 10 for sanity
+    })
+
 
 # live event routes
 from .service import on_order_paid as _on_paid, on_refund_created as _on_refund, on_quarter_roll as _on_qroll
