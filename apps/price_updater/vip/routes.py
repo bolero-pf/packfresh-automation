@@ -14,44 +14,64 @@ def ping():
 @bp.post("/backfill")
 def vip_backfill():
     """
-    Paged backfill.
-    POST JSON like:
-      {"page_size": 250, "cursor": null, "dry_run": false}
+    Paged backfill with failure skip.
+    POST:
+      {"page_size": 50, "cursor": null, "retry_ids": ["gid://shopify/Customer/.."], "dry_run": false}
+    If retry_ids is provided, we process exactly those IDs (no paging).
     Returns:
-      {"ok":true, "processed": N, "next_cursor": "...", "items":[...first10]}
-    You can call repeatedly, passing next_cursor until it returns null.
+      {"ok":true, "processed": N, "next_cursor": "...", "failed_ids":[...], "items":[...sample]}
     """
     payload = request.get_json(silent=True) or {}
-    page_size = int(payload.get("page_size", 250))
+    page_size = int(payload.get("page_size", 50))
     after = payload.get("cursor")
     dry_run = bool(payload.get("dry_run", False))
+    retry_ids = payload.get("retry_ids")
 
-    ids, next_cursor = fetch_customer_ids_page(first=page_size, after=after)
+    results, failed = [], []
 
-    results = []
+    if retry_ids:
+        ids = list(retry_ids)
+        next_cursor = None
+    else:
+        from .service import fetch_customer_ids_page
+        ids, next_cursor = fetch_customer_ids_page(first=page_size, after=after)
+
     if dry_run:
         from .service import compute_rolling_90d_spend, tier_from_spend, current_quarter_window
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc)
         for gid in ids:
-            spend = compute_rolling_90d_spend(gid, today=today)
-            tier = tier_from_spend(spend)
-            lock = None
-            if tier in ("VIP1","VIP2","VIP3"):
-                win = current_quarter_window(today.date())
-                lock = {"start": win["start"], "end": win["end"], "tier": tier}
-            results.append({"customer": gid, "spend90d": spend, "tier": tier, "lock": lock})
-    else:
-        from .service import backfill_customer
-        for gid in ids:
+            try:
+                spend = compute_rolling_90d_spend(gid, today=today)
+                tier = tier_from_spend(spend)
+                lock = None
+                if tier in ("VIP1","VIP2","VIP3"):
+                    win = current_quarter_window(today.date())
+                    lock = {"start": win["start"], "end": win["end"], "tier": tier}
+                results.append({"customer": gid, "spend90d": spend, "tier": tier, "lock": lock})
+            except Exception as e:
+                failed.append({"customer": gid, "error": str(e)})
+        return jsonify({"ok": True, "processed": len(ids), "next_cursor": next_cursor, "failed_ids": failed, "items": results[:10]})
+
+    # real writes
+    from .service import backfill_customer
+    import time
+    for idx, gid in enumerate(ids, start=1):
+        try:
             results.append(backfill_customer(gid))
+        except Exception as e:
+            failed.append({"customer": gid, "error": str(e)})
+        # small pause to be gentle on rate limits
+        time.sleep(0.05)
 
     return jsonify({
         "ok": True,
         "processed": len(ids),
         "next_cursor": next_cursor,
-        "items": results[:10]  # sample first 10 for sanity
+        "failed_ids": failed,
+        "items": results[:10]
     })
+
 
 
 # live event routes

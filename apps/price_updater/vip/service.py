@@ -27,10 +27,12 @@ MF_LASTCALC  = ("custom", "loyalty_last_calc_at")       # date_time
 _SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN")
 _SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
 _GRAPHQL_ENDPOINT = f"https://{_SHOPIFY_STORE}/admin/api/2025-10/graphql.json"
+_PER_CALL_TIMEOUT = int(os.environ.get("SHOPIFY_HTTP_TIMEOUT", "60"))
 
 def gid_numeric(gid: str) -> str:
     # "gid://shopify/Customer/7836399894748" -> "7836399894748"
     return gid.rsplit("/", 1)[-1]
+
 
 def shopify_gql(query: str, variables=None):
     if not _SHOPIFY_TOKEN or not _SHOPIFY_STORE:
@@ -40,13 +42,27 @@ def shopify_gql(query: str, variables=None):
         "X-Shopify-Access-Token": _SHOPIFY_TOKEN,
     }
     payload = {"query": query, "variables": variables or {}}
-    resp = requests.post(_GRAPHQL_ENDPOINT, headers=headers, json=payload, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    # Hard errors
-    if data.get("errors"):
-        raise RuntimeError(f"GraphQL errors: {data['errors']}")
-    return data
+
+    for attempt in range(6):  # ~5 retries
+        try:
+            resp = requests.post(
+                _GRAPHQL_ENDPOINT, headers=headers, json=payload, timeout=_PER_CALL_TIMEOUT
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("errors"):
+                messages = " ".join(e.get("message", "") for e in data["errors"])
+                # Retry on throttling or remote hiccups
+                if "Throttled" in messages or "throttle" in messages.lower():
+                    raise requests.HTTPError("Throttled")
+                raise RuntimeError(f"GraphQL errors: {data['errors']}")
+            return data
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError):
+            if attempt >= 5:
+                raise
+            # jittered backoff: 1.0s, 1.8s, 3.2s, 5.7s, 10.0s
+            sleep_s = min(10.0, 1.0 * (1.8 ** attempt))
+            time.sleep(sleep_s)
 
 def shopify_metafields_set(inputs: Iterable[Dict[str, Any]]) -> None:
     """
@@ -144,35 +160,21 @@ def compute_rolling_90d_spend(customer_gid: str, today: Optional[datetime]=None)
 def set_vip_tag(customer_gid: str, tier: str):
     """
     Maintain tags:
-    - VIP1+/VIP2/VIP3: add both a generic 'VIP' and the specific 'VIPx'
-    - VIP0: remove any VIP-related tags entirely
+    - VIP1+/VIP2/VIP3: ensure 'VIP' and the specific tier tag exist
+    - VIP0: remove all VIP tags
     """
-    # fetch current tags
-    q = """query($id: ID!) { customer(id:$id){ id tags } }"""
-    cur = shopify_gql(q, {"id": customer_gid})
-    tags = cur["data"]["customer"]["tags"] or []
-
-    # compute removals: any VIP*, plus generic VIP
-    to_remove = [t for t in tags if t == "VIP" or t.startswith("VIP")]
-    if to_remove:
-        rem = """
-        mutation TagsRemove($id: ID!, $tags: [String!]!) {
-          tagsRemove(id: $id, tags: $tags) { userErrors { message } }
-        }"""
-        shopify_gql(rem, {"id": customer_gid, "tags": to_remove})
-
-    # add back as needed
+    rem = """
+    mutation TagsRemove($id: ID!, $tags: [String!]!) {
+      tagsRemove(id: $id, tags: $tags) { userErrors { message } }
+    }"""
     add = """
     mutation TagsAdd($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) { userErrors { message } }
     }"""
-
-    if tier in ("VIP1","VIP2","VIP3"):
-        # add generic VIP + specific tier tag
+    # Blindly remove any VIP tags (idempotent, no-op if not present)
+    shopify_gql(rem, {"id": customer_gid, "tags": ["VIP0","VIP1","VIP2","VIP3"]})
+    if tier in ("VIP1", "VIP2", "VIP3"):
         shopify_gql(add, {"id": customer_gid, "tags": ["VIP", tier]})
-    else:
-        # VIP0 → add nothing
-        pass
 
 
 # ---- METAFIELDS UPSERT ----
