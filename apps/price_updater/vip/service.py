@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any, Iterable, Optional
-import os, requests
+import os, requests, time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -296,6 +296,38 @@ def _mf_to_dict(edges):
 TIER_RANK = {"VIP0":0, "VIP1":1, "VIP2":2, "VIP3":3}
 THRESH = {"VIP1":500.0, "VIP2":1250.0, "VIP3":2500.0}
 
+
+def build_public_from_state(state: dict) -> dict:
+    """Derive a safe, storefront-visible status from existing metafields."""
+    tier = state.get("tier", "VIP0") or "VIP0"
+    lock = state.get("lock") or {}
+    rolling = float(state.get("rolling") or 0.0)
+
+    thresholds = {"VIP1": 500.0, "VIP2": 1250.0, "VIP3": 2500.0}
+    order = ["VIP0","VIP1","VIP2","VIP3"]
+    idx = order.index(tier) if tier in order else 0
+    next_tier = None if tier == "VIP3" else order[idx+1]
+
+    if next_tier:
+        target = thresholds[next_tier]
+        lower = thresholds.get(tier, 0.0) if tier in thresholds else 0.0
+        span = max(0.0, target - lower)
+        progress = 0.0 if span <= 0 else max(0.0, min(1.0, (rolling - lower) / span))
+        public = {
+            "tier": tier,
+            "lock": {"end": lock.get("end")} if lock.get("end") else {},
+            "next": {"threshold": target, "remaining": round(max(0.0, target - rolling), 2)},
+            "progress": round(progress, 3),
+        }
+    else:
+        public = {
+            "tier": "VIP3",
+            "lock": {"end": lock.get("end")} if lock.get("end") else {},
+            "next": None,
+            "progress": 1.0,
+        }
+    return public
+
 def get_customer_state(customer_gid: str):
     data = shopify_gql(CUSTOMER_STATE_Q, {"id": customer_gid})
     c = data["data"]["customer"]
@@ -326,6 +358,16 @@ def current_quarter_lock_for(tier: str, today_date=None):
     win = current_quarter_window(today_date)
     return {"start": win["start"], "end": win["end"], "tier": tier}
 
+def rolling_90_lock_for(tier: str, today_date=None):
+    """Return a dynamic 90-day lock window from today for the given tier."""
+    from datetime import date, timedelta
+    if today_date is None:
+        today_date = date.today()
+    start = today_date
+    end = today_date + timedelta(days=90)
+    return {"start": start.isoformat(), "end": end.isoformat(), "tier": tier}
+
+
 def next_quarter_lock_for(tier: str, today_date=None):
     from datetime import date, timedelta
     if today_date is None:
@@ -341,6 +383,15 @@ def threshold_for_tier(tier: str) -> float:
 
 # ---------- WRITE STATE ----------
 def write_state(customer_gid: str, *, rolling=None, tier=None, lock=None, prov=None):
+    # pull current if needed (no order math)
+    if rolling is None or tier is None or lock is None:
+        state = get_customer_state(customer_gid)
+        if rolling is None: rolling = state["rolling"]
+        if tier is None: tier = state["tier"]
+        if lock is None: lock = state["lock"]
+
+    public = build_public_from_state({"tier": tier, "lock": lock or {}, "rolling": rolling or 0.0})
+
     updates = {}
     if rolling is not None:
         updates[(MF_ROLLING[0], MF_ROLLING[1], "number_decimal")] = rolling
@@ -350,10 +401,13 @@ def write_state(customer_gid: str, *, rolling=None, tier=None, lock=None, prov=N
         updates[(MF_LOCK[0], MF_LOCK[1], "json")] = lock
     if prov is not None:
         updates[(MF_PROV[0], MF_PROV[1], "json")] = prov
+    updates[( "custom", "vip_public", "json")] = public
     updates[(MF_LASTCALC[0], MF_LASTCALC[1], "date_time")] = datetime.now(timezone.utc).isoformat()
+
     upsert_customer_metafields(customer_gid, updates)
     if tier is not None:
         set_vip_tag(customer_gid, tier)
+
 
 # ---------- HANDLERS ----------
 def on_order_paid(customer_gid: str, order_gid: str, today: Optional[datetime]=None):
@@ -365,9 +419,9 @@ def on_order_paid(customer_gid: str, order_gid: str, today: Optional[datetime]=N
     tier_after = tier_from_spend(rolling)
     lock = state["lock"]
 
-    # Upgrade only if rank increases
-    if TIER_RANK[tier_after] > TIER_RANK[tier_before]:
-        new_lock = next_quarter_lock_for(tier_after, today.date())
+    # If they qualify for any VIP tier (same or higher), extend/refresh 90-day lock
+    if tier_after in ("VIP1","VIP2","VIP3"):
+        new_lock = rolling_90_lock_for(tier_after, today.date())
         prov = {
             "created_by_order_id": order_gid,
             "tier_before": tier_before,
@@ -375,11 +429,13 @@ def on_order_paid(customer_gid: str, order_gid: str, today: Optional[datetime]=N
             "prev_lock": lock if lock else {}
         }
         write_state(customer_gid, rolling=rolling, tier=tier_after, lock=new_lock, prov=prov)
-        return {"upgraded": True, "tier": tier_after, "lock": new_lock}
+        return {"upgraded": TIER_RANK[tier_after] > TIER_RANK[tier_before],
+                "tier": tier_after, "lock": new_lock}
     else:
-        # no change; just refresh rolling + timestamp
-        write_state(customer_gid, rolling=rolling)
-        return {"upgraded": False, "tier": tier_before, "lock": lock}
+        # dropped below VIP1 → clear lock
+        write_state(customer_gid, rolling=rolling, tier="VIP0", lock={}, prov={})
+        return {"upgraded": False, "tier": "VIP0", "lock": {}}
+
 
 def on_refund_created(customer_gid: str, order_gid: str, today: Optional[datetime]=None):
     if today is None:
@@ -411,10 +467,16 @@ def on_refund_created(customer_gid: str, order_gid: str, today: Optional[datetim
         return {"revoked": False, "tier": tier, "lock": lock}
 
     # lock not active → recompute baseline
+    # if refund drops them below threshold, recompute tier/lock normally
     new_tier = tier_from_spend(rolling)
-    new_lock = current_quarter_lock_for(new_tier, today.date()) if new_tier in ("VIP1","VIP2","VIP3") else {}
+    if new_tier in ("VIP1", "VIP2", "VIP3"):
+        # still qualifies → refresh rolling 90d lock
+        new_lock = rolling_90_lock_for(new_tier, today.date())
+    else:
+        new_lock = {}
     write_state(customer_gid, rolling=rolling, tier=new_tier, lock=new_lock, prov={})
     return {"revoked": False, "tier": new_tier, "lock": new_lock}
+
 
 def on_quarter_roll(today: Optional[datetime]=None, limit: Optional[int]=None):
     if today is None:
