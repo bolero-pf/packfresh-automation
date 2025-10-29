@@ -84,46 +84,6 @@ def order_paid():
     order_id    = payload["order_id"]         # GID
     result = _on_paid(customer_id, order_id)
     return jsonify({"ok": True, **result})
-@bp.post("/sweep_vips")
-def sweep_vips():
-    """
-    Recompute rolling/tier/public for customers with generic 'VIP' tag.
-    POST {"page_size": 200, "cursor": null}
-    """
-    from .service import shopify_gql, compute_rolling_90d_spend, tier_from_spend, write_state
-    from datetime import datetime, timezone
-
-    payload = request.get_json(silent=True) or {}
-    page_size = int(payload.get("page_size", 200))
-    after = payload.get("cursor")
-
-    query = """
-    query($first:Int!, $after:String, $q:String!){
-      customers(first:$first, after:$after, query:$q, sortKey:ID){
-        edges{ cursor node{ id } }
-        pageInfo{ hasNextPage endCursor }
-      }
-    }"""
-    q = 'tag:"VIP"'
-    data = shopify_gql(query, {"first": page_size, "after": after, "q": q})
-    cs = data["data"]["customers"]
-    ids = [e["node"]["id"] for e in cs["edges"]]
-    next_cursor = cs["pageInfo"]["endCursor"] if cs["pageInfo"]["hasNextPage"] else None
-
-    today = datetime.now(timezone.utc)
-
-    processed, failed = 0, []
-    for gid in ids:
-        try:
-            spend = compute_rolling_90d_spend(gid, today=today)
-            tier  = tier_from_spend(spend)
-            # Do not alter lock here; purchases own extending it
-            write_state(gid, rolling=spend, tier=tier, lock=None, prov=None)
-            processed += 1
-        except Exception as e:
-            failed.append({"customer": gid, "error": str(e)})
-
-    return jsonify({"ok": True, "processed": processed, "next_cursor": next_cursor, "failed_ids": failed})
 
 @bp.post("/refund_created")
 def refund_created():
