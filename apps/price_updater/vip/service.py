@@ -304,29 +304,48 @@ def build_public_from_state(state: dict) -> dict:
     rolling = float(state.get("rolling") or 0.0)
 
     thresholds = {"VIP1": 500.0, "VIP2": 1250.0, "VIP3": 2500.0}
-    order = ["VIP0","VIP1","VIP2","VIP3"]
+    order = ["VIP0", "VIP1", "VIP2", "VIP3"]
+
     idx = order.index(tier) if tier in order else 0
-    next_tier = None if tier == "VIP3" else order[idx+1]
+    next_tier = None if tier == "VIP3" else order[idx + 1]
+
+    # Maintain (remain at current tier) numbers — present for ALL tiers
+    maintain_threshold = thresholds.get(tier, 0.0)
+    maintain_remaining = max(0.0, maintain_threshold - rolling)
+
+    base = {
+        "tier": tier if next_tier else "VIP3",  # normalize VIP3
+        "lock": {"end": lock.get("end")} if lock.get("end") else {},
+        "maintain": {
+            "threshold": maintain_threshold,
+            "remaining": round(maintain_remaining, 2),
+        },
+    }
 
     if next_tier:
         target = thresholds[next_tier]
-        lower = thresholds.get(tier, 0.0) if tier in thresholds else 0.0
+        lower = thresholds.get(tier, 0.0)
         span = max(0.0, target - lower)
         progress = 0.0 if span <= 0 else max(0.0, min(1.0, (rolling - lower) / span))
-        public = {
-            "tier": tier,
-            "lock": {"end": lock.get("end")} if lock.get("end") else {},
-            "next": {"threshold": target, "remaining": round(max(0.0, target - rolling), 2)},
+        return {
+            **base,
+            "next": {
+                "threshold": target,
+                "remaining": round(max(0.0, target - rolling), 2),
+            },
             "progress": round(progress, 3),
+            "progress_kind": "next",
         }
     else:
-        public = {
-            "tier": "VIP3",
-            "lock": {"end": lock.get("end")} if lock.get("end") else {},
+        # VIP3: show progress to maintain threshold (2,500)
+        denom = thresholds["VIP3"]
+        progress = 1.0 if denom <= 0 else max(0.0, min(1.0, rolling / denom))
+        return {
+            **base,
             "next": None,
-            "progress": 1.0,
+            "progress": round(progress, 3),
+            "progress_kind": "maintain",
         }
-    return public
 
 def get_customer_state(customer_gid: str):
     data = shopify_gql(CUSTOMER_STATE_Q, {"id": customer_gid})
@@ -478,14 +497,4 @@ def on_refund_created(customer_gid: str, order_gid: str, today: Optional[datetim
     return {"revoked": False, "tier": new_tier, "lock": new_lock}
 
 
-def on_quarter_roll(today: Optional[datetime]=None, limit: Optional[int]=None):
-    if today is None:
-        today = datetime.now(timezone.utc)
-    cnt = 0
-    for gid in iterate_customer_ids(limit=limit):
-        spend = compute_rolling_90d_spend(gid, today=today)
-        tier = tier_from_spend(spend)
-        lock = current_quarter_lock_for(tier, today.date()) if tier in ("VIP1","VIP2","VIP3") else {}
-        write_state(gid, rolling=spend, tier=tier, lock=lock, prov={})
-        cnt += 1
-    return {"processed": cnt}
+

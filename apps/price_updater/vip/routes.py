@@ -93,20 +93,13 @@ def refund_created():
     result = _on_refund(customer_id, order_id)
     return jsonify({"ok": True, **result})
 
-@bp.post("/quarter_roll")
-def quarter_roll():
-    payload = request.get_json(silent=True) or {}
-    limit = payload.get("limit")
-    result = _on_qroll(limit=limit)
-    return jsonify({"ok": True, **result})
-
 @bp.post("/recalc")
 def recalc_one():
     # POST { "customer_id": "gid://shopify/Customer/123" }
     payload = request.get_json(force=True)
     customer_id = payload["customer_id"]
     from .service import compute_rolling_90d_spend, tier_from_spend, get_customer_state
-    from .service import current_quarter_lock_for, write_state
+    from .service import rolling_90_lock_for, write_state
     from datetime import datetime, timezone
 
     today = datetime.now(timezone.utc)
@@ -117,7 +110,7 @@ def recalc_one():
     lock = state["lock"]
     from .service import inside_lock
     if not inside_lock(lock, today.date()):
-        lock = current_quarter_lock_for(new_tier, today.date()) if new_tier in ("VIP1","VIP2","VIP3") else {}
+        lock = rolling_90_lock_for(new_tier, today.date()) if new_tier in ("VIP1","VIP2","VIP3") else {}
 
     write_state(customer_id, rolling=spend, tier=new_tier, lock=lock, prov={})
     return jsonify({"ok": True, "customer": customer_id, "spend90d": spend, "tier": new_tier, "lock": lock})
