@@ -75,7 +75,7 @@ def vip_backfill():
 
 
 # live event routes
-from .service import on_order_paid as _on_paid, on_refund_created as _on_refund, on_quarter_roll as _on_qroll
+from .service import on_order_paid as _on_paid, on_refund_created as _on_refund
 
 @bp.post("/order_paid")
 def order_paid():
