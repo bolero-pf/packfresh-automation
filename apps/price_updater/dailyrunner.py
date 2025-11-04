@@ -161,8 +161,8 @@ def get_shopify_products(first=100):
     return products
 
 def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -> float or None:
-    print(f"✅ ENTERED get_featured_price_tcgplayer_internal for {tcgplayer_id}")
-    print(f"✅ Chrome path: {chrome_path}")
+    #print(f"✅ ENTERED get_featured_price_tcgplayer_internal for {tcgplayer_id}")
+    #print(f"✅ Chrome path: {chrome_path}")
     url = f"https://www.tcgplayer.com/product/{tcgplayer_id}?Language=English"
 
     # Rotate user-agent strings
@@ -171,11 +171,11 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.70 Safari/537.36"
     ]
-    print(f"Options check")
+    #print(f"Options check")
     options = Options()
     options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
-    print("Resolved chrome path:", chrome_path)
-    print("Exists?", os.path.exists(chrome_path))
+    #print("Resolved chrome path:", chrome_path)
+    #print("Exists?", os.path.exists(chrome_path))
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-extensions")
@@ -188,12 +188,12 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
     service = Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"))
     try:
         driver = webdriver.Chrome(service=service, options=options)
-        print("✅ Browser launched. Navigating to:", url)
+        #print("✅ Browser launched. Navigating to:", url)
     except Exception as e:
         print(f"❌ Failed to launch ChromeDriver: {e}")
         return None
 
-    print("Browser launched. Navigating to:", url)
+    #print("Browser launched. Navigating to:", url)
 
     try:
         driver.get(url)
@@ -240,7 +240,7 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
                     shipping = float(match.group(1).replace(",", ""))
 
             total = price + shipping
-            print(f"✅ Featured price found: ${price:.2f} + ${shipping:.2f} shipping = ${total:.2f}")
+            #print(f"✅ Featured price found: ${price:.2f} + ${shipping:.2f} shipping = ${total:.2f}")
             return round(total, 2)
 
         print(f"❌ No featured price found above the fold.")
@@ -299,6 +299,39 @@ def update_variant_price(product_gid: str, variant_id: str, new_price: float):
     r = requests.post(GRAPHQL_ENDPOINT, headers=HEADERS, json={"query": mutation, "variables": variables})
     r.raise_for_status()
     return r.json()
+def round_competitive_price(tcg_price: float) -> float:
+    """
+    Always undercut TCGPlayer in a visually clean, margin-safe way.
+    """
+    if tcg_price < 1.0:
+        return round(tcg_price * 0.98, 2)  # keep smalls simple
+
+    # scale the delta
+    if tcg_price < 5:
+        pct = 0.03
+        min_drop = 0.05
+    elif tcg_price < 20:
+        pct = 0.015
+        min_drop = 0.10
+    elif tcg_price < 100:
+        pct = 0.0075
+        min_drop = 0.10
+    else:
+        pct = 0.0002
+        min_drop = 0.01
+
+    drop = max(tcg_price * pct, min_drop)
+    target = tcg_price - drop
+
+    # pick nearest "nice" price below target
+    endings = [0.99]
+    whole = int(target)
+    candidates = [(whole + e) for e in endings if (whole + e) < target]
+    if not candidates:
+        candidates = [(whole - 1) + e for e in endings]
+    final = max(candidates)
+
+    return round(final, 2)
 
 def process_product(product):
     tcg_id = product["tcgplayer_id"]
@@ -315,7 +348,7 @@ def process_product(product):
                                                                                      raw_tags.split(",")]
 
     if any(tag in tags for tag in ["weekly deals", "ignore_update", "slab"]):
-        print(f"🛑 Skipping {product['title']} (tagged as Weekly Deals or Ignore Update or a graded card)")
+        #print(f"🛑 Skipping {product['title']} (tagged as Weekly Deals or Ignore Update or a graded card)")
         return "untouched", product
 
     print(f"[{tcg_id}] Checking {product['title']}...")
@@ -323,14 +356,15 @@ def process_product(product):
     if tcg_price is None:
         return "missing", product
 
-    new_price = round_nice_price(tcg_price * TCGPLAYER_PRICE_ADJUSTMENT)
-
+    #new_price = round_nice_price(tcg_price * TCGPLAYER_PRICE_ADJUSTMENT)
+    new_price = round_competitive_price(tcg_price)
     if current_price > tcg_price:
         percent_diff = round(100 * (current_price - tcg_price) / current_price, 2)
         return "review", {**product, "product_gid": product["product_gid"], "tcg_price": tcg_price, "suggested_price": new_price, "price_to_upload": "", "percent_diff": percent_diff, "reason": "TCGPrice now lower"}
 
 
     elif new_price > current_price:
+        print(f" Updating {product['title']} : {tcg_price} : {new_price}")
         update_variant_price(product["product_gid"], product["variant_id"], new_price)
         return "updated", {**product, "tcg_price": tcg_price, "new_price": new_price}
 
