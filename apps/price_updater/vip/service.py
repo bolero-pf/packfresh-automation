@@ -230,13 +230,7 @@ def backfill_customer(customer_gid: str, today: Optional[datetime]=None) -> Dict
         lock = {"start": win["start"], "end": win["end"], "tier": tier}
 
     # Write metafields
-    upsert_customer_metafields(customer_gid, {
-        (MF_ROLLING[0],  MF_ROLLING[1],  "number_decimal"): spend,
-        (MF_TIER[0],     MF_TIER[1],     "single_line_text_field"): tier,
-        (MF_LOCK[0],     MF_LOCK[1],     "json"): lock or {},
-        (MF_PROV[0],     MF_PROV[1],     "json"): {},  # start clean
-        (MF_LASTCALC[0], MF_LASTCALC[1], "date_time"): datetime.now(timezone.utc).isoformat(),
-    })
+    write_state(customer_gid, rolling=spend, tier=tier, lock=lock or {}, prov={})
 
     # Set tag to match
     set_vip_tag(customer_gid, tier)
