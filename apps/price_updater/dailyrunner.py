@@ -319,7 +319,7 @@ def round_competitive_price(tcg_price: float) -> float:
 
     # .99 just below TCG
     below_99 = math.floor(tcg_price) + 0.99
-    if below_99 >= tcg_price:
+    if below_99 > tcg_price:
         below_99 = (math.floor(tcg_price) - 1) + 0.99
 
     drop_abs = tcg_price - below_99
