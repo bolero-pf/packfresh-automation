@@ -301,29 +301,23 @@ def update_variant_price(product_gid: str, variant_id: str, new_price: float):
     return r.json()
 import math
 
+import math
+
 def round_competitive_price(tcg_price: float) -> float:
     """
-    Produces a clean, brand-consistent .99 price that stays near TCGPlayer market.
-    Logic:
-      • Prefer just under TCG (.99 below) when the drop ≤ cap_pct or cap_abs.
-      • Otherwise, round up to the next .99 (effectively ~equal or 1¢ above).
-      • Always end in .99 for visual cohesion.
-
-    Tuned for Pack Fresh’s VIP mix:
-      cap_pct  = 0.005  → max 0.5 % under
-      cap_abs  = 0.25   → max $0.25 under
-      min_over = 0.0025 → allow up to +0.25 % over when rounding demands
+    Always return a clean .99-ending price close to TCGPlayer market.
+      • Undercut if within 0.5% or $0.25.
+      • Otherwise round up (≤0.25% over).
+      • All results end with .99.
     """
-
     if tcg_price < 1.0:
-        # Keep small items simple but still under TCG slightly
         return round(max(0.49, tcg_price * 0.98), 2)
 
-    cap_pct  = 0.005      # 0.5 %
+    cap_pct  = 0.005      # 0.5%
     cap_abs  = 0.25       # $0.25
-    min_over = 0.0025     # 0.25 %
+    min_over = 0.0025     # 0.25%
 
-    # candidate 1: .99 BELOW TCG (e.g., 81.00 → 80.99)
+    # .99 just below TCG
     below_99 = math.floor(tcg_price) + 0.99
     if below_99 >= tcg_price:
         below_99 = (math.floor(tcg_price) - 1) + 0.99
@@ -331,22 +325,23 @@ def round_competitive_price(tcg_price: float) -> float:
     drop_abs = tcg_price - below_99
     drop_pct = drop_abs / tcg_price
 
-    # If the drop is modest (within caps), keep the .99-below price
     if drop_abs <= cap_abs and drop_pct <= cap_pct:
+        # modest drop → stay just under
         return round(below_99, 2)
 
-    # Otherwise, go to the .99 AT / ABOVE TCG (1¢ over is fine)
-    above_99 = math.ceil(tcg_price) - 0.01
-    if above_99 < tcg_price:
-        # step up to ensure at least parity
-        above_99 = math.ceil(tcg_price) + 0.99 - 1.00  # keeps .99 ending
+    # otherwise, go slightly above but keep .99
+    # compute smallest .99 above TCG
+    above_99 = math.ceil(tcg_price) + 0.99 - 1.00  # e.g., 64.73 → 64.99
+    if above_99 <= tcg_price:
+        above_99 = math.ceil(tcg_price) + 0.99
 
-    # Prevent listing meaningfully over TCG (min_over cap)
+    # guardrail: don't exceed +0.25%
     max_over = tcg_price * (1 + min_over)
     if above_99 > max_over:
-        above_99 = max_over
+        above_99 = math.floor(max_over) + 0.99
 
     return round(above_99, 2)
+
 
 
 def process_product(product):
