@@ -378,7 +378,6 @@ def process_product(product):
                  "product_gid": product["product_gid"],
                  "tcg_price": tcg_price,
                  "suggested_price": new_price,
-                 "price_to_upload": new_price,  # prefill
                  "percent_diff": percent_diff,
                  "reason": "Lower to stay near market"})
 
