@@ -84,6 +84,15 @@ def order_paid():
     order_id    = payload["order_id"]         # GID
     result = _on_paid(customer_id, order_id)
     return jsonify({"ok": True, **result})
+@bp.post("/price_update")
+def price_update():
+    """
+    Secure trigger (Shopify Flow or GH Actions) to start the daily price updater.
+    Requires X-Flow-Secret per verify_flow_signature().
+    """
+    from ..jobs.price_update import kickoff_dailyrunner
+    started = kickoff_dailyrunner()
+    return jsonify({"ok": True, "started": started}), 200
 
 @bp.post("/refund_created")
 def refund_created():
