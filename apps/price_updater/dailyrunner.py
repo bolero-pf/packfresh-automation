@@ -369,17 +369,33 @@ def process_product(product):
 
     #new_price = round_nice_price(tcg_price * TCGPLAYER_PRICE_ADJUSTMENT)
     new_price = round_competitive_price(tcg_price)
-    if current_price > tcg_price:
-        percent_diff = round(100 * (current_price - tcg_price) / current_price, 2)
-        return "review", {**product, "product_gid": product["product_gid"], "tcg_price": tcg_price, "suggested_price": new_price, "price_to_upload": "", "percent_diff": percent_diff, "reason": "TCGPrice now lower"}
 
+    if new_price < current_price:
+        # price cut → send to review
+        percent_diff = round(100 * (current_price - new_price) / current_price, 2)
+        return ("review",
+                {**product,
+                 "product_gid": product["product_gid"],
+                 "tcg_price": tcg_price,
+                 "suggested_price": new_price,
+                 "price_to_upload": new_price,  # prefill
+                 "percent_diff": percent_diff,
+                 "reason": "Lower to stay near market"})
 
     elif new_price > current_price:
+        # price increase → auto-update
         print(f" Updating {product['title']} : {tcg_price} : {new_price}")
         update_variant_price(product["product_gid"], product["variant_id"], new_price)
-        return "updated", {**product, "tcg_price": tcg_price, "new_price": new_price}
+        return ("updated",
+                {**product,
+                 "tcg_price": tcg_price,
+                 "new_price": new_price,
+                 "percent_diff": round(100 * (new_price - current_price) / current_price, 2),
+                 "reason": "Raise to stay near market"})
 
-    return "untouched", {**product, "tcg_price": tcg_price, "note": "No update needed"}
+    # equal → no-op
+    return ("untouched",
+            {**product, "tcg_price": tcg_price, "note": "At target"})
 
 def _variant_product_gid_from_graphql(variant_id: str) -> str:
     # Fallback resolver if CSV lacks product_gid (should be rare once we write it)

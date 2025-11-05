@@ -210,6 +210,8 @@ def curated_random_carousel_blocks(index_json_string):
         "collection_block_pbWfhy",  # Graded Cards
         "collection_block_yegXtE",  # Clearance
         "collection_block_zLMMbE",  # International Version
+        "collection_block_mkzLL3",  # Damaged Goods
+        "collection_block_rdJWyC",  # Sealed Cases
     }
 
     fandom_blocks = {
