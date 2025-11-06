@@ -1,9 +1,12 @@
 # vip/routes.py
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, current_app
 from flask import request
 from .service import fetch_customer_ids_page
 from datetime import date
 from .verify import verify_flow_signature
+from pathlib import Path
+import os, sys, subprocess, threading
+from datetime import datetime
 bp = Blueprint("vip", __name__, url_prefix="/vip")
 @bp.before_request
 def _verify():
@@ -87,12 +90,35 @@ def order_paid():
 @bp.post("/price_update")
 def price_update():
     """
-    Secure trigger (Shopify Flow or GH Actions) to start the daily price updater.
-    Requires X-Flow-Secret per verify_flow_signature().
+    Secure trigger (Shopify Flow → POST {}) to start dailyrunner.py in background.
+    Requires X-Flow-Secret and application/json.
     """
-    from ..jobs.price_update import kickoff_dailyrunner
-    started = kickoff_dailyrunner()
-    return jsonify({"ok": True, "started": started}), 200
+    try:
+        # --- robust absolute paths ---
+        # Adjust these to match your repo layout if needed.
+        # Assuming this file is project_root/vip/routes.py
+        ROOT = Path(__file__).resolve().parents[1]   # project root
+        SCRIPT = ROOT / "dailyrunner.py"            # e.g. project_root/dailyrunner.py
+        LOG    = ROOT / "run_output.log"
+
+        def launch():
+            LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(LOG, "a", buffering=1) as f:
+                f.write(f"\n=== RUN {datetime.now().isoformat()} ===\n")
+                subprocess.Popen(
+                    [sys.executable, str(SCRIPT)],
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(ROOT),             # <- important if script relies on CWD
+                )
+
+        threading.Thread(target=launch, daemon=True).start()
+        return jsonify({"ok": True, "started": True}), 200
+
+    except Exception as e:
+        # Log full stacktrace to server logs and also surface string for now
+        current_app.logger.exception("price_update failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @bp.post("/refund_created")
 def refund_created():
