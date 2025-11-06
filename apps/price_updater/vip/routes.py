@@ -226,3 +226,61 @@ def sweep_vips():
             failed.append({"customer": gid, "error": str(e)})
 
     return jsonify({"ok": True, "processed": processed, "next_cursor": next_cursor, "failed_ids": failed})
+@bp.post("/sweep_kick")
+def sweep_kick():
+    """
+    Fast trigger for Shopify Flow: start a background VIP sweep that pages
+    through /vip/sweep_vips until done. Returns immediately.
+    """
+    import threading, time, requests, os
+    from datetime import datetime
+
+    # simple overlap lock (prevents double-runs)
+    LOCK = "/tmp/vip_sweep.lock"
+    def try_lock():
+        try:
+            # stale lock cleanup (2h)
+            if os.path.exists(LOCK) and (time.time() - os.path.getmtime(LOCK)) > 2*60*60:
+                os.remove(LOCK)
+            fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            return False
+
+    def release_lock():
+        if os.path.exists(LOCK):
+            os.remove(LOCK)
+
+    def worker():
+        try:
+            base = os.environ.get("BASE_ORIGIN", "https://prices.pack-fresh.com")
+            url  = f"{base}/vip/sweep_vips"
+            headers = {
+                "Content-Type": "application/json",
+                "X-Flow-Secret": os.environ.get("VIP_FLOW_SECRET",""),
+            }
+            cursor = None
+            total  = 0
+            while True:
+                body = {"page_size": 25}
+                if cursor:
+                    body["cursor"] = cursor
+                r = requests.post(url, json=body, headers=headers, timeout=60)
+                r.raise_for_status()
+                data = r.json()
+                total += int(data.get("processed", 0))
+                cursor = data.get("next_cursor")
+                # small breath for API limits
+                time.sleep(0.2)
+                if not cursor:
+                    break
+            print(f"[VIP SWEEP] DONE {datetime.now().isoformat()} total={total}")
+        finally:
+            release_lock()
+
+    if not try_lock():
+        return jsonify({"ok": True, "status": "already_running"}), 202
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"ok": True, "status": "started"}), 200
