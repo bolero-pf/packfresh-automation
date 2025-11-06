@@ -19,7 +19,7 @@ def verify_flow_signature():
     if not VIP_FLOW_SECRET or token != VIP_FLOW_SECRET:
         abort(401)
     # Minimal payload sanity to avoid random spam
-    if request.path in ("/vip/sweep_kick", "/vip/price_update", "/vip/order_paid", "/vip/refund_created"):
+    if request.path in ("/vip/order_paid", "/vip/refund_created"):
         data = request.get_json(silent=True) or {}
         if not (isinstance(data.get("order_id"), str) and data.get("order_id","").startswith("gid://shopify/Order/")
                 and isinstance(data.get("customer_id"), str) and data.get("customer_id","").startswith("gid://shopify/Customer/")):
