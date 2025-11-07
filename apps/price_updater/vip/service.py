@@ -176,6 +176,25 @@ def set_vip_tag(customer_gid: str, tier: str):
     if tier in ("VIP1", "VIP2", "VIP3"):
         shopify_gql(add, {"id": customer_gid, "tags": ["VIP", tier]})
 
+# ---- KLAYVIO SYNC TOUCH (force Shopify to include tags in customers/update) ----
+def klaviyo_touch_tags(customer_gid: str, touch_tag: str = "_kl_sync"):
+    """
+    Briefly add then remove a throwaway tag so the customers/update webhook
+    includes the full, current tag set. This fixes stale Klaviyo 'Shopify Tags'.
+    """
+    add = """
+    mutation TagsAdd($id: ID!, $tags: [String!]!) {
+      tagsAdd(id: $id, tags: $tags) { userErrors { message } }
+    }"""
+    rem = """
+    mutation TagsRemove($id: ID!, $tags: [String!]!) {
+      tagsRemove(id: $id, tags: $tags) { userErrors { message } }
+    }"""
+    try:
+        shopify_gql(add, {"id": customer_gid, "tags": [touch_tag]})
+        time.sleep(0.25)  # small pause so Shopify emits two distinct writes
+    finally:
+        shopify_gql(rem, {"id": customer_gid, "tags": [touch_tag]})
 
 # ---- METAFIELDS UPSERT ----
 

@@ -239,13 +239,22 @@ def sweep_vips():
             # true spend now
             spend = compute_rolling_90d_spend(gid, today=today)
 
+            changed = False
+
             if lock_active:
-                # do NOT change tier/lock mid-lock; just refresh spend/public
+                # mid-lock: we keep tier/lock → likely "no change"
                 write_state(gid, rolling=spend, tier=state["tier"], lock=state["lock"], prov=None)
+                changed = False
             else:
-                # lock expired → clear lock and set tier from current spend
+                # lock expired → recompute tier and clear lock
                 new_tier = tier_from_spend(spend)
                 write_state(gid, rolling=spend, tier=new_tier, lock={}, prov=None)
+                changed = (new_tier != (state.get("tier") or "VIP0")) or bool(state.get("lock"))
+
+            # If nothing material changed, force a tags-including webhook so Klaviyo updates stale 'Shopify Tags'
+            if not changed:
+                from .service import klaviyo_touch_tags
+                klaviyo_touch_tags(gid)
 
             processed += 1
         except Exception as e:
