@@ -252,14 +252,62 @@ def sweep_vips():
                 changed = (new_tier != (state.get("tier") or "VIP0")) or bool(state.get("lock"))
 
             # If nothing material changed, force a tags-including webhook so Klaviyo updates stale 'Shopify Tags'
-            from .service import klaviyo_touch_tags
-            klaviyo_touch_tags(gid)
+            from .service import reassert_full_tags_two_step as reassert_full_tags
+            reassert_full_tags(gid)
 
             processed += 1
         except Exception as e:
             failed.append({"customer": gid, "error": str(e)})
 
     return jsonify({"ok": True, "processed": processed, "next_cursor": next_cursor, "failed_ids": failed})
+
+@bp.post("/retag_only")
+def vip_retag_only():
+    """
+    Tags-only normalization (no lock/renew/date changes).
+    POST:
+      {"page_size": 50, "cursor": null, "retry_ids": ["gid://shopify/Customer/..."], "dry_run": false}
+    Returns:
+      {"ok":true, "processed": N, "next_cursor": "...", "failed_ids":[...], "items":[...sample]}
+    """
+    payload = request.get_json(silent=True) or {}
+    page_size = int(payload.get("page_size", 50))
+    after = payload.get("cursor")
+    dry_run = bool(payload.get("dry_run", False))
+    retry_ids = payload.get("retry_ids")
+
+    if retry_ids:
+        ids = list(retry_ids)
+        next_cursor = None
+    else:
+        ids, next_cursor = fetch_customer_ids_page(first=page_size, after=after)
+
+    results, failed = [], []
+
+    if dry_run:
+        # Just echo intended action, don’t write
+        from .service import get_customer_state, normalize_tier
+        for gid in ids:
+            try:
+                state = get_customer_state(gid)
+                tier = normalize_tier(state.get("tier") or "VIP0")
+                results.append({"customer": gid, "would_remove": ["VIP","VIP1","VIP2","VIP3"], "would_add": [tier] if tier in {"VIP1","VIP2","VIP3"} else []})
+            except Exception as e:
+                failed.append({"customer": gid, "error": str(e)})
+        return jsonify({"ok": True, "processed": len(ids), "next_cursor": next_cursor, "failed_ids": failed, "items": results[:10]})
+
+    # Real writes
+    from .service import retag_customer_tags_only
+    import time
+    for gid in ids:
+        try:
+            results.append(retag_customer_tags_only(gid))
+        except Exception as e:
+            failed.append({"customer": gid, "error": str(e)})
+        time.sleep(0.05)  # be gentle on API limits
+
+    return jsonify({"ok": True, "processed": len(ids), "next_cursor": next_cursor, "failed_ids": failed, "items": results[:10]})
+
 @bp.post("/sweep_kick")
 def sweep_kick():
     """

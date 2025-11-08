@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any, Iterable, Optional
 import os, requests, time
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 # ---- CONFIG ----
@@ -29,6 +30,12 @@ _SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
 _GRAPHQL_ENDPOINT = f"https://{_SHOPIFY_STORE}/admin/api/2025-10/graphql.json"
 _PER_CALL_TIMEOUT = int(os.environ.get("SHOPIFY_HTTP_TIMEOUT", "60"))
 
+VIP_DEBUG = os.getenv("VIP_DEBUG") == "1"
+VIP_DRY_RUN = os.getenv("VIP_DRY_RUN") == "1"   # ← NEW
+
+def dlog(*args):
+    if VIP_DEBUG:
+        print(*args, flush=True)
 def gid_numeric(gid: str) -> str:
     # "gid://shopify/Customer/7836399894748" -> "7836399894748"
     return gid.rsplit("/", 1)[-1]
@@ -87,7 +94,18 @@ def shopify_gql(query: str, variables=None):
             # jittered backoff: 1.0s, 1.8s, 3.2s, 5.7s, 10.0s
             sleep_s = min(10.0, 1.0 * (1.8 ** attempt))
             time.sleep(sleep_s)
+_ORIG_SHOPIFY_GQL = shopify_gql  # keep a handle to the original
 
+def shopify_gql(query: str, variables=None):
+    qline = (query or "").strip().splitlines()[0]
+    dlog(f"[GQL] {qline} vars={variables}")
+    if VIP_DRY_RUN:
+        dlog("[GQL] DRY_RUN → skipped")
+        return {}
+    t0 = time.time()
+    resp = _ORIG_SHOPIFY_GQL(query, variables)
+    dlog(f"[GQL] ok in {time.time()-t0:.3f}s")
+    return resp
 def shopify_metafields_set(inputs: Iterable[Dict[str, Any]]) -> None:
     """
     Convenience wrapper around metafieldsSet mutation.
@@ -183,55 +201,179 @@ def compute_rolling_90d_spend(customer_gid: str, today: Optional[datetime]=None)
 
 # in service.py -> set_vip_tag
 def set_vip_tag(customer_gid: str, tier: str):
-    tier = normalize_tier(tier) or "VIP0"     # backstop
+    tier = normalize_tier(tier) or "VIP0"
 
+    # read current
     state = get_customer_state(customer_gid)
     cur = set(state.get("tags", []) or [])
     vip_tiers = {"VIP0","VIP1","VIP2","VIP3"}
 
+    dlog(f"[VIP] {customer_gid} set_vip_tag tier={tier} cur={sorted(cur)}")
+
     if tier == "VIP0":
-        to_remove = list(cur & vip_tiers) + (["VIP"] if "VIP" in cur else [])
+        to_remove = list((cur & vip_tiers) | ({"VIP"} if "VIP" in cur else set()))
+        dlog(f"[VIP] {customer_gid} VIP0 → remove={to_remove}")
         if to_remove:
             shopify_gql("""mutation($id:ID!,$tags:[String!]!){
-                tagsRemove(id:$id,tags:$tags){ userErrors{message}} }""",
-                {"id": customer_gid, "tags": to_remove})
+              tagsRemove(id:$id,tags:$tags){ userErrors{message} } }""",
+              {"id": customer_gid, "tags": to_remove})
+        after = set((get_customer_state(customer_gid).get("tags") or []))
+        dlog(f"[VIP] {customer_gid} AFTER VIP0 cur={sorted(after)}")
         return
 
-    desired = {"VIP", tier}
+    # desired for VIP1..VIP3
+    desired = {tier}
     wrong_tiers = list((cur & vip_tiers) - {tier})
     missing     = list(desired - cur)
 
+    # AUDIT: never remove the target tier itself
+    if tier in wrong_tiers:
+        print(f"!!! ALERT: {customer_gid} WRONG REMOVAL planned: removing {tier} while tier={tier}", flush=True)
+
+    dlog(f"[VIP] {customer_gid} desired={sorted(desired)} wrong={wrong_tiers} missing={missing}")
+
     if wrong_tiers:
         shopify_gql("""mutation($id:ID!,$tags:[String!]!){
-            tagsRemove(id:$id,tags:$tags){ userErrors{message}} }""",
-            {"id": customer_gid, "tags": wrong_tiers})
+          tagsRemove(id:$id,tags:$tags){ userErrors{message} } }""",
+          {"id": customer_gid, "tags": wrong_tiers})
+
     if missing:
         shopify_gql("""mutation($id:ID!,$tags:[String!]!){
-            tagsAdd(id:$id,tags:$tags){ userErrors{message}} }""",
-            {"id": customer_gid, "tags": missing})
+          tagsAdd(id:$id,tags:$tags){ userErrors{message} } }""",
+          {"id": customer_gid, "tags": missing})
+
+    # verify final
+    after = set((get_customer_state(customer_gid).get("tags") or []))
+    dlog(f"[VIP] {customer_gid} FINAL cur={sorted(after)} (expect ⊇ {sorted(desired)})")
+
+    # AUDIT: if we ended without desired tags, scream
+    if not desired.issubset(after):
+        print(f"!!! ALERT: {customer_gid} FINAL missing {sorted(desired - after)}", flush=True)
 
 
 
-# ---- KLAYVIO SYNC TOUCH (force Shopify to include tags in customers/update) ----
-def klaviyo_touch_tags(customer_gid: str, touch_tag: str = "_kl_sync"):
+
+
+# vip/service.py
+import os, json, re, requests
+from datetime import datetime, timezone
+
+
+
+def _gid_to_numeric(gid: str) -> int:
+    m = re.search(r"/Customer/(\d+)$", gid)
+    if not m: raise ValueError(f"Bad gid: {gid}")
+    return int(m.group(1))
+def reassert_full_tags_ordered(customer_gid: str):
+    state = get_customer_state(customer_gid)
+    tags  = [t for t in (state.get("tags") or []) if t]
+
+    # Priority: VIP3, VIP2, VIP1, VIP, then everything else alpha
+    prio = {"VIP3": 0, "VIP2": 1, "VIP1": 2}
+    def keyfunc(t: str):
+        return (prio.get(t, 9), str(t))   # ALWAYS a tuple
+
+    tags_sorted = sorted(tags, key=keyfunc)
+    csv = ", ".join(tags_sorted)
+
+    cid = gid_numeric(customer_gid)
+    url = f"https://{_SHOPIFY_STORE}/admin/api/2025-10/customers/{cid}.json"
+    headers = {
+        "X-Shopify-Access-Token": _SHOPIFY_TOKEN,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    print(f"[REASSERT-ORDER] {customer_gid} → {csv}", flush=True)
+    r = requests.put(url, headers=headers, json={"customer": {"id": int(cid), "tags": csv}}, timeout=_PER_CALL_TIMEOUT)
+    print(f"[REASSERT-ORDER] status={r.status_code}", flush=True)
+    r.raise_for_status()
+
+def retag_customer_tags_only(customer_gid: str) -> dict:
     """
-    Briefly add then remove a throwaway tag so the customers/update webhook
-    includes the full, current tag set. This fixes stale Klaviyo 'Shopify Tags'.
+    Tags-only normalization:
+    - Read current tier from metafields
+    - Remove VIP1/2/3 (and plain VIP if present)
+    - Brief pause
+    - Re-add only the normalized tier tag if VIP1..VIP3
+    - (Optional) double-touch to push a full-tags webhook
     """
-    add = """
-    mutation TagsAdd($id: ID!, $tags: [String!]!) {
-      tagsAdd(id: $id, tags: $tags) { userErrors { message } }
-    }"""
-    rem = """
-    mutation TagsRemove($id: ID!, $tags: [String!]!) {
-      tagsRemove(id: $id, tags: $tags) { userErrors { message } }
-    }"""
+    state = get_customer_state(customer_gid)
+    tier  = normalize_tier(state.get("tier") or "VIP0")
+
+    # current tags
+    cur = set(t for t in (state.get("tags") or []) if t)
+    vip_family = {"VIP1","VIP2","VIP3","VIP"}
+
+    to_remove = sorted(cur & vip_family)
+    if to_remove:
+        shopify_gql(
+            """mutation($id:ID!,$tags:[String!]!){
+               tagsRemove(id:$id,tags:$tags){ userErrors{message} } }""",
+            {"id": customer_gid, "tags": to_remove}
+        )
+
+    # give Shopify → Klaviyo time to see the removal (break stale mapping)
+    time.sleep(0.8)
+
+    # add only the correct tier tag (no tier => VIP0 => add nothing)
+    added = []
+    if tier in {"VIP1","VIP2","VIP3"}:
+        shopify_gql(
+            """mutation($id:ID!,$tags:[String!]!){
+               tagsAdd(id:$id,tags:$tags){ userErrors{message} } }""",
+            {"id": customer_gid, "tags": [tier]}
+        )
+        added = [tier]
+
+    # nudge: send a full-tags array twice (anchor add/remove) to force rebuild
     try:
-        shopify_gql(add, {"id": customer_gid, "tags": [touch_tag]})
-        time.sleep(0.8)  # small pause so Shopify emits two distinct writes
-    finally:
-        shopify_gql(rem, {"id": customer_gid, "tags": [touch_tag]})
+        reassert_full_tags_two_step(customer_gid)
+    except Exception:
+        pass
 
+    return {"customer": customer_gid, "tier": tier, "removed": to_remove, "added": added}
+def reassert_full_tags_two_step(customer_gid: str):
+    """
+    Force two REST updates that *both* include the full tag CSV:
+      1) add a one-time anchor (net change → webhook)
+      2) remove the anchor (final state equals original)
+    Klaviyo sees complete tag arrays both times.
+    """
+    state = get_customer_state(customer_gid)
+    cur = [t for t in (state.get("tags") or []) if t]
+    full = sorted(cur)
+    base_csv = ", ".join(full)
+
+    anchor = f"KL-TOUCH{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    csv_with_anchor = ", ".join(sorted(full + [anchor]))
+
+    cid = gid_numeric(customer_gid)
+    url = f"https://{_SHOPIFY_STORE}/admin/api/2025-10/customers/{cid}.json"
+    headers = {
+        "X-Shopify-Access-Token": _SHOPIFY_TOKEN,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    # Step 1: add anchor (full CSV)
+    print(f"[REASSERT1] gid={customer_gid} → {csv_with_anchor}", flush=True)
+    r1 = requests.put(url, headers=headers, json={"customer": {"id": int(cid), "tags": csv_with_anchor}}, timeout=_PER_CALL_TIMEOUT)
+    print(f"[REASSERT1] status={r1.status_code}", flush=True)
+    if r1.status_code >= 400:
+        print(f"[REASSERT1] ERR {r1.text[:300]}", flush=True)
+        r1.raise_for_status()
+
+    # brief pause so the first webhook can propagate
+    time.sleep(1.2)
+
+    # Step 2: remove anchor (full CSV back to original)
+    print(f"[REASSERT2] gid={customer_gid} → {base_csv}", flush=True)
+    r2 = requests.put(url, headers=headers, json={"customer": {"id": int(cid), "tags": base_csv}}, timeout=_PER_CALL_TIMEOUT)
+    print(f"[REASSERT2] status={r2.status_code}", flush=True)
+    if r2.status_code >= 400:
+        print(f"[REASSERT2] ERR {r2.text[:300]}", flush=True)
+        r2.raise_for_status()
 # ---- METAFIELDS UPSERT ----
 
 def upsert_customer_metafields(customer_gid: str, updates: Dict[str, Any]):
@@ -475,6 +617,7 @@ def write_state(customer_gid: str, *, rolling=None, tier=None, lock=None, prov=N
     upsert_customer_metafields(customer_gid, updates)
 
     # IMPORTANT: tag using the normalized tier
+    print(f"[vip] {customer_gid} tier_in={tier!r} -> tier_norm={norm_tier}")
     if norm_tier is not None:
         set_vip_tag(customer_gid, norm_tier)
 
