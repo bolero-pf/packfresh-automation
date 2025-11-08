@@ -157,24 +157,38 @@ def compute_rolling_90d_spend(customer_gid: str, today: Optional[datetime]=None)
 
 # ---- TAGS ----
 
+# in service.py -> set_vip_tag
 def set_vip_tag(customer_gid: str, tier: str):
     """
-    Maintain tags:
-    - VIP1+/VIP2/VIP3: ensure 'VIP' and the specific tier tag exist
-    - VIP0: remove all VIP tags
+    Keep tags in sync with tier with minimal churn:
+    - If VIP0: remove VIP and any VIP* tags.
+    - If VIP1/2/3: ensure 'VIP' + specific tier exist, remove other VIP* tiers.
     """
-    rem = """
-    mutation TagsRemove($id: ID!, $tags: [String!]!) {
-      tagsRemove(id: $id, tags: $tags) { userErrors { message } }
-    }"""
-    add = """
-    mutation TagsAdd($id: ID!, $tags: [String!]!) {
-      tagsAdd(id: $id, tags: $tags) { userErrors { message } }
-    }"""
-    # Blindly remove any VIP tags (idempotent, no-op if not present)
-    shopify_gql(rem, {"id": customer_gid, "tags": ["VIP0","VIP1","VIP2","VIP3"]})
-    if tier in ("VIP1", "VIP2", "VIP3"):
-        shopify_gql(add, {"id": customer_gid, "tags": ["VIP", tier]})
+    # read current tags once
+    state = get_customer_state(customer_gid)  # has "tags"
+    cur = set(state.get("tags", []) or [])
+    vip_tiers = {"VIP0","VIP1","VIP2","VIP3"}
+
+    if tier == "VIP0":
+        to_remove = list(cur & vip_tiers) + (["VIP"] if "VIP" in cur else [])
+        if to_remove:
+            shopify_gql("""mutation($id:ID!,$tags:[String!]!){ tagsRemove(id:$id,tags:$tags){ userErrors{message}} }""",
+                        {"id": customer_gid, "tags": to_remove})
+        return
+
+    # desired final set
+    desired = {"VIP", tier}
+    # figure diffs
+    wrong_tiers = list((cur & vip_tiers) - {tier})
+    missing     = list(desired - cur)
+
+    if wrong_tiers:
+        shopify_gql("""mutation($id:ID!,$tags:[String!]!){ tagsRemove(id:$id,tags:$tags){ userErrors{message}} }""",
+                    {"id": customer_gid, "tags": wrong_tiers})
+    if missing:
+        shopify_gql("""mutation($id:ID!,$tags:[String!]!){ tagsAdd(id:$id,tags:$tags){ userErrors{message}} }""",
+                    {"id": customer_gid, "tags": missing})
+
 
 # ---- KLAYVIO SYNC TOUCH (force Shopify to include tags in customers/update) ----
 def klaviyo_touch_tags(customer_gid: str, touch_tag: str = "_kl_sync"):
@@ -192,7 +206,7 @@ def klaviyo_touch_tags(customer_gid: str, touch_tag: str = "_kl_sync"):
     }"""
     try:
         shopify_gql(add, {"id": customer_gid, "tags": [touch_tag]})
-        time.sleep(0.25)  # small pause so Shopify emits two distinct writes
+        time.sleep(0.8)  # small pause so Shopify emits two distinct writes
     finally:
         shopify_gql(rem, {"id": customer_gid, "tags": [touch_tag]})
 

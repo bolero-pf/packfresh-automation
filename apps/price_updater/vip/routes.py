@@ -252,9 +252,8 @@ def sweep_vips():
                 changed = (new_tier != (state.get("tier") or "VIP0")) or bool(state.get("lock"))
 
             # If nothing material changed, force a tags-including webhook so Klaviyo updates stale 'Shopify Tags'
-            if not changed:
-                from .service import klaviyo_touch_tags
-                klaviyo_touch_tags(gid)
+            from .service import klaviyo_touch_tags
+            klaviyo_touch_tags(gid)
 
             processed += 1
         except Exception as e:
