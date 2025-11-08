@@ -33,6 +33,30 @@ def gid_numeric(gid: str) -> str:
     # "gid://shopify/Customer/7836399894748" -> "7836399894748"
     return gid.rsplit("/", 1)[-1]
 
+def normalize_tier(t):
+    """
+    Coerce tier to one of 'VIP0','VIP1','VIP2','VIP3'.
+    Accepts str ('vip3'/'VIP 3'), int/float (3, 3.0), or dict {'tier': 'VIP3'}.
+    Fallback to 'VIP0' on anything else.
+    """
+    if t is None:
+        return None
+    if isinstance(t, dict):
+        # common leak: passing the whole 'public' or state object
+        if "tier" in t:
+            return normalize_tier(t["tier"])
+    if isinstance(t, (int, float)):
+        i = int(t)
+        return f"VIP{i}" if 0 <= i <= 3 else "VIP0"
+    if isinstance(t, str):
+        s = t.strip().upper().replace(" ", "")
+        # allow 'VIP3' or 'VIP' + digits
+        if s in {"VIP0","VIP1","VIP2","VIP3"}:
+            return s
+        if s.startswith("VIP") and s[3:].isdigit():
+            i = int(s[3:])
+            return f"VIP{i}" if 0 <= i <= 3 else "VIP0"
+    return "VIP0"
 
 def shopify_gql(query: str, variables=None):
     if not _SHOPIFY_TOKEN or not _SHOPIFY_STORE:
@@ -159,35 +183,33 @@ def compute_rolling_90d_spend(customer_gid: str, today: Optional[datetime]=None)
 
 # in service.py -> set_vip_tag
 def set_vip_tag(customer_gid: str, tier: str):
-    """
-    Keep tags in sync with tier with minimal churn:
-    - If VIP0: remove VIP and any VIP* tags.
-    - If VIP1/2/3: ensure 'VIP' + specific tier exist, remove other VIP* tiers.
-    """
-    # read current tags once
-    state = get_customer_state(customer_gid)  # has "tags"
+    tier = normalize_tier(tier) or "VIP0"     # backstop
+
+    state = get_customer_state(customer_gid)
     cur = set(state.get("tags", []) or [])
     vip_tiers = {"VIP0","VIP1","VIP2","VIP3"}
 
     if tier == "VIP0":
         to_remove = list(cur & vip_tiers) + (["VIP"] if "VIP" in cur else [])
         if to_remove:
-            shopify_gql("""mutation($id:ID!,$tags:[String!]!){ tagsRemove(id:$id,tags:$tags){ userErrors{message}} }""",
-                        {"id": customer_gid, "tags": to_remove})
+            shopify_gql("""mutation($id:ID!,$tags:[String!]!){
+                tagsRemove(id:$id,tags:$tags){ userErrors{message}} }""",
+                {"id": customer_gid, "tags": to_remove})
         return
 
-    # desired final set
     desired = {"VIP", tier}
-    # figure diffs
     wrong_tiers = list((cur & vip_tiers) - {tier})
     missing     = list(desired - cur)
 
     if wrong_tiers:
-        shopify_gql("""mutation($id:ID!,$tags:[String!]!){ tagsRemove(id:$id,tags:$tags){ userErrors{message}} }""",
-                    {"id": customer_gid, "tags": wrong_tiers})
+        shopify_gql("""mutation($id:ID!,$tags:[String!]!){
+            tagsRemove(id:$id,tags:$tags){ userErrors{message}} }""",
+            {"id": customer_gid, "tags": wrong_tiers})
     if missing:
-        shopify_gql("""mutation($id:ID!,$tags:[String!]!){ tagsAdd(id:$id,tags:$tags){ userErrors{message}} }""",
-                    {"id": customer_gid, "tags": missing})
+        shopify_gql("""mutation($id:ID!,$tags:[String!]!){
+            tagsAdd(id:$id,tags:$tags){ userErrors{message}} }""",
+            {"id": customer_gid, "tags": missing})
+
 
 
 # ---- KLAYVIO SYNC TOUCH (force Shopify to include tags in customers/update) ----
@@ -429,30 +451,33 @@ def threshold_for_tier(tier: str) -> float:
 
 # ---------- WRITE STATE ----------
 def write_state(customer_gid: str, *, rolling=None, tier=None, lock=None, prov=None):
-    # pull current if needed (no order math)
     if rolling is None or tier is None or lock is None:
         state = get_customer_state(customer_gid)
         if rolling is None: rolling = state["rolling"]
         if tier is None: tier = state["tier"]
         if lock is None: lock = state["lock"]
 
-    public = build_public_from_state({"tier": tier, "lock": lock or {}, "rolling": rolling or 0.0})
+    norm_tier = normalize_tier(tier) if tier is not None else None
+    public = build_public_from_state({"tier": norm_tier, "lock": lock or {}, "rolling": rolling or 0.0})
 
     updates = {}
     if rolling is not None:
-        updates[(MF_ROLLING[0], MF_ROLLING[1], "number_decimal")] = rolling
-    if tier is not None:
-        updates[(MF_TIER[0], MF_TIER[1], "single_line_text_field")] = tier
+        updates[(MF_ROLLING[0], MF_ROLLING[1], "number_decimal")] = float(rolling)
+    if norm_tier is not None:
+        updates[(MF_TIER[0], MF_TIER[1], "single_line_text_field")] = norm_tier
     if lock is not None:
         updates[(MF_LOCK[0], MF_LOCK[1], "json")] = lock
     if prov is not None:
         updates[(MF_PROV[0], MF_PROV[1], "json")] = prov
-    updates[( "custom", "vip_public", "json")] = public
+    updates[("custom", "vip_public", "json")] = public
     updates[(MF_LASTCALC[0], MF_LASTCALC[1], "date_time")] = datetime.now(timezone.utc).isoformat()
 
     upsert_customer_metafields(customer_gid, updates)
-    if tier is not None:
-        set_vip_tag(customer_gid, tier)
+
+    # IMPORTANT: tag using the normalized tier
+    if norm_tier is not None:
+        set_vip_tag(customer_gid, norm_tier)
+
 
 
 # ---------- HANDLERS ----------
