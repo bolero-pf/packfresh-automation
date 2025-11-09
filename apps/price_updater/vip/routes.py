@@ -202,17 +202,23 @@ def vip_promote_public():
 @bp.post("/sweep_vips")
 def sweep_vips():
     """
-    Nightly: refresh rolling 90d + tier + vip_public for customers with generic 'VIP' tag.
-    - If lock is ACTIVE: keep tier & lock, just refresh spend/public.
-    - If lock is EXPIRED: clear lock, set tier = tier_from_spend(spend) (may downgrade to VIP0).
-    POST {"page_size": 200, "cursor": null}
+    Nightly: refresh rolling 90d + tier + vip_public for customers with any VIP* tag.
     """
     from .service import shopify_gql, compute_rolling_90d_spend, tier_from_spend, write_state, get_customer_state, inside_lock
+    from flask import request, jsonify
     from datetime import datetime, timezone
 
     payload = request.get_json(silent=True) or {}
     page_size = int(payload.get("page_size", 200))
     after = payload.get("cursor")
+
+    # Define the exact tags you actually emit
+    VIP_TIERS   = ["VIP1", "VIP2", "VIP3"]   # add "VIP" here if you still use the generic tag
+    SUFFIXES    = ["", "-risk", "-hopeful"]  # add others if you have them
+    TERMS       = [f'tag:"{t}{s}"' for t in VIP_TIERS for s in SUFFIXES]
+
+    # If this OR string gets long, you can split into chunks of ~10–12 terms per call.
+    q = " OR ".join(TERMS)
 
     query = """
     query($first:Int!, $after:String, $q:String!){
@@ -221,7 +227,7 @@ def sweep_vips():
         pageInfo{ hasNextPage endCursor }
       }
     }"""
-    q = 'tag:VIP*'
+
     data = shopify_gql(query, {"first": page_size, "after": after, "q": q})
     cs = data["data"]["customers"]
     ids = [e["node"]["id"] for e in cs["edges"]]
@@ -230,36 +236,28 @@ def sweep_vips():
     today = datetime.now(timezone.utc)
     processed, failed = 0, []
 
+    # --- process
+    from .service import reassert_full_tags_two_step as reassert_full_tags
+
     for gid in ids:
         try:
-            # current state (to check lock/tier)
             state = get_customer_state(gid)
             lock_active = inside_lock(state.get("lock") or {}, today.date())
-
-            # true spend now
             spend = compute_rolling_90d_spend(gid, today=today)
 
-            changed = False
-
             if lock_active:
-                # mid-lock: we keep tier/lock → likely "no change"
                 write_state(gid, rolling=spend, tier=state["tier"], lock=state["lock"], prov=None)
-                changed = False
             else:
-                # lock expired → recompute tier and clear lock
                 new_tier = tier_from_spend(spend)
                 write_state(gid, rolling=spend, tier=new_tier, lock={}, prov=None)
-                changed = (new_tier != (state.get("tier") or "VIP0")) or bool(state.get("lock"))
 
-            # If nothing material changed, force a tags-including webhook so Klaviyo updates stale 'Shopify Tags'
-            from .service import reassert_full_tags_two_step as reassert_full_tags
             reassert_full_tags(gid)
-
             processed += 1
         except Exception as e:
             failed.append({"customer": gid, "error": str(e)})
 
     return jsonify({"ok": True, "processed": processed, "next_cursor": next_cursor, "failed_ids": failed})
+
 
 @bp.post("/retag_only")
 def vip_retag_only():
