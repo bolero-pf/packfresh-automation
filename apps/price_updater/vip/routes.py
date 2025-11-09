@@ -281,7 +281,7 @@ def _days_to_expiry(lock: dict, today: date) -> int:
     # assume YYYY-MM-DD
     d = date.fromisoformat(until)
     return max(0, (d - today).days)
-
+@bp.post("/sweep_vips")
 def sweep_vips():
     """
     Nightly: refresh rolling 90d + tier/lock, sync Klaviyo profile props,
