@@ -32,7 +32,40 @@ _PER_CALL_TIMEOUT = int(os.environ.get("SHOPIFY_HTTP_TIMEOUT", "60"))
 
 VIP_DEBUG = os.getenv("VIP_DEBUG") == "1"
 VIP_DRY_RUN = os.getenv("VIP_DRY_RUN") == "1"   # ← NEW
+ORDER = ["VIP0","VIP1","VIP2","VIP3"]
+TIER_MIN_CENTS = {"VIP0": 0, "VIP1": 50_000, "VIP2": 125_000, "VIP3": 250_000}
 
+def _numeric_id_from_gid(gid: str) -> str:
+    return gid.rsplit('/', 1)[-1]
+
+def _pick_lock_until(lock: dict) -> str | None:
+    if not lock:
+        return None
+    for k in ("end", "until", "expires", "expiry", "expiry_date"):
+        v = lock.get(k)
+        if v:
+            return v.split("T")[0]
+    return None
+
+def _days_to_date(yyyymmdd: str | None, today: date) -> int:
+    if not yyyymmdd:
+        return 0
+    try:
+        d = date.fromisoformat(yyyymmdd)
+        return max(0, (d - today).days)
+    except Exception:
+        return 0
+
+def _gap_to_next_tier_cents(tier: str, rolling_cents: int) -> int:
+    i = ORDER.index(tier)
+    if i == len(ORDER) - 1:
+        return 0
+    nxt = ORDER[i + 1]
+    return max(0, TIER_MIN_CENTS[nxt] - rolling_cents)
+
+def _gap_to_requalify_cents(tier: str, rolling_cents: int) -> int:
+    # spend needed to KEEP current tier during lock
+    return max(0, TIER_MIN_CENTS.get(tier, 0) - rolling_cents)
 def dlog(*args):
     if VIP_DEBUG:
         print(*args, flush=True)
