@@ -221,7 +221,7 @@ def sweep_vips():
         pageInfo{ hasNextPage endCursor }
       }
     }"""
-    q = 'tag:"VIP*"'
+    q = 'tag:VIP*'
     data = shopify_gql(query, {"first": page_size, "after": after, "q": q})
     cs = data["data"]["customers"]
     ids = [e["node"]["id"] for e in cs["edges"]]
