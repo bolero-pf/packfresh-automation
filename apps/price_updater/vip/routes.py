@@ -79,6 +79,55 @@ def vip_backfill():
 
 # live event routes
 from .service import on_order_paid as _on_paid, on_refund_created as _on_refund
+from datetime import date
+
+ORDER = ["VIP0","VIP1","VIP2","VIP3"]
+TIER_MIN_CENTS = {"VIP0": 0, "VIP1": 50_000, "VIP2": 125_000, "VIP3": 250_000}
+
+def _numeric_id_from_gid(gid: str) -> str:
+    return gid.rsplit('/', 1)[-1]
+
+def _pick_lock_until(lock: dict) -> str | None:
+    if not lock:
+        return None
+    for k in ("end", "until", "expires", "expiry", "expiry_date"):
+        v = lock.get(k)
+        if v:
+            return v.split("T")[0]
+    return None
+
+def _days_to_date(yyyymmdd: str | None, today: date) -> int:
+    if not yyyymmdd:
+        return 0
+    try:
+        d = date.fromisoformat(yyyymmdd)
+        return max(0, (d - today).days)
+    except Exception:
+        return 0
+
+def _gap_to_next_tier_cents(tier: str, rolling_cents: int) -> int:
+    i = ORDER.index(tier)
+    if i == len(ORDER) - 1:
+        return 0
+    nxt = ORDER[i + 1]
+    return max(0, TIER_MIN_CENTS[nxt] - rolling_cents)
+
+def _gap_to_requalify_cents(tier: str, rolling_cents: int) -> int:
+    # spend needed to KEEP current tier during lock
+    return max(0, TIER_MIN_CENTS.get(tier, 0) - rolling_cents)
+
+def _needs_vip_tag_update(current_tags: set[str], desired: set[str]) -> bool:
+    def vip_only(s): return {t for t in s if t.startswith("VIP")}
+    return vip_only(current_tags) != vip_only(desired)
+
+def _desired_vip_tags(tier: str, lock_active: bool) -> set[str]:
+    out = set()
+    if tier != "VIP0":
+        out.add(tier)             # VIP1/2/3 only
+    # If you want a lock marker, uncomment:
+    # if lock_active and tier != "VIP0":
+    #     out.add(f"{tier}-lock")
+    return out
 
 @bp.post("/order_paid")
 def order_paid():
@@ -199,12 +248,43 @@ def vip_promote_public():
         "items": results[:10]
     })
 
-@bp.post("/sweep_vips")
+# at top of file (imports)
+from ..integrations.klaviyo import upsert_profile
+from datetime import datetime, timezone, date
+
+# --- OPTIONAL: put your tier thresholds here (in cents). Adjust to your real numbers.
+TIER_MIN_CENTS = {"VIP0": 0, "VIP1": 50000, "VIP2": 125000, "VIP3": 250000}
+
+def _numeric_id_from_gid(gid: str) -> str:
+    # 'gid://shopify/Customer/8492221530332' -> '8492221530332'
+    return gid.rsplit('/', 1)[-1]
+
+def _gap_to_next_tier_cents(tier: str, rolling_cents: int) -> int:
+    order = ["VIP0", "VIP1", "VIP2", "VIP3"]
+    idx = order.index(tier)
+    if idx == len(order) - 1:  # top tier
+        return 0
+    next_tier = order[idx + 1]
+    return max(0, TIER_MIN_CENTS[next_tier] - rolling_cents)
+
+def _days_to_expiry(lock: dict, today: date) -> int:
+    # lock = {"since": "2025-06-01", "until": "2025-09-01"} or {}
+    until = (lock or {}).get("until")
+    if not until:
+        return 0
+    # assume YYYY-MM-DD
+    d = date.fromisoformat(until)
+    return max(0, (d - today).days)
+
 def sweep_vips():
     """
-    Nightly: refresh rolling 90d + tier + vip_public for customers with any VIP* tag.
+    Nightly: refresh rolling 90d + tier/lock, sync Klaviyo profile props,
+    and only touch Shopify VIP* tags when they actually need to change.
     """
-    from .service import shopify_gql, compute_rolling_90d_spend, tier_from_spend, write_state, get_customer_state, inside_lock
+    from .service import (
+        shopify_gql, compute_rolling_90d_spend, tier_from_spend,
+        write_state, get_customer_state, inside_lock, set_vip_tag
+    )
     from flask import request, jsonify
     from datetime import datetime, timezone
 
@@ -212,14 +292,7 @@ def sweep_vips():
     page_size = int(payload.get("page_size", 200))
     after = payload.get("cursor")
 
-    # Define the exact tags you actually emit
-    VIP_TIERS   = ["VIP1", "VIP2", "VIP3"]   # add "VIP" here if you still use the generic tag
-    SUFFIXES    = ["", "-risk", "-hopeful"]  # add others if you have them
-    TERMS       = [f'tag:"{t}{s}"' for t in VIP_TIERS for s in SUFFIXES]
-
-    # If this OR string gets long, you can split into chunks of ~10–12 terms per call.
-    q = " OR ".join(TERMS)
-
+    # Query: OR over exact VIP tier tags you use (no wildcards)
     query = """
     query($first:Int!, $after:String, $q:String!){
       customers(first:$first, after:$after, query:$q, sortKey:ID){
@@ -227,36 +300,75 @@ def sweep_vips():
         pageInfo{ hasNextPage endCursor }
       }
     }"""
+    VIP_TIERS = ["VIP1","VIP2","VIP3"]
+    SUFFIXES  = ["", "-risk", "-hopeful"]
+    terms     = [f'tag:"{t}{s}"' for t in VIP_TIERS for s in SUFFIXES]
+    q = " OR ".join(terms) if terms else 'tag:"VIP1" OR tag:"VIP2" OR tag:"VIP3"'
 
     data = shopify_gql(query, {"first": page_size, "after": after, "q": q})
     cs = data["data"]["customers"]
     ids = [e["node"]["id"] for e in cs["edges"]]
     next_cursor = cs["pageInfo"]["endCursor"] if cs["pageInfo"]["hasNextPage"] else None
 
-    today = datetime.now(timezone.utc)
-    processed, failed = 0, []
+    # Tiny query to fetch email
+    Q_EMAIL = """query($id:ID!){ customer(id:$id){ id email legacyResourceId } }"""
 
-    # --- process
-    from .service import reassert_full_tags_two_step as reassert_full_tags
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    processed, failed = 0, []
 
     for gid in ids:
         try:
-            state = get_customer_state(gid)
-            lock_active = inside_lock(state.get("lock") or {}, today.date())
-            spend = compute_rolling_90d_spend(gid, today=today)
+            # 1) Read current state
+            state = get_customer_state(gid)  # reads metafields+tags
+            raw_lock = state.get("lock") or {}
+            lock_active = inside_lock(raw_lock, today)
 
+            # 2) Compute true spend & resulting tier/lock write
+            spend = compute_rolling_90d_spend(gid, today=now)
             if lock_active:
-                write_state(gid, rolling=spend, tier=state["tier"], lock=state["lock"], prov=None)
+                tier = state["tier"]
+                lock = raw_lock
+                write_state(gid, rolling=spend, tier=tier, lock=lock, prov=None)
             else:
-                new_tier = tier_from_spend(spend)
-                write_state(gid, rolling=spend, tier=new_tier, lock={}, prov=None)
+                tier = tier_from_spend(spend)
+                lock = {}
+                write_state(gid, rolling=spend, tier=tier, lock=lock, prov=None)
 
-            reassert_full_tags(gid)
+            # 3) Build Klaviyo props from RAW LOCK (never the possibly-cleared one)
+            email = (shopify_gql(Q_EMAIL, {"id": gid})["data"]["customer"] or {}).get("email")
+            external_id = _numeric_id_from_gid(gid)
+
+            lock_until = _pick_lock_until(raw_lock)
+            days_to_expire = _days_to_date(lock_until, today)
+            rolling_cents = int(round(spend * 100))
+            props = {
+                "vip_tier": tier,
+                "vip_rolling_90d_cents": rolling_cents,
+                "vip_lock_start": raw_lock.get("start"),
+                "vip_lock_until": lock_until,
+                "vip_lock_active": bool(lock_active),
+                "vip_days_to_expire": days_to_expire,
+                "vip_requalify_gap_cents": _gap_to_requalify_cents(tier, rolling_cents),
+                "vip_next_tier_gap_cents": _gap_to_next_tier_cents(tier, rolling_cents),
+                "vip_last_change": now.isoformat(),   # optional: only set when tier changed if you prefer
+            }
+            upsert_profile(email=email, external_id=external_id, properties=props)
+
+            # 4) Only touch VIP* tags when there is a real delta
+            cur_tags = set(state.get("tags") or [])
+            desired  = _desired_vip_tags(tier, lock_active)
+            if _needs_vip_tag_update(cur_tags, desired):
+                # `set_vip_tag` is already idempotent and removes wrong tiers if needed. :contentReference[oaicite:3]{index=3}
+                set_vip_tag(gid, tier)
+
             processed += 1
         except Exception as e:
             failed.append({"customer": gid, "error": str(e)})
 
     return jsonify({"ok": True, "processed": processed, "next_cursor": next_cursor, "failed_ids": failed})
+
+
 
 
 @bp.post("/retag_only")
