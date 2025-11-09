@@ -2,12 +2,20 @@
 from flask import Blueprint, jsonify, current_app
 from flask import request
 from .service import fetch_customer_ids_page
-from datetime import date
 from .verify import verify_flow_signature
 from pathlib import Path
 import os, sys, subprocess, threading
-from ..integrations.klaviyo import upsert_profile
 from datetime import datetime, timezone, date
+
+try:
+    from integrations.klaviyo import upsert_profile
+except Exception:
+    # Local dev fallback if project root isn't on sys.path
+    import sys, os
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # parent of vip/
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    from integrations.klaviyo import upsert_profile
 bp = Blueprint("vip", __name__, url_prefix="/vip")
 @bp.before_request
 def _verify():
