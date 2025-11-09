@@ -6,7 +6,8 @@ from datetime import date
 from .verify import verify_flow_signature
 from pathlib import Path
 import os, sys, subprocess, threading
-from datetime import datetime
+from ..integrations.klaviyo import upsert_profile
+from datetime import datetime, timezone, date
 bp = Blueprint("vip", __name__, url_prefix="/vip")
 @bp.before_request
 def _verify():
@@ -248,9 +249,6 @@ def vip_promote_public():
         "items": results[:10]
     })
 
-# at top of file (imports)
-from ..integrations.klaviyo import upsert_profile
-from datetime import datetime, timezone, date
 
 # --- OPTIONAL: put your tier thresholds here (in cents). Adjust to your real numbers.
 TIER_MIN_CENTS = {"VIP0": 0, "VIP1": 50000, "VIP2": 125000, "VIP3": 250000}
