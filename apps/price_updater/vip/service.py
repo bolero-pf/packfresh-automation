@@ -490,6 +490,7 @@ CUSTOMER_STATE_Q = """
 query($id:ID!){
   customer(id:$id){
     id
+    email
     tags
     metafields(first:20, namespace:"custom"){
       edges{ node{ key type value } }
@@ -577,6 +578,7 @@ def get_customer_state(customer_gid: str):
     m = _mf_to_dict(c["metafields"]["edges"])
     return {
         "tags": c["tags"],
+        "email": c.get("email"),
         "tier": m.get("loyalty_vip_tier", "VIP0"),
         "lock": m.get("loyalty_lock_window", {}) or {},
         "prov": m.get("loyalty_lock_provenance", {}) or {},
