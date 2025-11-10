@@ -296,17 +296,16 @@ def vip_promote_public():
 @bp.post("/sweep_vips")
 def sweep_vips():
     """
-    Nightly: iterate VIP-tagged customers and push fresh VIP props to Klaviyo.
-    All logic lives in _push_vip_to_klaviyo(gid) so webhooks and sweep stay identical.
+    Process a SINGLE page per call and return next_cursor.
+    The caller (runner/Flow) is responsible for calling again with cursor.
     """
     from flask import request, jsonify
-    from .service import shopify_gql  # keep using your gql helper
+    from .service import shopify_gql
 
     payload = request.get_json(silent=True) or {}
-    page_size = int(payload.get("page_size", 200))
+    page_size = int(payload.get("page_size", 25))
     after = payload.get("cursor")
 
-    # Build exact-tag OR query (no wildcards)
     VIP_TIERS = ["VIP1", "VIP2", "VIP3"]
     SUFFIXES  = ["", "-risk", "-hopeful"]
     terms     = [f'tag:"{t}{s}"' for t in VIP_TIERS for s in SUFFIXES]
@@ -321,31 +320,20 @@ def sweep_vips():
     }"""
 
     processed, failed = 0, []
-    next_cursor = None
+    data = shopify_gql(QUERY, {"first": page_size, "after": after, "q": q})
+    cs = data["data"]["customers"]
+    ids = [e["node"]["id"] for e in cs["edges"]]
 
-    try:
-        while True:
-            data = shopify_gql(QUERY, {"first": page_size, "after": after, "q": q})
-            cs = data["data"]["customers"]
-            ids = [e["node"]["id"] for e in cs["edges"]]
+    for gid in ids:
+        try:
+            _push_vip_to_klaviyo(gid)  # canonical logic
+            processed += 1
+        except Exception as e:
+            failed.append({"customer": gid, "error": str(e)})
 
-            for gid in ids:
-                try:
-                    _push_vip_to_klaviyo(gid)  # <-- single source of truth
-                    processed += 1
-                except Exception as e:
-                    failed.append({"customer": gid, "error": str(e)})
-
-            if cs["pageInfo"]["hasNextPage"]:
-                after = cs["pageInfo"]["endCursor"]
-                next_cursor = after
-            else:
-                break
-    except Exception as e:
-        # catastrophic gql error; return what we have
-        failed.append({"fatal": str(e)})
-
+    next_cursor = cs["pageInfo"]["endCursor"] if cs["pageInfo"]["hasNextPage"] else None
     return jsonify({"ok": True, "processed": processed, "next_cursor": next_cursor, "failed_ids": failed})
+
 
 
 
