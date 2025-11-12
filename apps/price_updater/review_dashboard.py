@@ -11,17 +11,20 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import requests
 import time
 import os
+from pathlib import Path
 
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 from vip.routes import bp as vip_bp
-from inventory.routes import bp as inventory_bp
+#from inventory.routes import bp as inventory_bp
 app.register_blueprint(vip_bp)
-app.register_blueprint(inventory_bp)
-REVIEW_CSV = "price_updates_needs_review.csv"
-PUSHED_CSV = "price_updates_pushed.csv"
-MISSING_CSV = "price_updates_missing_listing.csv"
-UNTOUCHED_CSV = "price_updates_untouched.csv"
+#app.register_blueprint(inventory_bp)
+ROOT = Path(__file__).resolve().parent  # == .../price_updater
+REVIEW_CSV    = ROOT / "price_updates_needs_review.csv"
+PUSHED_CSV    = ROOT / "price_updates_pushed.csv"
+MISSING_CSV   = ROOT / "price_updates_missing_listing.csv"
+UNTOUCHED_CSV = ROOT / "price_updates_untouched.csv"
+RUN_LOG = ROOT / "run_output.log"
 app.secret_key = "something-super-secret-and-unique"
 
 if not os.path.exists(REVIEW_CSV):
@@ -232,11 +235,12 @@ def runlog():
 @requires_auth
 def run_dailyrunner():
     def launch_script():
-        with open("run_output.log", "w") as f:
+        with open(RUN_LOG, "w") as f:
             subprocess.Popen(
                 [sys.executable, "dailyrunner.py"],
                 stdout=f,
-                stderr=f
+                stderr=f,
+                cwd=str(ROOT)
             )
 
     threading.Thread(target=launch_script).start()
@@ -251,7 +255,7 @@ def run_dailyrunner():
 @app.route('/stream-log')
 def stream_log():
     def generate():
-        with open("run_output.log", "r") as f:
+        with open(RUN_LOG, "r") as f:
             f.seek(0, 2)  # Go to end of file
             while True:
                 line = f.readline()
@@ -286,7 +290,10 @@ def dashboard(view):
     df["shopify_qty"] = pd.to_numeric(df["shopify_qty"], errors="coerce").fillna(0)
     df = df[df["shopify_qty"] > 0]
 
-    df["tcgplayer_id"] = df.get("tcgplayer_id", "").astype(str).str.replace(".0", "", regex=False)
+    if "tcgplayer_id" in df.columns:
+        df["tcgplayer_id"] = df["tcgplayer_id"].astype(str).str.replace(".0", "", regex=False)
+    else:
+        df["tcgplayer_id"] = ""
     if "price_to_upload" in df.columns:
         df["price_to_upload"] = df["price_to_upload"].fillna("")
     if "suggested_price" in df.columns:
@@ -330,7 +337,7 @@ def run():
         elif source == "missing":
             cmd.append("--upload-missing")
 
-    subprocess.Popen(cmd)
+    subprocess.Popen(cmd, cwd=str(ROOT))
     return redirect(f"/dashboard/{source}")
 
 @app.route("/ignore", methods=["POST"])
@@ -354,7 +361,8 @@ def run_live_upload():
             stderr=subprocess.STDOUT,
             text=True,  # <-- enables string mode instead of bytes
             encoding='utf-8',  # <-- force UTF-8 decoding
-            bufsize=1
+            bufsize=1,
+            cwd=str(ROOT)
         )
 
         for line in iter(process.stdout.readline, ''):
