@@ -25,8 +25,33 @@ load_dotenv()
 CHROME_BINARY_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "chrome", "chrome.exe"))
 CHROME_BINARY_PATH = ".venv/Scripts/chrome/chrome.exe"
 MAX_WORKERS = 5
-REVIEW_CSV = "price_updates_needs_review.csv"
-MISSING_CSV = "price_updates_missing_listing.csv"
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent
+
+# Write outputs next to your app, not the ephemeral CWD
+REVIEW_CSV     = BASE_DIR / "price_updates_needs_review.csv"
+PUSHED_CSV     = BASE_DIR / "price_updates_pushed.csv"
+UNTOUCHED_CSV  = BASE_DIR / "price_updates_untouched.csv"
+MISSING_CSV    = BASE_DIR / "price_updates_missing_listing.csv"  # keep your current name
+
+# One place to define the columns your dashboard can tolerate
+CSV_COLS = [
+    "title","sku","shopify_price","suggested_price","price_to_upload",
+    "shopify_qty","variant_id","shopify_inventory_item_id","pending_shopify_update",
+    "price_last_updated","notes","product_gid","tcg_price","percent_diff","reason",
+    "tcgplayer_id","handle","tags","new_price","note"
+]
+
+def _write_csv_safe(rows, path, cols=CSV_COLS):
+    import pandas as pd
+    # Always emit headers so read_csv never fails
+    df = pd.DataFrame(rows)
+    if df.empty:
+        df = pd.DataFrame(columns=cols)
+    # Re-order columns where possible (missing columns will be created)
+    df = df.reindex(columns=cols, fill_value="")
+    df.to_csv(path, index=False)
+    print(f"[WRITE] {path} rows={len(df)}")
 # === CONFIG ===
 SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN")
 SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
@@ -37,8 +62,6 @@ HEADERS = {
 }
 TCGPLAYER_PRICE_ADJUSTMENT = 0.98
 MAX_PERCENT_DROP = 5  # % drop below current price to flag
-MAX_WORKERS = 5
-REVIEW_CSV = "price_updates_needs_review.csv"
 ignored_skus = set()
 if os.path.exists(".venv/Scripts/ignore_skus.txt"):
     with open(".venv/Scripts/ignore_skus.txt") as f:
@@ -558,10 +581,10 @@ def run_price_sync():
                 print(f"💤 Still alive… sleeping {i} more minute(s)", flush=True)
                 time.sleep(60)
 
-    pd.DataFrame(updated_rows).to_csv("price_updates_pushed.csv", index=False)
-    pd.DataFrame(flagged_rows).to_csv(REVIEW_CSV, index=False)
-    pd.DataFrame(untouched_rows).to_csv("price_updates_untouched.csv", index=False)
-    pd.DataFrame(missing_rows).assign(price_to_upload="").to_csv(MISSING_CSV, index=False)
+    _write_csv_safe(updated_rows, PUSHED_CSV)
+    _write_csv_safe(flagged_rows, REVIEW_CSV)
+    _write_csv_safe(untouched_rows, UNTOUCHED_CSV)
+    _write_csv_safe([{**r, "price_to_upload": ""} for r in missing_rows], MISSING_CSV)
 
     print(f"\n✅ Updates pushed: {len(updated_rows)}")
     print(f"⚠️  Flagged for review: {len(flagged_rows)}")

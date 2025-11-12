@@ -15,11 +15,14 @@ import os
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 from vip.routes import bp as vip_bp
+from inventory.routes import bp as inventory_bp
 app.register_blueprint(vip_bp)
+app.register_blueprint(inventory_bp)
 REVIEW_CSV = "price_updates_needs_review.csv"
 PUSHED_CSV = "price_updates_pushed.csv"
 MISSING_CSV = "price_updates_missing_listing.csv"
 UNTOUCHED_CSV = "price_updates_untouched.csv"
+app.secret_key = "something-super-secret-and-unique"
 
 if not os.path.exists(REVIEW_CSV):
     pd.DataFrame(columns=[
@@ -206,7 +209,13 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return decorated
 def load_csv(path):
-    return pd.read_csv(path) if os.path.exists(path) else pd.DataFrame()
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        # File exists but has no rows/headers → treat as empty table
+        return pd.DataFrame()
 
 @app.route("/")
 @requires_auth
@@ -267,7 +276,13 @@ def dashboard(view):
         "missing": "Missing Listings",
         "untouched": "Untouched Listings"
     }
+
     df = load_csv(files.get(view, REVIEW_CSV))
+    if "shopify_qty" in df.columns:
+        df["shopify_qty"] = pd.to_numeric(df["shopify_qty"], errors="coerce").fillna(0)
+        df = df[df["shopify_qty"] > 0]
+    else:
+        df["shopify_qty"] = 0
     df["shopify_qty"] = pd.to_numeric(df["shopify_qty"], errors="coerce").fillna(0)
     df = df[df["shopify_qty"] > 0]
 
