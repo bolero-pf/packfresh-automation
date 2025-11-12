@@ -137,7 +137,7 @@ def _push_vip_to_klaviyo(gid: str):
         effective_tier = new_tier
 
     # persist (metafields + any tier change)
-    write_state(gid, rolling=spend, tier=effective_tier, lock=effective_lock, prov="webhook")
+    write_state(gid, rolling=spend, tier=effective_tier, lock=effective_lock)
 
     # --- VIP TAGS (only if needed) ---
     cur_tags = set(state.get("tags") or [])

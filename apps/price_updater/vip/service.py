@@ -637,6 +637,11 @@ def write_state(customer_gid: str, *, rolling=None, tier=None, lock=None, prov=N
     norm_tier = normalize_tier(tier) if tier is not None else None
     public = build_public_from_state({"tier": norm_tier, "lock": lock or {}, "rolling": rolling or 0.0})
 
+    if isinstance(prov, str):
+        prov = {"source": prov}
+    elif prov is not None and not isinstance(prov, dict):
+        prov = {}
+
     updates = {}
     if rolling is not None:
         updates[(MF_ROLLING[0], MF_ROLLING[1], "number_decimal")] = float(rolling)
@@ -694,6 +699,8 @@ def on_refund_created(customer_gid: str, order_gid: str, today: Optional[datetim
     tier = state["tier"]
     lock = state["lock"]
     prov = state["prov"]
+    if not isinstance(prov, dict):
+        prov = {}
 
     if inside_lock(lock, today.date()):
         # causal-refund exception?
