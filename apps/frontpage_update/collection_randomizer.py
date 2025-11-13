@@ -19,49 +19,143 @@ HEADERS = {
 
 # Global: how many items to show in each homepage collection
 NUM_PRODUCTS = 12
+import os, time, random, requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+DEFAULT_TIMEOUT = (5, 45)  # connect, read
+
+def make_session():
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    retry = Retry(
+        total=6, connect=6, read=6,
+        backoff_factor=0.6,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods={"GET", "POST", "PUT", "DELETE"},
+        raise_on_status=False,
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+SESSION = make_session()
+
+from requests.exceptions import ConnectionError, Timeout
+
+def _respect_rate_limit(resp):
+    # Shopify sends X-Request-Id, X-Shopify-Shop-Api-Call-Limit: "N/80"
+    lim = resp.headers.get("X-Shopify-Shop-Api-Call-Limit")
+    if lim:
+        used, burst = map(int, lim.split("/"))
+        if used >= burst - 4:
+            time.sleep(0.5 + random.random())  # brief cool-off near the ceiling
+
+def _req_json(method, url, **kwargs):
+    kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    for attempt in range(1, 4):
+        try:
+            resp = SESSION.request(method, url, **kwargs)
+            if resp.status_code == 429:
+                delay = float(resp.headers.get("Retry-After", "1"))
+                time.sleep(delay + random.random())
+                continue
+            _respect_rate_limit(resp)
+            resp.raise_for_status()
+            try:
+                return resp, (resp.json() if resp.content else {})
+            except ValueError:
+                return resp, {}
+        except (ConnectionError, Timeout) as e:
+            if attempt == 3:
+                raise
+            time.sleep((2 ** attempt) + random.random())
+
+def _req_ok(method, url, **kwargs) -> bool:
+    kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    for attempt in range(1, 4):
+        try:
+            resp = SESSION.request(method, url, **kwargs)
+            if resp.status_code in (200, 204):
+                _respect_rate_limit(resp)
+                return True
+            if resp.status_code == 429:
+                delay = float(resp.headers.get("Retry-After", "1"))
+                time.sleep(delay + random.random())
+                continue
+            _respect_rate_limit(resp)
+            resp.raise_for_status()
+            return True
+        except (ConnectionError, Timeout):
+            if attempt == 3:
+                return False
+            time.sleep((2 ** attempt) + random.random())
 
 def graphql_query(query, variables=None):
     url = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04/graphql.json"
-    headers = {
-        "X-Shopify-Access-Token": ACCESS_TOKEN,
-        "Content-Type": "application/json"
-    }
     payload = {"query": query}
     if variables:
         payload["variables"] = variables
-
-    response = requests.post(url, headers=headers, json=payload)
-    response.raise_for_status()
-    return response.json()
+    _, data = _req_json("POST", url, json=payload)
+    return data
 
 def get_collections():
     custom_url = f"{BASE_URL}/custom_collections.json?limit=250"
-    smart_url = f"{BASE_URL}/smart_collections.json?limit=250"
+    smart_url  = f"{BASE_URL}/smart_collections.json?limit=250"
+    _, custom = _req_json("GET", custom_url)
+    _, smart  = _req_json("GET", smart_url)
+    return custom.get("custom_collections", []), smart.get("smart_collections", [])
 
-    custom_res = requests.get(custom_url, headers=HEADERS)
-    smart_res = requests.get(smart_url, headers=HEADERS)
+def get_collects_for_collection(collection_id: int, limit: int = 250) -> list[dict]:
+    url = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04/collects.json"
+    params = {"collection_id": collection_id, "limit": limit}
+    collects = []
+    while True:
+        resp, data = _req_json("GET", url, params=params)
+        batch = data.get("collects", [])
+        collects.extend(batch)
+        # Shopify REST pagination via Link header
+        link = resp.headers.get("Link", "")
+        if 'rel="next"' not in link:
+            break
+        # Parse next page URL (simple split; you may already have a helper)
+        next_url = None
+        for part in link.split(","):
+            if 'rel="next"' in part:
+                next_url = part.split(";")[0].strip().strip("<>").strip()
+                break
+        if not next_url:
+            break
+        url, params = next_url, None  # next_url already has query
+    return collects
 
-    custom_res.raise_for_status()
-    smart_res.raise_for_status()
-
-    return custom_res.json()["custom_collections"], smart_res.json()["smart_collections"]
-
-def get_collects_for_collection(collection_id):
-    url = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04/collects.json?collection_id={collection_id}&limit=250"
-    response = requests.get(url, headers=HEADERS)
-    response.raise_for_status()
-    return response.json()["collects"]
-
-def delete_collect(collect_id):
+def delete_collect(collect_id) -> bool:
     url = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04/collects/{collect_id}.json"
-    response = requests.delete(url, headers=HEADERS)
-    response.raise_for_status()
+    return _req_ok("DELETE", url)
 
-def get_products_in_collection(collection_id):
-    url = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04/collections/{collection_id}/products.json?limit=250"
-    response = requests.get(url, headers=HEADERS)
-    response.raise_for_status()
-    return response.json()["products"]
+
+def get_products_in_collection(collection_id: int, limit: int = 250) -> list[dict]:
+    url = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04/products.json"
+    params = {"collection_id": collection_id, "limit": limit, "fields": "id,title,product_type,tags"}
+    products = []
+    while True:
+        resp, data = _req_json("GET", url, params=params)
+        batch = data.get("products", [])
+        products.extend(batch)
+        link = resp.headers.get("Link", "")
+        if 'rel="next"' not in link:
+            break
+        next_url = None
+        for part in link.split(","):
+            if 'rel="next"' in part:
+                next_url = part.split(";")[0].strip().strip("<>").strip()
+                break
+        if not next_url:
+            break
+        url, params = next_url, None
+    return products
 
 def get_products_in_collection_graphql(collection_gid, limit=100):
     query = """
@@ -115,64 +209,59 @@ def create_collect(product_id, collection_id):
             "collection_id": collection_id
         }
     }
-    response = requests.post(url, json=data, headers=HEADERS)
-    response.raise_for_status()
+    resp, data = _req_json("POST", url, json=data)
+    # Expected: {"collect": {...}}
+    return data.get("collect", {})
 
 def sync_homepage_collections():
     custom_collections, smart_collections = get_collections()
-
     for homepage in custom_collections:
         handle = homepage["handle"]
         if not handle.endswith("-homepage"):
             continue
 
-        base_handle = handle.replace('-homepage', '')
-        parent = next((c for c in smart_collections if c['handle'] == base_handle), None)
+        parent = next((c for c in smart_collections if c['handle'] == handle.replace('-homepage','')), None)
         if not parent:
             print(f"❌ No parent found for {homepage['handle']}")
             continue
 
         homepage_id = homepage['id']
-        parent_id = parent['id']
+        parent_id   = parent['id']
 
-        # 1. Remove all current collects from homepage collection
-        collects = get_collects_for_collection(homepage_id)
-        for collect in collects:
-            delete_collect(collect['id'])
+        # Clear (keep going on failures)
+        for c in get_collects_for_collection(homepage_id):
+            ok = delete_collect(c['id'])
+            if not ok:
+                print(f"⚠️ delete_collect failed for collect_id={c['id']} (pid={c.get('product_id')})")
 
-        # 2. Get parent products and shuffle
+        # Fill
         parent_products = get_products_in_collection(parent_id)
         product_ids = [p['id'] for p in parent_products]
         random.shuffle(product_ids)
-        selected = product_ids[:NUM_PRODUCTS]
+        for pid in product_ids[:NUM_PRODUCTS]:
+            try:
+                create_collect(pid, homepage_id)
+                time.sleep(0.12)  # gentle pacing
+            except Exception as e:
+                print(f"⚠️ create_collect failed for pid={pid}: {e}")
 
-        # 3. Add selected products to homepage collection
-        for pid in selected:
-            create_collect(pid, homepage_id)
+        print(f"✅ Synced {homepage['title']} with {min(NUM_PRODUCTS, len(product_ids))} products")
 
-        print(f"✅ Synced {homepage['title']} with {len(selected)} products")
+
 
 def get_index_data(theme_id):
     url = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04/themes/{theme_id}/assets.json"
     params = {"asset[key]": "templates/index.json"}
-    res = requests.get(url, headers=HEADERS, params=params)
-    res.raise_for_status()
-
-    data = res.json()['asset']['value']
-    index_data = json.loads(data)
-    return index_data
+    _, data = _req_json("GET", url, params=params)
+    raw = data["asset"]["value"]
+    return json.loads(raw)
 
 def update_index_data(index_data, theme_id):
-    payload = {
-        "asset": {
-            "key": "templates/index.json",
-            "value": json.dumps(index_data, indent=2)
-        }
-    }
+    payload = {"asset": {"key": "templates/index.json",
+                         "value": json.dumps(index_data, indent=2)}}
     url = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04/themes/{theme_id}/assets.json"
-    res = requests.put(url, headers=HEADERS, json=payload)
-    res.raise_for_status()
-    print("✅ index.json updated.")
+    _, _ = _req_json("PUT", url, json=payload)  # <-- PUT, not POST
+    print("✅ index.json updated.", flush=True)
 
 def curated_random_carousel_blocks(index_json_string):
     index_data = json.loads(index_json_string)
@@ -235,18 +324,19 @@ def curated_random_carousel_blocks(index_json_string):
         "collection_block_7xX4Ge",  # Just For Fun
     }
 
-
-
-
+    def _pick(keys, block_map, k):
+        pool = list(keys & block_map.keys())
+        k = min(k, len(pool))
+        return random.sample(pool, k) if k > 0 else []
 
     # Sample according to strategy
     selected = []
-    selected += random.sample(list(product_type_blocks & block_map.keys()), 2)
-    #selected += random.sample(list(ip_blocks & block_map.keys()), 1)
-    selected += random.sample(list(curated_blocks & block_map.keys()), 1)
-    selected += random.sample(list(seasonal_blocks & block_map.keys()), 1)
-    selected += random.sample(list(era_blocks & block_map.keys()), 1)
-    selected += random.sample(list(fandom_blocks & block_map.keys()), 1)
+    selected += _pick(product_type_blocks, block_map, 2)
+    # selected += _pick(ip_blocks, block_map, 1)  # still optional
+    selected += _pick(curated_blocks, block_map, 1)
+    selected += _pick(seasonal_blocks, block_map, 1)
+    selected += _pick(era_blocks, block_map, 1)
+    selected += _pick(fandom_blocks, block_map, 1)
 
     random.shuffle(selected)
     existing_order = index_data['sections'][section_id]['block_order']
