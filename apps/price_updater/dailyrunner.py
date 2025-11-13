@@ -323,11 +323,6 @@ def update_variant_price(product_gid: str, variant_id: str, new_price: float):
     r.raise_for_status()
     return r.json()
 import math
-
-import math
-
-import math
-
 def round_competitive_price(tcg_price: float) -> float:
     """
     Always return a clean .99, .75, .50, or .25 ending that stays *below* TCGPlayer market.
@@ -403,6 +398,8 @@ def process_product(product):
         return ("review",
                 {**product,
                  "shopify_price": current_price,
+                 "price_to_upload": "",  # empty until you approve it
+                 "current_price": current_price,  # optional alias for clarity
                  "product_gid": product["product_gid"],
                  "tcg_price": tcg_price,
                  "suggested_price": new_price,
@@ -416,6 +413,7 @@ def process_product(product):
         return ("updated",
                 {**product,
                  "shopify_price": current_price,
+                 "current_price": current_price,
                  "tcg_price": tcg_price,
                  "uploaded_price": new_price,
                  "new_price": new_price,
