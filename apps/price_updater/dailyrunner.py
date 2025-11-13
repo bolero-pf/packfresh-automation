@@ -39,7 +39,7 @@ CSV_COLS = [
     "title","sku","shopify_price","suggested_price","price_to_upload",
     "shopify_qty","variant_id","shopify_inventory_item_id","pending_shopify_update",
     "price_last_updated","notes","product_gid","tcg_price","percent_diff","reason",
-    "tcgplayer_id","handle","tags","new_price","note"
+    "tcgplayer_id","handle","tags","uploaded_price","new_price","note"
 ]
 
 def _write_csv_safe(rows, path, cols=CSV_COLS):
@@ -167,7 +167,7 @@ def get_shopify_products(first=100):
                     "title": node["title"],
                     "handle": node["handle"],
                     "variant_id": variant["id"].split("/")[-1],
-                    "price": float(variant["price"]),
+                    "shopify_price": float(variant["price"]),
                     "shopify_inventory_item_id": inventory_item_id,
                     "shopify_qty": variant["inventoryQuantity"],
                     "sku": variant["sku"],
@@ -369,7 +369,7 @@ def round_competitive_price(tcg_price: float) -> float:
 
 def process_product(product):
     tcg_id = product["tcgplayer_id"]
-    current_price = product["price"]
+    current_price = float(product.get("shopify_price") or product.get("price") or 0)
     if not tcg_id:
         return "missing", product
 
@@ -398,6 +398,7 @@ def process_product(product):
         percent_diff = round(100 * (current_price - new_price) / current_price, 2)
         return ("review",
                 {**product,
+                 "shopify_price": current_price,
                  "product_gid": product["product_gid"],
                  "tcg_price": tcg_price,
                  "suggested_price": new_price,
@@ -410,7 +411,9 @@ def process_product(product):
         update_variant_price(product["product_gid"], product["variant_id"], new_price)
         return ("updated",
                 {**product,
+                 "shopify_price": current_price,
                  "tcg_price": tcg_price,
+                 "uploaded_price": new_price,
                  "new_price": new_price,
                  "percent_diff": round(100 * (new_price - current_price) / current_price, 2),
                  "reason": "Raise to stay near market"})
