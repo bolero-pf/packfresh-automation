@@ -326,44 +326,48 @@ import math
 
 import math
 
+import math
+
 def round_competitive_price(tcg_price: float) -> float:
     """
-    Always return a clean .99-ending price close to TCGPlayer market.
-      • Undercut if within 0.5% or $0.25.
-      • Otherwise round up (≤0.25% over).
-      • All results end with .99.
+    Always return a clean .99, .75, .50, or .25 ending that stays *below* TCGPlayer market.
+      • Prefer the closest ending below tcg_price within 0.5% or $0.25 (whichever smaller).
+      • Never round up or exceed TCG price.
+      • If no valid tier undercut fits within caps, fall back to maximum allowed drop.
     """
     if tcg_price < 1.0:
-        return round(max(0.49, tcg_price * 0.98), 2)
+        return round(max(0.25, tcg_price * 0.97), 2)
 
-    cap_pct  = 0.005      # 0.5%
-    cap_abs  = 0.25       # $0.25
-    min_over = 0.0025     # 0.25%
+    cap_pct = 0.005     # 0.5 %
+    cap_abs = 0.25      # $0.25
 
-    # .99 just below TCG
-    below_99 = math.floor(tcg_price) + 0.99
-    if below_99 > tcg_price:
-        below_99 = (math.floor(tcg_price) - 1) + 0.99
+    endings = [0.99, 0.75, 0.50, 0.25]
+    floor_val = math.floor(tcg_price)
 
-    drop_abs = tcg_price - below_99
-    drop_pct = drop_abs / tcg_price
+    candidates = []
+    for ending in endings:
+        price = floor_val + ending
+        # if the chosen .ending is above tcg_price, step down one dollar
+        if price >= tcg_price:
+            price = (floor_val - 1) + ending
+        drop_abs = tcg_price - price
+        drop_pct = drop_abs / tcg_price if tcg_price else 0.0
+        if 0 < drop_abs <= cap_abs and drop_pct <= cap_pct:
+            candidates.append((drop_abs, price))
 
-    if drop_abs <= cap_abs and drop_pct <= cap_pct:
-        # modest drop → stay just under
-        return round(below_99, 2)
+    if candidates:
+        # pick the *closest* undercut (smallest drop)
+        _, best = min(candidates, key=lambda x: x[0])
+        return round(best, 2)
 
-    # otherwise, go slightly above but keep .99
-    # compute smallest .99 above TCG
-    above_99 = math.ceil(tcg_price) + 0.99 - 1.00  # e.g., 64.73 → 64.99
-    if above_99 <= tcg_price:
-        above_99 = math.ceil(tcg_price) + 0.99
-
-    # guardrail: don't exceed +0.25%
-    max_over = tcg_price * (1 + min_over)
-    if above_99 > max_over:
-        above_99 = math.floor(max_over) + 0.99
-
-    return round(above_99, 2)
+    # if all four are beyond cap, take the max allowed undercut
+    limit = round(tcg_price - min(cap_abs, tcg_price * cap_pct), 2)
+    # snap limit down to nearest allowed ending
+    dec = limit % 1
+    for ending in endings:
+        if dec >= ending:
+            return round(math.floor(limit) + ending, 2)
+    return round(math.floor(limit) - 1 + endings[0], 2)
 
 
 
