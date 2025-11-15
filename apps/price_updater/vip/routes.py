@@ -121,6 +121,7 @@ def seed_vip2_lock_2025():
     )
 
     LOCK = "/tmp/vip_seed_vip2_lock_2025.lock"
+    logger = current_app.logger
 
     def try_lock():
         try:
@@ -162,7 +163,6 @@ def seed_vip2_lock_2025():
                         state = get_customer_state(gid)
                         tier = normalize_tier(state.get("tier") or "VIP0")
 
-                        # never downrank existing VIP2/VIP3
                         if tier in ("VIP2", "VIP3"):
                             skipped_high += 1
                             continue
@@ -172,7 +172,6 @@ def seed_vip2_lock_2025():
                             skipped_low += 1
                             continue
 
-                        # Force VIP2 + lock. Let _push_vip_to_klaviyo recompute rolling, props, etc.
                         lock = {
                             "start": today.isoformat(),
                             "end": lock_end,
@@ -181,7 +180,6 @@ def seed_vip2_lock_2025():
 
                         write_state(
                             gid,
-                            # keep whatever rolling is; _push_vip_to_klaviyo will refresh it
                             rolling=None,
                             tier="VIP2",
                             lock=lock,
@@ -191,21 +189,22 @@ def seed_vip2_lock_2025():
                         try:
                             _push_vip_to_klaviyo(gid)
                         except Exception as e:
-                            current_app.logger.warning(
-                                f"[seed_vip2_lock_2025] Klaviyo push failed for {gid}: {e}"
+                            logger.warning(  # <-- use captured logger
+                                "[seed_vip2_lock_2025] Klaviyo push failed for %s: %s",
+                                gid, e,
                             )
 
                         promoted += 1
 
                     except Exception as e:
-                        current_app.logger.exception(
-                            f"[seed_vip2_lock_2025] error for {gid}: {e}"
+                        logger.exception(  # <-- use captured logger
+                            "[seed_vip2_lock_2025] error for %s: %s", gid, e
                         )
 
                 cursor = next_cursor
                 if not cursor:
                     break
-                time.sleep(0.2)  # be gentle on API limits
+                time.sleep(0.2)
 
             print(
                 f"[VIP SEED VIP2] DONE {datetime.now(timezone.utc).isoformat()} "
