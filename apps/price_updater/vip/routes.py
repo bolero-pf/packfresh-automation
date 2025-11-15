@@ -93,9 +93,134 @@ from datetime import date
 from .service import (
     compute_rolling_90d_spend, tier_from_spend,
     get_customer_state, write_state, inside_lock, _pick_lock_until,
-    _days_to_date, _gap_to_next_tier_cents, _gap_to_requalify_cents
+    _days_to_date, _gap_to_next_tier_cents, _gap_to_requalify_cents, normalize_tier,
+    get_customer_lifetime_spend
 )
 
+@bp.post("/seed_vip2_lock_2025")
+def seed_vip2_lock_2025():
+    """
+    Fast trigger for Shopify Flow: start a background job that:
+      - walks all customers
+      - if lifetime_spend >= $500 and NOT already VIP2/VIP3
+        → force VIP2
+        → lock from today through 2025-12-31
+        → sync to Klaviyo
+
+    Returns immediately so Flow doesn’t time out.
+    """
+    import threading, time, os
+    from datetime import datetime, timezone
+
+    from .service import (
+        fetch_customer_ids_page,
+        get_customer_state,
+        normalize_tier,
+        write_state,
+        get_customer_lifetime_spend,
+    )
+
+    LOCK = "/tmp/vip_seed_vip2_lock_2025.lock"
+
+    def try_lock():
+        try:
+            # stale lock cleanup (2h)
+            if os.path.exists(LOCK) and (time.time() - os.path.getmtime(LOCK)) > 2 * 60 * 60:
+                os.remove(LOCK)
+            fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            return False
+
+    def release_lock():
+        try:
+            os.remove(LOCK)
+        except FileNotFoundError:
+            pass
+
+    def worker():
+        from datetime import date as _date
+
+        total = 0
+        promoted = 0
+        skipped_high = 0
+        skipped_low = 0
+        today = _date.today()
+        lock_end = "2025-12-31"
+
+        try:
+            cursor = None
+            while True:
+                ids, next_cursor = fetch_customer_ids_page(first=250, after=cursor)
+                if not ids:
+                    break
+
+                for gid in ids:
+                    total += 1
+                    try:
+                        state = get_customer_state(gid)
+                        tier = normalize_tier(state.get("tier") or "VIP0")
+
+                        # never downrank existing VIP2/VIP3
+                        if tier in ("VIP2", "VIP3"):
+                            skipped_high += 1
+                            continue
+
+                        lifetime = get_customer_lifetime_spend(gid)
+                        if lifetime < 500.0:
+                            skipped_low += 1
+                            continue
+
+                        # Force VIP2 + lock. Let _push_vip_to_klaviyo recompute rolling, props, etc.
+                        lock = {
+                            "start": today.isoformat(),
+                            "end": lock_end,
+                            "tier": "VIP2",
+                        }
+
+                        write_state(
+                            gid,
+                            # keep whatever rolling is; _push_vip_to_klaviyo will refresh it
+                            rolling=None,
+                            tier="VIP2",
+                            lock=lock,
+                            prov={"source": "seed_vip2_lock_2025"},
+                        )
+
+                        try:
+                            _push_vip_to_klaviyo(gid)
+                        except Exception as e:
+                            current_app.logger.warning(
+                                f"[seed_vip2_lock_2025] Klaviyo push failed for {gid}: {e}"
+                            )
+
+                        promoted += 1
+
+                    except Exception as e:
+                        current_app.logger.exception(
+                            f"[seed_vip2_lock_2025] error for {gid}: {e}"
+                        )
+
+                cursor = next_cursor
+                if not cursor:
+                    break
+                time.sleep(0.2)  # be gentle on API limits
+
+            print(
+                f"[VIP SEED VIP2] DONE {datetime.now(timezone.utc).isoformat()} "
+                f"total={total} promoted={promoted} "
+                f"skipped_high={skipped_high} skipped_low={skipped_low}",
+                flush=True,
+            )
+        finally:
+            release_lock()
+
+    if not try_lock():
+        return jsonify({"ok": True, "status": "already_running"}), 202
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"ok": True, "status": "started"}), 200
 
 def _needs_vip_tag_update(current_tags: set[str], desired: set[str]) -> bool:
     def vip_only(s): return {t for t in s if t.startswith("VIP")}

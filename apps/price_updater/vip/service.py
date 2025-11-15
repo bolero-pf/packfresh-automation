@@ -478,6 +478,29 @@ query($first:Int!, $after:String) {
 }
 """
 
+def get_customer_lifetime_spend(customer_gid: str) -> float:
+    """
+    Return Shopify's lifetime total_spent for a customer (shop currency, dollars).
+    """
+    cid = gid_numeric(customer_gid)
+    url = f"https://{_SHOPIFY_STORE}/admin/api/2025-10/customers/{cid}.json"
+    headers = {
+        "X-Shopify-Access-Token": _SHOPIFY_TOKEN,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    r = requests.get(url, headers=headers, timeout=_PER_CALL_TIMEOUT)
+    r.raise_for_status()
+    data = r.json() or {}
+    cust = data.get("customer") or {}
+    raw = cust.get("total_spent") or "0"
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def fetch_customer_ids_page(first: int = 250, after: str | None = None):
     """Return (ids, next_cursor_or_None)."""
     data = shopify_gql(CUSTOMERS_QUERY, {"first": first, "after": after})
