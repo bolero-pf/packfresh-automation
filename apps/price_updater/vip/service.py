@@ -687,31 +687,85 @@ def write_state(customer_gid: str, *, rolling=None, tier=None, lock=None, prov=N
 
 
 # ---------- HANDLERS ----------
-def on_order_paid(customer_gid: str, order_gid: str, today: Optional[datetime]=None):
+def on_order_paid(customer_gid: str, order_gid: str, today: Optional[datetime] = None):
     if today is None:
         today = datetime.now(timezone.utc)
+
     state = get_customer_state(customer_gid)
     rolling = compute_rolling_90d_spend(customer_gid, today=today)
-    tier_before = state["tier"]
-    tier_after = tier_from_spend(rolling)
-    lock = state["lock"]
 
-    # If they qualify for any VIP tier (same or higher), extend/refresh 90-day lock
-    if tier_after in ("VIP1","VIP2","VIP3"):
-        new_lock = rolling_90_lock_for(tier_after, today.date())
+    tier_before = state.get("tier") or "VIP0"
+    lock        = state.get("lock") or {}
+    tier_after  = tier_from_spend(rolling)
+
+    today_date = today.date()
+
+    before_rank = TIER_RANK.get(tier_before, 0)
+    after_rank  = TIER_RANK.get(tier_after, 0)
+
+    # --- INSIDE A LOCK: only extend/upgrade, never downgrade ---
+    if inside_lock(lock, today_date):
+        if tier_after in ("VIP1", "VIP2", "VIP3") and after_rank >= before_rank:
+            # Same or higher tier → extend/upgrade the rolling 90-day lock
+            new_lock = rolling_90_lock_for(tier_after, today_date)
+            prov = {
+                "created_by_order_id": order_gid,
+                "tier_before": tier_before,
+                "tier_after": tier_after,
+                "prev_lock": lock if lock else {},
+                "reason": "extend_or_upgrade_inside_lock",
+            }
+            write_state(
+                customer_gid,
+                rolling=rolling,
+                tier=tier_after,
+                lock=new_lock,
+                prov=prov,
+            )
+            return {
+                "upgraded": after_rank > before_rank,
+                "tier": tier_after,
+                "lock": new_lock,
+            }
+
+        # Would be a downgrade (or VIP0) → keep tier + lock, just update rolling
+        write_state(customer_gid, rolling=rolling)
+        return {
+            "upgraded": False,
+            "tier": tier_before,
+            "lock": lock,
+        }
+
+    # --- OUTSIDE A LOCK: keep your original behavior ---
+    if tier_after in ("VIP1", "VIP2", "VIP3"):
+        new_lock = rolling_90_lock_for(tier_after, today_date)
         prov = {
             "created_by_order_id": order_gid,
             "tier_before": tier_before,
             "tier_after": tier_after,
-            "prev_lock": lock if lock else {}
+            "prev_lock": lock if lock else {},
         }
-        write_state(customer_gid, rolling=rolling, tier=tier_after, lock=new_lock, prov=prov)
-        return {"upgraded": TIER_RANK[tier_after] > TIER_RANK[tier_before],
-                "tier": tier_after, "lock": new_lock}
+        write_state(
+            customer_gid,
+            rolling=rolling,
+            tier=tier_after,
+            lock=new_lock,
+            prov=prov,
+        )
+        return {
+            "upgraded": after_rank > before_rank,
+            "tier": tier_after,
+            "lock": new_lock,
+        }
     else:
-        # dropped below VIP1 → clear lock
+        # dropped below VIP1 with no active lock → clear lock and tier
         write_state(customer_gid, rolling=rolling, tier="VIP0", lock={}, prov={})
-        return {"upgraded": False, "tier": "VIP0", "lock": {}}
+        return {
+            "upgraded": False,
+            "tier": "VIP0",
+            "lock": {},
+        }
+
 
 
 def on_refund_created(customer_gid: str, order_gid: str, today: Optional[datetime]=None):
