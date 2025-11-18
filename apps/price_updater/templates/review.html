@@ -102,7 +102,7 @@
     {% if 'tcgplayer_id' in df.columns %}
       <th>TCG Link</th>
     {% endif %}
-    {% if 'price' in df.columns %}
+    {% if 'shopify_price' in df.columns or 'price' in df.columns %}
       <th>Current Price</th>
     {% endif %}
     {% if 'tcg_price' in df.columns %}
@@ -141,8 +141,8 @@
       </td>
     {% endif %}
 
-    {% if 'price' in df.columns %}
-      <td>{{ row.get('price', '') }}</td>
+    {% if 'shopify_price' in df.columns or 'price' in df.columns %}
+      <td>{{ row.get('shopify_price', row.get('price', '')) }}</td>
     {% endif %}
     {% if 'tcg_price' in df.columns %}
       <td>{{ row.get('tcg_price', '') }}</td>
