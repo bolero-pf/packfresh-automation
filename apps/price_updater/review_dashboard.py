@@ -16,9 +16,9 @@ from pathlib import Path
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 from vip.routes import bp as vip_bp
-#from inventory.routes import bp as inventory_bp
+from inventory.routes import bp as inventory_bp
 app.register_blueprint(vip_bp)
-#app.register_blueprint(inventory_bp)
+app.register_blueprint(inventory_bp)
 ROOT = Path(__file__).resolve().parent  # == .../price_updater
 REVIEW_CSV    = ROOT / "price_updates_needs_review.csv"
 PUSHED_CSV    = ROOT / "price_updates_pushed.csv"
