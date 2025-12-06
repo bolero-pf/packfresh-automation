@@ -10,7 +10,7 @@ import os
 import io
 import csv
 from pathlib import Path
-from apps.price_updater.dailyrunner import get_shopify_products, get_shopify_products_for_feed
+from dailyrunner import get_shopify_products, get_shopify_products_for_feed
 
 
 
