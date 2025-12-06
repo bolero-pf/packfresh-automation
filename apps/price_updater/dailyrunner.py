@@ -17,6 +17,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from dotenv import load_dotenv
 from selenium.common.exceptions import TimeoutException
+import traceback
 
 load_dotenv()
 
@@ -534,6 +535,7 @@ def process_product_with_delay(product_and_index):
     return process_product(product)
 
 def run_price_sync():
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--upload-reviewed", action="store_true", help="Upload reviewed prices")
     parser.add_argument("--upload-missing", action="store_true", help="Upload missing listings")
@@ -549,56 +551,76 @@ def run_price_sync():
     products = get_shopify_products()
     updated_rows, flagged_rows, missing_rows, untouched_rows  = [], [], [], []
 
-    print(f"🔄 Total products to process: {len(products)}")
+    try:
 
-    for batch_start in range(0, len(products), 200):
-        batch = products[batch_start:batch_start + 200]
-        print(f"\n📦 Starting batch {batch_start + 1} to {batch_start + len(batch)}...")
+        print(f"🔄 Total products to process: {len(products)}")
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            indexed_batch = [(product, batch_start + i) for i, product in enumerate(batch)]
-            futures = {executor.submit(process_product_with_delay, p): p[0] for p in indexed_batch}
-            completed = 0
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result_type, data = future.result(timeout=60)
-                except concurrent.futures.TimeoutError:
-                    print(f"⏰ Timeout in thread for product: {futures[future].get('title', 'Unknown')}")
-                    result_type, data = "missing", {**futures[future], "reason": "Thread timeout"}
+        for batch_start in range(0, len(products), 200):
+            batch = products[batch_start:batch_start + 200]
+            print(f"\n📦 Starting batch {batch_start + 1} to {batch_start + len(batch)}...")
 
-                completed += 1
-                if completed % 10 == 0 or completed == len(batch):
-                    print(f"🔁 Processed {completed}/{len(batch)} items in this batch...")
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                indexed_batch = [(product, batch_start + i) for i, product in enumerate(batch)]
+                futures = {executor.submit(process_product_with_delay, p): p[0] for p in indexed_batch}
+                completed = 0
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        result_type, data = future.result(timeout=60)
+                    except concurrent.futures.TimeoutError:
+                        print(f"⏰ Timeout in thread for product: {futures[future].get('title', 'Unknown')}")
+                        result_type, data = "missing", {**futures[future], "reason": "Thread timeout"}
 
-                if result_type == "updated":
-                    updated_rows.append(data)
-                elif result_type == "review":
-                    flagged_rows.append(data)
-                elif result_type == "missing":
-                    missing_rows.append(data)
-                elif result_type == "untouched":
-                    untouched_rows.append(data)
+                    completed += 1
+                    if completed % 10 == 0 or completed == len(batch):
+                        print(f"🔁 Processed {completed}/{len(batch)} items in this batch...")
 
-        # ✅ Sleep after each batch, except the last one
-        if batch_start + len(batch) < len(products):
-            print(f"🟡 Cooling down to avoid IP rate limit", flush=True)
-            for i in range(10, 0, -1):
-                print(f"💤 Still alive… sleeping {i} more minute(s)", flush=True)
-                time.sleep(60)
+                    if result_type == "updated":
+                        updated_rows.append(data)
+                    elif result_type == "review":
+                        flagged_rows.append(data)
+                    elif result_type == "missing":
+                        missing_rows.append(data)
+                    elif result_type == "untouched":
+                        untouched_rows.append(data)
+            # Incrementally write each time.
+            _write_csv_safe(updated_rows, PUSHED_CSV)
+            _write_csv_safe(flagged_rows, REVIEW_CSV)
+            _write_csv_safe(untouched_rows, UNTOUCHED_CSV)
+            _write_csv_safe([{**r, "price_to_upload": ""} for r in missing_rows], MISSING_CSV)
+            # ✅ Sleep after each batch, except the last one
+            if batch_start + len(batch) < len(products):
+                print(f"🟡 Cooling down to avoid IP rate limit", flush=True)
+                for i in range(10, 0, -1):
+                    print(f"💤 Still alive… sleeping {i} more minute(s)", flush=True)
+                    time.sleep(60)
 
-    _write_csv_safe(updated_rows, PUSHED_CSV)
-    _write_csv_safe(flagged_rows, REVIEW_CSV)
-    _write_csv_safe(untouched_rows, UNTOUCHED_CSV)
-    _write_csv_safe([{**r, "price_to_upload": ""} for r in missing_rows], MISSING_CSV)
+        _write_csv_safe(updated_rows, PUSHED_CSV)
+        _write_csv_safe(flagged_rows, REVIEW_CSV)
+        _write_csv_safe(untouched_rows, UNTOUCHED_CSV)
+        _write_csv_safe([{**r, "price_to_upload": ""} for r in missing_rows], MISSING_CSV)
 
-    print(f"\n✅ Updates pushed: {len(updated_rows)}")
-    print(f"⚠️  Flagged for review: {len(flagged_rows)}")
-    print(f"❓ Missing listings: {len(missing_rows)}")
-    print(f"👌 Untouched (no change needed): {len(untouched_rows)}")
+        print(f"\n✅ Updates pushed: {len(updated_rows)}")
+        print(f"⚠️  Flagged for review: {len(flagged_rows)}")
+        print(f"❓ Missing listings: {len(missing_rows)}")
+        print(f"👌 Untouched (no change needed): {len(untouched_rows)}")
+    except Exception as e:
+        print("FATAL error in run_price_sync: ", e)
+        traceback.print_exc()
+        raise
+    finally:
+        print("🧹 Final flush (crash-safe)!")
+        _write_csv_safe(updated_rows, PUSHED_CSV)
+        _write_csv_safe(flagged_rows, REVIEW_CSV)
+        _write_csv_safe(untouched_rows, UNTOUCHED_CSV)
+        _write_csv_safe([{**r, "price_to_upload": ""} for r in missing_rows],
+                        MISSING_CSV)
+
 
 
 
 # === RUN ===
 if __name__ == "__main__":
+    print("=== ENTER price sync ===")
     run_price_sync()
+    print("=== EXIT price sync ===")
 
