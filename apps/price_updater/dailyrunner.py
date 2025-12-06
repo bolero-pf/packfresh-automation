@@ -365,7 +365,10 @@ def round_competitive_price(tcg_price: float) -> float:
             return round(math.floor(limit) + ending, 2)
     return round(math.floor(limit) - 1 + endings[0], 2)
 
-
+def safe_percent_diff(old_price: float, new_price: float):
+    if not old_price or old_price <= 0:
+        return ""   # or "n/a"
+    return round(100 * (new_price - old_price) / old_price, 2)
 
 def process_product(product):
     tcg_id = product["tcgplayer_id"]
@@ -395,7 +398,7 @@ def process_product(product):
 
     if new_price < current_price:
         # price cut → send to review
-        percent_diff = round(100 * (current_price - new_price) / current_price, 2)
+        percent_diff = safe_percent_diff(current_price, new_price)
         return ("review",
                 {**product,
                  "shopify_price": current_price,
@@ -411,6 +414,7 @@ def process_product(product):
         # price increase → auto-update
         print(f" Updating {product['title']} : {tcg_price} : {new_price}")
         update_variant_price(product["product_gid"], product["variant_id"], new_price)
+        percent_diff = safe_percent_diff(current_price, new_price)
         return ("updated",
                 {**product,
                  "shopify_price": current_price,
@@ -418,7 +422,7 @@ def process_product(product):
                  "tcg_price": tcg_price,
                  "uploaded_price": new_price,
                  "new_price": new_price,
-                 "percent_diff": round(100 * (new_price - current_price) / current_price, 2),
+                 "percent_diff": percent_diff,
                  "reason": "Raise to stay near market"})
 
     # equal → no-op
