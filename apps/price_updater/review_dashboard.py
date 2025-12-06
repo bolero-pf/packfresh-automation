@@ -1,17 +1,17 @@
-import os
 import pandas as pd
 import sys
 from functools import wraps
 import subprocess
 import threading
-import time
-from datetime import datetime
 from flask import Flask, render_template, render_template_string, request, redirect, url_for, Response
 from apscheduler.schedulers.background import BackgroundScheduler
-import requests
 import time
 import os
+import io
+import csv
 from pathlib import Path
+from apps.price_updater.dailyrunner import get_shopify_products, get_shopify_products_for_feed
+
 
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -19,6 +19,8 @@ from vip.routes import bp as vip_bp
 from inventory.routes import bp as inventory_bp
 app.register_blueprint(vip_bp)
 app.register_blueprint(inventory_bp)
+REDDIT_FEED_USER = os.environ["REDDIT_USER_NAME"]
+REDDIT_FEED_PASS = os.environ["REDDIT_USER_PASS"]
 ROOT = Path(__file__).resolve().parent  # == .../price_updater
 REVIEW_CSV    = ROOT / "price_updates_needs_review.csv"
 PUSHED_CSV    = ROOT / "price_updates_pushed.csv"
@@ -26,6 +28,55 @@ MISSING_CSV   = ROOT / "price_updates_missing_listing.csv"
 UNTOUCHED_CSV = ROOT / "price_updates_untouched.csv"
 RUN_LOG = ROOT / "run_output.log"
 app.secret_key = "something-super-secret-and-unique"
+
+FEED_COLUMNS = [
+    "id",
+    "title",
+    "description",
+    "link",
+    "image_link",
+    "price",
+    "item_group_id",
+    "gtin",
+    "mpn",
+    "google_product_category",
+    "product_type",
+    "brand",
+    "adult",
+    "is_bundle",
+    "sale_price",
+    "sale_price_effective_date",
+    "cost_of_goods_sold",
+    "mobile_link",
+    "platform_specific_link",
+    "additional_image_links",
+    "lifestyle_image_link",
+    "availability",
+    "expiration_date",
+    "condition",
+    "age_group",
+    "gender",
+    "color",
+    "size",
+    "size_type",
+    "material",
+    "pattern",
+    "product_detail",
+    "product_highlight",
+    "average_review_rating",
+    "number_of_ratings",
+    "custom_label_0",
+    "custom_label_1",
+    "custom_label_2",
+    "custom_label_3",
+    "custom_label_4",
+    "custom_number_0",
+    "custom_number_1",
+    "custom_number_2",
+    "custom_number_3",
+    "custom_number_4",
+]
+
 
 if not os.path.exists(REVIEW_CSV):
     pd.DataFrame(columns=[
@@ -219,7 +270,21 @@ def load_csv(path):
     except pd.errors.EmptyDataError:
         # File exists but has no rows/headers → treat as empty table
         return pd.DataFrame()
+def check_reddit_auth(username, password):
+    return username == REDDIT_FEED_USER and password == REDDIT_FEED_PASS
 
+def requires_reddit_auth(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_reddit_auth(auth.username, auth.password):
+            return Response(
+                "Unauthorized",
+                401,
+                {"WWW-Authenticate": 'Basic realm="Reddit Product Feed"'},
+            )
+        return f(*args, **kwargs)
+    return wrapper
 @app.route("/")
 @requires_auth
 def home():
@@ -372,7 +437,94 @@ def run_live_upload():
 
     return Response(generate(), mimetype="text/event-stream")
 
+def map_variant_to_row(product, variant):
+    # Strip HTML if needed
+    import re
+    body_html = product.get("body_html") or ""
+    description = re.sub("<[^<]+?>", "", body_html)
+    description = description.strip()
+    if not description:
+        description = product["title"]
 
+    handle = product["handle"]
+    variant_id = variant["id"]
+    image_link = (
+            (variant.get("image") or {}).get("src")
+            or (product.get("image") or {}).get("src")
+            or ""
+    )
+    if not image_link:
+        return None  # or just skip this variant
+
+    row = {
+        "id": variant_id,
+        "title": product["title"],
+        "description": description[:5000],  # keep it sane
+        "link": f"https://pack-fresh.com/products/{handle}?variant={variant_id}",
+        "image_link": image_link,
+        "price": f"{variant['price']} USD",
+        "item_group_id": product["id"],
+        "gtin": variant.get("barcode") or "",
+        "mpn": "",
+        "google_product_category": "Toys & Games > Games > Card Games > Collectible Card Games",
+        "product_type": "TCG > Pokémon > Sealed",
+        "brand": "Pack Fresh",
+        "adult": "no",
+        "is_bundle": "no",
+        "sale_price": "",
+        "sale_price_effective_date": "",
+        "cost_of_goods_sold": "",
+        "mobile_link": "",
+        "platform_specific_link": "",
+        "additional_image_links": "",
+        "lifestyle_image_link": "",
+        "availability": "in stock" if variant["inventory_quantity"] > 0 else "out of stock",
+        "expiration_date": "",
+        "condition": "new",
+        "age_group": "",
+        "gender": "",
+        "color": "",
+        "size": "",
+        "size_type": "",
+        "material": "",
+        "pattern": "",
+        "product_detail": "",
+        "product_highlight": "",
+        "average_review_rating": "",
+        "number_of_ratings": "",
+        "custom_label_0": "",
+        "custom_label_1": "",
+        "custom_label_2": "",
+        "custom_label_3": "",
+        "custom_label_4": "",
+        "custom_number_0": "",
+        "custom_number_1": "",
+        "custom_number_2": "",
+        "custom_number_3": "",
+        "custom_number_4": "",
+    }
+    return row
+
+@app.get("/reddit-feed.csv")
+@requires_reddit_auth
+def reddit_feed():
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=FEED_COLUMNS)
+    writer.writeheader()
+
+    for product in get_shopify_products_for_feed():
+        for variant in product["variants"]:
+            # optional: only include in-stock / visible variants
+            if variant.get("inventory_quantity", 0) <= 0:
+                continue
+            row = map_variant_to_row(product, variant)
+            if not row:
+                continue
+            writer.writerow(row)
+
+    csv_data = output.getvalue()
+    output.close()
+    return Response(csv_data, mimetype="text/csv")
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

@@ -183,7 +183,126 @@ def get_shopify_products(first=100):
 
     print(f"🔄 Processed {len(products)} items...")
     return products
+def get_shopify_products_for_feed(first=100):
+    """
+    Returns product-level structures with nested variants and minimal fields
+    needed for the Reddit catalog feed.
 
+    Shape:
+    {
+      "id": <product_gid>,
+      "title": "...",
+      "handle": "...",
+      "body_html": "...",
+      "image": {"src": "..."} or None,
+      "variants": [
+          {
+            "id": <numeric_variant_id_str>,
+            "price": "12.34",
+            "barcode": "...",
+            "sku": "...",
+            "inventory_quantity": 5,
+            "image": {"src": "..."} or None,
+          },
+          ...
+      ]
+    }
+    """
+    query = """
+    query getProductsForFeed($first: Int!, $cursor: String) {
+      products(first: $first, after: $cursor) {
+        pageInfo {
+          hasNextPage
+        }
+        edges {
+          cursor
+          node {
+            id
+            title
+            handle
+            bodyHtml
+            tags
+            featuredImage { url }
+            images(first: 1) {
+              edges {
+                node { url }
+              }
+            }
+            variants(first: 50) {
+              edges {
+                node {
+                  id
+                  title
+                  price
+                  barcode
+                  sku
+                  inventoryQuantity
+                  image { url }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    products = []
+    has_next_page = True
+    cursor = None
+
+    while has_next_page:
+        variables = {"first": first, "cursor": cursor}
+        resp = requests.post(
+            GRAPHQL_ENDPOINT,
+            headers=HEADERS,
+            json={"query": query, "variables": variables},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        product_edges = data["data"]["products"]["edges"]
+
+        for edge in product_edges:
+            node = edge["node"]
+
+            # pick a product-level image
+            feat = (node.get("featuredImage") or {}).get("url")
+            img_edge = (node.get("images") or {}).get("edges") or []
+            fallback = img_edge[0]["node"]["url"] if img_edge else None
+            product_image_url = feat or fallback
+
+            product_dict = {
+                "id": node["id"],
+                "title": node["title"],
+                "handle": node["handle"],
+                "body_html": node.get("bodyHtml") or "",
+                "tags": node.get("tags") or [],
+                "image": {"src": product_image_url} if product_image_url else None,
+                "variants": [],
+            }
+
+            for var_edge in node["variants"]["edges"]:
+                v = var_edge["node"]
+                var_img_url = (v.get("image") or {}).get("url")
+                variant_dict = {
+                    # numeric ID for the storefront link
+                    "id": v["id"].split("/")[-1],
+                    "price": v["price"],
+                    "barcode": v.get("barcode"),
+                    "sku": v.get("sku"),
+                    "inventory_quantity": v.get("inventoryQuantity") or 0,
+                    "image": {"src": var_img_url} if var_img_url else None,
+                }
+                product_dict["variants"].append(variant_dict)
+
+            products.append(product_dict)
+
+        has_next_page = data["data"]["products"]["pageInfo"]["hasNextPage"]
+        if has_next_page:
+            cursor = product_edges[-1]["cursor"]
+            time.sleep(0.25)
+
+    return products
 def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -> float or None:
     #print(f"✅ ENTERED get_featured_price_tcgplayer_internal for {tcgplayer_id}")
     #print(f"✅ Chrome path: {chrome_path}")
