@@ -6,6 +6,7 @@ import concurrent
 import argparse
 import os
 import random
+import threading
 import pandas as pd
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,7 +26,7 @@ load_dotenv()
 
 CHROME_BINARY_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "chrome", "chrome.exe"))
 CHROME_BINARY_PATH = ".venv/Scripts/chrome/chrome.exe"
-MAX_WORKERS = 5
+MAX_WORKERS = 3
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -317,18 +318,20 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
     #print(f"Options check")
     options = Options()
     options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
-    #print("Resolved chrome path:", chrome_path)
-    #print("Exists?", os.path.exists(chrome_path))
+
+    options.add_argument("--headless=new")  # or just "--headless"
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-extensions")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
     options.add_argument("--disable-features=VizDisplayCompositor")
-    options.add_argument("--disable-setuid-sandbox")
-    options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--headless=old")  # Optional: comment this out to see browser
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-renderer-backgrounding")
     options.add_argument(f"--user-agent={random.choice(user_agents)}")
 
     service = Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"))
@@ -416,15 +419,18 @@ def _price_scraper_worker(tcgplayer_id, return_dict):
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as ThreadTimeout
 
 def get_featured_price_tcgplayer(tcgplayer_id: str, timeout=30):
-    chrome_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "chrome", "chrome.exe"))
+    result = {"value": None}
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(get_featured_price_tcgplayer_internal, tcgplayer_id, chrome_path)
-        try:
-            return future.result(timeout=timeout)
-        except ThreadTimeout:
-            print(f"⏱️ Timeout: skipping Selenium scrape for {tcgplayer_id}")
-            return None
+    def worker():
+        result["value"] = get_featured_price_tcgplayer_internal(tcgplayer_id, None)
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        print(f"⏱️ Timeout: skipping Selenium scrape for {tcgplayer_id}")
+        return None
+    return result["value"]
 
 def update_variant_price(product_gid: str, variant_id: str, new_price: float):
     mutation = """
