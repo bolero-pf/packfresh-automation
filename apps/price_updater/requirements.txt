@@ -2,7 +2,7 @@ flask
 pandas
 requests
 bs4
-selenium
+selenium==4.25.0
 python-dotenv
 gunicorn
 apscheduler

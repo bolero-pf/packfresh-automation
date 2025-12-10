@@ -23,8 +23,10 @@ load_dotenv()
 
 
 
-CHROME_BINARY_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "chrome", "chrome.exe"))
-CHROME_BINARY_PATH = ".venv/Scripts/chrome/chrome.exe"
+CHROME_BINARY_PATH = os.environ.get(
+    "CHROME_BINARY_PATH",
+    ".venv/Scripts/chrome/chrome.exe"
+)
 MAX_WORKERS = 5
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
@@ -303,7 +305,7 @@ def get_shopify_products_for_feed(first=100):
             time.sleep(0.25)
 
     return products
-def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -> float or None:
+def get_featured_price_tcgplayer_internal(tcgplayer_id: str) -> float or None:
     #print(f"✅ ENTERED get_featured_price_tcgplayer_internal for {tcgplayer_id}")
     #print(f"✅ Chrome path: {chrome_path}")
     url = f"https://www.tcgplayer.com/product/{tcgplayer_id}?Language=English"
@@ -316,24 +318,20 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
     ]
     #print(f"Options check")
     options = Options()
-    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
-    #print("Resolved chrome path:", chrome_path)
-    #print("Exists?", os.path.exists(chrome_path))
+    options.binary_location = os.environ.get("CHROME_BIN", CHROME_BINARY_PATH)
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--headless=new")  # Optional: comment this out to see browser
+    options.add_argument("--headless=new")
     options.add_argument(f"--user-agent={random.choice(user_agents)}")
 
-    service = Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"))
     try:
-        driver = webdriver.Chrome(service=service, options=options)
-        #print("✅ Browser launched. Navigating to:", url)
+        driver = webdriver.Chrome(options=options)  # NOTE: no Service / CHROMEDRIVER here
     except Exception as e:
-        print(f"❌ Failed to launch ChromeDriver: {e}")
+        print(f"❌ Failed to launch ChromeDriver via Selenium Manager: {e}")
         return None
 
     #print("Browser launched. Navigating to:", url)
@@ -413,10 +411,8 @@ def _price_scraper_worker(tcgplayer_id, return_dict):
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as ThreadTimeout
 
 def get_featured_price_tcgplayer(tcgplayer_id: str, timeout=30):
-    chrome_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "chrome", "chrome.exe"))
-
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(get_featured_price_tcgplayer_internal, tcgplayer_id, chrome_path)
+        future = executor.submit(get_featured_price_tcgplayer_internal, tcgplayer_id)
         try:
             return future.result(timeout=timeout)
         except ThreadTimeout:
