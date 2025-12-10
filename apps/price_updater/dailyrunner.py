@@ -328,10 +328,16 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str) -> float or None:
     options.add_argument("--headless=new")
     options.add_argument(f"--user-agent={random.choice(user_agents)}")
 
+    service = Service(
+        executable_path=os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"),
+        log_path="/tmp/chromedriver.log",
+        service_args=["--verbose"],
+    )
+
     try:
-        driver = webdriver.Chrome(options=options)  # NOTE: no Service / CHROMEDRIVER here
+        driver = webdriver.Chrome(service=service, options=options)
     except Exception as e:
-        print(f"❌ Failed to launch ChromeDriver via Selenium Manager: {e}")
+        print(f"❌ Failed to launch ChromeDriver: {e}")
         return None
 
     #print("Browser launched. Navigating to:", url)
