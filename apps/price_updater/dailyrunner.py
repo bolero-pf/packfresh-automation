@@ -324,8 +324,11 @@ def get_featured_price_tcgplayer_internal(tcgplayer_id: str, chrome_path: str) -
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
+    options.add_argument("--disable-features=VizDisplayCompositor")
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--disable-software-rasterizer")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--headless=new")  # Optional: comment this out to see browser
+    options.add_argument("--headless=old")  # Optional: comment this out to see browser
     options.add_argument(f"--user-agent={random.choice(user_agents)}")
 
     service = Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"))
