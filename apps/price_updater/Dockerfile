@@ -14,11 +14,13 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 \
     libxi6 \
     libxtst6 \
+    libxrandr2 \
     libatk-bridge2.0-0 \
     libgtk-3-0 \
     && apt-get clean
 
 ENV CHROME_BIN=/usr/bin/chromium
+ENV CHROMEDRIVER=/usr/bin/chromedriver
 
 WORKDIR /app
 COPY . /app
