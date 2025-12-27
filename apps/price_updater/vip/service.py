@@ -4,6 +4,15 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any, Iterable, Optional
 import os, requests, time
 from dotenv import load_dotenv
+try:
+    from integrations.klaviyo import upsert_profile
+except Exception:
+    # Local dev fallback if project root isn't on sys.path
+    import sys, os
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # parent of vip/
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    from integrations.klaviyo import upsert_profile
 import json
 
 load_dotenv()
@@ -46,7 +55,22 @@ def _pick_lock_until(lock: dict) -> str | None:
         if v:
             return v.split("T")[0]
     return None
+def _push_vip_transition(customer_gid: str, transition: str):
+    state = get_customer_state(customer_gid)
+    email = state.get("email")
+    if not email:
+        return  # nothing to do
 
+    external_id = customer_gid.split("/")[-1]
+
+    upsert_profile(
+        email=email,
+        external_id=external_id,
+        properties={
+            "vip_transition": transition,
+            "vip_transition_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 def _days_to_date(yyyymmdd: str | None, today: date) -> int:
     if not yyyymmdd:
         return 0
@@ -702,6 +726,9 @@ def on_order_paid(customer_gid: str, order_gid: str, today: Optional[datetime] =
 
     before_rank = TIER_RANK.get(tier_before, 0)
     after_rank  = TIER_RANK.get(tier_after, 0)
+
+    if after_rank > before_rank:
+        _push_vip_transition(customer_gid, "upgrade")
 
     # --- INSIDE A LOCK: only extend/upgrade, never downgrade ---
     if inside_lock(lock, today_date):

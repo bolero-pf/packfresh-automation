@@ -6,7 +6,7 @@ from .verify import verify_flow_signature
 from pathlib import Path
 import os, sys, subprocess, threading
 from datetime import datetime, timezone, date
-
+TIER_RANK = {"VIP0":0, "VIP1":1, "VIP2":2, "VIP3":3}
 try:
     from integrations.klaviyo import upsert_profile
 except Exception:
@@ -94,7 +94,7 @@ from .service import (
     compute_rolling_90d_spend, tier_from_spend,
     get_customer_state, write_state, inside_lock, _pick_lock_until,
     _days_to_date, _gap_to_next_tier_cents, _gap_to_requalify_cents, normalize_tier,
-    get_customer_lifetime_spend
+    get_customer_lifetime_spend, _push_vip_transition
 )
 
 @bp.post("/seed_vip2_lock_2025")
@@ -234,6 +234,7 @@ def _desired_vip_tags(tier: str, lock_active: bool) -> set[str]:
     #     out.add(f"{tier}-lock")
     return out
 
+
 def _push_vip_to_klaviyo(gid: str):
     now = datetime.now(timezone.utc)
     today = now.date()
@@ -261,6 +262,9 @@ def _push_vip_to_klaviyo(gid: str):
         effective_tier = new_tier
 
     # persist (metafields + any tier change)
+    prev = normalize_tier(state.get("tier") or "VIP0")
+    if TIER_RANK.get(effective_tier, 0) < TIER_RANK.get(prev, 0):
+        _push_vip_transition(gid, "downgrade")
     write_state(gid, rolling=spend, tier=effective_tier, lock=effective_lock)
 
     # --- VIP TAGS (only if needed) ---
