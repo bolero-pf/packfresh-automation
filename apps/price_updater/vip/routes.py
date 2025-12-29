@@ -298,7 +298,15 @@ def order_paid():
     payload = request.get_json(force=True)
     customer_id = payload["customer_id"]      # GID
     order_id    = payload["order_id"]         # GID
-    result = _on_paid(customer_id, order_id)
+
+    order_created_at = payload.get("order_created_at")
+    eval_time = None
+    if order_created_at:
+        eval_time = datetime.fromisoformat(
+            order_created_at.replace("Z", "+00:00")
+        )
+
+    result = _on_paid(customer_id, order_id, today=eval_time)
     try:
         _push_vip_to_klaviyo(customer_id)
     except Exception as e:
