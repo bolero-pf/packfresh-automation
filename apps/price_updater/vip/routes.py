@@ -1,7 +1,7 @@
 # vip/routes.py
 from flask import Blueprint, jsonify, current_app
 from flask import request
-from .service import fetch_customer_ids_page
+from .service import fetch_customer_ids_page, _push_vip_to_klaviyo
 from .verify import verify_flow_signature
 from pathlib import Path
 import os, sys, subprocess, threading
@@ -221,77 +221,6 @@ def seed_vip2_lock_2025():
     threading.Thread(target=worker, daemon=True).start()
     return jsonify({"ok": True, "status": "started"}), 200
 
-def _needs_vip_tag_update(current_tags: set[str], desired: set[str]) -> bool:
-    def vip_only(s): return {t for t in s if t.startswith("VIP")}
-    return vip_only(current_tags) != vip_only(desired)
-
-def _desired_vip_tags(tier: str, lock_active: bool) -> set[str]:
-    out = set()
-    if tier != "VIP0":
-        out.add(tier)             # VIP1/2/3 only
-    # If you want a lock marker, uncomment:
-    # if lock_active and tier != "VIP0":
-    #     out.add(f"{tier}-lock")
-    return out
-
-
-def _push_vip_to_klaviyo(gid: str):
-    now = datetime.now(timezone.utc)
-    today = now.date()
-
-    state = get_customer_state(gid)
-    raw_lock = state.get("lock") or {}
-    lock_active = inside_lock(raw_lock, today)
-
-    # fresh spend + tier
-    spend = compute_rolling_90d_spend(gid, today=now)
-    new_tier = tier_from_spend(spend)
-
-    # --- LOCK POLICY ---
-    if lock_active:
-        # keep existing tier+lock during active window
-        effective_tier = state["tier"]
-        effective_lock = raw_lock
-    else:
-        # lock expired/not set: choose policy
-        if new_tier in ("VIP1","VIP2","VIP3"):
-            from .service import rolling_90_lock_for
-            effective_lock = rolling_90_lock_for(new_tier, today)  # seed new window
-        else:
-            effective_lock = {}
-        effective_tier = new_tier
-
-    # persist (metafields + any tier change)
-    prev = normalize_tier(state.get("tier") or "VIP0")
-    if TIER_RANK.get(effective_tier, 0) < TIER_RANK.get(prev, 0):
-        _push_vip_transition(gid, "downgrade")
-    write_state(gid, rolling=spend, tier=effective_tier, lock=effective_lock)
-
-    # --- VIP TAGS (only if needed) ---
-    cur_tags = set(state.get("tags") or [])
-    desired  = _desired_vip_tags(effective_tier, inside_lock(effective_lock or {}, today))
-    if _needs_vip_tag_update(cur_tags, desired):
-        from .service import set_vip_tag
-        set_vip_tag(gid, effective_tier)
-
-    # --- KLAVIYO PROPS ---
-    rolling_cents = int(round(spend * 100))
-    lock_until = _pick_lock_until(effective_lock)  # tolerate "end"/"until", strip time
-    props = {
-        "vip_tier": effective_tier,
-        "vip_rolling_90d_cents": rolling_cents,
-        "vip_lock_start": (effective_lock or {}).get("start"),
-        "vip_lock_until": lock_until,
-        "vip_lock_active": bool(inside_lock(effective_lock or {}, today)),
-        "vip_days_to_expire": _days_to_date(lock_until, today),
-        "vip_requalify_gap_cents": _gap_to_requalify_cents(effective_tier, rolling_cents),
-        "vip_next_tier_gap_cents": _gap_to_next_tier_cents(effective_tier, rolling_cents),
-        "vip_last_change": now.isoformat(),
-    }
-
-    email = state.get("email")
-    external_id = gid.split("/")[-1]
-    upsert_profile(email=email, external_id=external_id, properties=props)
 
 @bp.post("/order_paid")
 def order_paid():
@@ -312,6 +241,7 @@ def order_paid():
     except Exception as e:
         current_app.logger.warning(f"Klaviyo push failed: {e}")
     return jsonify({"ok": True, **result})
+
 @bp.post("/price_update")
 def price_update():
     try:
@@ -433,45 +363,22 @@ def vip_promote_public():
 
 @bp.post("/sweep_vips")
 def sweep_vips():
-    """
-    Process a SINGLE page per call and return next_cursor.
-    The caller (runner/Flow) is responsible for calling again with cursor.
-    """
-    from flask import request, jsonify
-    from .service import shopify_gql
-
     payload = request.get_json(silent=True) or {}
     page_size = int(payload.get("page_size", 25))
-    after = payload.get("cursor")
+    cursor = payload.get("cursor")
 
-    VIP_TIERS = ["VIP1", "VIP2", "VIP3"]
-    SUFFIXES  = ["", "-risk", "-hopeful"]
-    terms     = [f'tag:"{t}{s}"' for t in VIP_TIERS for s in SUFFIXES]
-    q = " OR ".join(terms) if terms else 'tag:"VIP1" OR tag:"VIP2" OR tag:"VIP3"'
+    from .service import sweep_vips_page
 
-    QUERY = """
-    query($first:Int!, $after:String, $q:String!){
-      customers(first:$first, after:$after, query:$q, sortKey:ID){
-        edges{ cursor node{ id } }
-        pageInfo{ hasNextPage endCursor }
-      }
-    }"""
+    processed, next_cursor = sweep_vips_page(
+        page_size=page_size,
+        cursor=cursor,
+    )
 
-    processed, failed = 0, []
-    data = shopify_gql(QUERY, {"first": page_size, "after": after, "q": q})
-    cs = data["data"]["customers"]
-    ids = [e["node"]["id"] for e in cs["edges"]]
-
-    for gid in ids:
-        try:
-            _push_vip_to_klaviyo(gid)  # canonical logic
-            processed += 1
-        except Exception as e:
-            failed.append({"customer": gid, "error": str(e)})
-
-    next_cursor = cs["pageInfo"]["endCursor"] if cs["pageInfo"]["hasNextPage"] else None
-    return jsonify({"ok": True, "processed": processed, "next_cursor": next_cursor, "failed_ids": failed})
-
+    return jsonify({
+        "ok": True,
+        "processed": processed,
+        "next_cursor": next_cursor,
+    })
 
 
 
@@ -551,25 +458,19 @@ def sweep_kick():
 
     def worker():
         try:
-            base = os.environ.get("BASE_ORIGIN", "https://prices.pack-fresh.com")
-            url  = f"{base}/vip/sweep_vips"
-            headers = {
-                "Content-Type": "application/json",
-                "X-Flow-Secret": os.environ.get("VIP_FLOW_SECRET",""),
-            }
+            from .service import sweep_vips_page
             cursor = None
-            total  = 0
+            total = 0
+
             while True:
-                body = {"page_size": 25}
-                if cursor:
-                    body["cursor"] = cursor
-                r = requests.post(url, json=body, headers=headers, timeout=60)
-                r.raise_for_status()
-                data = r.json()
-                total += int(data.get("processed", 0))
-                cursor = data.get("next_cursor")
-                # small breath for API limits
-                time.sleep(0.2)
+                processed, cursor = sweep_vips_page(
+                    page_size=25,
+                    cursor=cursor,
+                )
+                total += processed
+
+                time.sleep(0.2)  # keep your throttle
+
                 if not cursor:
                     break
             print(f"[VIP SWEEP] DONE {datetime.now().isoformat()} total={total}")

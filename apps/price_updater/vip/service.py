@@ -709,6 +709,115 @@ def write_state(customer_gid: str, *, rolling=None, tier=None, lock=None, prov=N
         set_vip_tag(customer_gid, norm_tier)
 
 
+def _needs_vip_tag_update(current_tags: set[str], desired: set[str]) -> bool:
+    def vip_only(s): return {t for t in s if t.startswith("VIP")}
+    return vip_only(current_tags) != vip_only(desired)
+
+def _desired_vip_tags(tier: str, lock_active: bool) -> set[str]:
+    out = set()
+    if tier != "VIP0":
+        out.add(tier)             # VIP1/2/3 only
+    # If you want a lock marker, uncomment:
+    # if lock_active and tier != "VIP0":
+    #     out.add(f"{tier}-lock")
+    return out
+
+def _push_vip_to_klaviyo(gid: str):
+    now = datetime.now(timezone.utc)
+    today = now.date()
+
+    state = get_customer_state(gid)
+    raw_lock = state.get("lock") or {}
+    lock_active = inside_lock(raw_lock, today)
+
+    # fresh spend + tier
+    spend = compute_rolling_90d_spend(gid, today=now)
+    new_tier = tier_from_spend(spend)
+
+    # --- LOCK POLICY ---
+    if lock_active:
+        # keep existing tier+lock during active window
+        effective_tier = state["tier"]
+        effective_lock = raw_lock
+    else:
+        # lock expired/not set: choose policy
+        if new_tier in ("VIP1","VIP2","VIP3"):
+            from .service import rolling_90_lock_for
+            effective_lock = rolling_90_lock_for(new_tier, today)  # seed new window
+        else:
+            effective_lock = {}
+        effective_tier = new_tier
+
+    # persist (metafields + any tier change)
+    prev = normalize_tier(state.get("tier") or "VIP0")
+    if TIER_RANK.get(effective_tier, 0) < TIER_RANK.get(prev, 0):
+        _push_vip_transition(gid, "downgrade")
+    write_state(gid, rolling=spend, tier=effective_tier, lock=effective_lock)
+
+    # --- VIP TAGS (only if needed) ---
+    cur_tags = set(state.get("tags") or [])
+    desired  = _desired_vip_tags(effective_tier, inside_lock(effective_lock or {}, today))
+    if _needs_vip_tag_update(cur_tags, desired):
+        from .service import set_vip_tag
+        set_vip_tag(gid, effective_tier)
+
+    # --- KLAVIYO PROPS ---
+    rolling_cents = int(round(spend * 100))
+    lock_until = _pick_lock_until(effective_lock)  # tolerate "end"/"until", strip time
+    props = {
+        "vip_tier": effective_tier,
+        "vip_rolling_90d_cents": rolling_cents,
+        "vip_lock_start": (effective_lock or {}).get("start"),
+        "vip_lock_until": lock_until,
+        "vip_lock_active": bool(inside_lock(effective_lock or {}, today)),
+        "vip_days_to_expire": _days_to_date(lock_until, today),
+        "vip_requalify_gap_cents": _gap_to_requalify_cents(effective_tier, rolling_cents),
+        "vip_next_tier_gap_cents": _gap_to_next_tier_cents(effective_tier, rolling_cents),
+        "vip_last_change": now.isoformat(),
+    }
+
+    email = state.get("email")
+    external_id = gid.split("/")[-1]
+    upsert_profile(email=email, external_id=external_id, properties=props)
+
+def sweep_vips_page(*, page_size: int = 25, cursor: str | None = None):
+    """
+    Process one page of VIP customers.
+    Returns: (processed_count, next_cursor)
+    """
+    VIP_TIERS = ["VIP1", "VIP2", "VIP3"]
+    SUFFIXES  = ["", "-risk", "-hopeful"]
+    terms     = [f'tag:"{t}{s}"' for t in VIP_TIERS for s in SUFFIXES]
+    q = " OR ".join(terms)
+
+    QUERY = """
+    query($first:Int!, $after:String, $q:String!){
+      customers(first:$first, after:$after, query:$q, sortKey:ID){
+        edges{ cursor node{ id } }
+        pageInfo{ hasNextPage endCursor }
+      }
+    }"""
+
+    data = shopify_gql(QUERY, {
+        "first": page_size,
+        "after": cursor,
+        "q": q,
+    })
+
+    cs = data["data"]["customers"]
+    ids = [e["node"]["id"] for e in cs["edges"]]
+
+    processed = 0
+    for gid in ids:
+        try:
+            _push_vip_to_klaviyo(gid)
+            processed += 1
+        except Exception as e:
+            print(f"[VIP SWEEP] error gid={gid}: {e}", flush=True)
+
+    next_cursor = cs["pageInfo"]["endCursor"] if cs["pageInfo"]["hasNextPage"] else None
+    return processed, next_cursor
+
 
 # ---------- HANDLERS ----------
 def on_order_paid(customer_gid: str, order_gid: str, today: Optional[datetime] = None):
