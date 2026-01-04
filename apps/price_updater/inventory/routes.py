@@ -1,13 +1,15 @@
-from flask import Blueprint, request, redirect, flash
+from flask import Blueprint, request, redirect, flash, Response
 
 
 from .lib import (
     render_inventory_table, inventory_df, save_inventory_to_db,
     shopify_sync_logic, requires_auth, update_shopify_variant_price,
-    update_shopify_qty, engine
+    update_shopify_qty, engine,
 )
 import pandas as pd
 import time
+import datetime
+
 
 bp = Blueprint("inventory", __name__, url_prefix="/inventory")
 
@@ -52,6 +54,45 @@ def _ensure_sync(force=False):
         finally:
             _LAST_SYNC = time.time()
 
+def get_filtered_inventory_df(
+    df,
+    q=None,
+    in_stock=False,
+    tag_any=None,
+    status="all",
+):
+    df_filtered = df
+
+    if status != "all" and "shopify_status" in df_filtered.columns:
+        if status == "published":
+            df_filtered = df_filtered[df_filtered["shopify_status"] != "draft"]
+        elif status == "draft":
+            df_filtered = df_filtered[df_filtered["shopify_status"] == "draft"]
+
+    if q:
+        df_filtered = df_filtered[
+            df_filtered["name"].astype(str).str.lower().str.contains(q)
+        ]
+
+    if in_stock:
+        df_filtered = df_filtered[
+            df_filtered["shopify_qty"].fillna(0) > 0
+        ]
+
+    if tag_any:
+        wanted = [t.lower() for t in tag_any]
+
+        def has_all(csv):
+            s = str(csv or "").lower()
+            return all(w in s for w in wanted)
+
+        df_filtered = df_filtered[
+            df_filtered["shopify_tags"].apply(has_all)
+        ]
+
+    return df_filtered
+
+
 @bp.route("/sync")
 @requires_auth
 def sync_now():
@@ -70,6 +111,62 @@ def zero_current():
     else:
         flash(f"Column '{col}' not found.", "warning")
     return redirect("/inventory")
+
+
+@bp.route("/export.csv")
+@requires_auth
+def export_csv():
+    _ensure_sync(False)
+
+    df = inventory_df.copy()
+
+    q = (request.args.get("q") or "").strip().lower()
+    in_stock = request.args.get("in_stock") == "1"
+    tag_any = request.args.getlist("tag")
+
+    df_filtered = get_filtered_inventory_df(
+        df,
+        q=q,
+        in_stock=in_stock,
+        tag_any=tag_any,
+    )
+
+    # Drop internal / UI-only columns
+    drop_cols = [
+        "__orig_idx__",
+        "adjust_delta",
+    ]
+    df_out = df_filtered.drop(
+        columns=[c for c in drop_cols if c in df_filtered.columns],
+        errors="ignore",
+    )
+
+    # Deterministic column order (optional but nice)
+    preferred_order = [
+        "name",
+        "shopify_qty",
+        "shopify_price",
+        "total amount (4/1)",
+        "shopify_tags",
+        "notes",
+        "variant_id",
+        "shopify_inventory_id",
+    ]
+    cols = [c for c in preferred_order if c in df_out.columns] + \
+           [c for c in df_out.columns if c not in preferred_order]
+    df_out = df_out[cols]
+
+    csv_bytes = df_out.to_csv(index=False).encode("utf-8")
+
+    filename = f"inventory-{datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d')}.csv"
+
+    return Response(
+        csv_bytes,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        },
+    )
 
 @bp.route("/", methods=["GET", "POST"])
 @requires_auth
@@ -105,26 +202,32 @@ def index():
     q = (request.args.get("q") or "").strip().lower()
     in_stock = (request.args.get("in_stock") == "1")
     tag_any = request.args.getlist("tag")  # multi-select via ?tag=a&tag=b
+    status = request.args.get("status", "all")
 
-    if q:
-        df = df[df["name"].astype(str).str.lower().str.contains(q)]
-    if in_stock:
-        df = df[df["shopify_qty"].fillna(0) > 0]
-    if tag_any:
-        wanted = [t.lower() for t in tag_any]
+    df_filtered = get_filtered_inventory_df(
+        df,
+        q=q,
+        in_stock=in_stock,
+        tag_any=tag_any,
+        status=status,
+    )
 
-        def has_any(csv):
-            s = str(csv or "").lower()
-            return any(w in s for w in wanted)
-
-        df = df[df["shopify_tags"].apply(has_any)]
-
-    # pagination to keep it snappy
+    # --- paginate for display only ---
+    df_filtered = df_filtered.copy()
+    df_filtered["__orig_idx__"] = df_filtered.index
     limit = int(request.args.get("limit", "400"))
-    df = df.head(limit)
+    df_page = df_filtered.head(limit)
+
+    totals = {
+        "count": len(df_filtered),
+        "shopify_value": float(
+            (df_filtered["shopify_qty"].fillna(0) * df_filtered["shopify_price"].fillna(0)).sum()
+        ),
+        "shopify_qty": int(df_filtered["shopify_qty"].fillna(0).sum()),
+        "inventory_qty": int(df_filtered["total amount (4/1)"].fillna(0).sum()),
+    }
 
     # map back to master df on save
-    df["__orig_idx__"] = df.index
     df["adjust_delta"] = ""
 
     # ---------- SAVE (changed-only) ----------
@@ -143,11 +246,15 @@ def index():
 
         # collect changed rows so we can optionally push to Shopify
         changed_rows = []  # list of {"variant_id":int, "shopify_inventory_id":int, "shopify_qty"?:int, "shopify_price"?:float}
-        for i, row in df.reset_index(drop=True).iterrows():
-            orig_idx = row.get("__orig_idx__", row.name)
+        df_for_save = df_page.reset_index(drop=True)
+        for i, row in df_for_save.iterrows():
+            orig_idx = row["__orig_idx__"]
+            vid = row.get("variant_id")
+            iid = row.get("shopify_inventory_id")
+
             row_change = {
-                "variant_id": int(row.get("variant_id") or 0),
-                "shopify_inventory_id": int(row.get("shopify_inventory_id") or 0),
+                "variant_id": int(vid) if pd.notna(vid) else None,
+                "shopify_inventory_id": int(iid) if pd.notna(iid) else None,
             }
             touched = False
             pending_adjust = None  # ← collect without persisting
@@ -239,7 +346,7 @@ def index():
             flash("💾 Saved locally.", "success")
 
         return redirect(request.full_path or "/inventory")
-
+    query_string = request.query_string.decode("utf-8")
     # ------- TAG OPTIONS for filters (top 50 by frequency) -------
     # Build once per request from the master df (not just the page slice)
     tag_counts = {}
@@ -256,11 +363,13 @@ def index():
     meta = {
         "last_sync": get_last_sync_str(),
         "mode_label": ("DRY RUN" if DRY_RUN  else "LIVE"),
+        "totals": totals,
+        "query_string" : query_string,
     }
 
     # ------- render -------
     html = render_inventory_table(
-        filtered_df=df,
+        filtered_df=df_page,
         title=f"🗂️ Shopify Inventory ({total_rows} variants; showing {len(df)})",
         show_columns=keep_cols,
         hidden_buttons=["only_rc", "unpublished", "untouched", "sync_rc"],
@@ -270,6 +379,7 @@ def index():
             "in_stock": in_stock,
             "tag_options": tag_options,
             "selected_tags": tag_any,
+            "status" : status,
         },
         meta = meta,
     )
@@ -333,6 +443,10 @@ def push_price_row(row_index: int):
         flash(f"Error pushing price for row {row_index}: {e}", "danger")
     return redirect("/inventory")
 
+from .lib import create_shopify_draft_product, DRY_RUN
+
+# ...
+
 @bp.route("/add", methods=["POST"])
 @requires_auth
 def add_local():
@@ -346,17 +460,28 @@ def add_local():
         return redirect("/inventory")
 
     try:
+        price_val = float(price) if price not in (None, "",) else None
+    except Exception:
+        price_val = None
+
+    try:
         qty_val = int(qty) if qty not in (None, "",) else 0
     except Exception:
         qty_val = 0
 
     try:
-        price_val = float(price) if price not in (None, "",) else None
-    except Exception:
-        price_val = None
+        created = create_shopify_draft_product(title=name, price=price_val, tags=tags)
 
-    from .lib import add_local_inventory_row
-    add_local_inventory_row(name=name, qty=qty_val, price=price_val, tags=tags)
-    flash(f"➕ Added local-only item: {name}", "success")
-    # bounce back with a filter on the new name so it’s visible
-    return redirect(f"/inventory?q={name}")
+        # Sync so the new draft appears in the table (requires sync to include drafts)
+        shopify_sync_logic()
+
+        # Optionally apply qty immediately (only if you want; otherwise skip for “minimum”)
+        # if qty_val and created.get("inventory_item_id") and LOCATION_ID:
+        #     update_shopify_qty(created["inventory_item_id"], int(LOCATION_ID), qty_val)
+
+        flash(f"➕ Created Shopify DRAFT listing: {name}", "success")
+        return redirect(f"/inventory?q={name}")
+
+    except Exception as e:
+        flash(f"Could not create Shopify draft: {e}", "danger")
+        return redirect("/inventory")

@@ -111,8 +111,15 @@ except Exception as e:
 # minimal skeleton so routes & sync can use it immediately
 inventory_df = pd.DataFrame(
     columns=[
-        "name", "shopify_qty", "shopify_price", "shopify_tags",
-        "variant_id", "shopify_inventory_id", "total amount (4/1)", "notes"
+        "name",
+        "shopify_qty",
+        "shopify_price",
+        "shopify_tags",
+        "shopify_status",
+        "variant_id",
+        "shopify_inventory_id",
+        "total amount (4/1)",
+        "notes",
     ]
 )
 
@@ -185,6 +192,48 @@ def _activate_session():
     session = shopify.Session(SHOPIFY_STORE, API_VERSION, SHOPIFY_TOKEN)
     shopify.ShopifyResource.activate_session(session)
 
+def create_shopify_draft_product(title: str, price: float | None = None, tags: str = "") -> dict:
+    """
+    Create a draft Shopify product with a single variant.
+    Returns: {"product_id": int, "variant_id": int, "inventory_item_id": int}
+    """
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("title is required")
+
+    if DRY_RUN:
+        print(f"[DRY_RUN] Would create DRAFT product title={title!r} price={price} tags={tags!r}")
+        return {"product_id": 0, "variant_id": 0, "inventory_item_id": 0}
+
+    _activate_session()
+
+    p = shopify.Product()
+    p.title = title
+    p.status = "draft"          # Draft product
+    p.tags = tags or ""
+
+    v = shopify.Variant()
+    if price is not None:
+        v.price = f"{float(price):.2f}"
+    # ensure it is inventory tracked; Shopify will attach inventory_item_id
+    v.inventory_management = "shopify"
+
+    p.variants = [v]
+
+    if not p.save():
+        raise RuntimeError(f"Shopify draft create failed: {getattr(p, 'errors', None)}")
+
+    # Re-fetch or use returned fields (python-shopify can be finicky; simplest is to read back)
+    created = shopify.Product.find(p.id)
+    created_variant = created.variants[0]
+
+    return {
+        "product_id": int(created.id),
+        "variant_id": int(created_variant.id),
+        "inventory_item_id": int(created_variant.inventory_item_id),
+    }
+
+
 def update_shopify_variant_price(variant_id: int, new_price: float) -> bool:
     """
     Updates a single variant's price. Returns True on success.
@@ -233,6 +282,7 @@ def render_inventory_table(
     meta = meta or {}
     last_sync = meta.get("last_sync", "Never")
     mode_label = meta.get("mode_label", "LIVE")
+    totals = meta.get("totals")
     import html
     editable_columns = set(editable_columns or [])
     show_columns = list(show_columns or filtered_df.columns)
@@ -242,6 +292,9 @@ def render_inventory_table(
     in_stock = filters.get("in_stock", False)
     tag_options = filters.get("tag_options", [])
     selected_tags = set([t.lower() for t in filters.get("selected_tags", [])])
+    query_string = meta.get("query_string", "")
+
+    qs = f"?{query_string}" if query_string else ""
 
     # --- small helpers
     def disp(col):
@@ -273,6 +326,14 @@ def render_inventory_table(
         "</form>"
     )
     nav_html = '<div class="mb-3">' + "".join(nav) + "</div>"
+    totals_html = ""
+    if totals:
+        totals_html = (
+            f'<span class="pf-badge">Items: {totals["count"]}</span>'
+            f'<span class="pf-badge">Shopify Qty: {totals["shopify_qty"]}</span>'
+            f'<span class="pf-badge">Inventory Qty: {totals["inventory_qty"]}</span>'
+            f'<span class="pf-badge">Value: ${totals["shopify_value"]:,.2f}</span>'
+        )
     topbar = f"""
     <div class="pf-topbar">
       <div class="pf-title">
@@ -280,9 +341,14 @@ def render_inventory_table(
         <span class="pf-badge">{len(filtered_df)} variants</span>
         <span class="pf-badge">Last sync: {html.escape(last_sync)}</span>
         <span class="pf-badge pf-live">{html.escape(mode_label)}</span>
+        {totals_html}
       </div>
       <div class="pf-actions">
         <a class="pf-btn pf-btn-ghost" href="/inventory/sync">🔁 Sync Shopify</a>
+        <a class="pf-btn pf-btn-ghost"
+           href="/inventory/export.csv{qs}">
+           📤 Export CSV
+        </a>
         <form method="post" action="/inventory/zero_current" style="display:inline">
           <button class="pf-btn">🧹 Zero Current Inventory</button>
         </form>
@@ -292,6 +358,23 @@ def render_inventory_table(
       </div>
     </div>
     """
+    status = filters.get("status", "all")
+
+    def status_chip(label, value):
+        active = "pf-chip-active" if status == value else ""
+        return (
+            f'<a class="pf-chip {active}" '
+            f'href="/inventory?status={value}{("&" + query_string.replace("status=" + status, "").lstrip("&")) if query_string else ""}">'
+            f'{label}</a>'
+        )
+
+    status_chips_html = (
+            '<div class="pf-chips mb-2">'
+            + status_chip("All", "all")
+            + status_chip("Published", "published")
+            + status_chip("Drafts", "draft")
+            + "</div>"
+    )
 
     # --- filters form (GET)
     filter_bar = f"""
@@ -309,6 +392,7 @@ def render_inventory_table(
       <button class="btn btn-outline-light">Filter</button>
 
       <div style="flex-basis:100%; height:0;"></div>
+      {status_chips_html}
       <div class="pf-chips">
         {''.join(
         f'<label class="pf-chip"><input type="checkbox" name="tag" value="{html.escape(t)}" {"checked" if t in selected_tags else ""}>{html.escape(t)}</label>'
@@ -387,24 +471,47 @@ def render_inventory_table(
     }
     .pf-badge.pf-live{ border-color: var(--pf-accent); }
     .pf-actions{ display:flex; gap:8px; flex-wrap:wrap; }
-    .pf-btn{
-      height:40px; padding:0 12px; border-radius:10px; font-size:14px;
-      border:1px solid var(--pf-border-strong); color:var(--pf-text); background:transparent;
+    .pf-btn,
+    .pf-btn-ghost,
+    .pf-btn-primary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    
+      height: 40px;
+      padding: 0 14px;
+    
+      border-radius: 10px;
+      font-size: 14px;
+      line-height: 1;
+      white-space: nowrap;
+    
+      text-decoration: none;   /* critical for <a> */
+      cursor: pointer;
+    
+      border: 1px solid var(--pf-border-strong);
+      background: transparent;
+      color: var(--pf-text);
     }
-    .pf-btn:hover{ border-color:var(--pf-accent); color:var(--pf-accent); }
-    .pf-btn-primary{
-      background:var(--pf-accent); color:#1b1b1b; border-color:var(--pf-accent);
+    
+    .pf-btn:hover,
+    .pf-btn-ghost:hover {
+      border-color: var(--pf-accent);
+      color: var(--pf-accent);
+      text-decoration: none;
     }
-    .pf-btn-ghost{
-      background:transparent;
-      color:var(--pf-text);
-      border:1px solid var(--pf-border);
+    
+    .pf-btn-primary {
+      background: var(--pf-accent);
+      color: #1b1b1b;
+      border-color: var(--pf-accent);
     }
-    .pf-btn-ghost:hover{
-      border-color:var(--pf-accent);
-      color:var(--pf-accent);
+    
+    .pf-btn-primary:hover {
+      filter: brightness(1.05);
     }
-    .pf-btn-primary:hover{ filter:brightness(1.05); }
+
 
     /* ===== Toolbar (search, toggle, chips) ===== */
     .pf-toolbar{ display:flex; flex-wrap:wrap; align-items:center; gap:12px 16px; margin:0 0 12px; }
@@ -424,6 +531,11 @@ def render_inventory_table(
       background:var(--pf-panel); border:1px solid var(--pf-border); font-size:14px;
     }
     .pf-chip input{ accent-color:var(--pf-accent); }
+    .pf-chip-active{
+      border-color: var(--pf-accent);
+      color: var(--pf-accent);
+      box-shadow: 0 0 0 1px var(--pf-accent) inset;
+    }
     
     /* ===== Table ===== */
     .table{ color:var(--pf-text); font-size:14px; }
@@ -642,8 +754,15 @@ def shopify_sync_logic() -> int:
         prev = inventory_df.copy()
 
     base_cols = [
-        "name", "shopify_qty", "shopify_price", "shopify_tags",
-        "variant_id", "shopify_inventory_id", "total amount (4/1)", "notes"
+        "name",
+        "shopify_qty",
+        "shopify_price",
+        "shopify_tags",
+        "shopify_status",
+        "variant_id",
+        "shopify_inventory_id",
+        "total amount (4/1)",
+        "notes",
     ]
     for c in base_cols:
         if c not in prev.columns:
@@ -654,7 +773,7 @@ def shopify_sync_logic() -> int:
 
     # --- 2) Pull fresh Shopify variants ---
     rows = []
-    products = shopify.Product.find(limit=250, status="active")
+    products = shopify.Product.find(limit=250)
     while True:
         for p in products:
             tags_csv = (p.tags or "").strip()
@@ -665,6 +784,7 @@ def shopify_sync_logic() -> int:
                         "shopify_qty": int(v.inventory_quantity) if v.inventory_quantity is not None else None,
                         "shopify_price": float(v.price) if v.price is not None else None,
                         "shopify_tags": tags_csv,
+                        "shopify_status": p.status,
                         "variant_id": int(v.id) if v.id else None,
                         "shopify_inventory_id": int(v.inventory_item_id) if v.inventory_item_id else None,
                         "total amount (4/1)": None,
