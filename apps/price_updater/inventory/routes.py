@@ -60,6 +60,7 @@ def get_filtered_inventory_df(
     in_stock=False,
     tag_any=None,
     status="all",
+    qty_mismatch=False,
 ):
     df_filtered = df
 
@@ -89,6 +90,11 @@ def get_filtered_inventory_df(
         df_filtered = df_filtered[
             df_filtered["shopify_tags"].apply(has_all)
         ]
+
+    if qty_mismatch:
+        df_filtered = df_filtered[
+            df_filtered["total amount (4/1)"] != df_filtered["shopify_qty"]
+            ]
 
     return df_filtered
 
@@ -203,6 +209,7 @@ def index():
     in_stock = (request.args.get("in_stock") == "1")
     tag_any = request.args.getlist("tag")  # multi-select via ?tag=a&tag=b
     status = request.args.get("status", "all")
+    qty_mismatch = request.args.get("qty_mismatch") == "1"
 
     df_filtered = get_filtered_inventory_df(
         df,
@@ -210,7 +217,30 @@ def index():
         in_stock=in_stock,
         tag_any=tag_any,
         status=status,
+        qty_mismatch=qty_mismatch,
     )
+    sort_col = request.args.get("sort")
+    sort_dir = request.args.get("dir", "asc")
+
+    sortable_columns = {
+        "name",
+        "shopify_qty",
+        "shopify_price",
+        "shopify_value",
+        "total amount (4/1)",
+        "notes",
+    }
+
+    if sort_col not in sortable_columns:
+        sort_col = None
+    ascending = (sort_dir != "desc")
+
+    if sort_col:
+        df_filtered = df_filtered.sort_values(
+            by=sort_col,
+            ascending=ascending,
+            kind="mergesort",  # <-- critical: stable sort
+            na_position="last")
 
     # --- paginate for display only ---
     df_filtered = df_filtered.copy()
@@ -380,6 +410,9 @@ def index():
             "tag_options": tag_options,
             "selected_tags": tag_any,
             "status" : status,
+            "sort" : sort_col,
+            "dir" : sort_dir,
+            "qty_mismatch" : qty_mismatch,
         },
         meta = meta,
     )

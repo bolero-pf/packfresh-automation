@@ -6,6 +6,7 @@ from flask import Flask, render_template_string, request, render_template, redir
 from dotenv import load_dotenv
 from functools import wraps
 from sqlalchemy import create_engine
+from urllib.parse import parse_qs, urlencode
 
 load_dotenv()
 
@@ -60,7 +61,18 @@ from sqlalchemy import create_engine, text
 
 # 1) Choose a sane local default (relative to your project root)
 DB_URL = os.getenv("PF_DB_URL", "sqlite:///./data/inventory.db")
+def build_sort_qs(col, next_dir):
+    qs = parse_qs(request.query_string.decode("utf-8"), keep_blank_values=True)
 
+    # Remove existing sort params
+    qs.pop("sort", None)
+    qs.pop("dir", None)
+
+    # Set new sort params
+    qs["sort"] = [col]
+    qs["dir"] = [next_dir]
+
+    return "?" + urlencode(qs, doseq=True)
 def _resolve_sqlite_fs_path(db_url: str) -> str | None:
     """
     Returns a normalized absolute filesystem path for sqlite URLs.
@@ -293,12 +305,26 @@ def render_inventory_table(
     tag_options = filters.get("tag_options", [])
     selected_tags = set([t.lower() for t in filters.get("selected_tags", [])])
     query_string = meta.get("query_string", "")
+    sort_col = filters.get("sort")
+    sort_dir = filters.get("dir", "asc")
+    qty_mismatch = filters.get("qty_mismatch", False)
 
     qs = f"?{query_string}" if query_string else ""
+    qty_checked = "checked" if qty_mismatch else ""
 
     # --- small helpers
     def disp(col):
         return COLUMN_RENAMES.get(col, col.replace("_", " ").title())
+
+    def sort_link(col):
+        if col == sort_col:
+            next_dir = "desc" if sort_dir == "asc" else "asc"
+            arrow = " ▲" if sort_dir == "asc" else " ▼"
+        else:
+            next_dir = "asc"
+            arrow = ""
+
+        return build_sort_qs(col, next_dir), arrow
 
     # --- top controls: search, in-stock toggle, tag chips
     chips = []
@@ -360,22 +386,36 @@ def render_inventory_table(
     """
     status = filters.get("status", "all")
 
-    def status_chip(label, value):
-        active = "pf-chip-active" if status == value else ""
-        return (
-            f'<a class="pf-chip {active}" '
-            f'href="/inventory?status={value}{("&" + query_string.replace("status=" + status, "").lstrip("&")) if query_string else ""}">'
-            f'{label}</a>'
-        )
+    checked_all = "checked" if status == "all" else ""
+    checked_pub = "checked" if status == "published" else ""
+    checked_draft = "checked" if status == "draft" else ""
 
-    status_chips_html = (
-            '<div class="pf-chips mb-2">'
-            + status_chip("All", "all")
-            + status_chip("Published", "published")
-            + status_chip("Drafts", "draft")
-            + "</div>"
-    )
-
+    status_chips_html = f"""
+    <div class="pf-chips pf-chips-status mb-2">
+      <label class="pf-chip">
+        <input type="radio" name="status" value="all" {checked_all} onchange="this.form.submit()">
+        <span>All</span>
+      </label>
+      <label class="pf-chip">
+        <input type="radio" name="status" value="published" {checked_pub} onchange="this.form.submit()">
+        <span>Published</span>
+      </label>
+      <label class="pf-chip">
+        <input type="radio" name="status" value="draft" {checked_draft} onchange="this.form.submit()">
+        <span>Drafts</span>
+      </label>
+    </div>
+    """
+    qty_mismatch_chip = f"""
+    <label class="pf-chip">
+      <input type="checkbox"
+             name="qty_mismatch"
+             value="1"
+             {qty_checked}
+             onchange="this.form.submit()">
+      Qty mismatch
+    </label>
+    """
     # --- filters form (GET)
     filter_bar = f"""
     <form id="pf-filter" method="get" class="pf-toolbar" onsubmit="">
@@ -387,6 +427,7 @@ def render_inventory_table(
         <input class="form-check-input" type="checkbox" name="in_stock" value="1" {'checked' if in_stock else ''}>
         In stock only
       </label>
+      {qty_mismatch_chip}
 
       <input type="hidden" name="limit" value="{html.escape(str(request.args.get('limit', '400')))}">
       <button class="btn btn-outline-light">Filter</button>
@@ -403,7 +444,13 @@ def render_inventory_table(
     """
 
     # --- table header
-    thead_cells = ["<th></th>"] + [f"<th>{html.escape(disp(c))}</th>" for c in show_columns]
+    thead_cells = ["<th></th>"]
+    for c in show_columns:
+        href, arrow = sort_link(c)
+        thead_cells.append(
+            f'<th><a href="{href}" class="pf-sort">{html.escape(disp(c))}{arrow}</a></th>'
+        )
+
     thead_html = "<thead><tr>" + "".join(thead_cells) + "</tr></thead>"
 
     # --- body rows
@@ -524,18 +571,79 @@ def render_inventory_table(
     .pf-search input::placeholder{ color:var(--pf-muted); }
     .pf-toolbar .form-check-input{ width:20px; height:20px; accent-color:var(--pf-accent); }
     .pf-toolbar .btn{ height:44px; border-radius:12px; }
-
-    .pf-chips{ display:flex; flex-wrap:wrap; gap:8px; }
-    .pf-chip{
-      display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px;
-      background:var(--pf-panel); border:1px solid var(--pf-border); font-size:14px;
+    .pf-chip input[type="radio"] {
+      display: none;
     }
+    
+    .pf-chip input[type="radio"]:checked + span,
+    .pf-chip input[type="radio"]:checked {
+      border-color: var(--pf-accent);
+      color: var(--pf-accent);
+      box-shadow: 0 0 0 1px var(--pf-accent) inset;
+    }
+    .pf-chips{ display:flex; flex-wrap:wrap; gap:8px; }
+    .pf-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    
+      padding: 8px 14px;
+      border-radius: 999px;
+    
+      background: var(--pf-panel);
+      border: 1px solid var(--pf-border);
+      font-size: 14px;
+    
+      cursor: pointer;
+    }
+
     .pf-chip input{ accent-color:var(--pf-accent); }
     .pf-chip-active{
       border-color: var(--pf-accent);
       color: var(--pf-accent);
       box-shadow: 0 0 0 1px var(--pf-accent) inset;
     }
+    /* Status chips = segmented buttons */
+    .pf-chips-status .pf-chip {
+      padding: 0;
+      border: none;
+      background: none;
+    }
+    
+    .pf-chips-status .pf-chip span {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 14px;
+      border-radius: 999px;
+    
+      background: var(--pf-panel);
+      border: 1px solid var(--pf-border);
+    }
+    
+    /* Active status = filled button */
+    .pf-chips-status input[type="radio"]:checked + span {
+      background: var(--pf-accent);
+      color: #1b1b1b;
+      border-color: var(--pf-accent);
+    }
+
+    .pf-chip span:hover {
+      border-color: var(--pf-accent);
+    }
+    .pf-sort {
+      color: var(--pf-text);
+      text-decoration: none;
+    }
+    
+    .pf-sort:hover {
+      color: var(--pf-accent);
+      text-decoration: none;
+    }
+    
+    .pf-sort:visited {
+      color: var(--pf-text);
+    }
+
     
     /* ===== Table ===== */
     .table{ color:var(--pf-text); font-size:14px; }
@@ -774,10 +882,16 @@ def shopify_sync_logic() -> int:
     # --- 2) Pull fresh Shopify variants ---
     rows = []
     products = shopify.Product.find(limit=250)
+    seen_variant_ids = set()
     while True:
         for p in products:
             tags_csv = (p.tags or "").strip()
             for v in (p.variants or []):
+                variant_id = int(v.id) if v.id else None
+                if variant_id is not None:
+                    if variant_id in seen_variant_ids:
+                        continue
+                    seen_variant_ids.add(variant_id)
                 try:
                     rows.append({
                         "name": f"{p.title} — {v.title}" if v.title and v.title.lower() != "default title" else p.title,
