@@ -282,6 +282,9 @@ def curated_random_carousel_blocks(index_json_string):
         "collection_block_R4WJRB",  # Booster Boxes
         "collection_block_7mejda",  # Booster Packs
         "collection_block_GEemDK",  # Collection Boxes
+        "collection_block_HDN8mG",  # Sleeved Booster Packs
+        "collection_block_zP3pHm",  # Blister Packs
+
     }
 
     ip_blocks = {
