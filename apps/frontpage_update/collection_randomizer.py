@@ -9,7 +9,7 @@ load_dotenv()
 SHOPIFY_DOMAIN = os.environ.get("SHOPIFY_STORE")
 ACCESS_TOKEN = os.environ.get("SHOPIFY_TOKEN")
 BASE_URL = f"https://{SHOPIFY_DOMAIN}/admin/api/2024-04"
-THEME_ID = 157487169756
+THEME_ID = 159537758428
 
 
 HEADERS = {
