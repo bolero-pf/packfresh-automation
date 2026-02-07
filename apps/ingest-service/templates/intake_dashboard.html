@@ -146,6 +146,8 @@
             backdrop-filter: blur(4px);
         }
         .modal-overlay.active { display: flex; }
+        /* Mapping modal must stack ABOVE session modal */
+        #mapping-modal { z-index: 1100; }
         .modal {
             background: var(--surface); border: 1px solid var(--border);
             border-radius: 12px; padding: 28px; width: 90%; max-width: 640px;
@@ -519,7 +521,7 @@
                             ? '<span class="badge badge-green">Linked</span>'
                             : '<span class="badge badge-amber">Needs Link</span>'}</td>
                         <td>${!i.is_mapped
-                            ? `<button class="btn btn-primary btn-sm" onclick="openMapping('${i.id}', \`${i.product_name.replace(/`/g,"'")}\`, '${(i.set_name||'').replace(/'/g,"\\'")}')">Link</button>`
+                            ? `<button class="btn btn-primary btn-sm" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set)">Link</button>`
                             : `<small style="color:var(--text-dim);">ID: ${i.tcgplayer_id}</small>`}</td>
                     </tr>`).join('')}</tbody>
                 </table>
@@ -572,27 +574,31 @@
     async function fuzzySearch() {
         const productName = document.getElementById('map-product-name').textContent;
         const container = document.getElementById('fuzzy-results');
-        container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+        container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
 
         try {
-            const r = await fetch('/api/ppt/parse-title', {
+            // Use sealed-products search for sealed items (most Collectr imports are sealed)
+            const r = await fetch('/api/ppt/search-sealed', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ title: productName }),
+                body: JSON.stringify({ query: productName }),
             });
             const d = await r.json();
-            if (!d.matches || !d.matches.length) {
-                container.innerHTML = '<p style="color:var(--text-dim);">No matches found. Try pasting the ID manually.</p>';
+            if (!r.ok) { container.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+            const results = d.results || [];
+            if (!results.length) {
+                container.innerHTML = '<p style="color:var(--text-dim);">No sealed products found. Try pasting the TCGPlayer ID manually from tcgplayer.com.</p>';
                 return;
             }
-            container.innerHTML = d.matches.map(m => {
-                const card = m.card || m;
-                const conf = m.confidence ? `${(m.confidence * 100).toFixed(0)}% match` : '';
-                const tcgId = card.tcgPlayerId || card.tcgplayer_id || '';
-                const price = card.prices?.market || card.market_price || '';
+            container.innerHTML = results.map(p => {
+                const tcgId = p.tcgPlayerId || p.tcgplayer_id || '';
+                const price = p.prices?.market || p.market_price || p.price || '';
+                const name = p.name || p.productName || '?';
+                const setName = p.setName || p.set || '';
                 return `<div class="search-result" onclick="document.getElementById('map-tcgplayer-id').value='${tcgId}'">
-                    <h4>${card.name || card.productName || '?'}</h4>
-                    <p>${card.setName || ''} ${conf ? '• ' + conf : ''} ${price ? '• $' + price : ''}</p>
+                    <h4>${name}</h4>
+                    <p>${setName} ${price ? '• $' + price : ''}</p>
                     <small style="color:var(--accent);">TCGPlayer ID: ${tcgId}</small>
                 </div>`;
             }).join('');
@@ -633,6 +639,8 @@
         } catch(err) { alert(err.message); }
     }
 
+    let lastCardLookup = null;
+
     async function lookupRawCard() {
         const tcgId = document.getElementById('raw-tcgplayer-id').value;
         if (!tcgId) { alert('Enter a TCGPlayer ID first'); return; }
@@ -647,23 +655,89 @@
                 body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
             });
             const d = await r.json();
-            if (!r.ok) { resultDiv.innerHTML = `<div class="alert alert-warning">${d.error}</div>`; return; }
+            if (!r.ok) { resultDiv.innerHTML = `<div class="alert alert-warning">${d.error}</div>`; lastCardLookup = null; return; }
 
             const c = d.card;
+            lastCardLookup = { card: c, variants: d.variants || {}, primary: d.primary_printing || 'Default' };
+
             // Auto-fill fields
             if (c.name) document.getElementById('raw-card-name').value = c.name;
             if (c.setName) document.getElementById('raw-set-name').value = c.setName;
             if (c.cardNumber) document.getElementById('raw-card-number').value = c.cardNumber;
             if (c.rarity) document.getElementById('raw-rarity').value = c.rarity;
 
-            const price = c.prices?.market || c.market_price || '?';
-            resultDiv.innerHTML = `<div class="alert alert-success">
-                Found: <strong>${c.name}</strong> (${c.setName || ''}) — Market: $${price}
-            </div>`;
+            renderVariantPrices();
         } catch(err) {
             resultDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+            lastCardLookup = null;
         }
     }
+
+    let selectedVariant = null;
+
+    function renderVariantPrices() {
+        if (!lastCardLookup) return;
+        const resultDiv = document.getElementById('raw-lookup-result');
+        const c = lastCardLookup.card;
+        const variants = lastCardLookup.variants;
+        const variantNames = Object.keys(variants);
+        const selectedCond = document.getElementById('raw-condition').value;
+
+        // Auto-select variant
+        if (!selectedVariant || !variants[selectedVariant]) {
+            selectedVariant = lastCardLookup.primary;
+            if (!variants[selectedVariant] && variantNames.length) selectedVariant = variantNames[0];
+        }
+
+        const currentVariant = variants[selectedVariant] || {};
+
+        resultDiv.innerHTML = `
+            <div class="alert alert-success">
+                <strong>${c.name}</strong> — ${c.setName || ''} #${c.cardNumber || ''}
+            </div>
+
+            ${variantNames.length > 1 ? `
+            <div style="margin-bottom:10px;">
+                <label style="font-size:0.8rem; color:var(--text-dim); margin-bottom:4px; display:block;">Variant / Printing</label>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                    ${variantNames.map(v => `
+                        <button class="btn btn-sm ${v === selectedVariant ? 'btn-primary' : 'btn-secondary'}"
+                                onclick="selectedVariant='${v.replace(/'/g,"\\'")}'; renderVariantPrices();">
+                            ${v}
+                        </button>
+                    `).join('')}
+                </div>
+            </div>` : (variantNames.length === 1 ? `
+            <div style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">
+                Printing: <strong style="color:var(--text);">${variantNames[0]}</strong>
+            </div>` : '')}
+
+            <div style="display:grid; grid-template-columns: repeat(5, 1fr); gap:8px;">
+                ${['NM','LP','MP','HP','DMG'].map(cond => {
+                    const price = currentVariant[cond];
+                    const isSelected = cond === selectedCond;
+                    const hasPrice = price !== null && price !== undefined;
+                    return `
+                    <div style="background:var(${isSelected ? '--accent' : '--surface-2'});
+                                color:${isSelected ? '#fff' : 'var(--text)'};
+                                padding:10px 6px; border-radius:6px; text-align:center; cursor:pointer;
+                                border:1px solid var(--border); opacity:${hasPrice ? '1' : '0.4'};"
+                         onclick="document.getElementById('raw-condition').value='${cond}'; renderVariantPrices();">
+                        <div style="font-size:0.75rem; font-weight:600;">${cond}</div>
+                        <div style="font-size:1.05rem; font-weight:700;">${hasPrice ? '$'+price.toFixed(2) : '—'}</div>
+                    </div>`;
+                }).join('')}
+            </div>
+            <small style="color:var(--text-dim); margin-top:6px; display:block;">
+                ${selectedVariant !== 'Default' ? `<strong>${selectedVariant}</strong> • ` : ''}
+                Selected: <strong>${selectedCond}</strong>
+                → ${currentVariant[selectedCond] != null ? '$' + currentVariant[selectedCond].toFixed(2) : 'no price data (will use market price)'}
+            </small>
+        `;
+    }
+
+    // Re-render when condition dropdown changes
+    document.getElementById('raw-condition').addEventListener('change', renderVariantPrices);
 
     async function addRawCard() {
         if (!rawSessionId) { alert('Start a session first'); return; }

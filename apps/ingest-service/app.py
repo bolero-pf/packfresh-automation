@@ -388,9 +388,9 @@ def finalize(session_id):
 
 @app.route("/api/ppt/lookup-card", methods=["POST"])
 def ppt_lookup_card():
-    """Look up a raw card by tcgplayer_id via PPT."""
+    """Look up a raw card by tcgplayer_id. Returns card data + variant/condition prices."""
     if not ppt:
-        return jsonify({"error": "PPT API not configured"}), 503
+        return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
 
     data = request.json or {}
     tcgplayer_id = data.get("tcgplayer_id")
@@ -400,8 +400,17 @@ def ppt_lookup_card():
     try:
         card_data = ppt.get_card_by_tcgplayer_id(int(tcgplayer_id))
         if not card_data:
-            return jsonify({"error": "Card not found"}), 404
-        return jsonify({"card": card_data})
+            return jsonify({"error": "Card not found in PPT"}), 404
+
+        # Extract structured variant → condition → price data
+        variants = PPTClient.extract_variants(card_data)
+        primary_printing = PPTClient.get_primary_printing(card_data)
+
+        return jsonify({
+            "card": card_data,
+            "variants": variants,            # {"Holofoil": {"NM": 103.85, "LP": 87.80, ...}, ...}
+            "primary_printing": primary_printing,  # "Holofoil"
+        })
     except PPTError as e:
         return jsonify({"error": str(e)}), 502
 
@@ -410,7 +419,7 @@ def ppt_lookup_card():
 def ppt_lookup_sealed():
     """Look up a sealed product by tcgplayer_id via PPT."""
     if not ppt:
-        return jsonify({"error": "PPT API not configured"}), 503
+        return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
 
     data = request.json or {}
     tcgplayer_id = data.get("tcgplayer_id")
@@ -420,17 +429,53 @@ def ppt_lookup_sealed():
     try:
         product_data = ppt.get_sealed_product_by_tcgplayer_id(int(tcgplayer_id))
         if not product_data:
-            return jsonify({"error": "Product not found"}), 404
+            return jsonify({"error": "Sealed product not found in PPT"}), 404
         return jsonify({"product": product_data})
+    except PPTError as e:
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/api/ppt/search-sealed", methods=["POST"])
+def ppt_search_sealed():
+    """Search sealed products by name via PPT /v2/sealed-products?search=..."""
+    if not ppt:
+        return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
+
+    data = request.json or {}
+    query = data.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "query required"}), 400
+
+    try:
+        results = ppt.search_sealed_products(query, limit=10)
+        return jsonify({"results": results})
+    except PPTError as e:
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/api/ppt/search-cards", methods=["POST"])
+def ppt_search_cards():
+    """Search cards by name via PPT /v2/cards?search=..."""
+    if not ppt:
+        return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
+
+    data = request.json or {}
+    query = data.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "query required"}), 400
+
+    try:
+        results = ppt.search_cards(query, limit=10)
+        return jsonify({"results": results})
     except PPTError as e:
         return jsonify({"error": str(e)}), 502
 
 
 @app.route("/api/ppt/parse-title", methods=["POST"])
 def ppt_parse_title():
-    """Fuzzy-match a product name via PPT's parse-title endpoint."""
+    """Fuzzy-match a product name via PPT's parse-title endpoint (best for card titles)."""
     if not ppt:
-        return jsonify({"error": "PPT API not configured"}), 503
+        return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
 
     data = request.json or {}
     title = data.get("title", "").strip()

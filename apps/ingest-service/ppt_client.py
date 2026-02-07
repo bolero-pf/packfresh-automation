@@ -1,12 +1,43 @@
 """
-PokemonPriceTracker API Client
-Adapted for intake service needs: card lookup, sealed product lookup, price verification.
-Based on existing PPTClient but streamlined for this service's use cases.
+PokemonPriceTracker API Client v3
+
+PPT Response shape for cards:
+    {"data": [{"name": "Charizard", "setName": "Base Set", "cardNumber": "4",
+               "rarity": "Holo Rare", "tcgPlayerId": 1234,
+               "prices": {
+                   "market": 103.85, "low": 87.05, "sellers": 28, "listings": 0,
+                   "primaryPrinting": "Holofoil",
+                   "conditions": {
+                       "Damaged": {"price": 49.99, ...},
+                       "Heavily Played": {"price": ..., ...},
+                       "Lightly Played": {"price": 87.80, ...},
+                       "Moderately Played": {"price": 64.95, ...},
+                       "Near Mint": {"price": 103.85, ...},
+                   },
+                   "variants": {
+                       "Holofoil": {
+                           "Damaged": {"price": 49.99, ...},
+                           "Lightly Played": {"price": 87.80, ...},
+                           "Near Mint": {"price": 103.85, ...},
+                           "Moderately Played": {"price": 64.95, ...},
+                           "Heavily Played": {"price": ..., ...},
+                       },
+                       "Reverse Holofoil": { ... },
+                       "Normal": { ... },
+                   }
+               }}]}
+
+Condition name mapping (PPT -> our codes):
+    "Near Mint"         -> NM
+    "Lightly Played"    -> LP
+    "Moderately Played" -> MP
+    "Heavily Played"    -> HP
+    "Damaged"           -> DMG
 """
 
 import time
 import logging
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
 import requests
@@ -14,14 +45,26 @@ import requests
 logger = logging.getLogger(__name__)
 
 UA = "pack-fresh-intake/1.0"
-DEFAULT_HEADERS = {
-    "Accept": "application/json",
-    "User-Agent": UA,
+DEFAULT_HEADERS = {"Accept": "application/json", "User-Agent": UA}
+
+# Mapping between our short codes and PPT's full condition names
+CONDITION_TO_PPT = {
+    "NM":  "Near Mint",
+    "LP":  "Lightly Played",
+    "MP":  "Moderately Played",
+    "HP":  "Heavily Played",
+    "DMG": "Damaged",
+}
+PPT_TO_CONDITION = {v: k for k, v in CONDITION_TO_PPT.items()}
+
+# Fallback multipliers only used when PPT doesn't return condition data
+FALLBACK_MULTIPLIERS = {
+    "NM": Decimal("1.00"), "LP": Decimal("0.80"), "MP": Decimal("0.65"),
+    "HP": Decimal("0.45"), "DMG": Decimal("0.25"),
 }
 
 
 class PPTError(Exception):
-    """PPT API error with status code and body"""
     def __init__(self, message: str, status_code: int = None, body=None):
         super().__init__(message)
         self.status_code = status_code
@@ -29,57 +72,36 @@ class PPTError(Exception):
 
 
 class PPTClient:
-    """
-    Client for PokemonPriceTracker API v2.
-    
-    Endpoints used:
-        GET  /api/v2/cards              - Raw card lookup by tcgPlayerId
-        GET  /api/v2/sealed-products    - Sealed product lookup by tcgPlayerId
-        POST /api/v2/parse-title        - Fuzzy match product names to find tcgPlayerId
-    """
 
     def __init__(self, api_key: str, base_url: str = "https://www.pokemonpricetracker.com/api"):
         self.base_url = base_url.rstrip("/")
         self.headers = {**DEFAULT_HEADERS, "Authorization": f"Bearer {api_key}"}
 
-    # ------------------------------------------------------------------
-    # Internal: request with backoff + rate-limit respect
-    # ------------------------------------------------------------------
+    # ── request engine ───────────────────────────────────────────────
 
-    def _request(self, method: str, url: str, *, params: dict = None,
-                 json_body: dict = None, max_tries: int = 4):
-        """HTTP request with retry, backoff, and rate-limit handling."""
+    def _request(self, method, url, *, params=None, json_body=None, max_tries=4):
         last_err = None
-
         for attempt in range(1, max_tries + 1):
             try:
-                if method == "GET":
-                    r = requests.get(url, headers=self.headers, params=params, timeout=15)
-                elif method == "POST":
-                    r = requests.post(url, headers=self.headers, json=json_body, timeout=15)
-                else:
-                    raise ValueError(f"Unsupported method: {method}")
+                r = (requests.get(url, headers=self.headers, params=params, timeout=15)
+                     if method == "GET" else
+                     requests.post(url, headers=self.headers, json=json_body, timeout=15))
             except requests.exceptions.RequestException as e:
                 logger.warning(f"PPT request failed (attempt {attempt}): {e}")
                 time.sleep(1.0 * attempt)
                 continue
 
-            # Happy path
             if r.status_code < 400:
-                # Respect rate limit headers if close to exhaustion
                 mr = r.headers.get("X-Ratelimit-Minute-Remaining")
                 reset = r.headers.get("X-Ratelimit-Minute-Reset")
-                if mr is not None and reset is not None:
+                if mr and reset:
                     try:
                         if int(mr) <= 1:
-                            wait = max(0.0, float(reset) - time.time() + 0.5)
-                            logger.info(f"PPT rate limit near exhaustion, sleeping {wait:.1f}s")
-                            time.sleep(wait)
+                            time.sleep(max(0.0, float(reset) - time.time() + 0.5))
                     except (ValueError, TypeError):
                         pass
                 return r.json()
 
-            # 429: rate limited
             if r.status_code == 429:
                 reset = r.headers.get("X-Ratelimit-Minute-Reset")
                 wait = 2.0 + attempt
@@ -88,194 +110,195 @@ class PPTClient:
                         wait = max(0.0, float(reset) - time.time() + 0.5)
                     except (ValueError, TypeError):
                         pass
-                logger.warning(f"PPT 429 rate limited, sleeping {wait:.1f}s (attempt {attempt})")
+                logger.warning(f"PPT 429, sleeping {wait:.1f}s")
                 time.sleep(wait)
                 continue
 
-            # Other errors
             last_err = r
             time.sleep(1.0 * attempt)
 
-        # Exhausted retries
         status = last_err.status_code if last_err else "UNKNOWN"
         body = None
         try:
             body = last_err.json() if last_err else None
         except Exception:
             body = last_err.text if last_err else None
-        raise PPTError(f"PPT API failed after {max_tries} attempts: {status}", status, body)
+        raise PPTError(f"PPT failed after {max_tries} tries: {status}", status, body)
 
-    def _get(self, url: str, params: dict = None, **kwargs):
-        return self._request("GET", url, params=params, **kwargs)
+    def _get(self, url, params=None, **kw):
+        return self._request("GET", url, params=params, **kw)
 
-    def _post(self, url: str, json_body: dict = None, **kwargs):
-        return self._request("POST", url, json_body=json_body, **kwargs)
+    def _post(self, url, json_body=None, **kw):
+        return self._request("POST", url, json_body=json_body, **kw)
 
-    # ------------------------------------------------------------------
-    # Public: Raw card lookup
-    # ------------------------------------------------------------------
-
-    def get_card_by_tcgplayer_id(self, tcgplayer_id: int, *,
-                                  days: int = 7,
-                                  include_history: bool = False) -> Optional[dict]:
-        """
-        Look up a raw card by tcgPlayerId.
-        Returns card data including prices.market and condition-based pricing.
-        
-        Response shape (relevant fields):
-        {
-            "data": [{
-                "name": "Charizard ex",
-                "setName": "Obsidian Flames",
-                "cardNumber": "125",
-                "rarity": "...",
-                "prices": {"market": 125.50, "low": ..., "mid": ..., "high": ...},
-                "tcgPlayerId": 490294,
-                ...
-            }]
-        }
-        """
-        url = f"{self.base_url}/v2/cards"
-        params = {
-            "tcgPlayerId": str(int(tcgplayer_id)),
-            "days": int(days),
-        }
-        if include_history:
-            params["includeHistory"] = "true"
-
-        resp = self._get(url, params)
-
-        # Extract from response
+    @staticmethod
+    def _extract_data(resp):
         data = resp.get("data", resp)
         if isinstance(data, list):
-            return data[0] if data else None
-        elif isinstance(data, dict) and "name" in data:
             return data
-        return None
+        if isinstance(data, dict) and ("name" in data or "productName" in data):
+            return [data]
+        return []
 
-    # ------------------------------------------------------------------
-    # Public: Sealed product lookup
-    # ------------------------------------------------------------------
+    # ── card endpoints ───────────────────────────────────────────────
 
-    def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id: int, *,
-                                            days: int = 7,
-                                            include_history: bool = False) -> Optional[dict]:
-        """
-        Look up a sealed product by tcgPlayerId.
-        Uses the dedicated /v2/sealed-products endpoint.
-        
-        Response includes market price and recent sales data.
-        """
-        url = f"{self.base_url}/v2/sealed-products"
-        params = {
-            "tcgPlayerId": str(int(tcgplayer_id)),
-            "days": int(days),
-        }
+    def get_card_by_tcgplayer_id(self, tcgplayer_id, *, days=7, include_history=False):
+        params = {"tcgPlayerId": str(int(tcgplayer_id)), "days": int(days)}
         if include_history:
             params["includeHistory"] = "true"
+        items = self._extract_data(self._get(f"{self.base_url}/v2/cards", params))
+        return items[0] if items else None
 
-        resp = self._get(url, params)
+    def search_cards(self, query, *, limit=10):
+        params = {"search": query, "limit": limit}
+        return self._extract_data(self._get(f"{self.base_url}/v2/cards", params))
 
-        data = resp.get("data", resp)
-        if isinstance(data, list):
-            return data[0] if data else None
-        elif isinstance(data, dict) and "name" in data:
-            return data
-        return None
+    # ── sealed product endpoints ─────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    # Public: Fuzzy title matching (for auto-suggesting tcgplayer IDs)
-    # ------------------------------------------------------------------
+    def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, days=7, include_history=False):
+        params = {"tcgPlayerId": str(int(tcgplayer_id)), "days": int(days)}
+        if include_history:
+            params["includeHistory"] = "true"
+        items = self._extract_data(self._get(f"{self.base_url}/v2/sealed-products", params))
+        return items[0] if items else None
 
-    def parse_title(self, title: str, *, fuzzy: bool = True,
-                    max_suggestions: int = 5) -> list[dict]:
-        """
-        Use the parse-title endpoint to fuzzy-match a product name.
-        Useful for suggesting tcgplayer_id when staff is mapping Collectr items.
-        
-        Returns list of matches with confidence scores:
-        [{"card": {"name": ..., "tcgPlayerId": ..., "prices": {...}}, "confidence": 0.95}, ...]
-        """
-        url = f"{self.base_url}/v2/parse-title"
+    def search_sealed_products(self, query, *, limit=10):
+        params = {"search": query, "limit": limit}
+        return self._extract_data(self._get(f"{self.base_url}/v2/sealed-products", params))
+
+    # ── parse-title ──────────────────────────────────────────────────
+
+    def parse_title(self, title, *, fuzzy=True, max_suggestions=5):
         body = {
             "title": title,
-            "options": {
-                "fuzzyMatching": fuzzy,
-                "maxSuggestions": max_suggestions,
-                "includeConfidence": True,
-            }
+            "options": {"fuzzyMatching": fuzzy, "maxSuggestions": max_suggestions, "includeConfidence": True},
         }
-
         try:
-            resp = self._post(url, body)
+            resp = self._post(f"{self.base_url}/v2/parse-title", body)
             matches = resp.get("matches") or resp.get("data", {}).get("matches", [])
             return matches if isinstance(matches, list) else []
         except PPTError as e:
             logger.warning(f"parse_title failed for '{title}': {e}")
             return []
 
-    # ------------------------------------------------------------------
-    # Helpers: Extract standardized pricing from PPT responses
-    # ------------------------------------------------------------------
+    # ── price extraction ─────────────────────────────────────────────
 
     @staticmethod
-    def extract_market_price(card_data: dict) -> Optional[Decimal]:
-        """Extract market price from a PPT card or sealed-product response."""
+    def extract_market_price(card_data):
+        """Extract NM market price."""
         if not card_data:
             return None
-
         prices = card_data.get("prices", {})
         if isinstance(prices, dict):
             market = prices.get("market") or prices.get("mid")
             if market is not None:
                 return Decimal(str(market))
-
-        # Fallback: check top-level fields
         for key in ("market_price", "marketPrice", "price"):
             val = card_data.get(key)
             if val is not None:
                 return Decimal(str(val))
-
         return None
 
     @staticmethod
-    def extract_condition_price(card_data: dict, condition: str) -> Optional[Decimal]:
+    def extract_variants(card_data) -> dict:
         """
-        Extract condition-specific price from a PPT card response.
-        PPT includes TCGPlayer condition pricing in the response.
+        Extract all variant → condition → price data from the PPT response.
         
-        Condition mapping:
-            NM  -> Near Mint
-            LP  -> Lightly Played  
-            MP  -> Moderately Played
-            HP  -> Heavily Played
-            DMG -> Damaged
+        Returns:
+            {
+                "Holofoil": {"NM": 103.85, "LP": 87.80, "MP": 64.95, "HP": None, "DMG": 49.99},
+                "Reverse Holofoil": {"NM": ..., ...},
+                ...
+            }
+        Also includes the "primaryPrinting" field if available.
         """
-        CONDITION_MAP = {
-            "NM": "nearMint",
-            "LP": "lightlyPlayed",
-            "MP": "moderatelyPlayed",
-            "HP": "heavilyPlayed",
-            "DMG": "damaged",
-            # Full name variants
-            "Near Mint": "nearMint",
-            "Lightly Played": "lightlyPlayed",
-            "Moderately Played": "moderatelyPlayed",
-            "Heavily Played": "heavilyPlayed",
-            "Damaged": "damaged",
-        }
-
         if not card_data:
-            return None
+            return {}
 
-        mapped = CONDITION_MAP.get(condition, "nearMint")
         prices = card_data.get("prices", {})
+        if not isinstance(prices, dict):
+            return {}
 
-        # Try direct condition key
-        if isinstance(prices, dict):
-            val = prices.get(mapped)
-            if val is not None:
-                return Decimal(str(val))
+        result = {}
+        variants = prices.get("variants", {})
 
-        # Fallback to market price
+        if variants and isinstance(variants, dict):
+            for variant_name, conditions in variants.items():
+                if not isinstance(conditions, dict):
+                    continue
+                variant_prices = {}
+                for ppt_cond, cond_data in conditions.items():
+                    short_code = PPT_TO_CONDITION.get(ppt_cond)
+                    if short_code and isinstance(cond_data, dict):
+                        price = cond_data.get("price")
+                        variant_prices[short_code] = float(price) if price is not None else None
+                if variant_prices:
+                    result[variant_name] = variant_prices
+
+        # If no variants found, try the flat "conditions" object
+        if not result:
+            conditions = prices.get("conditions", {})
+            if conditions and isinstance(conditions, dict):
+                flat = {}
+                for ppt_cond, cond_data in conditions.items():
+                    short_code = PPT_TO_CONDITION.get(ppt_cond)
+                    if short_code and isinstance(cond_data, dict):
+                        price = cond_data.get("price")
+                        flat[short_code] = float(price) if price is not None else None
+                if flat:
+                    variant_label = prices.get("primaryPrinting", "Default")
+                    result[variant_label] = flat
+
+        # Last resort: use market price with fallback multipliers
+        if not result:
+            nm = PPTClient.extract_market_price(card_data)
+            if nm is not None:
+                result["Default"] = {
+                    code: float((nm * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                    for code, mult in FALLBACK_MULTIPLIERS.items()
+                }
+
+        return result
+
+    @staticmethod
+    def get_primary_printing(card_data) -> str:
+        """Get the primary printing variant name (e.g., 'Holofoil')."""
+        if not card_data:
+            return "Default"
+        prices = card_data.get("prices", {})
+        return prices.get("primaryPrinting", "Default") if isinstance(prices, dict) else "Default"
+
+    @staticmethod
+    def extract_condition_price(card_data, condition, variant=None):
+        """
+        Get price for a specific condition + variant.
+        If variant is None, uses primaryPrinting.
+        Falls back to market price × multiplier if structured data unavailable.
+        """
+        variants = PPTClient.extract_variants(card_data)
+        if not variants:
+            nm = PPTClient.extract_market_price(card_data)
+            if nm is None:
+                return None
+            mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
+            return (nm * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        # Pick variant
+        if variant and variant in variants:
+            v = variants[variant]
+        else:
+            # Use primary printing or first available
+            primary = PPTClient.get_primary_printing(card_data)
+            v = variants.get(primary) or next(iter(variants.values()))
+
+        price = v.get(condition)
+        if price is not None:
+            return Decimal(str(price))
+
+        # Condition not available in this variant; fall back to NM × multiplier
+        nm = v.get("NM")
+        if nm is not None:
+            mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
+            return (Decimal(str(nm)) * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
         return PPTClient.extract_market_price(card_data)
