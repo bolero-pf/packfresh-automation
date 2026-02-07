@@ -23,6 +23,8 @@ def _patch_profile(profile_id: str, properties: dict, timeout=10):
         raise KlaviyoError(f"PATCH failed {r.status_code}: {r.text}")
     return r.json()
 
+
+
 def upsert_profile(*, email=None, external_id=None, properties: dict, timeout=10):
     # Strategy:
     # 1) POST using EMAIL ONLY (preferred unique key).

@@ -1,0 +1,10 @@
+<!doctype html>
+<title>Run {{ m.run_id }}</title>
+<h1>Run {{ m.run_id }}</h1>
+<p><a href="{{ url_for('slabs_reports.runs_index') }}">← All runs</a></p>
+<ul>
+  <li><a href="{{ url_for('slabs_reports.run_bucket', run_id=m.run_id, bucket='updated') }}">updated</a> ({{ m.counts.updated }})</li>
+  <li><a href="{{ url_for('slabs_reports.run_bucket', run_id=m.run_id, bucket='flag_down') }}">flag_down</a> ({{ m.counts.flag_down }})</li>
+  <li><a href="{{ url_for('slabs_reports.run_bucket', run_id=m.run_id, bucket='no_data') }}">no_data</a> ({{ m.counts.no_data }})</li>
+  <li><a href="{{ url_for('slabs_reports.run_bucket', run_id=m.run_id, bucket='skipped') }}">skipped</a> ({{ m.counts.skipped }})</li>
+</ul>

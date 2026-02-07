@@ -11,21 +11,23 @@ load_dotenv()
 
 BASE_ORIGIN = os.getenv("BASE_ORIGIN", "https://prices.pack-fresh.com")
 SECRET      = os.getenv("VIP_FLOW_SECRET", "")
-MODE        = (sys.argv[1] if len(sys.argv) > 1 else "backfill").lower()
+MODE        = (sys.argv[1] if len(sys.argv) > 1 else "retag").lower()
 
 # keep pages quick; tune after you watch timings
-PAGE_SIZE   = int(os.getenv("PAGE_SIZE", "75"))
+PAGE_SIZE   = int(os.getenv("PAGE_SIZE", "25"))
 
 # use tuple (connect, read). keep read < common edge caps
 CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "10"))
 READ_TIMEOUT    = int(os.getenv("READ_TIMEOUT", "60"))
 TIMEOUT         = (CONNECT_TIMEOUT, READ_TIMEOUT)
 
-if MODE not in ("backfill","sweep"):
-    print("Usage: python runner.py [backfill|sweep]")
-    sys.exit(2)
+if MODE not in ("backfill","sweep","retag"):
+     print("Usage: python runner.py [backfill|sweep]")
+     sys.exit(2)
 
-endpoint = "/vip/backfill" if MODE=="backfill" else "/vip/sweep_vips"
+endpoint = "/vip/backfill"
+endpoint = "/vip/backfill" if MODE=="backfill" else ("/vip/sweep_vips" if MODE=="sweep" else "/vip/retag_only")
+
 URL = f"{BASE_ORIGIN}{endpoint}"
 
 session = requests.Session()

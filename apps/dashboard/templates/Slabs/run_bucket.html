@@ -1,0 +1,179 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{{ bucket }} – {{ run_id }}</title>
+  <style>
+  :root{
+    --pf-navy:#242833; --pf-olive:#fec657; --pf-cream:#fcf7e1; --pf-blue:#238bca;
+    --pf-gold-hover:#d0a247; --pf-green:#019b5f; --pf-red:#f05d4d; --pf-pink:#f37ca6;
+
+    --bg:var(--pf-cream); --text:var(--pf-navy); --muted:#6b7182; --edge:#e7e2cf;
+    --card:#fff; --thead-bg:var(--pf-navy); --thead-fg:var(--pf-cream); --row-alt:#f7f2dd;
+  }
+  html,body{background:var(--bg); color:var(--text); font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;}
+  a{color:var(--pf-blue); text-decoration:none;} a:hover{text-decoration:underline;}
+  .wrap{max-width:1200px; margin:24px auto; padding:0 16px;}
+  h1{font-size:20px; margin:0 0 12px; font-weight:700;}
+  .actions-top{display:flex; gap:10px; align-items:center; margin:14px 0 16px;}
+  .right{margin-left:auto;}
+  .btn{border:1px solid transparent; padding:8px 12px; border-radius:8px; cursor:pointer; font-weight:600;}
+  .btn:disabled{opacity:.55; cursor:not-allowed;}
+  .btn.save{background:var(--pf-olive); color:var(--pf-navy);} .btn.save:hover{background:var(--pf-gold-hover);}
+  .btn.push{background:var(--pf-green); color:#fff;} .btn.push:hover{filter:brightness(.95);}
+  .btn.secondary{background:#fff; color:var(--pf-navy); border-color:var(--edge);} .btn.secondary:hover{background:#faf6e6;}
+  input[type="text"], input[type="search"]{background:#fff; color:var(--text); border:1px solid var(--edge); border-radius:8px; padding:6px 10px;}
+  input[size]{width:6.5rem;}
+  table{width:100%; border-collapse:separate; border-spacing:0; background:var(--card); border:1px solid var(--edge); border-radius:12px; overflow:hidden;}
+  thead th{position:sticky; top:0; z-index:2; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--thead-fg); background:var(--thead-bg); padding:10px; text-align:left;}
+  tbody td{padding:12px 10px; border-top:1px solid var(--edge); vertical-align:middle;}
+  tbody tr:nth-child(even){background:var(--row-alt);} tbody tr:hover{background:#f0e9cd;}
+  .price{font-variant-numeric:tabular-nums;}
+  .checkbox{width:18px;height:18px; accent-color:var(--pf-olive);}
+  .badge{display:inline-block; font-size:12px; line-height:1; padding:4px 8px; border-radius:999px; border:1px solid var(--edge); color:var(--muted); background:#fff;}
+  .badge.saved{color:var(--pf-navy); border-color:var(--pf-olive); background:#fff6da;}
+  .badge.ok{color:#fff; background:var(--pf-green); border-color:var(--pf-green);}
+  .flashlist{list-style:none; margin:0 0 12px; padding:0;}
+  .flashlist li{background:#fff; border:1px solid var(--edge); padding:10px 12px; border-radius:8px; margin-bottom:8px;}
+  .flex{display:flex; gap:6px; align-items:center;}
+  .muted{color:var(--muted);}
+  .row-actions form{display:inline;}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="flex">
+    <h1>{{ bucket|replace('_',' ')|title }} – {{ run_id }}</h1>
+    <a class="right" href="{{ url_for('slabs_reports.run_summary', run_id=run_id) }}">← Back to run</a>
+  </div>
+
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% if msgs %}
+      <ul class="flashlist">
+        {% for cat,msg in msgs %}
+          <li><span class="badge">{{ cat }}</span> {{ msg }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endwith %}
+
+  <form id="bulk" class="actions-top" method="post"
+        action="{{ url_for('slabs_reports.save_bulk', run_id=run_id, bucket=bucket) }}">
+    <button class="btn save" type="submit">Save selected</button>
+    <button class="btn push"
+            formaction="{{ url_for('slabs_reports.push_bulk', run_id=run_id, bucket=bucket) }}"
+            {% if not allow_push %}disabled{% endif %}>
+      Push selected{% if not allow_push %} (writes disabled){% endif %}
+    </button>
+    <input class="right" id="q" type="search" placeholder="Filter…" oninput="filterRows()">
+  </form>
+
+  {% if rows %}
+  <table id="t">
+    <thead>
+      <tr>
+        <th><input type="checkbox" class="checkbox" onclick="document.querySelectorAll('input[name=selected]').forEach(x=>x.checked=this.checked)"></th>
+        <th>Product</th>
+        <th style="width:110px">Old</th>
+        <th style="width:140px">New</th>
+        <th style="width:160px">Source</th>
+        <th style="width:160px">Actions</th>
+        <th style="width:120px">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set _approved_map = approved_map|default({}) %}
+      {% for r in rows %}
+        {% set vid = r['variant_id'] %}
+        {% set raw_suggest = r.get('target') or r.get('new') %}
+        {% set saved_price = _approved_map.get(vid) %}
+        {% set display_price = saved_price if saved_price is not none else raw_suggest %}
+      <tr>
+        <td><input class="checkbox" form="bulk" type="checkbox" name="selected" value="{{ vid }}"></td>
+
+        <td>
+          <div class="flex">
+            <div>{{ r['product_title'] }}</div>
+            {% if r.tcgplayer_id %}<span class="badge muted">TPID {{ r.tcgplayer_id }}</span>{% endif %}
+          </div>
+        </td>
+
+        <td class="price">${{ '%.2f'|format((r['old'] or 0)|float) }}</td>
+
+        <td class="price">
+          <form method="post" action="{{ url_for('slabs_reports.save_one', run_id=run_id, bucket=bucket) }}" style="display:flex; gap:6px; align-items:center;">
+            <input type="hidden" name="variant_id" value="{{ vid }}">
+            <input name="price"
+                   value="{{ '%.2f'|format(display_price|float) if display_price is not none else '' }}"
+                   size="6"
+                   {% if saved_price is not none %}style="background:#fff6da;border-color:#fec657"{% endif %}>
+            <button class="btn save" type="submit">Save</button>
+          </form>
+          {% if saved_price is not none %}
+            <div class="muted" style="font-size:12px;margin-top:4px;">
+              saved at <strong>${{ '%.2f'|format(saved_price|float) }}</strong>
+            </div>
+          {% endif %}
+            <!-- NEW: this hidden field belongs to the top bulk form -->
+        <input type="hidden"
+         form="bulk"
+         name="price[{{ vid }}]"
+         id="bulk_price_{{ vid }}"
+         value="{{ '%.2f'|format(display_price|float) if display_price is not none else '' }}">
+        </td>
+
+        <td>{{ r['source'] or '-' }}</td>
+
+        <td class="row-actions">
+          <form method="post" action="{{ url_for('slabs_reports.push_one', run_id=run_id, bucket=bucket) }}">
+            <input type="hidden" name="variant_id" value="{{ vid }}">
+            <input type="hidden" name="price"
+                   value="{{ '%.2f'|format(display_price|float) if display_price is not none else '' }}">
+            <button class="btn push" type="submit" {% if not allow_push %}disabled{% endif %}>Push</button>
+          </form>
+        </td>
+
+        <td>
+          {% if vid in applied_ids %}
+            <span class="badge ok">pushed</span>
+          {% elif vid in approved_ids %}
+            <span class="badge saved">saved</span>
+          {% else %}
+            <span class="badge">pending</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">No entries.</p>
+  {% endif %}
+</div>
+
+<script>
+  function filterRows(){
+    const q = document.getElementById('q').value.toLowerCase();
+    document.querySelectorAll('#t tbody tr').forEach(tr=>{
+      tr.style.display = tr.innerText.toLowerCase().includes(q) ? '' : 'none';
+    });
+  }
+</script>
+<script>
+  // existing filterRows() stays
+
+  // NEW: on bulk submit, copy the visible per-row price into the hidden input bound to the bulk form
+  document.getElementById('bulk').addEventListener('submit', function () {
+    document.querySelectorAll('#t tbody tr').forEach(tr => {
+      const cb = tr.querySelector('input[name="selected"]');
+      if (!cb || !cb.checked) return;
+      const vid = cb.value;
+      const visible = tr.querySelector('input[name="price"]');
+      const hidden  = document.getElementById('bulk_price_' + vid);
+      if (visible && hidden) hidden.value = visible.value;
+    });
+  });
+</script>
+
+</body>
+</html>

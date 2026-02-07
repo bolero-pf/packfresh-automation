@@ -46,6 +46,12 @@ def _png_bytes(im: Image.Image) -> bytes:
     im.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
+def normalize_pokemon_text(s: str) -> str:
+    """
+    Force ASCII-safe 'Pokemon' spelling (no accents) everywhere.
+    """
+    s = strip_accents(s or "")
+    return re.sub(r"(?i)\bpokemon\b", "Pokemon", s)
 def _shopify_staged_upload_png(filename: str, data: bytes) -> dict:
     """Stage a file to Shopify and return { 'resourceUrl', 'mimeType' } etc."""
     gql_url = f"https://{SHOPIFY_DOMAIN}/admin/api/{SHOPIFY_VERSION}/graphql.json"
@@ -648,7 +654,7 @@ def build_clean_description(psa):
     year = psa.get("Year", "").strip()
 
     # --- IP extraction (always 'Pokémon' from Brand for your use case)
-    ip = "Pokémon"
+    ip = "Pokemon"
 
     # --- Set extraction from Brand
     brand = psa.get("Brand", "").strip()
@@ -713,7 +719,7 @@ def build_clean_description(psa):
         f"<p>Population: {population}</p>"
     ]
 
-    return "\n".join(html_lines)
+    return normalize_pokemon_text("\n".join(html_lines))
 
 
 def normalize_grade(raw):
@@ -740,10 +746,11 @@ def build_clean_title(psa):
     card_name   = clean_card_name(psa.get("Subject", "") or "")
 
     # Always use “Pokémon” IP label in titles
-    ip = "Pokémon"
+    ip = "Pokemon"
 
     # e.g., "2016 Pokémon Generations – Radiant Collection Gardevoir EX #RC30 PSA 9"
-    return f"{year} {ip} {set_display} {card_name} #{card_number} PSA {grade}".strip()
+    title = f"{year} {ip} {set_display} {card_name} #{card_number} PSA {grade}".strip()
+    return normalize_pokemon_text(title)
 def find_product_existing(title, cert_number=None, gtin_as_sku=None):
     url_base = f"https://{SHOPIFY_DOMAIN}/admin/api/{SHOPIFY_VERSION}"
     headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN}

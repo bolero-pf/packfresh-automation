@@ -1,0 +1,78 @@
+{% extends "layout.html" %}
+{% block content %}
+<form class="controls" method="get">
+  <input name="q" value="{{ q }}" placeholder="Search (e.g. status:active sku:ABC)">
+  <select name="first">
+    {% for n in [25,50,100,150,200,250] %}
+    <option value="{{n}}" {% if n==first %}selected{% endif %}>{{n}} / page</option>
+    {% endfor %}
+  </select>
+  <button>Apply</button>
+</form>
+
+<form id="bulkForm">
+<table class="grid">
+  <thead>
+  <tr>
+    <th><input type="checkbox" id="checkAll"></th>
+    <th>Product</th><th>Variant</th><th>SKU</th><th>GTIN</th>
+    <th>Price</th><th>Qty</th>
+  </tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr data-id="{{ r.id }}">
+      <td><input type="checkbox" class="rowchk"></td>
+      <td>{{ r.product }}</td>
+      <td>{{ r.variant }}</td>
+      <td>{{ r.sku }}</td>
+      <td>{{ r.gtin }}</td>
+      <td contenteditable="true" data-field="price">{{ r.price }}</td>
+      <td contenteditable="true" data-field="inventoryQuantity">{{ r.qty }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<div class="actions">
+  <button type="button" id="saveSelected">Save Selected</button>
+  {% if has_next %}
+    <a class="next" href="?q={{q}}&first={{first}}&cursor={{end_cursor}}">Next →</a>
+  {% endif %}
+</div>
+</form>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+
+$("#checkAll").addEventListener("change", e => {
+  $$(".rowchk").forEach(c => c.checked = e.target.checked);
+});
+
+$("#saveSelected").addEventListener("click", async () => {
+  const rows = $$(".rowchk:checked").map(c => c.closest("tr"));
+  if (!rows.length) return alert("No rows selected");
+  const payload = rows.map(tr => {
+    const id = tr.dataset.id;
+    const obj = { id };
+    tr.querySelectorAll("[data-field]").forEach(cell => {
+      const key = cell.dataset.field;
+      const val = cell.textContent.trim();
+      if (key === "inventoryQuantity") obj[key] = parseInt(val || "0", 10);
+      else obj[key] = val;
+    });
+    return obj;
+  });
+
+  const res = await fetch("{{ url_for('actions.update_variants') }}", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const j = await res.json();
+  if (j.ok) alert("Saved");
+  else alert("Errors:\n" + JSON.stringify(j.errors, null, 2));
+});
+</script>
+{% endblock %}

@@ -1,0 +1,16 @@
+:root { --bg:#0f1115; --txt:#e6e6ea; --muted:#a1a1aa; --card:#181b22; --line:#2a2f3a; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.45 system-ui,Segoe UI,Roboto,Arial; }
+.container { max-width:1200px; margin:24px auto; padding:0 16px; }
+.topbar { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:#12151b; border-bottom:1px solid var(--line);}
+.topbar a { color:var(--txt); text-decoration:none; margin-left:12px; }
+.brand { font-weight:700; }
+.controls { display:flex; gap:8px; margin:12px 0; }
+.controls input, .controls select, .controls button { background:var(--card); border:1px solid var(--line); color:var(--txt); padding:8px; border-radius:8px; }
+.grid { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); }
+.grid th, .grid td { border-bottom:1px solid var(--line); padding:10px; vertical-align:middle; }
+.grid th { text-align:left; color:var(--muted); position:sticky; top:0; background:var(--card); }
+.grid td[contenteditable="true"] { outline:2px solid transparent; }
+.grid td[contenteditable="true"]:focus { outline:2px solid #3b82f6; }
+.actions { display:flex; gap:12px; align-items:center; margin:12px 0; }
+.actions .next { color:#cbd5e1; text-decoration:none; }

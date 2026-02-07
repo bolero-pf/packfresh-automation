@@ -1,0 +1,638 @@
+{% comment %}
+VIP Status section
+Relies on customer.metafields.custom.vip_public (JSON, Storefront access ON).
+{% endcomment %}
+
+<section class="pf-vip container">
+  {% if customer %}
+    {% assign vp = customer.metafields.custom.vip_public.value %}
+    {% if vp %}
+      {% assign tier = vp.tier | default: "VIP0" %}
+      {% case tier %}
+        {% when "VIP0" %}{% assign tier_name = "Villager" %}
+        {% when "VIP1" %}{% assign tier_name = "Adventurer" %}
+        {% when "VIP2" %}{% assign tier_name = "Guardian" %}
+        {% when "VIP3" %}{% assign tier_name = "Champion" %}
+        {% else %}{% assign tier_name = "Villager" %}
+      {% endcase %}
+
+      {%- assign lock_obj = vp.lock | default: nil -%}
+      {%- assign lock_end = lock_obj.end | default: nil -%}
+
+      {%- comment -%} -------- Numbers & state (compute early) -------- {%- endcomment -%}
+      {%- assign next_remaining = vp.next.remaining | plus: 0 -%}
+      {%- assign next_threshold = vp.next.threshold | plus: 0 -%}
+
+      {%- case tier -%}
+        {%- when "VIP0" -%}{% assign floor = 0 %}
+        {%- when "VIP1" -%}{% assign floor = 500 %}
+        {%- when "VIP2" -%}{% assign floor = 1250 %}
+        {%- when "VIP3" -%}{% assign floor = 2500 %}
+        {%- else -%}{% assign floor = 0 %}
+      {%- endcase -%}
+
+      {%- if next_threshold > 0 -%}
+        {%- assign cur_spend = next_threshold | minus: next_remaining -%}
+      {%- elsif tier == "VIP3" -%}
+        {%- assign cur_spend = floor -%}
+      {%- else -%}
+        {%- assign cur_spend = 0 -%}
+      {%- endif -%}
+
+      {%- assign cap = next_threshold -%}
+      {%- if cap <= 0 -%}{% assign cap = floor | times: 2 %}{% endif %}
+
+      {%- assign p_v1 = 500 | times: 100 | divided_by: cap | round -%}
+      {%- if p_v1 < 0 -%}{% assign p_v1 = 0 %}{% endif -%}{%- if p_v1 > 100 -%}{% assign p_v1 = 100 %}{% endif -%}
+
+      {%- assign p_v2 = 1250 | times: 100 | divided_by: cap | round -%}
+      {%- if p_v2 < 0 -%}{% assign p_v2 = 0 %}{% endif -%}{%- if p_v2 > 100 -%}{% assign p_v2 = 100 %}{% endif -%}
+
+      {%- assign p_v3 = 2500 | times: 100 | divided_by: cap | round -%}
+      {%- if p_v3 < 0 -%}{% assign p_v3 = 0 %}{% endif -%}{%- if p_v3 > 100 -%}{% assign p_v3 = 100 %}{% endif -%}
+
+
+
+
+
+
+
+      {%- comment -%} Progress values {%- endcomment -%}
+      {%- comment -%} --- PCT ONLY: does not touch floor_pct --- {%- endcomment -%}
+      {%- comment -%} --- PCT ONLY (does not touch floor_pct) --- {%- endcomment -%}
+      {%- assign pct_next = 0 -%}
+
+      {%- assign has_maintain = false -%}
+      {%- if vp.maintain and vp.maintain.threshold -%}
+        {%- assign has_maintain = true -%}
+      {%- endif -%}
+
+      {%- if tier == "VIP3" and has_maintain -%}
+        {%- assign m_thresh = vp.maintain.threshold | plus: 0 -%}
+        {%- assign m_rem   = vp.maintain.remaining | default: 0 | plus: 0 -%}
+        {%- if m_thresh > 0 -%}
+          {%- assign m_cur = m_thresh | minus: m_rem -%}
+          {%- assign pct_next = m_cur | times: 100 | divided_by: m_thresh | round -%}
+        {%- else -%}
+          {%- assign pct_next = 100 -%}
+        {%- endif -%}
+
+      {%- elsif vp.progress -%}
+        {%- assign pct_next = vp.progress | times: 100 | round -%}
+
+      {%- elsif next_threshold > 0 -%}
+        {%- assign pct_next = cur_spend | times: 100 | divided_by: next_threshold | round -%}
+
+      {%- elsif tier == "VIP3" -%}
+        {%- assign pct_next = 100 -%}
+      {%- endif -%}
+
+      {%- if pct_next < 0 -%}{%- assign pct_next = 0 -%}{%- endif -%}
+      {%- if pct_next > 100 -%}{%- assign pct_next = 100 -%}{%- endif -%}
+      {%- if pct_next > 100 -%}{%- assign pct_next = 100 -%}{%- endif -%}
+
+      {%- assign floor_pct = 100 -%}
+      {%- if next_threshold > 0 -%}
+        {%- assign floor_pct = floor | times: 100 | divided_by: next_threshold -%}
+      {%- endif -%}
+      {%- assign floor_pct = floor_pct | round -%}
+      {%- if floor_pct < 0 -%}{% assign floor_pct = 0 %}{%- endif -%}
+      {%- if floor_pct > 100 -%}{% assign floor_pct = 100 %}{%- endif -%}
+
+      {%- comment -%} Tier colors {%- endcomment -%}
+      {%- assign color_vip0 = '#444' -%}
+      {%- assign color_vip1 = '#238bca' -%}
+      {%- assign color_vip2 = '#019b5f' -%}
+      {%- assign color_vip3 = '#dfa260' -%}
+
+      {%- assign bar_color = color_vip1 -%}
+      {%- if tier == "VIP1" -%}
+        {%- assign bar_color = color_vip1 -%}
+      {%- elsif tier == "VIP2" -%}
+        {%- assign bar_color = color_vip2 -%}
+      {%- elsif tier == "VIP3" -%}
+        {%- assign bar_color = color_vip3 -%}
+      {%- endif -%}
+
+      {%- assign at_risk = false -%}
+      {%- if tier != "VIP0" and cur_spend < floor -%}
+        {%- assign at_risk = true -%}
+      {%- endif -%}
+      {% if next_threshold < 1250 %}
+        {% assign beyond_v2 = true %}
+      {% else %}
+        {% assign beyond_v2 = false %}
+      {% endif %}
+
+      {% if next_threshold < 2500 %}
+        {% assign beyond_v3 = true %}
+      {% else %}
+        {% assign beyond_v3 = false %}
+      {% endif %}
+      {%- comment -%} Tier names helper {%- endcomment -%}
+      {%- assign name_v0 = "Villager" -%}
+      {%- assign name_v1 = "Explorer" -%}
+      {%- assign name_v2 = "Vanguard" -%}
+      {%- assign name_v3 = "Champion" -%}
+
+      {%- comment -%} Determine next tier name {%- endcomment -%}
+      {%- case tier -%}
+        {%- when "VIP0" -%}{% assign next_name = name_v1 %}
+        {%- when "VIP1" -%}{% assign next_name = name_v2 %}
+        {%- when "VIP2" -%}{% assign next_name = name_v3 %}
+        {%- else -%}{% assign next_name = blank %}
+      {%- endcase -%}
+
+      {%- comment -%} Left-end label by tier {%- endcomment -%}
+      {%- case tier -%}
+        {%- when "VIP0" -%}{% assign left_name = name_v0 %}
+        {%- when "VIP1" -%}{% assign left_name = name_v0 %}
+        {%- when "VIP2" -%}{% assign left_name = name_v1 %}
+        {%- else -%}{% assign left_name = name_v2 %}
+      {%- endcase -%}
+
+      {%- comment -%} map names → css keys for chip colors {%- endcomment -%}
+      {%- case left_name -%}
+        {%- when "Villager" -%}{% assign left_key = "vip0" %}
+        {%- when "Explorer" -%}{% assign left_key = "vip1" %}
+        {%- when "Vanguard" -%}{% assign left_key = "vip2" %}
+        {%- when "Champion" -%}{% assign left_key = "vip3" %}
+      {%- endcase -%}
+
+      {%- if next_name -%}
+        {%- case next_name -%}
+          {%- when "Villager" -%}{% assign right_key = "vip0" %}
+          {%- when "Explorer" -%}{% assign right_key = "vip1" %}
+          {%- when "Vanguard" -%}{% assign right_key = "vip2" %}
+          {%- when "Champion" -%}{% assign right_key = "vip3" %}
+        {%- endcase -%}
+      {%- endif -%}
+
+      {% if tier != "VIP0" %}
+        {%- assign show_notch = true -%}
+      {% else %}
+        {%- assign show_notch = false -%}
+      {% endif %}
+      {% if tier != "VIP3" %}
+        {%- assign show_right = true -%}
+      {% else %}
+        {%- assign show_right = false -%}
+      {% endif %}
+
+
+{% comment %} used to dim later ticks {% endcomment %}
+
+      {%- assign risk_class = '' -%}
+      {%- if at_risk -%}
+        {%- assign risk_class = 'is-risk' -%}
+      {%- endif -%}
+
+      {%- assign next_remaining = vp.next.remaining | plus: 0 -%}
+      {% if tier == "VIP3" %}
+        {%- assign is_top = true -%}
+      {% else %}
+        {%- assign is_top = false -%}
+      {% endif %}
+
+      <div class="pf-card {{ risk_class }}">
+        <div class="pf-head">
+          <h1 class="pf-title">Your VIP Status</h1>
+          <span class="pf-tier-badge pf-{{ tier | downcase }} {% if at_risk %}is-risk{% endif %}">{{ tier_name }}</span>
+        </div>
+
+        <div class="pf-row">
+          <div class="pf-col">
+            <div class="pf-label">
+                {%- if is_top -%} Status: <strong>Champion Tier</strong>
+                {%- else -%} Progress to {{ next_name }}:
+                {%- endif -%}
+              </div>
+
+            <div class="pf-progress"
+              style="--pct: {{ pct_next }}%; --floor: {{ floor_pct }}%; --bar: {{ bar_color }};">
+            <span class="pf-progress-fill"></span>
+            {% unless floor == 0 or tier == "VIP3"%}
+            <span class="pf-floor-notch" tabindex="0" aria-label="Maintain floor"></span>
+            <span class="pf-floor-tip">Maintain: {{ floor | times: 100 | money_without_trailing_zeros }}</span>
+            {% endunless %}
+          </div>
+          <div class="pf-scale" style="--floor: {{ floor_pct }}%;">
+            <div class="pf-scale-track"></div>
+
+            {%- if show_notch -%}
+              <span class="pf-scale-notch">
+              </span>
+            {%- endif -%}
+
+            {%- if show_right and next_name -%}
+              <span class="pf-scale-end pf-right">
+              </span>
+            {%- endif -%}
+          </div>
+
+            {%- assign next_remaining_cents = next_remaining | times: 100 | round -%}
+
+            {%- assign lock_end = vp.lock.end | default: blank -%}
+            {%- assign next_remaining_cents = next_remaining | times: 100 | round -%}
+            {%- assign maintain_remaining = 0 -%}
+            {%- if vp.maintain and vp.maintain.remaining -%}
+              {%- assign maintain_remaining = vp.maintain.remaining | plus: 0 -%}
+            {%- endif -%}
+            {%- assign maintain_remaining_cents = maintain_remaining | times: 100 | round -%}
+
+            <div class="pf-note">
+              {%- if tier == "VIP3" and vp.maintain and vp.maintain.threshold and maintain_remaining > 0 -%}
+                Renew your <strong>{{ tier_name }}</strong> perks!<br/>
+                Spend <strong>{{ maintain_remaining_cents | money_without_trailing_zeros }}</strong> today to renew your <strong>{{ tier_name }}</strong> perks for another 90 days!
+              {%- elsif tier == "VIP3" -%}
+                You’re at the top tier.{% if lock_end %} <br/>Your perks are active through <strong>{{ lock_end | date: "%B %e, %Y" }}</strong>{% endif %}.
+              {%- elsif next_threshold > 0 -%}
+                You’re <strong>{{ next_remaining_cents | money_without_trailing_zeros }}</strong> away from <strong>{{ next_name }}</strong> tier.
+              {%- else -%}
+                Keep shopping to unlock the next tier.
+              {%- endif -%}
+            </div>
+          </div>
+
+          <div class="pf-col">
+            {% if lock_end and lock_end != blank %}
+              <div class="pf-label">Perks active until</div>
+              <div class="pf-lock">
+                {{ lock_end | date: "%B %e, %Y" }}
+              </div>
+              <div class="pf-note">New purchases extend this date automatically.</div>
+            {% else %}
+              <div class="pf-label">Perks status</div>
+              <div class="pf-lock pf-muted">Not active</div>
+              <div class="pf-note">Make a qualifying purchase to activate your VIP status.</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <!-- Perks header -->
+      <div class="pf-card pf-perks-card">
+        <div class="pf-perks-head">
+          <div class="pf-perks-title">
+            Current Tier <span class="pf-tier-badge pf-{{ tier | downcase }} {% if at_risk %}is-risk{% endif %}">{{ tier_name }}</span>
+          </div>
+          <div class="pf-perks-sub">Your Active Perks:</div>
+        </div>
+
+        <div class="pf-grid">
+          <!-- Free Shipping -->
+          <div class="pf-perk">
+            <div class="pf-perk-head">
+              <span class="pf-icochip" aria-hidden="true">
+                <!-- Truck icon -->
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 6h11v7h2.7l2.1-3H21v7h-1a2 2 0 1 1-4 0H10a2 2 0 1 1-4 0H3V6zm3 9a1 1 0 1 0 .001 2.001A1 1 0 0 0 6 15zm11 0a1 1 0 1 0 .001 2.001A1 1 0 0 0 17 15zM16 8h3l1.8 3H16V8z"/></svg>
+              </span>
+              <div class="pf-perk-title">Free Shipping</div>
+            </div>
+            <div class="pf-perk-body">
+              {% if customer.tags contains "VIP3" %}
+                Always free shipping.
+              {% elsif customer.tags contains "VIP2" %}
+                Free shipping over $200.
+              {% elsif customer.tags contains "VIP1" %}
+                Free shipping over $300.
+              {% else %}
+                Free shipping over $300.
+              {% endif %}
+            </div>
+          </div>
+
+          <!-- Early/MSRP Access -->
+          {% assign early2_min = 1 %}
+          {% assign early3_min = 24 %}
+          <div class="pf-perk">
+            <div class="pf-perk-head">
+              <span class="pf-icochip" aria-hidden="true">
+                <!-- Clock icon -->
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2a10 10 0 1 0 .001 20.001A10 10 0 0 0 12 2zm1 11h5v-2h-4V7h-2v6z"/></svg>
+              </span>
+              <div class="pf-perk-title">MSRP Access</div>
+            </div>
+            <div class="pf-perk-body">
+              {% if customer.tags contains "VIP3" %}
+                {{ early3_min }} hour early access on our exclusive drops.
+              {% elsif customer.tags contains "VIP2" %}
+                {{ early2_min }} hour early access on our exclusive drops.
+              {% elsif customer.tags contains "VIP1" %}
+                You get access to our exclusive drops!
+              {% else %}
+                Earn VIP to access our exclusive drops.
+              {% endif %}
+            </div>
+          </div>
+
+          <!-- VIP Savings -->
+          <div class="pf-perk">
+            <div class="pf-perk-head">
+              <span class="pf-icochip" aria-hidden="true">
+                <!-- Percent/discount icon -->
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M7.5 7A1.5 1.5 0 1 1 6 5.5 1.5 1.5 0 0 1 7.5 7zm9 12A1.5 1.5 0 1 1 18 17.5 1.5 1.5 0 0 1 16.5 19zM6 18l12-12 1.4 1.4L7.4 19z"/></svg>
+              </span>
+              <div class="pf-perk-title">VIP Savings</div>
+            </div>
+            <div class="pf-perk-body">
+              {% if customer.tags contains "VIP3" %}
+                3% off eligible carts automatically.
+              {% elsif customer.tags contains "VIP2" %}
+                2% off eligible carts automatically.
+              {% elsif customer.tags contains "VIP1" %}
+                1% off eligible carts automatically.
+              {% else %}
+                Unlock VIP to start saving.
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+    {% else %}
+      <div class="pf-card">
+        <h1 class="pf-title">Your VIP Status</h1>
+        <p class="pf-help">No VIP data yet for this account. If you’ve recently ordered, this will update soon.</p>
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="pf-card">
+      <h1 class="pf-title">VIP Status</h1>
+      <p class="pf-help">Please <a href="/account/login">log in</a> to view your VIP status.</p>
+    </div>
+  {% endif %}
+</section>
+
+<style>
+  /* ===== VIP Widget — Consolidated Styles ===== */
+
+  /* Container width + local type scale */
+  .pf-vip.container { max-width: 1080px; margin: 0 auto; padding: 28px; }
+  .pf-vip { --pf-base: clamp(16px, 1.05vw + 12px, 19px); }
+
+  /* Tier colors */
+  :root {
+    --pf-vip0: #444;
+    --pf-vip1: #238bca;   /* Explorer */
+    --pf-vip2: #019b5f;/* Vanguard */
+    --pf-vip3: #dfa260;   /* Champion */
+  }
+
+  /* Card shell */
+  .pf-card {
+    background:#1d1d25;
+    color:#fcf7e1;
+    border-radius:16px;
+    padding:20px;
+    box-shadow:0 0 0 1px rgba(255,255,255,.06), 0 10px 30px rgba(0,0,0,.35);
+  }
+  .pf-card + .pf-card { margin-top: 18px; }
+
+  /* Status header */
+  .pf-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+  .pf-title { margin:0; font-size: calc(var(--pf-base) * 1.25); line-height:1.25; color:#fcf7e1; }
+
+  .pf-tier-badge {
+    display: inline-block;
+    padding: 8px 18px;
+    border-radius: 999px;
+    text-transform: capitalize;
+    font-weight: 800;
+    font-size: 1.25rem;
+    letter-spacing: 0.01em;
+    vertical-align: middle;
+    transform: translateY(-1px);
+    line-height: 1;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.12),
+                0 4px 10px rgba(0,0,0,0.45);
+    background-image: linear-gradient(to top, rgba(255,255,255,0.12), rgba(255,255,255,0.02));
+  }
+  .pf-tier-badge.pf-vip0 { background: #444;    color: #ddd; }
+  .pf-tier-badge.pf-vip1 { background: #238bca; color: #0b1220; }
+  .pf-tier-badge.pf-vip2 { background: #019b5f; color: #1d1d25; }
+  .pf-tier-badge.pf-vip3 { background: #dfa260; color: #031a12; }
+
+  /* Two-column layout inside the status card */
+  .pf-row { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:12px; }
+  @media (max-width: 720px){ .pf-row { grid-template-columns:1fr; } }
+
+  /* Labels & values */
+  .pf-label { color:#e6e1cc; font-size: calc(var(--pf-base) * .95); font-weight:600; margin-bottom:6px; }
+  .pf-lock  { font-size: calc(var(--pf-base) * 1.05); font-weight:700; letter-spacing:.02em; }
+  .pf-note  { margin-top:6px; font-size: calc(var(--pf-base) * .9); color: rgba(255,255,255,.70); }
+  .pf-muted { color:#aaa; font-style:italic; }
+
+  /* ---------- Perks CARD ---------- */
+  .pf-perks-card { padding: 18px 20px; }
+  .pf-perks-head { margin: 2px 0 8px; padding: 0 0 10px; border-bottom:1px solid rgba(255,255,255,.08); }
+  .pf-perks-title { font-weight:800; font-size: calc(var(--pf-base) * 1.15); line-height:1.2; display:flex; align-items:center; gap:8px; }
+  .pf-perks-sub { margin-top:4px; color: rgba(255,255,255,.72); font-size: calc(var(--pf-base) * .9); font-weight: 600 }
+
+  .pf-grid{ display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; margin-top:12px; }
+  @media (max-width: 900px){ .pf-grid{ grid-template-columns:1fr; } }
+
+  /* Perk card — sharper */
+  .pf-perk{
+    position:relative;
+    background:#20222b;
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:12px;
+    padding:14px 16px 16px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 6px 18px rgba(0,0,0,.28);
+    min-height:110px;
+  }
+  .pf-perk::before{
+    content:""; position:absolute; left:0; top:0; right:0; height:3px; border-radius:12px 12px 0 0;
+    background: linear-gradient(90deg, var(--pf-vip1), var(--pf-vip3));
+    opacity:.85;
+  }
+
+  .pf-perk-head{ display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+  .pf-icochip{
+    display:inline-flex; align-items:center; justify-content:center;
+    width:22px; height:22px; border-radius:999px;
+    background: rgba(255,255,255,.08);
+    color: #e8e3cf;
+    border:1px solid rgba(255,255,255,.10);
+  }
+  .pf-perk-title{ margin:0; font-weight:700; font-size: calc(var(--pf-base) * 1.0); letter-spacing:.005em; color:#f0ebd6; }
+  .pf-perk-body{ font-size: calc(var(--pf-base) * .92); line-height:1.45; color:#cfc9b2; }
+
+  @media (min-width: 1200px){ .pf-vip { --pf-base: 19px; } }
+
+  /* ---------- Progress bar (higher contrast) ---------- */
+  /* Progress bar — reliable element-based fill */
+  /* base progress (keep your existing fill rules) */
+.pf-progress{
+  position:relative;
+  height:16px;
+  border-radius:999px;
+  background:rgba(255,255,255,.12);  /* slightly darker than before */
+  outline:1px solid rgba(255,255,255,.20);
+  overflow:visible;
+}
+
+  /* NEW: big, easy-to-hit notch target (24px wide) */
+ .pf-floor-notch{ position:absolute; top:-6px; bottom:-6px; left:var(--floor);
+    transform:translateX(-12px); width:24px; z-index:2; pointer-events:auto; cursor:help; }
+ .pf-floor-notch::before{
+    content:""; position:absolute; left:50%; top:6px; bottom:6px; width:2px;
+    transform:translateX(-1px);
+    background: rgba(255,216,107,.95);
+    border-radius:1px; box-shadow:0 0 0 2px rgba(255,216,107,.18);
+  }
+
+  /* Tooltip spacing so it never collides with the rail */
+  .pf-floor-tip{
+    position:absolute; top:-34px; left:var(--floor); transform:translate(-50%,0);
+    background: rgba(0,0,0,.92); color:#ffd86b; padding:4px 8px; border-radius:6px;
+    font-size:.75rem; line-height:1; white-space:nowrap; box-shadow:0 6px 16px rgba(0,0,0,.35);
+    opacity:0; pointer-events:none; transition:opacity .15s, transform .15s; z-index:3;
+  }
+/* Show on hover or keyboard focus */
+.pf-progress:hover .pf-floor-tip,
+.pf-floor-notch:focus + .pf-floor-tip,
+.pf-floor-notch:hover + .pf-floor-tip{
+  opacity:1;
+  transform: translate(-50%, -4px);
+}
+
+/* OPTIONAL: tiny mobile bump so it doesn’t get clipped by the card */
+@media (max-width:720px){
+  .pf-floor-tip{ top:-40px; }
+}
+
+
+  /* the fill */
+  .pf-progress .pf-progress-fill{
+    position:absolute; inset:0 auto 0 0;
+    width: var(--pct);
+    height:100%;
+    background: var(--bar, #238bca); /* VIP0 now inherits blue from Liquid */
+    box-shadow: inset 0 0 4px rgba(0,0,0,.45);
+    border-radius:999px;
+  }
+
+    /* Hide floor tick/tooltip entirely on $0 tiers */
+  .pf-progress.is-zero-floor .pf-floor-notch,
+  .pf-progress.is-zero-floor + .pf-floor-tip { display:none; }
+  /* the floor notch */
+  .pf-progress .pf-progress-notch{
+    position:absolute; top:0; bottom:0;
+    width:2px;
+    transform: translateX(-1px);
+    background: rgba(255,216,107,.95);
+    box-shadow: 0 0 0 2px rgba(255,216,107,.18);
+    border-radius:1px;
+    opacity:.9;
+  }
+
+  /* at-risk → amber fill */
+  .pf-progress.is-risk .pf-progress-fill{
+    background: #c4a453;
+  }
+
+
+  /* Badge at-risk look */
+/* Subtle at-risk treatment: same size, amber outline/text */
+.pf-tier-badge.is-risk{
+  background: linear-gradient(to top, rgba(255,216,107,.06), rgba(255,216,107,.02));
+  color:#ffd86b;
+  border:1px solid rgba(255,216,107,.45);
+  box-shadow:
+    0 0 0 1px rgba(255,216,107,.25),
+    0 3px 10px rgba(0,0,0,.35);
+}
+
+/* Make sure base badge doesn’t auto-grow from the at-risk look */
+.pf-tier-badge{
+  padding: 8px 18px;
+  border-radius: 999px;
+  line-height: 1;
+}
+  /* Card-level at-risk → swap bar fill to amber */
+  .pf-card.is-risk .pf-progress::before{
+    background: linear-gradient(90deg, #c4a453, #c4a453);
+  }
+  /* ---- Two-lane tier scale ---- */
+  .pf-scale-end{ position:absolute; bottom:-2px; pointer-events:none; }
+  .pf-scale-end.pf-left{ left:0; transform:none; }
+  .pf-scale-end.pf-right{ right:0; left:auto; transform:none; }
+  .pf-scale-track{
+    height:2px; background:rgba(255,255,255,.18); border-radius:2px;
+  }
+
+  /* notch ABOVE the track, lowered closer to the line */
+  .pf-scale-notch{
+    position:absolute; left: var(--floor); top:2px;      /* sits right above the track */
+    transform:translateX(-50%);
+    pointer-events:none;
+    z-index:2;
+  }
+  .pf-scale-notch i{
+    position:absolute; left:50%; bottom:-2px;            /* line only touches the track */
+    width:2px; height:8px;                                /* shorter so it can’t pierce the pill */
+    transform:translateX(-50%);
+    background: rgba(255,216,107,.95);
+    border-radius:1px;
+    box-shadow:0 0 0 2px rgba(255,216,107,.18);
+    display:none;
+  }
+  .pf-scale-notch .pf-badge{
+    position:absolute; bottom:10px; left:50%;            /* pill above the line, with a gap */
+    transform:translateX(-50%);
+    font-weight:800; font-size:.75rem; letter-spacing:.01em;
+    padding:4px 10px; border-radius:999px; white-space:nowrap;
+    box-shadow:0 0 0 1px rgba(0,0,0,.25), 0 6px 16px rgba(0,0,0,.25);
+    background-image: linear-gradient(to top, rgba(255,255,255,.10), rgba(255,255,255,.02));
+  }
+
+  /* badge colors follow your palette */
+  .pf-scale-notch .pf-badge.pf-vip1{ background: var(--pf-vip1); color:#0b1220; }
+  .pf-scale-notch .pf-badge.pf-vip2{ background: var(--pf-vip2); color:#1d1d25; }
+  .pf-scale-notch .pf-badge.pf-vip3{ background: var(--pf-vip3); color:#031a12; }
+
+  /* ----- Endpoints (BELOW lane) ----- */
+  .pf-scale-end{ position:absolute; bottom:-2px; pointer-events:none; }
+  .pf-scale-end.pf-left{ left:0; transform:none; }        /* << no translateX(-50%) */
+  .pf-scale-end.pf-right{ right:0; left:auto; transform:none; } /* << anchor to right edge */
+
+  /* make chips readable: not italic, bigger, bolder */
+  .pf-scale em,
+  .pf-chip{ font-style: normal; }
+
+  .pf-chip{ font-style:normal; display:inline-block; font-weight:800; font-size:.80rem;
+    letter-spacing:.01em; padding:5px 10px; border-radius:999px; white-space:nowrap;
+    border:1px solid rgba(0,0,0,.28); box-shadow:0 3px 10px rgba(0,0,0,.25); }
+  .pf-chip.pf-vip0{ background:#444; color:#ddd; }
+  .pf-chip.pf-vip1{ background:#238bca; color:#0b1220; }
+  .pf-chip.pf-vip2{ background:#dfa260; color:#1d1d25; }
+  .pf-chip.pf-vip3{ background:#019b5f; color:#031a12; }
+
+  /* optional light tier tints for the chips */
+  .pf-left-chip{ background: rgba(255,255,255,.06); }
+  .pf-right-chip{ background: rgba(255,255,255,.06); }
+
+
+  /* mobile nudge */
+  @media (max-width:720px){
+    .pf-scale{ padding-top:12px; padding-bottom:12px; }
+    .pf-scale-notch .pf-badge, .pf-chip{ font-size:.68rem; padding:3px 7px; }
+  }
+
+
+  /* Small legend */
+  .pf-legend{ margin-top:8px; display:flex; align-items:center; gap:8px;
+    font-size:.85rem; color:rgba(255,255,255,.75); }
+  .pf-legend .pf-sep{ opacity:.6; }
+</style>
+
+{% schema %}
+{
+  "name": "VIP Status",
+  "tag": "section",
+  "class": "pf-vip-status",
+  "enabled_on": { "templates": ["page", "customers/account"] },
+  "settings": []
+}
+{% endschema %}

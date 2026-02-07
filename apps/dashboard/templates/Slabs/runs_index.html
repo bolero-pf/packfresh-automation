@@ -1,0 +1,16 @@
+<!doctype html>
+<title>Slab Sync – Runs</title>
+<h1>Slab Sync – Runs</h1>
+<table border="1" cellpadding="6">
+  <tr><th>Run ID</th><th>Created</th><th>Updated</th><th>Flag</th><th>No Data</th><th>Skipped</th></tr>
+  {% for m in runs %}
+  <tr>
+    <td><a href="{{ url_for('slabs_reports.run_summary', run_id=m.run_id) }}">{{ m.run_id }}</a></td>
+    <td>{{ m.created_at }}</td>
+    <td>{{ m.counts.updated }}</td>
+    <td>{{ m.counts.flag_down }}</td>
+    <td>{{ m.counts.no_data }}</td>
+    <td>{{ m.counts.skipped }}</td>
+  </tr>
+  {% endfor %}
+</table>
