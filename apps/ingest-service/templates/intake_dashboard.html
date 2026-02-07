@@ -343,7 +343,18 @@
         </div>
     </div>
 
-    <!-- ═══════════════════════════════════ MAPPING MODAL ═══════════════════════════════════ -->
+    <!-- ═══════════════════════════════════ SESSION DETAIL MODAL ═══════════════════════════════════ -->
+    <div id="session-modal" class="modal-overlay">
+        <div class="modal" style="max-width:900px;">
+            <div class="modal-header">
+                <h3>Session Details</h3>
+                <button class="modal-close" onclick="closeModal('session-modal')">&times;</button>
+            </div>
+            <div id="session-modal-body"></div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ MAPPING MODAL (must be AFTER session modal in DOM) ═══════════════════════════════════ -->
     <div id="mapping-modal" class="modal-overlay">
         <div class="modal">
             <div class="modal-header">
@@ -376,21 +387,11 @@
         </div>
     </div>
 
-    <!-- ═══════════════════════════════════ SESSION DETAIL MODAL ═══════════════════════════════════ -->
-    <div id="session-modal" class="modal-overlay">
-        <div class="modal" style="max-width:900px;">
-            <div class="modal-header">
-                <h3>Session Details</h3>
-                <button class="modal-close" onclick="closeModal('session-modal')">&times;</button>
-            </div>
-            <div id="session-modal-body"></div>
-        </div>
-    </div>
-
     <script>
     // ═══════════════════════════════ STATE ═══════════════════════════════
     let currentSessionId = null;
     let currentMapItemId = null;
+    let currentMapProductType = 'sealed';
     let rawSessionId = null;
 
     // ═══════════════════════════════ TABS ═══════════════════════════════
@@ -521,7 +522,7 @@
                             ? '<span class="badge badge-green">Linked</span>'
                             : '<span class="badge badge-amber">Needs Link</span>'}</td>
                         <td>${!i.is_mapped
-                            ? `<button class="btn btn-primary btn-sm" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set)">Link</button>`
+                            ? `<button class="btn btn-primary btn-sm" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type)">Link</button>`
                             : `<small style="color:var(--text-dim);">ID: ${i.tcgplayer_id}</small>`}</td>
                     </tr>`).join('')}</tbody>
                 </table>
@@ -539,8 +540,9 @@
     }
 
     // ═══════════════════════════════ MAPPING ═══════════════════════════════
-    function openMapping(itemId, productName, setName) {
+    function openMapping(itemId, productName, setName, productType) {
         currentMapItemId = itemId;
+        currentMapProductType = productType || 'sealed';
         document.getElementById('map-product-name').textContent = productName;
         document.getElementById('map-set-name').textContent = setName || 'N/A';
         document.getElementById('map-tcgplayer-id').value = '';
@@ -573,33 +575,53 @@
 
     async function fuzzySearch() {
         const productName = document.getElementById('map-product-name').textContent;
+        const setName = document.getElementById('map-set-name').textContent;
         const container = document.getElementById('fuzzy-results');
         container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
 
+        // Build a better search query: include set name for specificity
+        let query = productName;
+        if (setName && setName !== 'N/A') {
+            query = `${setName} ${productName}`;
+        }
+
+        // Choose endpoint based on product type
+        const endpoint = currentMapProductType === 'raw' ? '/api/ppt/search-cards' : '/api/ppt/search-sealed';
+
         try {
-            // Use sealed-products search for sealed items (most Collectr imports are sealed)
-            const r = await fetch('/api/ppt/search-sealed', {
+            const r = await fetch(endpoint, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ query: productName }),
+                body: JSON.stringify({ query: query }),
             });
             const d = await r.json();
             if (!r.ok) { container.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
-            const results = d.results || [];
+            let results = d.results || [];
+
+            // Filter out "Code Card" results for sealed — those are almost never what stores want
+            if (currentMapProductType !== 'raw') {
+                const filtered = results.filter(p => {
+                    const name = (p.name || p.productName || '').toLowerCase();
+                    return !name.startsWith('code card');
+                });
+                // Only use filtered if it leaves us with results
+                if (filtered.length > 0) results = filtered;
+            }
+
             if (!results.length) {
-                container.innerHTML = '<p style="color:var(--text-dim);">No sealed products found. Try pasting the TCGPlayer ID manually from tcgplayer.com.</p>';
+                container.innerHTML = `<p style="color:var(--text-dim);">No results for "${query}". Try pasting the TCGPlayer ID manually.</p>`;
                 return;
             }
             container.innerHTML = results.map(p => {
                 const tcgId = p.tcgPlayerId || p.tcgplayer_id || '';
                 const price = p.prices?.market || p.market_price || p.price || '';
                 const name = p.name || p.productName || '?';
-                const setName = p.setName || p.set || '';
+                const pSetName = p.setName || p.set || '';
                 return `<div class="search-result" onclick="document.getElementById('map-tcgplayer-id').value='${tcgId}'">
                     <h4>${name}</h4>
-                    <p>${setName} ${price ? '• $' + price : ''}</p>
-                    <small style="color:var(--accent);">TCGPlayer ID: ${tcgId}</small>
+                    <p>${pSetName} ${price ? '• $' + price : ''}</p>
+                    <small style="color:var(--accent);">TCGPlayer ID: ${tcgId} — click to use</small>
                 </div>`;
             }).join('');
         } catch(err) {
