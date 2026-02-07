@@ -579,20 +579,20 @@
         const container = document.getElementById('fuzzy-results');
         container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
 
-        // Build a better search query: include set name for specificity
-        let query = productName;
-        if (setName && setName !== 'N/A') {
-            query = `${setName} ${productName}`;
-        }
-
         // Choose endpoint based on product type
         const endpoint = currentMapProductType === 'raw' ? '/api/ppt/search-cards' : '/api/ppt/search-sealed';
+
+        // Pass set_name as separate filter parameter (PPT uses ?search=...&set=...)
+        const body = { query: productName };
+        if (setName && setName !== 'N/A') {
+            body.set_name = setName;
+        }
 
         try {
             const r = await fetch(endpoint, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ query: query }),
+                body: JSON.stringify(body),
             });
             const d = await r.json();
             if (!r.ok) { container.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
@@ -605,12 +605,11 @@
                     const name = (p.name || p.productName || '').toLowerCase();
                     return !name.startsWith('code card');
                 });
-                // Only use filtered if it leaves us with results
                 if (filtered.length > 0) results = filtered;
             }
 
             if (!results.length) {
-                container.innerHTML = `<p style="color:var(--text-dim);">No results for "${query}". Try pasting the TCGPlayer ID manually.</p>`;
+                container.innerHTML = `<p style="color:var(--text-dim);">No results found. Try pasting the TCGPlayer ID manually from tcgplayer.com.</p>`;
                 return;
             }
             container.innerHTML = results.map(p => {

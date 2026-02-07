@@ -437,17 +437,18 @@ def ppt_lookup_sealed():
 
 @app.route("/api/ppt/search-sealed", methods=["POST"])
 def ppt_search_sealed():
-    """Search sealed products by name via PPT /v2/sealed-products?search=..."""
+    """Search sealed products by name via PPT /v2/sealed-products?search=...&set=..."""
     if not ppt:
         return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
 
     data = request.json or {}
     query = data.get("query", "").strip()
+    set_name = data.get("set_name", "").strip() or None
     if not query:
         return jsonify({"error": "query required"}), 400
 
     try:
-        results = ppt.search_sealed_products(query, limit=10)
+        results = ppt.search_sealed_products(query, set_name=set_name, limit=10)
         return jsonify({"results": results})
     except PPTError as e:
         return jsonify({"error": str(e)}), 502
@@ -455,17 +456,18 @@ def ppt_search_sealed():
 
 @app.route("/api/ppt/search-cards", methods=["POST"])
 def ppt_search_cards():
-    """Search cards by name via PPT /v2/cards?search=..."""
+    """Search cards by name via PPT /v2/cards?search=...&set=..."""
     if not ppt:
         return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
 
     data = request.json or {}
     query = data.get("query", "").strip()
+    set_name = data.get("set_name", "").strip() or None
     if not query:
         return jsonify({"error": "query required"}), 400
 
     try:
-        results = ppt.search_cards(query, limit=10)
+        results = ppt.search_cards(query, set_name=set_name, limit=10)
         return jsonify({"results": results})
     except PPTError as e:
         return jsonify({"error": str(e)}), 502
