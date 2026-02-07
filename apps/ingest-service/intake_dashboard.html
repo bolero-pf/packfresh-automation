@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pack Fresh — Intake System</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface-2: #22263a;
+            --border: #2d3148;
+            --text: #e8eaf0;
+            --text-dim: #8b90a5;
+            --accent: #4f7df9;
+            --accent-hover: #3b6ae8;
+            --green: #2dd4a0;
+            --green-bg: rgba(45, 212, 160, 0.12);
+            --amber: #f5a623;
+            --amber-bg: rgba(245, 166, 35, 0.12);
+            --red: #f05252;
+            --red-bg: rgba(240, 82, 82, 0.1);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg); color: var(--text); line-height: 1.55;
+        }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+        /* ─── HEADER ─── */
+        header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 0;
+            margin-bottom: 24px;
+        }
+        header .container { display: flex; align-items: center; gap: 16px; }
+        .logo { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px; }
+        .logo span { color: var(--accent); }
+        header .status { margin-left: auto; font-size: 0.85rem; color: var(--text-dim); }
+        .status-dot {
+            display: inline-block; width: 8px; height: 8px;
+            border-radius: 50%; margin-right: 6px;
+        }
+        .status-dot.ok { background: var(--green); }
+        .status-dot.warn { background: var(--amber); }
+
+        /* ─── TABS ─── */
+        .tabs {
+            display: flex; gap: 4px; margin-bottom: 24px;
+            border-bottom: 1px solid var(--border); padding-bottom: 0;
+        }
+        .tab {
+            padding: 10px 20px; background: none; border: none;
+            border-bottom: 2px solid transparent; cursor: pointer;
+            font-size: 0.9rem; font-weight: 500; color: var(--text-dim);
+            transition: all 0.15s;
+        }
+        .tab:hover { color: var(--text); }
+        .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* ─── CARDS ─── */
+        .card {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 10px; padding: 24px; margin-bottom: 20px;
+        }
+        .card h2 { font-size: 1.2rem; font-weight: 600; margin-bottom: 16px; }
+
+        /* ─── FORMS ─── */
+        .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        label { font-size: 0.85rem; font-weight: 500; color: var(--text-dim); }
+        input, select, textarea {
+            padding: 10px 12px; background: var(--bg); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text); font-size: 0.95rem;
+            transition: border-color 0.15s;
+        }
+        input:focus, select:focus, textarea:focus {
+            outline: none; border-color: var(--accent);
+        }
+        input[type="file"] { padding: 8px; }
+        input[type="file"]::file-selector-button {
+            background: var(--accent); color: #fff; border: none;
+            padding: 6px 14px; border-radius: 4px; cursor: pointer;
+            margin-right: 10px; font-size: 0.85rem;
+        }
+
+        /* ─── BUTTONS ─── */
+        .btn {
+            padding: 10px 20px; border: none; border-radius: 6px;
+            font-size: 0.9rem; font-weight: 500; cursor: pointer;
+            transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px;
+        }
+        .btn-primary { background: var(--accent); color: #fff; }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+        .btn-secondary:hover { border-color: var(--accent); }
+        .btn-success { background: var(--green); color: #000; }
+        .btn-danger { background: var(--red); color: #fff; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-sm { padding: 6px 12px; font-size: 0.82rem; }
+
+        /* ─── STATS ─── */
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .stat {
+            background: var(--surface-2); border-radius: 8px; padding: 16px;
+            border: 1px solid var(--border);
+        }
+        .stat-label { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
+        .stat-value { font-size: 1.6rem; font-weight: 700; }
+
+        /* ─── BADGES ─── */
+        .badge {
+            display: inline-block; padding: 3px 10px; border-radius: 10px;
+            font-size: 0.78rem; font-weight: 600;
+        }
+        .badge-green { background: var(--green-bg); color: var(--green); }
+        .badge-amber { background: var(--amber-bg); color: var(--amber); }
+        .badge-blue { background: rgba(79,125,249,0.12); color: var(--accent); }
+        .badge-red { background: var(--red-bg); color: var(--red); }
+
+        /* ─── ALERTS ─── */
+        .alert {
+            padding: 12px 16px; border-radius: 8px; margin-bottom: 16px;
+            font-size: 0.9rem; border: 1px solid;
+        }
+        .alert-success { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+        .alert-warning { background: var(--amber-bg); border-color: var(--amber); color: var(--amber); }
+        .alert-error { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+
+        /* ─── TABLE ─── */
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
+        th { font-weight: 600; color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; }
+        tr:hover { background: rgba(255,255,255,0.02); }
+        .row-unmapped { background: var(--amber-bg); }
+
+        /* ─── MODAL ─── */
+        .modal-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.6); z-index: 1000;
+            align-items: center; justify-content: center;
+            backdrop-filter: blur(4px);
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 12px; padding: 28px; width: 90%; max-width: 640px;
+            max-height: 85vh; overflow-y: auto;
+        }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .modal-header h3 { font-size: 1.2rem; }
+        .modal-close {
+            background: none; border: none; color: var(--text-dim);
+            font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1;
+        }
+        .divider { text-align: center; color: var(--text-dim); margin: 16px 0; font-size: 0.85rem; position: relative; }
+        .divider::before, .divider::after {
+            content: ''; position: absolute; top: 50%; height: 1px;
+            background: var(--border); width: 40%;
+        }
+        .divider::before { left: 0; }
+        .divider::after { right: 0; }
+
+        /* ─── SEARCH RESULTS ─── */
+        .search-result {
+            padding: 12px; border: 1px solid var(--border); border-radius: 6px;
+            margin-top: 8px; cursor: pointer; transition: all 0.15s;
+        }
+        .search-result:hover { border-color: var(--accent); background: var(--surface-2); }
+        .search-result h4 { font-size: 0.95rem; margin-bottom: 4px; }
+        .search-result p { font-size: 0.82rem; color: var(--text-dim); }
+
+        /* ─── LOADING ─── */
+        .loading { text-align: center; padding: 40px; color: var(--text-dim); }
+        .spinner {
+            display: inline-block; width: 20px; height: 20px;
+            border: 2px solid var(--border); border-top-color: var(--accent);
+            border-radius: 50%; animation: spin 0.6s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ─── RESPONSIVE ─── */
+        @media (max-width: 768px) {
+            .form-row { grid-template-columns: 1fr; }
+            .stats { grid-template-columns: 1fr 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="logo">Pack <span>Fresh</span></div>
+            <div style="color: var(--text-dim); font-size: 0.9rem;">Intake System</div>
+            <div class="status">
+                <span class="status-dot ok" id="health-dot"></span>
+                <span id="health-text">Connected</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('sealed-intake')">Sealed Intake (CSV)</button>
+            <button class="tab" onclick="switchTab('raw-intake')">Raw Card Entry</button>
+            <button class="tab" onclick="switchTab('active-sessions')">Active Sessions</button>
+            <button class="tab" onclick="switchTab('completed')">Completed</button>
+        </div>
+
+        <!-- ═══════════════════════════════════ SEALED INTAKE TAB ═══════════════════════════════════ -->
+        <div id="sealed-intake" class="tab-content active">
+            <div class="card">
+                <h2>Upload Collectr CSV</h2>
+                <form id="csv-upload-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Customer Name</label>
+                            <input type="text" id="csv-customer" placeholder="e.g. Raul" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Offer Percentage (%)</label>
+                            <input type="number" id="csv-offer-pct" value="75" min="1" max="100" step="0.5" required>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:16px;">
+                        <label>Collectr CSV Export</label>
+                        <input type="file" id="csv-file" accept=".csv" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Upload &amp; Process</button>
+                </form>
+            </div>
+            <div id="csv-upload-result"></div>
+        </div>
+
+        <!-- ═══════════════════════════════════ RAW CARD ENTRY TAB ═══════════════════════════════════ -->
+        <div id="raw-intake" class="tab-content">
+            <div class="card">
+                <h2>Manual Raw Card Entry</h2>
+                <p style="color:var(--text-dim); margin-bottom:16px; font-size:0.9rem;">
+                    Create a session, then add cards one at a time. Prices are fetched from PPT by tcgplayer ID + condition.
+                </p>
+
+                <!-- Create session section -->
+                <div id="raw-session-setup">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Customer Name</label>
+                            <input type="text" id="raw-customer" value="Walk-in">
+                        </div>
+                        <div class="form-group">
+                            <label>Offer Percentage (%)</label>
+                            <input type="number" id="raw-offer-pct" value="65" min="1" max="100" step="0.5">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="createRawSession()">Start Raw Intake Session</button>
+                </div>
+
+                <!-- Active raw session card entry -->
+                <div id="raw-entry-form" style="display:none;">
+                    <div class="alert alert-success" id="raw-session-info"></div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>TCGPlayer ID *</label>
+                            <input type="number" id="raw-tcgplayer-id" placeholder="e.g. 490294">
+                        </div>
+                        <div class="form-group">
+                            <label>Card Name *</label>
+                            <input type="text" id="raw-card-name" placeholder="e.g. Charizard ex">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Condition *</label>
+                            <select id="raw-condition">
+                                <option value="NM">Near Mint (NM)</option>
+                                <option value="LP">Lightly Played (LP)</option>
+                                <option value="MP">Moderately Played (MP)</option>
+                                <option value="HP">Heavily Played (HP)</option>
+                                <option value="DMG">Damaged (DMG)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Quantity</label>
+                            <input type="number" id="raw-quantity" value="1" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label>Price Override (optional)</label>
+                            <input type="text" id="raw-price-override" placeholder="Leave blank for PPT price">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Set Name (auto-filled from PPT)</label>
+                            <input type="text" id="raw-set-name" placeholder="Auto-filled">
+                        </div>
+                        <div class="form-group">
+                            <label>Card Number</label>
+                            <input type="text" id="raw-card-number" placeholder="e.g. 125">
+                        </div>
+                        <div class="form-group">
+                            <label>Rarity</label>
+                            <input type="text" id="raw-rarity" placeholder="Auto-filled">
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:10px; margin-bottom:20px;">
+                        <button class="btn btn-secondary" onclick="lookupRawCard()">
+                            Lookup Price from PPT
+                        </button>
+                        <button class="btn btn-primary" onclick="addRawCard()">Add Card to Session</button>
+                    </div>
+                    <div id="raw-lookup-result"></div>
+
+                    <!-- Items added so far -->
+                    <div id="raw-items-table"></div>
+
+                    <div style="margin-top:16px; display:flex; gap:10px;">
+                        <button class="btn btn-success" onclick="finalizeRawSession()">Finalize Session</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════ ACTIVE SESSIONS TAB ═══════════════════════════════════ -->
+        <div id="active-sessions" class="tab-content">
+            <div class="card">
+                <h2>Active Intake Sessions</h2>
+                <div id="active-sessions-list" class="loading"><span class="spinner"></span> Loading...</div>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════ COMPLETED TAB ═══════════════════════════════════ -->
+        <div id="completed" class="tab-content">
+            <div class="card">
+                <h2>Completed Intakes</h2>
+                <div id="completed-sessions-list" class="loading"><span class="spinner"></span> Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ MAPPING MODAL ═══════════════════════════════════ -->
+    <div id="mapping-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Link Product to TCGPlayer ID</h3>
+                <button class="modal-close" onclick="closeModal('mapping-modal')">&times;</button>
+            </div>
+            <div style="margin-bottom:16px;">
+                <strong>Product:</strong> <span id="map-product-name" style="color:var(--accent);"></span><br>
+                <strong>Set:</strong> <span id="map-set-name"></span>
+            </div>
+
+            <div class="form-group" style="margin-bottom:12px;">
+                <label>Paste TCGPlayer ID</label>
+                <div style="display:flex; gap:8px;">
+                    <input type="number" id="map-tcgplayer-id" placeholder="e.g. 624679" style="flex:1;">
+                    <button class="btn btn-primary btn-sm" onclick="submitMapping()">Link</button>
+                    <button class="btn btn-secondary btn-sm" onclick="submitMappingVerify()">Link + Verify Price</button>
+                </div>
+                <small style="color:var(--text-dim);">Find the ID at tcgplayer.com/product/&lt;ID&gt;/</small>
+            </div>
+
+            <div class="divider">or try auto-match</div>
+
+            <div class="form-group">
+                <button class="btn btn-secondary" onclick="fuzzySearch()" style="width:100%;">
+                    Search PPT for Matches
+                </button>
+            </div>
+            <div id="fuzzy-results"></div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ SESSION DETAIL MODAL ═══════════════════════════════════ -->
+    <div id="session-modal" class="modal-overlay">
+        <div class="modal" style="max-width:900px;">
+            <div class="modal-header">
+                <h3>Session Details</h3>
+                <button class="modal-close" onclick="closeModal('session-modal')">&times;</button>
+            </div>
+            <div id="session-modal-body"></div>
+        </div>
+    </div>
+
+    <script>
+    // ═══════════════════════════════ STATE ═══════════════════════════════
+    let currentSessionId = null;
+    let currentMapItemId = null;
+    let rawSessionId = null;
+
+    // ═══════════════════════════════ TABS ═══════════════════════════════
+    function switchTab(name) {
+        document.querySelectorAll('.tab').forEach((t, i) => {
+            t.classList.toggle('active', t.textContent.toLowerCase().includes(name.replace(/-/g,' ').split(' ')[0]));
+        });
+        // simpler: just match by data
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        document.getElementById(name).classList.add('active');
+
+        // re-highlight the clicked tab
+        event.target.classList.add('active');
+        document.querySelectorAll('.tab').forEach(t => { if (t !== event.target) t.classList.remove('active'); });
+
+        if (name === 'active-sessions') loadSessions('in_progress', 'active-sessions-list');
+        if (name === 'completed') loadSessions('finalized', 'completed-sessions-list');
+    }
+
+    // ═══════════════════════════════ MODAL HELPERS ═══════════════════════════════
+    function openModal(id) { document.getElementById(id).classList.add('active'); }
+    function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+    // ═══════════════════════════════ CSV UPLOAD ═══════════════════════════════
+    document.getElementById('csv-upload-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const resultDiv = document.getElementById('csv-upload-result');
+        resultDiv.innerHTML = '<div class="card"><div class="loading"><span class="spinner"></span> Processing CSV...</div></div>';
+
+        const form = new FormData();
+        form.append('file', document.getElementById('csv-file').files[0]);
+        form.append('customer_name', document.getElementById('csv-customer').value);
+        form.append('offer_percentage', document.getElementById('csv-offer-pct').value);
+
+        try {
+            const r = await fetch('/api/intake/upload-collectr', { method: 'POST', body: form });
+            const d = await r.json();
+            if (!r.ok) {
+                resultDiv.innerHTML = `<div class="alert alert-error">${d.error}${d.existing_session_id ? ` (Session: ${d.existing_session_id.slice(0,8)}...)` : ''}</div>`;
+                return;
+            }
+
+            resultDiv.innerHTML = `
+                <div class="alert alert-success">Uploaded! Session ${d.session_id.slice(0,8)}...</div>
+                <div class="stats">
+                    <div class="stat"><div class="stat-label">Items</div><div class="stat-value">${d.item_count}</div></div>
+                    <div class="stat"><div class="stat-label">Market Value</div><div class="stat-value">$${d.total_market_value.toFixed(2)}</div></div>
+                    <div class="stat"><div class="stat-label">Your Offer</div><div class="stat-value">$${d.total_offer.toFixed(2)}</div></div>
+                    <div class="stat"><div class="stat-label">Auto-Mapped</div><div class="stat-value">${d.auto_mapped_count}/${d.item_count}</div></div>
+                </div>
+                ${d.unmapped_count > 0 ? `<div class="alert alert-warning">${d.unmapped_count} items need TCGPlayer ID linking</div>` : '<div class="alert alert-success">All items auto-mapped from cache!</div>'}
+                <button class="btn btn-primary" onclick="viewSession('${d.session_id}')">View &amp; Map Items</button>
+            `;
+            document.getElementById('csv-upload-form').reset();
+        } catch(err) {
+            resultDiv.innerHTML = `<div class="alert alert-error">Upload failed: ${err.message}</div>`;
+        }
+    });
+
+    // ═══════════════════════════════ SESSION LIST ═══════════════════════════════
+    async function loadSessions(status, containerId) {
+        const c = document.getElementById(containerId);
+        c.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
+        try {
+            const r = await fetch(`/api/intake/sessions?status=${status}`);
+            const d = await r.json();
+            if (!d.sessions.length) { c.innerHTML = '<p style="color:var(--text-dim);">No sessions found.</p>'; return; }
+
+            c.innerHTML = `<table>
+                <thead><tr>
+                    <th>Customer</th><th>Type</th><th>Items</th><th>Offer</th>
+                    <th>Unmapped</th><th>Created</th><th></th>
+                </tr></thead>
+                <tbody>${d.sessions.map(s => `<tr>
+                    <td>${s.customer_name || 'Unknown'}</td>
+                    <td><span class="badge badge-blue">${s.session_type}</span></td>
+                    <td>${s.item_count || 0}</td>
+                    <td>$${(s.total_offer_amount || 0).toFixed(2)}</td>
+                    <td>${(s.unmapped_count || 0) > 0
+                        ? `<span class="badge badge-amber">${s.unmapped_count}</span>`
+                        : '<span class="badge badge-green">✓</span>'}</td>
+                    <td>${new Date(s.created_at).toLocaleDateString()}</td>
+                    <td><button class="btn btn-secondary btn-sm" onclick="viewSession('${s.id}')">View</button></td>
+                </tr>`).join('')}</tbody>
+            </table>`;
+        } catch(err) {
+            c.innerHTML = `<div class="alert alert-error">Failed to load: ${err.message}</div>`;
+        }
+    }
+
+    // ═══════════════════════════════ VIEW SESSION ═══════════════════════════════
+    async function viewSession(sessionId) {
+        currentSessionId = sessionId;
+        const body = document.getElementById('session-modal-body');
+        body.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+        openModal('session-modal');
+
+        try {
+            const r = await fetch(`/api/intake/session/${sessionId}`);
+            const d = await r.json();
+            const s = d.session;
+            const items = d.items;
+
+            body.innerHTML = `
+                <div class="stats">
+                    <div class="stat"><div class="stat-label">Customer</div><div class="stat-value" style="font-size:1.1rem;">${s.customer_name}</div></div>
+                    <div class="stat"><div class="stat-label">Type</div><div class="stat-value" style="font-size:1.1rem;"><span class="badge badge-blue">${s.session_type}</span></div></div>
+                    <div class="stat"><div class="stat-label">Market Value</div><div class="stat-value">$${(s.total_market_value || 0).toFixed(2)}</div></div>
+                    <div class="stat"><div class="stat-label">Offer (${s.offer_percentage}%)</div><div class="stat-value">$${(s.total_offer_amount || 0).toFixed(2)}</div></div>
+                </div>
+
+                ${(s.unmapped_count || 0) > 0 ? `<div class="alert alert-warning">${s.unmapped_count} items need linking before finalization</div>` : ''}
+
+                <div style="overflow-x:auto;">
+                <table>
+                    <thead><tr>
+                        <th>Product</th><th>Qty</th><th>Market</th><th>Offer</th><th>Status</th><th></th>
+                    </tr></thead>
+                    <tbody>${items.map(i => `<tr class="${!i.is_mapped ? 'row-unmapped' : ''}">
+                        <td>
+                            ${i.product_name}
+                            ${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}</small>` : ''}
+                        </td>
+                        <td>${i.quantity}</td>
+                        <td>$${(i.market_price || 0).toFixed(2)}</td>
+                        <td>$${(i.offer_price || 0).toFixed(2)}</td>
+                        <td>${i.is_mapped
+                            ? '<span class="badge badge-green">Linked</span>'
+                            : '<span class="badge badge-amber">Needs Link</span>'}</td>
+                        <td>${!i.is_mapped
+                            ? `<button class="btn btn-primary btn-sm" onclick="openMapping('${i.id}', \`${i.product_name.replace(/`/g,"'")}\`, '${(i.set_name||'').replace(/'/g,"\\'")}')">Link</button>`
+                            : `<small style="color:var(--text-dim);">ID: ${i.tcgplayer_id}</small>`}</td>
+                    </tr>`).join('')}</tbody>
+                </table>
+                </div>
+
+                ${s.status === 'in_progress' && (s.unmapped_count || 0) === 0 ? `
+                    <div style="margin-top:20px;">
+                        <button class="btn btn-success" onclick="finalizeSession('${sessionId}')">Finalize Session</button>
+                    </div>
+                ` : ''}
+            `;
+        } catch(err) {
+            body.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    // ═══════════════════════════════ MAPPING ═══════════════════════════════
+    function openMapping(itemId, productName, setName) {
+        currentMapItemId = itemId;
+        document.getElementById('map-product-name').textContent = productName;
+        document.getElementById('map-set-name').textContent = setName || 'N/A';
+        document.getElementById('map-tcgplayer-id').value = '';
+        document.getElementById('fuzzy-results').innerHTML = '';
+        openModal('mapping-modal');
+    }
+
+    async function submitMapping(verify = false) {
+        const tcgId = document.getElementById('map-tcgplayer-id').value;
+        if (!tcgId) { alert('Enter a TCGPlayer ID'); return; }
+
+        try {
+            const r = await fetch('/api/intake/map-item', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    item_id: currentMapItemId,
+                    tcgplayer_id: parseInt(tcgId),
+                    verify_price: verify,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            closeModal('mapping-modal');
+            viewSession(currentSessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    function submitMappingVerify() { submitMapping(true); }
+
+    async function fuzzySearch() {
+        const productName = document.getElementById('map-product-name').textContent;
+        const container = document.getElementById('fuzzy-results');
+        container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+
+        try {
+            const r = await fetch('/api/ppt/parse-title', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ title: productName }),
+            });
+            const d = await r.json();
+            if (!d.matches || !d.matches.length) {
+                container.innerHTML = '<p style="color:var(--text-dim);">No matches found. Try pasting the ID manually.</p>';
+                return;
+            }
+            container.innerHTML = d.matches.map(m => {
+                const card = m.card || m;
+                const conf = m.confidence ? `${(m.confidence * 100).toFixed(0)}% match` : '';
+                const tcgId = card.tcgPlayerId || card.tcgplayer_id || '';
+                const price = card.prices?.market || card.market_price || '';
+                return `<div class="search-result" onclick="document.getElementById('map-tcgplayer-id').value='${tcgId}'">
+                    <h4>${card.name || card.productName || '?'}</h4>
+                    <p>${card.setName || ''} ${conf ? '• ' + conf : ''} ${price ? '• $' + price : ''}</p>
+                    <small style="color:var(--accent);">TCGPlayer ID: ${tcgId}</small>
+                </div>`;
+            }).join('');
+        } catch(err) {
+            container.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    // ═══════════════════════════════ FINALIZE ═══════════════════════════════
+    async function finalizeSession(sessionId) {
+        if (!confirm('Finalize this session? This will create inventory entries and COGS records.')) return;
+        try {
+            const r = await fetch(`/api/intake/finalize/${sessionId}`, { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            alert(`Finalized! ${d.sealed_processed || 0} sealed COGS updated, ${d.raw_cards_created || 0} raw cards created.`);
+            closeModal('session-modal');
+        } catch(err) { alert(err.message); }
+    }
+
+    // ═══════════════════════════════ RAW CARD MANUAL ENTRY ═══════════════════════════════
+    async function createRawSession() {
+        const customer = document.getElementById('raw-customer').value || 'Walk-in';
+        const offerPct = document.getElementById('raw-offer-pct').value || '65';
+        try {
+            const r = await fetch('/api/intake/create-session', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ customer_name: customer, session_type: 'raw', offer_percentage: parseFloat(offerPct) }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            rawSessionId = d.session.id;
+            document.getElementById('raw-session-setup').style.display = 'none';
+            document.getElementById('raw-entry-form').style.display = 'block';
+            document.getElementById('raw-session-info').innerHTML =
+                `Session started for <strong>${customer}</strong> • Offer: ${offerPct}% • ID: ${rawSessionId.slice(0,8)}...`;
+        } catch(err) { alert(err.message); }
+    }
+
+    async function lookupRawCard() {
+        const tcgId = document.getElementById('raw-tcgplayer-id').value;
+        if (!tcgId) { alert('Enter a TCGPlayer ID first'); return; }
+
+        const resultDiv = document.getElementById('raw-lookup-result');
+        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up...</div>';
+
+        try {
+            const r = await fetch('/api/ppt/lookup-card', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+            });
+            const d = await r.json();
+            if (!r.ok) { resultDiv.innerHTML = `<div class="alert alert-warning">${d.error}</div>`; return; }
+
+            const c = d.card;
+            // Auto-fill fields
+            if (c.name) document.getElementById('raw-card-name').value = c.name;
+            if (c.setName) document.getElementById('raw-set-name').value = c.setName;
+            if (c.cardNumber) document.getElementById('raw-card-number').value = c.cardNumber;
+            if (c.rarity) document.getElementById('raw-rarity').value = c.rarity;
+
+            const price = c.prices?.market || c.market_price || '?';
+            resultDiv.innerHTML = `<div class="alert alert-success">
+                Found: <strong>${c.name}</strong> (${c.setName || ''}) — Market: $${price}
+            </div>`;
+        } catch(err) {
+            resultDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    async function addRawCard() {
+        if (!rawSessionId) { alert('Start a session first'); return; }
+        const tcgId = document.getElementById('raw-tcgplayer-id').value;
+        const cardName = document.getElementById('raw-card-name').value;
+        const condition = document.getElementById('raw-condition').value;
+        const quantity = document.getElementById('raw-quantity').value || '1';
+
+        if (!tcgId || !cardName || !condition) { alert('TCGPlayer ID, Card Name, and Condition are required'); return; }
+
+        const body = {
+            session_id: rawSessionId,
+            tcgplayer_id: parseInt(tcgId),
+            card_name: cardName,
+            condition: condition,
+            quantity: parseInt(quantity),
+            set_name: document.getElementById('raw-set-name').value,
+            card_number: document.getElementById('raw-card-number').value,
+            rarity: document.getElementById('raw-rarity').value,
+        };
+        const priceOverride = document.getElementById('raw-price-override').value;
+        if (priceOverride) body.market_price = parseFloat(priceOverride);
+
+        try {
+            const r = await fetch('/api/intake/add-raw-card', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+
+            // Clear form (except session fields)
+            document.getElementById('raw-tcgplayer-id').value = '';
+            document.getElementById('raw-card-name').value = '';
+            document.getElementById('raw-card-number').value = '';
+            document.getElementById('raw-set-name').value = '';
+            document.getElementById('raw-rarity').value = '';
+            document.getElementById('raw-price-override').value = '';
+            document.getElementById('raw-quantity').value = '1';
+            document.getElementById('raw-lookup-result').innerHTML = '';
+
+            // Reload items table
+            loadRawSessionItems();
+        } catch(err) { alert(err.message); }
+    }
+
+    async function loadRawSessionItems() {
+        if (!rawSessionId) return;
+        try {
+            const r = await fetch(`/api/intake/session/${rawSessionId}`);
+            const d = await r.json();
+            const items = d.items;
+            const s = d.session;
+
+            const tableDiv = document.getElementById('raw-items-table');
+            if (!items.length) { tableDiv.innerHTML = '<p style="color:var(--text-dim);">No cards added yet.</p>'; return; }
+
+            tableDiv.innerHTML = `
+                <div style="margin-top:16px; margin-bottom:8px; font-weight:600;">
+                    ${items.length} cards • Total offer: $${(s.total_offer_amount || 0).toFixed(2)}
+                </div>
+                <table>
+                    <thead><tr><th>Card</th><th>Condition</th><th>Qty</th><th>Market</th><th>Offer</th></tr></thead>
+                    <tbody>${items.map(i => `<tr>
+                        <td>${i.product_name}<br><small style="color:var(--text-dim);">${i.set_name || ''}</small></td>
+                        <td><span class="badge badge-blue">${i.condition || ''}</span></td>
+                        <td>${i.quantity}</td>
+                        <td>$${(i.market_price || 0).toFixed(2)}</td>
+                        <td>$${(i.offer_price || 0).toFixed(2)}</td>
+                    </tr>`).join('')}</tbody>
+                </table>`;
+        } catch(err) { console.error(err); }
+    }
+
+    async function finalizeRawSession() {
+        if (!rawSessionId) return;
+        await finalizeSession(rawSessionId);
+        // Reset the raw entry form
+        rawSessionId = null;
+        document.getElementById('raw-session-setup').style.display = 'block';
+        document.getElementById('raw-entry-form').style.display = 'none';
+        document.getElementById('raw-items-table').innerHTML = '';
+    }
+
+    // ═══════════════════════════════ HEALTH CHECK ═══════════════════════════════
+    async function checkHealth() {
+        try {
+            const r = await fetch('/health');
+            const d = await r.json();
+            const dot = document.getElementById('health-dot');
+            const txt = document.getElementById('health-text');
+            if (d.status === 'healthy') {
+                dot.className = 'status-dot ok';
+                txt.textContent = `DB ✓ • PPT ${d.ppt === 'configured' ? '✓' : '✗'}`;
+            } else {
+                dot.className = 'status-dot warn';
+                txt.textContent = 'Unhealthy';
+            }
+        } catch { /* silent */ }
+    }
+    checkHealth();
+    setInterval(checkHealth, 30000);
+    </script>
+</body>
+</html>
