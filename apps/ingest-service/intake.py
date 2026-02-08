@@ -535,7 +535,8 @@ def update_item_quantity(item_id: str, new_qty: int, session_id: str) -> dict:
 
 
 def add_sealed_item(session_id: str, product_name: str, tcgplayer_id: int = None,
-                    market_price: Decimal = Decimal("0"), quantity: int = 1) -> dict:
+                    market_price: Decimal = Decimal("0"), quantity: int = 1,
+                    set_name: str = None) -> dict:
     """Add a sealed item to an existing session (manual add during a buy)."""
     session = get_session(session_id)
     if not session:
@@ -552,11 +553,11 @@ def add_sealed_item(session_id: str, product_name: str, tcgplayer_id: int = None
     execute("""
         INSERT INTO intake_items (
             id, session_id, product_name, tcgplayer_id, product_type,
-            quantity, market_price, offer_price, unit_cost_basis,
+            set_name, quantity, market_price, offer_price, unit_cost_basis,
             is_mapped, item_status, listing_condition
-        ) VALUES (%s, %s, %s, %s, 'sealed', %s, %s, %s, %s, %s, 'good', 'NM')
+        ) VALUES (%s, %s, %s, %s, 'sealed', %s, %s, %s, %s, %s, %s, 'good', 'NM')
     """, (item_id, session_id, product_name, tcgplayer_id,
-          quantity, market_price, offer_price, unit_cost, is_mapped))
+          set_name, quantity, market_price, offer_price, unit_cost, is_mapped))
 
     # Also save the mapping for future imports
     if tcgplayer_id and product_name:
