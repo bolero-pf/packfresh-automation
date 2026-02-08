@@ -262,31 +262,44 @@ def refresh_session_prices(session_id):
     Fetch current PPT prices for all linked items in a session.
     Returns a comparison: collectr_price vs ppt_price for each item.
     Does NOT auto-update prices — the user chooses which to accept.
+    Deduplicates API calls: same tcgplayer_id only looked up once.
     """
     if not ppt:
         return jsonify({"error": "PPT API not configured"}), 503
 
     items = intake.get_session_items(session_id)
-    linked = [i for i in items if i.get("tcgplayer_id")]
+    linked = [i for i in items if i.get("tcgplayer_id") and i.get("item_status", "good") in ("good", "damaged")]
+
+    # Deduplicate: group by (tcgplayer_id, product_type) to avoid redundant API calls
+    price_cache = {}  # (tcg_id, product_type) -> {ppt_price, ppt_low}
 
     comparisons = []
     for item in linked:
         tcg_id = item["tcgplayer_id"]
-        ppt_price = None
-        ppt_low = None
-        try:
-            if item.get("product_type") == "sealed":
-                ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
-                if ppt_data:
-                    ppt_price = ppt_data.get("unopenedPrice")
-            else:
-                ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
-                if ppt_data:
-                    prices = ppt_data.get("prices", {})
-                    ppt_price = prices.get("market")
-                    ppt_low = prices.get("low")
-        except PPTError as e:
-            app.logger.warning(f"Price refresh failed for {tcg_id}: {e}")
+        ptype = item.get("product_type", "sealed")
+        cache_key = (tcg_id, ptype)
+
+        if cache_key not in price_cache:
+            ppt_price = None
+            ppt_low = None
+            try:
+                if ptype == "sealed":
+                    ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+                    if ppt_data:
+                        ppt_price = ppt_data.get("unopenedPrice")
+                else:
+                    ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
+                    if ppt_data:
+                        prices = ppt_data.get("prices", {})
+                        ppt_price = prices.get("market")
+                        ppt_low = prices.get("low")
+            except PPTError as e:
+                app.logger.warning(f"Price refresh failed for {tcg_id}: {e}")
+            price_cache[cache_key] = {"ppt_price": ppt_price, "ppt_low": ppt_low}
+
+        cached = price_cache[cache_key]
+        ppt_price = cached["ppt_price"]
+        ppt_low = cached["ppt_low"]
 
         collectr_price = float(item.get("market_price") or 0)
         ppt_price_f = float(ppt_price) if ppt_price is not None else None
