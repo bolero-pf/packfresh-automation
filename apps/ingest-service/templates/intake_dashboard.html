@@ -1462,28 +1462,29 @@
                 const price = p.unopenedPrice || (p.prices ? p.prices.market : null) || 0;
                 const offer = (price * qty * offerPct / 100).toFixed(2);
                 const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.id || '';
-                return `<div class="search-result" onclick="addSealedToSession('${sessionId}', ${tcgId}, '${(p.name||'').replace(/'/g,"\\'")}', ${price}, ${qty}, ${offerPct})">
+                const setName = (p.setName || p.set_name || '').replace(/'/g, "\\'");
+                return `<div class="search-result" onclick="addSealedToSession('${sessionId}', ${tcgId}, '${(p.name||'').replace(/'/g,"\\'")}', '${setName}', ${price}, ${qty}, ${offerPct})">
                     <h4>${p.name}</h4>
-                    <p>TCG#${tcgId} · $${Number(price).toFixed(2)} each · Qty ${qty} · Offer: $${offer}</p>
+                    <p>${p.setName || p.set_name || ''} · TCG#${tcgId} · $${Number(price).toFixed(2)} each · Qty ${qty} · Offer: $${offer}</p>
                 </div>`;
+            }).join('');
             }).join('');
         } catch(err) {
             resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
     }
 
-    async function addSealedToSession(sessionId, tcgplayerId, name, price, qty, offerPct) {
+    async function addSealedToSession(sessionId, tcgplayerId, name, setName, price, qty, offerPct) {
         const resultsDiv = document.getElementById('session-sealed-results');
         resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding...</div>';
         try {
-            // Add the item via the existing import-like endpoint
-            const offerPrice = price * qty * (offerPct / 100);
             const r = await fetch('/api/intake/add-sealed-item', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     session_id: sessionId,
                     product_name: name,
+                    set_name: setName,
                     tcgplayer_id: tcgplayerId,
                     market_price: price,
                     quantity: qty,

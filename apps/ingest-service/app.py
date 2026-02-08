@@ -581,6 +581,7 @@ def add_sealed_item():
             tcgplayer_id=int(tcgplayer_id) if tcgplayer_id else None,
             market_price=Decimal(str(market_price)),
             quantity=int(quantity),
+            set_name=data.get("set_name"),
         )
         return jsonify({"success": True, "item": _serialize(item)})
     except ValueError as e:
