@@ -83,6 +83,7 @@ class PPTClient:
         last_err = None
         for attempt in range(1, max_tries + 1):
             try:
+                logger.info(f"PPT {method} {url} params={params} body={json_body}")
                 r = (requests.get(url, headers=self.headers, params=params, timeout=15)
                      if method == "GET" else
                      requests.post(url, headers=self.headers, json=json_body, timeout=15))
@@ -91,8 +92,18 @@ class PPTClient:
                 time.sleep(min(1.0 * attempt, 3.0))
                 continue
 
+            logger.info(f"PPT response: status={r.status_code} "
+                        f"daily_remaining={r.headers.get('X-RateLimit-Daily-Remaining','?')} "
+                        f"minute_remaining={r.headers.get('X-Ratelimit-Minute-Remaining','?')}")
+
             if r.status_code < 400:
-                return r.json()
+                data = r.json()
+                # Log a summary of what came back
+                if isinstance(data, dict):
+                    d = data.get('data', data)
+                    count = len(d) if isinstance(d, list) else 1
+                    logger.info(f"PPT success: {count} item(s) returned")
+                return data
 
             if r.status_code == 429:
                 # NEVER sleep long — this blocks gunicorn sync workers.
@@ -195,19 +206,34 @@ class PPTClient:
     # ── price extraction ─────────────────────────────────────────────
 
     @staticmethod
-    def extract_market_price(card_data):
-        """Extract NM market price."""
-        if not card_data:
+    def extract_market_price(item_data):
+        """
+        Extract market price from a PPT response.
+        
+        Cards use:     item.prices.market
+        Sealed uses:   item.unopenedPrice
+        """
+        if not item_data:
             return None
-        prices = card_data.get("prices", {})
+
+        # Sealed products: unopenedPrice is the primary price field
+        unopened = item_data.get("unopenedPrice")
+        if unopened is not None:
+            return Decimal(str(unopened))
+
+        # Cards: nested prices object
+        prices = item_data.get("prices", {})
         if isinstance(prices, dict):
             market = prices.get("market") or prices.get("mid")
             if market is not None:
                 return Decimal(str(market))
+
+        # Fallback: try various flat field names
         for key in ("market_price", "marketPrice", "price"):
-            val = card_data.get(key)
+            val = item_data.get(key)
             if val is not None:
                 return Decimal(str(val))
+
         return None
 
     @staticmethod

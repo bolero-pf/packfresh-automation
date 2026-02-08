@@ -580,13 +580,12 @@
             const d = await r.json();
             if (r.ok) {
                 const item = d.card || d.product || {};
-                // Try multiple paths for the price — sealed products may structure it differently
-                pptPrice = d.extracted_price               // backend pre-extracted
-                        || item.prices?.market             // standard card format
+                // Sealed products use 'unopenedPrice', cards use 'prices.market'
+                pptPrice = item.unopenedPrice             // sealed products
+                        || d.extracted_price               // backend pre-extracted
+                        || item.prices?.market             // cards
                         || item.prices?.mid                // fallback
                         || item.market_price               // flat field
-                        || item.marketPrice                // camelCase variant
-                        || item.price                      // simple price field
                         || null;
                 pptProductName = item.name || item.productName || '';
             } else {
@@ -776,7 +775,7 @@
             }
             container.innerHTML = results.map(p => {
                 const tcgId = p.tcgPlayerId || p.tcgplayer_id || '';
-                const price = p.prices?.market || p.market_price || p.price || '';
+                const price = p.unopenedPrice || p.prices?.market || p.market_price || p.price || '';
                 const name = p.name || p.productName || '?';
                 const pSetName = p.setName || p.set || '';
                 return `<div class="search-result" onclick="document.getElementById('map-tcgplayer-id').value='${tcgId}'">

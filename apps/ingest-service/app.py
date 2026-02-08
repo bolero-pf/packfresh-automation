@@ -455,17 +455,36 @@ def ppt_lookup_sealed():
 
 @app.route("/api/ppt/debug-sealed/<int:tcgplayer_id>")
 def debug_sealed(tcgplayer_id):
-    """Debug: show raw PPT response for a sealed product. Remove in production."""
+    """Debug: compare search vs direct lookup for a sealed product."""
     if not ppt:
         return jsonify({"error": "PPT not configured"}), 503
+    results = {}
+    
+    # Test 1: Direct lookup by tcgPlayerId
     try:
-        # Get the raw response (before _extract_data)
         url = f"{ppt.base_url}/v2/sealed-products"
         params = {"tcgPlayerId": str(tcgplayer_id)}
         raw = ppt._get(url, params)
-        return jsonify({"raw_response": raw, "type": str(type(raw))})
+        results["direct_lookup"] = {
+            "url": f"{url}?tcgPlayerId={tcgplayer_id}",
+            "response": raw,
+        }
     except PPTError as e:
-        return jsonify({"error": str(e), "status": e.status_code}), 502
+        results["direct_lookup"] = {"error": str(e), "status": e.status_code}
+
+    # Test 2: Search (to compare structure)
+    try:
+        url2 = f"{ppt.base_url}/v2/sealed-products"
+        params2 = {"search": "Elite Trainer Box", "limit": 1}
+        raw2 = ppt._get(url2, params2)
+        results["search_example"] = {
+            "url": f"{url2}?search=Elite+Trainer+Box&limit=1",
+            "response": raw2,
+        }
+    except PPTError as e:
+        results["search_example"] = {"error": str(e), "status": e.status_code}
+
+    return jsonify(results)
 
 
 @app.route("/api/ppt/search-sealed", methods=["POST"])
