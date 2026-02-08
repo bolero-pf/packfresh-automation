@@ -546,6 +546,21 @@ def delete_item(item_id):
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/intake/item/<item_id>/update-quantity", methods=["POST"])
+def update_quantity(item_id):
+    """Update an item's quantity."""
+    data = request.get_json(silent=True) or {}
+    new_qty = data.get("quantity")
+    session_id = data.get("session_id")
+    if new_qty is None or not session_id:
+        return jsonify({"error": "quantity and session_id required"}), 400
+    try:
+        item = intake.update_item_quantity(item_id, int(new_qty), session_id)
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
 # ==========================================
 # FINALIZATION
 # ==========================================

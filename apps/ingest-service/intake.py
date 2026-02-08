@@ -505,6 +505,34 @@ def delete_item(item_id: str) -> dict:
     _recalculate_session_totals(session_id)
     return get_session(session_id)
 
+
+def update_item_quantity(item_id: str, new_qty: int, session_id: str) -> dict:
+    """Update an item's quantity and recalculate offer price."""
+    if new_qty < 1:
+        raise ValueError("Quantity must be at least 1")
+
+    session = get_session(session_id)
+    if not session:
+        raise ValueError("Session not found")
+
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    offer_pct = session["offer_percentage"]
+    discount = DAMAGE_DISCOUNT if item.get("item_status") == "damaged" else Decimal("1")
+    offer_price = item["market_price"] * new_qty * (offer_pct / Decimal("100")) * discount
+
+    execute("""
+        UPDATE intake_items 
+        SET quantity = %s, offer_price = %s
+        WHERE id = %s
+    """, (new_qty, offer_price, item_id))
+
+    _recalculate_session_totals(session_id)
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
 def finalize_session(session_id: str) -> dict:
     """
     Finalize an intake session.

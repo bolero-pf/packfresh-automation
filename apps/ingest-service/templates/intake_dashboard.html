@@ -142,22 +142,68 @@
         .modal-overlay {
             display: none; position: fixed; inset: 0;
             background: rgba(0,0,0,0.6); z-index: 1000;
-            align-items: center; justify-content: center;
+            align-items: flex-start; justify-content: center;
             backdrop-filter: blur(4px);
+            padding: 40px 20px;
+            overflow-y: auto;
         }
         .modal-overlay.active { display: flex; }
         /* Mapping modal must stack ABOVE session modal */
         #mapping-modal { z-index: 1100; }
+        /* Themed prompt/confirm modal stacks above everything */
+        #themed-prompt-overlay { z-index: 1200; align-items: center; }
         .modal {
             background: var(--surface); border: 1px solid var(--border);
             border-radius: 12px; padding: 28px; width: 90%; max-width: 640px;
-            max-height: 85vh; overflow-y: auto;
+            max-height: 85vh; overflow-y: auto; position: relative;
         }
         .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
         .modal-header h3 { font-size: 1.2rem; }
         .modal-close {
             background: none; border: none; color: var(--text-dim);
             font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1;
+        }
+        /* Sticky close button that follows scroll */
+        .modal-close-sticky {
+            position: sticky; top: 0; float: right;
+            background: var(--surface-2); border: 1px solid var(--border);
+            color: var(--text); font-size: 1.3rem; cursor: pointer;
+            width: 36px; height: 36px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            z-index: 10; margin-top: -8px; margin-right: -8px;
+            transition: all 0.15s;
+        }
+        .modal-close-sticky:hover { background: var(--red); color: #fff; border-color: var(--red); }
+
+        /* Action dropdown — must escape table overflow */
+        .action-cell { position: relative; overflow: visible; }
+        .action-dropdown {
+            display: none; position: absolute; right: 0; top: 100%;
+            z-index: 200; background: var(--surface-2); border: 1px solid var(--border);
+            border-radius: 6px; padding: 4px; min-width: 160px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        }
+        .action-dropdown.show { display: block !important; }
+        .action-dropdown button {
+            width: 100%; text-align: left; font-size: 0.8rem;
+            background: none; color: var(--text); padding: 8px 10px;
+            border: none; border-radius: 4px; cursor: pointer;
+        }
+        .action-dropdown button:hover { background: var(--surface); }
+        .action-dropdown hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+
+        /* Themed prompt modal */
+        .prompt-modal {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 12px; padding: 24px; width: 90%; max-width: 420px;
+        }
+        .prompt-modal h3 { font-size: 1.1rem; margin-bottom: 12px; }
+        .prompt-modal p { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 16px; }
+        .prompt-modal input, .prompt-modal textarea {
+            width: 100%; margin-bottom: 12px;
+        }
+        .prompt-modal .prompt-buttons {
+            display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;
         }
         .divider { text-align: center; color: var(--text-dim); margin: 16px 0; font-size: 0.85rem; position: relative; }
         .divider::before, .divider::after {
@@ -355,11 +401,21 @@
     <!-- ═══════════════════════════════════ SESSION DETAIL MODAL ═══════════════════════════════════ -->
     <div id="session-modal" class="modal-overlay">
         <div class="modal" style="max-width:900px;">
-            <div class="modal-header">
-                <h3>Session Details</h3>
-                <button class="modal-close" onclick="closeModal('session-modal')">&times;</button>
-            </div>
+            <button class="modal-close-sticky" onclick="closeModal('session-modal')">&times;</button>
             <div id="session-modal-body"></div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ THEMED PROMPT/CONFIRM ═══════════════════════════════════ -->
+    <div id="themed-prompt-overlay" class="modal-overlay">
+        <div class="prompt-modal">
+            <h3 id="tp-title"></h3>
+            <p id="tp-message"></p>
+            <div id="tp-inputs"></div>
+            <div class="prompt-buttons">
+                <button class="btn btn-secondary" id="tp-cancel">Cancel</button>
+                <button class="btn btn-primary" id="tp-confirm">Confirm</button>
+            </div>
         </div>
     </div>
 
@@ -400,6 +456,82 @@
     </div>
 
     <script>
+    // ═══════════════════════════════ THEMED PROMPT/CONFIRM SYSTEM ═══════════════════════════════
+    function themedPrompt({ title, message, inputs = [], confirmText = 'Confirm', confirmClass = 'btn-primary', dangerous = false }) {
+        return new Promise((resolve) => {
+            const overlay = document.getElementById('themed-prompt-overlay');
+            document.getElementById('tp-title').textContent = title;
+            document.getElementById('tp-message').textContent = message || '';
+            document.getElementById('tp-message').style.display = message ? 'block' : 'none';
+            const confirmBtn = document.getElementById('tp-confirm');
+            confirmBtn.textContent = confirmText;
+            confirmBtn.className = `btn ${dangerous ? 'btn-danger' : confirmClass}`;
+
+            const inputsDiv = document.getElementById('tp-inputs');
+            inputsDiv.innerHTML = inputs.map((inp, idx) => {
+                if (inp.type === 'number') {
+                    return `<div class="form-group"><label>${inp.label}</label>
+                        <input type="number" id="tp-input-${idx}" value="${inp.default || ''}" 
+                               min="${inp.min || ''}" max="${inp.max || ''}" step="${inp.step || 'any'}"
+                               placeholder="${inp.placeholder || ''}"></div>`;
+                } else if (inp.type === 'textarea') {
+                    return `<div class="form-group"><label>${inp.label}</label>
+                        <textarea id="tp-input-${idx}" rows="2" placeholder="${inp.placeholder || ''}">${inp.default || ''}</textarea></div>`;
+                } else {
+                    return `<div class="form-group"><label>${inp.label}</label>
+                        <input type="text" id="tp-input-${idx}" value="${inp.default || ''}" 
+                               placeholder="${inp.placeholder || ''}"></div>`;
+                }
+            }).join('');
+
+            overlay.classList.add('active');
+            if (inputs.length > 0) {
+                setTimeout(() => document.getElementById('tp-input-0')?.focus(), 50);
+            }
+
+            function cleanup() {
+                overlay.classList.remove('active');
+                document.getElementById('tp-cancel').removeEventListener('click', onCancel);
+                document.getElementById('tp-confirm').removeEventListener('click', onConfirm);
+            }
+            function onCancel() { cleanup(); resolve(null); }
+            function onConfirm() {
+                const values = inputs.map((_, idx) => document.getElementById(`tp-input-${idx}`)?.value ?? '');
+                cleanup();
+                resolve(inputs.length === 0 ? true : inputs.length === 1 ? values[0] : values);
+            }
+            document.getElementById('tp-cancel').addEventListener('click', onCancel);
+            document.getElementById('tp-confirm').addEventListener('click', onConfirm);
+            // Enter key confirms
+            inputsDiv.addEventListener('keydown', (e) => { if (e.key === 'Enter') onConfirm(); });
+        });
+    }
+
+    function themedConfirm(title, message, { confirmText = 'Confirm', dangerous = false } = {}) {
+        return themedPrompt({ title, message, inputs: [], confirmText, dangerous });
+    }
+
+    // ═══════════════════════════════ ESCAPE KEY & CLICK-OUTSIDE ═══════════════════════════════
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            // Close topmost modal
+            const tp = document.getElementById('themed-prompt-overlay');
+            if (tp.classList.contains('active')) { tp.classList.remove('active'); return; }
+            const mapping = document.getElementById('mapping-modal');
+            if (mapping.classList.contains('active')) { closeModal('mapping-modal'); return; }
+            const session = document.getElementById('session-modal');
+            if (session.classList.contains('active')) { closeModal('session-modal'); return; }
+        }
+    });
+    // Click outside modal to close
+    document.querySelectorAll('.modal-overlay').forEach(overlay => {
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                overlay.classList.remove('active');
+            }
+        });
+    });
+
     // ═══════════════════════════════ STATE ═══════════════════════════════
     let currentSessionId = null;
     let currentMapItemId = null;
@@ -543,7 +675,7 @@
 
                 ${(s.unmapped_count || 0) > 0 ? `<div class="alert alert-warning">${s.unmapped_count} items need linking before finalization</div>` : ''}
 
-                <div style="overflow-x:auto;">
+                <div style="overflow:visible;">
                 <table>
                     <thead><tr>
                         <th>Product</th><th>Qty</th><th>Market</th><th>Offer</th><th>Status</th><th>Actions</th>
@@ -572,7 +704,7 @@
                             <td>$${(i.market_price || 0).toFixed(2)}</td>
                             <td>$${(i.offer_price || 0).toFixed(2)}</td>
                             <td>${statusBadge}</td>
-                            <td style="white-space:nowrap;">
+                            <td style="overflow:visible; position:relative; white-space:nowrap;">
                                 ${s.status === 'in_progress' ? (() => {
                                     let btns = '';
                                     if (isDead) {
@@ -584,15 +716,16 @@
                                         }
                                         // Action dropdown
                                         btns += `<div style="display:inline-block; position:relative;">
-                                            <button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" 
-                                                    onclick="this.nextElementSibling.classList.toggle('show')">⋮</button>
-                                            <div class="action-dropdown" style="display:none; position:absolute; right:0; top:100%; z-index:100; background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:4px; min-width:140px; box-shadow:0 4px 12px rgba(0,0,0,0.3);">
-                                                ${!isDamaged ? `<button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--text);padding:6px 8px;" onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">🔨 Damage</button>` : ''}
-                                                <button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--text);padding:6px 8px;" onclick="overridePrice('${i.id}','${sessionId}',${i.market_price})">💰 Override Price</button>
-                                                <button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--text);padding:6px 8px;" onclick="markMissing('${i.id}','${sessionId}')">❌ Missing</button>
-                                                <button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--text);padding:6px 8px;" onclick="markRejected('${i.id}','${sessionId}')">🚫 Rejected</button>
-                                                <hr style="border-color:var(--border);margin:4px 0;">
-                                                <button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--red);padding:6px 8px;" onclick="deleteItem('${i.id}','${sessionId}')">🗑 Delete</button>
+                                            <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" 
+                                                    onclick="toggleActionMenu(this)">⋮</button>
+                                            <div class="action-dropdown">
+                                                ${!isDamaged ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">🔨 Damage</button>` : ''}
+                                                <button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price})">💰 Override Price</button>
+                                                <button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">✏ Edit Qty</button>
+                                                <button onclick="markMissing('${i.id}','${sessionId}')">❌ Missing</button>
+                                                <button onclick="markRejected('${i.id}','${sessionId}')">🚫 Rejected</button>
+                                                <hr>
+                                                <button style="color:var(--red);" onclick="deleteItem('${i.id}','${sessionId}')">🗑 Delete</button>
                                             </div>
                                         </div>`;
                                     }
@@ -919,7 +1052,12 @@
 
     // ═══════════════════════════════ EDIT OFFER % ═══════════════════════════════
     async function editOfferPct(sessionId, currentPct) {
-        const newPct = prompt(`Current offer: ${currentPct}%\nEnter new offer percentage:`, currentPct);
+        const newPct = await themedPrompt({
+            title: 'Edit Offer Percentage',
+            message: `Current offer: ${currentPct}%`,
+            inputs: [{ type: 'number', label: 'New offer percentage', default: String(currentPct), min: 1, max: 100, step: '0.5' }],
+            confirmText: 'Update',
+        });
         if (newPct === null || newPct === '') return;
         const val = parseFloat(newPct);
         if (isNaN(val) || val <= 0 || val > 100) { alert('Enter a valid percentage (1-100)'); return; }
@@ -1055,19 +1193,26 @@
 
     // Close action dropdowns when clicking outside
     document.addEventListener('click', (e) => {
-        if (!e.target.closest('.action-dropdown') && !e.target.matches('[onclick*="toggle"]')) {
+        if (!e.target.closest('.action-dropdown') && !e.target.closest('.action-trigger')) {
             document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
         }
     });
-    // .show class for dropdown
-    const ddStyle = document.createElement('style');
-    ddStyle.textContent = '.action-dropdown.show { display:block !important; }';
-    document.head.appendChild(ddStyle);
+
+    function toggleActionMenu(btn) {
+        // Close all others first
+        document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
+        btn.nextElementSibling.classList.toggle('show');
+    }
 
     async function cancelSession(sessionId) {
-        const reason = prompt('Reason for cancellation (optional):');
-        if (reason === null) return; // user hit Cancel on prompt
-        if (!confirm('Cancel this session? No inventory will be created.')) return;
+        const reason = await themedPrompt({
+            title: '✕ Cancel Session',
+            message: 'This session will be cancelled. No inventory will be created.',
+            inputs: [{ type: 'text', label: 'Reason (optional)', placeholder: 'e.g. Deal fell through' }],
+            confirmText: 'Cancel Session',
+            dangerous: true,
+        });
+        if (reason === null) return;
         try {
             const r = await fetch(`/api/intake/cancel-session/${sessionId}`, {
                 method: 'POST',
@@ -1083,19 +1228,27 @@
     async function damageItem(itemId, sessionId, currentQty) {
         let damagedQty = 1;
         if (currentQty > 1) {
-            const input = prompt(`How many are damaged? (1-${currentQty})`, '1');
+            const input = await themedPrompt({
+                title: '🔨 Mark as Damaged',
+                message: `This item has ${currentQty} units. How many are damaged? Damaged items receive 85% of the original offer.`,
+                inputs: [{ type: 'number', label: 'Damaged quantity', default: '1', min: 1, max: currentQty }],
+                confirmText: 'Split & Mark Damaged',
+                dangerous: true,
+            });
             if (input === null) return;
             damagedQty = parseInt(input);
             if (isNaN(damagedQty) || damagedQty < 1 || damagedQty > currentQty) {
                 alert(`Must be between 1 and ${currentQty}`);
                 return;
             }
+        } else {
+            const ok = await themedConfirm(
+                '🔨 Mark as Damaged',
+                'Mark this item as damaged? Offer becomes 85% of original.',
+                { confirmText: 'Mark Damaged', dangerous: true }
+            );
+            if (!ok) return;
         }
-        const desc = damagedQty === currentQty
-            ? `Mark all ${currentQty} as damaged? (offer becomes 85% of original)`
-            : `Split: ${currentQty - damagedQty} good + ${damagedQty} damaged (at 85% offer)`;
-        if (!confirm(desc)) return;
-
         try {
             const r = await fetch(`/api/intake/item/${itemId}/damage`, {
                 method: 'POST',
@@ -1109,7 +1262,12 @@
     }
 
     async function markMissing(itemId, sessionId) {
-        if (!confirm('Mark as missing? Item will be excluded from payment.')) return;
+        const ok = await themedConfirm(
+            '❌ Mark as Missing',
+            'This item will be excluded from payment and Shopify push.',
+            { confirmText: 'Mark Missing', dangerous: true }
+        );
+        if (!ok) return;
         try {
             const r = await fetch(`/api/intake/item/${itemId}/missing`, { method: 'POST' });
             const d = await r.json();
@@ -1119,7 +1277,12 @@
     }
 
     async function markRejected(itemId, sessionId) {
-        if (!confirm('Mark as rejected? (Seller kept this item — excluded from payment)')) return;
+        const ok = await themedConfirm(
+            '🚫 Mark as Rejected',
+            'Seller kept this item. It will be excluded from payment.',
+            { confirmText: 'Mark Rejected', dangerous: true }
+        );
+        if (!ok) return;
         try {
             const r = await fetch(`/api/intake/item/${itemId}/rejected`, { method: 'POST' });
             const d = await r.json();
@@ -1129,7 +1292,12 @@
     }
 
     async function restoreItem(itemId, sessionId) {
-        if (!confirm('Restore this item back to good?')) return;
+        const ok = await themedConfirm(
+            'Restore Item',
+            'Restore this item back to good status?',
+            { confirmText: 'Restore' }
+        );
+        if (!ok) return;
         try {
             const r = await fetch(`/api/intake/item/${itemId}/restore`, { method: 'POST' });
             const d = await r.json();
@@ -1139,13 +1307,19 @@
     }
 
     async function overridePrice(itemId, sessionId, currentPrice) {
-        const newPrice = prompt(`Override market price (currently $${currentPrice.toFixed(2)}):`, currentPrice.toFixed(2));
-        if (newPrice === null) return;
-        const parsed = parseFloat(newPrice);
+        const values = await themedPrompt({
+            title: '💰 Override Price',
+            message: `Current market price: $${currentPrice.toFixed(2)}`,
+            inputs: [
+                { type: 'number', label: 'New market price', default: currentPrice.toFixed(2), min: 0, step: '0.01' },
+                { type: 'text', label: 'Reason', placeholder: 'e.g. Better packs version, EV $45+' },
+            ],
+            confirmText: 'Override Price',
+        });
+        if (values === null) return;
+        const [priceStr, note] = values;
+        const parsed = parseFloat(priceStr);
         if (isNaN(parsed) || parsed < 0) { alert('Invalid price'); return; }
-
-        const note = prompt('Reason for override (e.g. "better packs version, EV $45"):');
-        if (note === null) return;
 
         try {
             const r = await fetch(`/api/intake/item/${itemId}/override-price`, {
@@ -1159,8 +1333,37 @@
         } catch(err) { alert(err.message); }
     }
 
+    async function editQuantity(itemId, sessionId, currentQty) {
+        const input = await themedPrompt({
+            title: '✏ Edit Quantity',
+            message: `Current quantity: ${currentQty}`,
+            inputs: [{ type: 'number', label: 'New quantity', default: String(currentQty), min: 1 }],
+            confirmText: 'Update Quantity',
+        });
+        if (input === null) return;
+        const newQty = parseInt(input);
+        if (isNaN(newQty) || newQty < 1) { alert('Invalid quantity'); return; }
+        if (newQty === currentQty) return;
+
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/update-quantity`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ quantity: newQty, session_id: sessionId }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
     async function deleteItem(itemId, sessionId) {
-        if (!confirm('Permanently delete this item? This cannot be undone.')) return;
+        const ok = await themedConfirm(
+            '🗑 Delete Item',
+            'Permanently remove this item from the session? This cannot be undone.',
+            { confirmText: 'Delete', dangerous: true }
+        );
+        if (!ok) return;
         try {
             const r = await fetch(`/api/intake/item/${itemId}/delete`, { method: 'POST' });
             const d = await r.json();
@@ -1270,7 +1473,12 @@
 
     // ═══════════════════════════════ FINALIZE ═══════════════════════════════
     async function finalizeSession(sessionId) {
-        if (!confirm('Finalize this session? This will create inventory entries and COGS records.')) return;
+        const ok = await themedConfirm(
+            'Finalize Session',
+            'This will lock all prices and create inventory/COGS records. This cannot be undone.',
+            { confirmText: 'Finalize' }
+        );
+        if (!ok) return;
         try {
             const r = await fetch(`/api/intake/finalize/${sessionId}`, { method: 'POST' });
             const d = await r.json();
