@@ -706,6 +706,25 @@
                 <!-- Price comparison results go here -->
                 <div id="price-refresh-results"></div>
 
+                ${s.status === 'in_progress' && (s.session_type === 'sealed' || s.session_type === 'mixed') ? `
+                    <div style="margin-bottom:16px; padding:12px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
+                        <h4 style="margin-bottom:10px; font-size:0.95rem;">➕ Add Sealed Item</h4>
+                        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+                            <div class="form-group" style="flex:2; min-width:180px; margin:0;">
+                                <label>Search PPT</label>
+                                <input type="text" id="session-sealed-search" placeholder="e.g. Celebrations Elite Trainer Box"
+                                       onkeydown="if(event.key==='Enter') searchSealedForSession('${sessionId}', ${s.offer_percentage})">
+                            </div>
+                            <div class="form-group" style="width:60px; margin:0;">
+                                <label>Qty</label>
+                                <input type="number" id="session-sealed-qty" value="1" min="1">
+                            </div>
+                            <button class="btn btn-primary btn-sm" onclick="searchSealedForSession('${sessionId}', ${s.offer_percentage})">Search</button>
+                        </div>
+                        <div id="session-sealed-results" style="margin-top:8px;"></div>
+                    </div>
+                ` : ''}
+
                 ${(s.unmapped_count || 0) > 0 ? `<div class="alert alert-warning">${s.unmapped_count} items need linking before finalization</div>` : ''}
 
                 <div style="overflow-x:auto;">
@@ -769,27 +788,6 @@
                     }).join('')}</tbody>
                 </table>
                 </div>
-
-                ${s.status === 'in_progress' && (s.session_type === 'sealed' || s.session_type === 'mixed') ? `
-                    <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
-                        <h4 style="margin-bottom:12px;">➕ Add Sealed Item</h4>
-                        <div class="form-row">
-                            <div class="form-group" style="flex:2;">
-                                <label>Search PPT</label>
-                                <input type="text" id="session-sealed-search" placeholder="e.g. Celebrations Elite Trainer Box">
-                            </div>
-                            <div class="form-group">
-                                <label>Qty</label>
-                                <input type="number" id="session-sealed-qty" value="1" min="1" style="width:70px;">
-                            </div>
-                            <div class="form-group" style="justify-content:flex-end;">
-                                <label>&nbsp;</label>
-                                <button class="btn btn-primary" onclick="searchSealedForSession('${sessionId}', ${s.offer_percentage})">Search</button>
-                            </div>
-                        </div>
-                        <div id="session-sealed-results" style="margin-top:8px;"></div>
-                    </div>
-                ` : ''}
 
                 ${s.status === 'in_progress' && s.session_type === 'raw' ? `
                     <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
@@ -1444,6 +1442,15 @@
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ query: searchTerm }),
             });
+            
+            // Handle non-JSON responses
+            const contentType = r.headers.get('content-type') || '';
+            if (!contentType.includes('application/json')) {
+                const text = await r.text();
+                resultsDiv.innerHTML = `<div class="alert alert-error">Server error (${r.status}): ${text.substring(0, 100)}</div>`;
+                return;
+            }
+            
             const d = await r.json();
             if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
@@ -1452,11 +1459,12 @@
 
             const qty = parseInt(document.getElementById('session-sealed-qty').value) || 1;
             resultsDiv.innerHTML = products.map(p => {
-                const price = p.unopenedPrice || p.prices?.market || 0;
+                const price = p.unopenedPrice || (p.prices ? p.prices.market : null) || 0;
                 const offer = (price * qty * offerPct / 100).toFixed(2);
-                return `<div class="search-result" onclick="addSealedToSession('${sessionId}', ${p.tcgPlayerId || p.tcgplayer_id}, '${(p.name||'').replace(/'/g,"\\'")}', ${price}, ${qty}, ${offerPct})">
+                const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.id || '';
+                return `<div class="search-result" onclick="addSealedToSession('${sessionId}', ${tcgId}, '${(p.name||'').replace(/'/g,"\\'")}', ${price}, ${qty}, ${offerPct})">
                     <h4>${p.name}</h4>
-                    <p>TCG#${p.tcgPlayerId || p.tcgplayer_id} · $${price.toFixed(2)} each · Qty ${qty} · Offer: $${offer}</p>
+                    <p>TCG#${tcgId} · $${Number(price).toFixed(2)} each · Qty ${qty} · Offer: $${offer}</p>
                 </div>`;
             }).join('');
         } catch(err) {
