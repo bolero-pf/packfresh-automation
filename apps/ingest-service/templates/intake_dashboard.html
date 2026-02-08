@@ -1468,7 +1468,6 @@
                     <p>${p.setName || p.set_name || ''} · TCG#${tcgId} · $${Number(price).toFixed(2)} each · Qty ${qty} · Offer: $${offer}</p>
                 </div>`;
             }).join('');
-            }).join('');
         } catch(err) {
             resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
