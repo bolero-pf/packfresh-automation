@@ -1195,57 +1195,54 @@
 
     async function applyPptPrice(itemId, sessionId, pptPrice, btn) {
         try {
+            // Disable button immediately
+            btn.disabled = true;
+            btn.textContent = '...';
+
             const r = await fetch('/api/intake/update-item-price', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ item_id: itemId, session_id: sessionId, new_price: pptPrice }),
             });
             const d = await r.json();
-            if (!r.ok) { alert(d.error); return; }
+            if (!r.ok) { alert(d.error); btn.disabled = false; btn.textContent = 'Apply'; return; }
 
-            // Update the row in-place
+            // Mark this row as applied visually
             const row = btn.closest('tr');
             if (row) {
-                // Update Collectr column to show the new accepted price
-                const cells = row.querySelectorAll('td');
-                cells[1].innerHTML = `<span style="color:var(--green); font-weight:700;">$${pptPrice.toFixed(2)}</span>`;
-                cells[4].innerHTML = `<span style="color:var(--green);">✓ Updated</span>`;
-                cells[5].innerHTML = '<span class="badge badge-green">Applied</span>';
                 row.style.background = 'rgba(0,200,100,0.06)';
+                const cells = row.querySelectorAll('td');
+                // Update Current price column
+                cells[1].innerHTML = `<span style="color:var(--green); font-weight:700;">$${pptPrice.toFixed(2)}</span>`;
+                // Update Delta column
+                cells[4].innerHTML = `<span style="color:var(--green);">✓ Applied</span>`;
+                // Replace button
+                cells[5].innerHTML = '<span class="badge badge-green">Applied</span>';
             }
 
-            // Also update the session stats (market value / offer total) without reloading
+            // Update session stats at top of modal
             try {
                 const sr = await fetch(`/api/intake/session/${sessionId}`);
                 const sd = await sr.json();
                 const s = sd.session;
-                // Update the stats at the top
-                const offerDisplay = document.getElementById('offer-pct-display');
-                if (offerDisplay) {
-                    // Find the stats container and update totals
-                    const stats = offerDisplay.closest('.stats');
-                    if (stats) {
-                        const statValues = stats.querySelectorAll('.stat-value');
-                        // Market Value stat (index 2)
-                        if (statValues[2]) statValues[2].textContent = `$${(s.total_market_value || 0).toFixed(2)}`;
-                        // Offer Total stat (index 4)
-                        if (statValues[4]) statValues[4].textContent = `$${(s.total_offer_amount || 0).toFixed(2)}`;
-                    }
+                const statsDiv = document.querySelector('#session-modal-body .stats');
+                if (statsDiv) {
+                    const marketStat = statsDiv.querySelectorAll('.stat-value');
+                    if (marketStat[2]) marketStat[2].textContent = '$' + (s.total_market_value || 0).toFixed(2);
+                    const offerStat = document.querySelector('#session-modal-body .stat-value');
+                    // Update offer total
+                    const allStats = document.querySelectorAll('#session-modal-body .stat-value');
+                    allStats.forEach(el => {
+                        if (el.textContent.startsWith('$') && el.closest('.stat')?.querySelector('.stat-label')?.textContent === 'Offer Total') {
+                            el.textContent = '$' + (s.total_offer_amount || 0).toFixed(2);
+                        }
+                    });
                 }
-                // Also update the items table
-                const itemRows = document.querySelectorAll('#session-modal-body table:last-of-type tbody tr');
-                const items = sd.items;
-                itemRows.forEach((tr, idx) => {
-                    if (items[idx]) {
-                        const tds = tr.querySelectorAll('td');
-                        tds[2].textContent = `$${(items[idx].market_price || 0).toFixed(2)}`;
-                        tds[3].textContent = `$${(items[idx].offer_price || 0).toFixed(2)}`;
-                    }
-                });
-            } catch(e) { /* stats refresh failed, not critical */ }
-
+            } catch(e) { /* stats update is best-effort */ }
         } catch(err) { alert(err.message); }
     }
+
+    // ═══════════════════════════════ ADD SEALED ITEM TO EXISTING SESSION ═══════════════════════════════
 
     // ═══════════════════════════════ ITEM STATUS MANAGEMENT ═══════════════════════════════
 
