@@ -246,7 +246,7 @@ def list_sessions():
 
 @app.route("/api/intake/map-item", methods=["POST"])
 def map_item():
-    """Map an intake item to a tcgplayer_id."""
+    """Map an intake item to a tcgplayer_id, with optional price override."""
     data = request.json or {}
     item_id = data.get("item_id")
     tcgplayer_id = data.get("tcgplayer_id")
@@ -259,10 +259,17 @@ def map_item():
     except (ValueError, TypeError):
         return jsonify({"error": "tcgplayer_id must be an integer"}), 400
 
-    # Optionally verify price via PPT
+    # Price override from the comparison UI (user picked Collectr, PPT, or custom)
     new_price = None
-    verify_price = data.get("verify_price", False)
-    if verify_price and ppt:
+    override_price = data.get("override_price")
+    if override_price is not None:
+        try:
+            new_price = Decimal(str(override_price))
+        except Exception:
+            pass
+
+    # Legacy: verify_price still works if called directly
+    if new_price is None and data.get("verify_price") and ppt:
         item = db.query_one("SELECT product_type FROM intake_items WHERE id = %s", (item_id,))
         if item:
             try:
@@ -279,7 +286,7 @@ def map_item():
         return jsonify({
             "success": True,
             "item": _serialize(updated),
-            "ppt_price_used": new_price is not None,
+            "price_updated": new_price is not None,
         })
     except ValueError as e:
         return jsonify({"error": str(e)}), 404

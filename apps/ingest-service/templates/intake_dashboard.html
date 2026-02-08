@@ -363,18 +363,21 @@
             </div>
             <div style="margin-bottom:16px;">
                 <strong>Product:</strong> <span id="map-product-name" style="color:var(--accent);"></span><br>
-                <strong>Set:</strong> <span id="map-set-name"></span>
+                <strong>Set:</strong> <span id="map-set-name"></span><br>
+                <strong>Collectr Price:</strong> <span id="map-collectr-price" style="font-weight:700;"></span>
             </div>
 
             <div class="form-group" style="margin-bottom:12px;">
                 <label>Paste TCGPlayer ID</label>
                 <div style="display:flex; gap:8px;">
                     <input type="number" id="map-tcgplayer-id" placeholder="e.g. 624679" style="flex:1;">
-                    <button class="btn btn-primary btn-sm" onclick="submitMapping()">Link</button>
-                    <button class="btn btn-secondary btn-sm" onclick="submitMappingVerify()">Link + Verify Price</button>
+                    <button class="btn btn-primary btn-sm" onclick="linkAndCompare()">Link &amp; Compare</button>
                 </div>
                 <small style="color:var(--text-dim);">Find the ID at tcgplayer.com/product/&lt;ID&gt;/</small>
             </div>
+
+            <!-- Price comparison panel (hidden until Link & Compare is clicked) -->
+            <div id="price-comparison" style="display:none;"></div>
 
             <div class="divider">or try auto-match</div>
 
@@ -522,7 +525,7 @@
                             ? '<span class="badge badge-green">Linked</span>'
                             : '<span class="badge badge-amber">Needs Link</span>'}</td>
                         <td>${!i.is_mapped
-                            ? `<button class="btn btn-primary btn-sm" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type)">Link</button>`
+                            ? `<button class="btn btn-primary btn-sm" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" data-price="${i.market_price||0}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type, parseFloat(this.dataset.price))">Link</button>`
                             : `<small style="color:var(--text-dim);">ID: ${i.tcgplayer_id}</small>`}</td>
                     </tr>`).join('')}</tbody>
                 </table>
@@ -540,20 +543,174 @@
     }
 
     // ═══════════════════════════════ MAPPING ═══════════════════════════════
-    function openMapping(itemId, productName, setName, productType) {
+    let currentMapCollectrPrice = 0;
+
+    function openMapping(itemId, productName, setName, productType, collectrPrice) {
         currentMapItemId = itemId;
         currentMapProductType = productType || 'sealed';
+        currentMapCollectrPrice = collectrPrice || 0;
         document.getElementById('map-product-name').textContent = productName;
         document.getElementById('map-set-name').textContent = setName || 'N/A';
+        document.getElementById('map-collectr-price').textContent = `$${currentMapCollectrPrice.toFixed(2)}`;
         document.getElementById('map-tcgplayer-id').value = '';
         document.getElementById('fuzzy-results').innerHTML = '';
+        document.getElementById('price-comparison').style.display = 'none';
+        document.getElementById('price-comparison').innerHTML = '';
         openModal('mapping-modal');
     }
 
-    async function submitMapping(verify = false) {
+    async function linkAndCompare() {
         const tcgId = document.getElementById('map-tcgplayer-id').value;
         if (!tcgId) { alert('Enter a TCGPlayer ID'); return; }
 
+        const panel = document.getElementById('price-comparison');
+        panel.style.display = 'block';
+        panel.innerHTML = '<div class="loading"><span class="spinner"></span> Fetching PPT price...</div>';
+
+        // Step 1: Look up PPT price
+        let pptPrice = null;
+        let pptProductName = '';
+        try {
+            const endpoint = currentMapProductType === 'raw' ? '/api/ppt/lookup-card' : '/api/ppt/lookup-sealed';
+            const r = await fetch(endpoint, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+            });
+            const d = await r.json();
+            if (r.ok) {
+                const item = d.card || d.product || {};
+                pptPrice = item.prices?.market || item.market_price || null;
+                pptProductName = item.name || item.productName || '';
+            } else {
+                // PPT lookup failed — still allow linking, just no price comparison
+                panel.innerHTML = `
+                    <div class="alert alert-warning" style="margin-top:12px;">
+                        PPT lookup failed: ${d.error || 'Unknown error'}. You can still link with the Collectr price.
+                    </div>
+                    <button class="btn btn-primary" style="width:100%; margin-top:8px;" 
+                            onclick="confirmLink(${currentMapCollectrPrice})">
+                        Link with Collectr Price ($${currentMapCollectrPrice.toFixed(2)})
+                    </button>`;
+                return;
+            }
+        } catch(err) {
+            panel.innerHTML = `
+                <div class="alert alert-error" style="margin-top:12px;">${err.message}</div>
+                <button class="btn btn-primary" style="width:100%; margin-top:8px;" 
+                        onclick="confirmLink(${currentMapCollectrPrice})">
+                    Link with Collectr Price ($${currentMapCollectrPrice.toFixed(2)})
+                </button>`;
+            return;
+        }
+
+        // Step 2: Show price comparison
+        const collectr = currentMapCollectrPrice;
+        const ppt = pptPrice || 0;
+        const delta = collectr > 0 ? ((ppt - collectr) / collectr * 100) : 0;
+        const absDelta = Math.abs(delta);
+        const significant = absDelta > 10;
+        const deltaColor = significant ? (delta > 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+        const deltaIcon = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
+
+        panel.innerHTML = `
+            ${pptProductName ? `<div style="margin-bottom:10px; font-size:0.85rem; color:var(--text-dim);">PPT match: <strong style="color:var(--text);">${pptProductName}</strong></div>` : ''}
+            
+            <div style="display:grid; grid-template-columns: 1fr auto 1fr; gap:12px; align-items:center; margin:12px 0;">
+                <!-- Collectr price -->
+                <div style="background:var(--surface-2); border:2px solid var(--border); border-radius:8px; padding:14px; text-align:center; cursor:pointer; transition:all 0.15s;"
+                     onclick="selectPrice('collectr')" id="price-option-collectr">
+                    <div style="font-size:0.75rem; color:var(--text-dim); font-weight:600; text-transform:uppercase;">Collectr</div>
+                    <div style="font-size:1.4rem; font-weight:700; margin:4px 0;">$${collectr.toFixed(2)}</div>
+                    <div style="font-size:0.75rem; color:var(--text-dim);">From CSV import</div>
+                </div>
+
+                <!-- Delta -->
+                <div style="text-align:center;">
+                    <div style="font-size:1.1rem; font-weight:700; color:${deltaColor};">
+                        ${deltaIcon} ${absDelta.toFixed(1)}%
+                    </div>
+                    ${significant ? `<div style="font-size:0.7rem; color:${deltaColor}; font-weight:600;">⚠ SIGNIFICANT</div>` : ''}
+                </div>
+
+                <!-- PPT price -->
+                <div style="background:var(--surface-2); border:2px solid var(--border); border-radius:8px; padding:14px; text-align:center; cursor:pointer; transition:all 0.15s;"
+                     onclick="selectPrice('ppt')" id="price-option-ppt">
+                    <div style="font-size:0.75rem; color:var(--text-dim); font-weight:600; text-transform:uppercase;">PPT (Live)</div>
+                    <div style="font-size:1.4rem; font-weight:700; margin:4px 0;">${ppt > 0 ? '$' + ppt.toFixed(2) : 'N/A'}</div>
+                    <div style="font-size:0.75rem; color:var(--text-dim);">TCGPlayer market</div>
+                </div>
+            </div>
+
+            <!-- Custom price option -->
+            <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+                <span style="font-size:0.85rem; color:var(--text-dim);">Or custom:</span>
+                <input type="number" id="custom-price" placeholder="Enter price" step="0.01" style="width:120px;" 
+                       onfocus="selectPrice('custom')">
+                <button class="btn btn-sm btn-secondary" onclick="selectPrice('custom')" id="price-option-custom-btn" 
+                        style="opacity:0.5;">Custom</button>
+            </div>
+
+            <!-- Confirm button -->
+            <button class="btn btn-primary" style="width:100%;" id="confirm-link-btn" data-ppt-price="${ppt}" onclick="confirmSelectedLink(${ppt})">
+                Select a price above, then confirm
+            </button>
+        `;
+
+        // Default selection: PPT if available and significant diff, otherwise Collectr
+        if (ppt > 0 && significant) {
+            selectPrice('ppt');
+        } else {
+            selectPrice('collectr');
+        }
+    }
+
+    let selectedPriceSource = null;
+
+    function selectPrice(source) {
+        selectedPriceSource = source;
+        // Update visual selection
+        ['collectr', 'ppt'].forEach(s => {
+            const el = document.getElementById('price-option-' + s);
+            if (el) {
+                el.style.borderColor = s === source ? 'var(--accent)' : 'var(--border)';
+                el.style.background = s === source ? 'rgba(79,125,249,0.08)' : 'var(--surface-2)';
+            }
+        });
+        const customBtn = document.getElementById('price-option-custom-btn');
+        if (customBtn) customBtn.style.opacity = source === 'custom' ? '1' : '0.5';
+
+        // Update confirm button text
+        const btn = document.getElementById('confirm-link-btn');
+        if (btn) {
+            if (source === 'collectr') {
+                btn.textContent = `Confirm Link — Use Collectr Price ($${currentMapCollectrPrice.toFixed(2)})`;
+            } else if (source === 'ppt') {
+                const pptVal = btn.dataset.pptPrice || '0';
+                btn.textContent = `Confirm Link — Use PPT Price ($${parseFloat(pptVal).toFixed(2)})`;
+            } else {
+                btn.textContent = 'Confirm Link — Use Custom Price';
+            }
+        }
+    }
+
+    async function confirmSelectedLink(pptPrice) {
+        let finalPrice;
+        if (selectedPriceSource === 'collectr') {
+            finalPrice = currentMapCollectrPrice;
+        } else if (selectedPriceSource === 'ppt') {
+            finalPrice = pptPrice;
+        } else if (selectedPriceSource === 'custom') {
+            finalPrice = parseFloat(document.getElementById('custom-price').value);
+            if (isNaN(finalPrice) || finalPrice <= 0) { alert('Enter a valid custom price'); return; }
+        } else {
+            alert('Select a price first'); return;
+        }
+        await confirmLink(finalPrice);
+    }
+
+    async function confirmLink(price) {
+        const tcgId = document.getElementById('map-tcgplayer-id').value;
         try {
             const r = await fetch('/api/intake/map-item', {
                 method: 'POST',
@@ -561,7 +718,8 @@
                 body: JSON.stringify({
                     item_id: currentMapItemId,
                     tcgplayer_id: parseInt(tcgId),
-                    verify_price: verify,
+                    verify_price: false,
+                    override_price: price,
                 }),
             });
             const d = await r.json();
@@ -570,8 +728,6 @@
             viewSession(currentSessionId);
         } catch(err) { alert(err.message); }
     }
-
-    function submitMappingVerify() { submitMapping(true); }
 
     async function fuzzySearch() {
         const productName = document.getElementById('map-product-name').textContent;
