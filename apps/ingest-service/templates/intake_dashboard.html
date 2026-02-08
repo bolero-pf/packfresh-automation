@@ -1152,8 +1152,8 @@
                 <table>
                     <thead><tr>
                         <th>Product</th>
-                        <th>Collectr</th>
-                        <th>PPT Market</th>
+                        <th>Current</th>
+                        <th>PPT Price</th>
                         <th>PPT Low</th>
                         <th>Delta</th>
                         <th></th>
@@ -1164,18 +1164,24 @@
                         const deltaColor = sig ? (delta > 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
                         const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
                         return `<tr style="${sig ? 'background:rgba(255,180,0,0.06);' : ''}">
-                            <td>${c.product_name}<br><small style="color:var(--text-dim);">ID: ${c.tcgplayer_id}</small></td>
+                            <td>
+                                ${c.product_name}
+                                <br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small>
+                                ${c.ppt_name && c.ppt_name !== c.product_name ? `<br><small style="color:var(--amber);">⚠ PPT: ${c.ppt_name}</small>` : ''}
+                            </td>
                             <td>$${c.collectr_price.toFixed(2)}</td>
-                            <td>${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : '—'}</td>
+                            <td style="${sig ? 'font-weight:700; color:var(--accent);' : ''}">
+                                ${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : '—'}
+                            </td>
                             <td>${c.ppt_low != null ? '$' + c.ppt_low.toFixed(2) : '—'}</td>
                             <td style="color:${deltaColor}; font-weight:${sig ? '700' : '400'};">
                                 ${delta != null ? arrow + ' ' + Math.abs(delta).toFixed(1) + '%' : '—'}
                                 ${sig ? ' ⚠' : ''}
                             </td>
-                            <td>${c.ppt_market != null && sig ? `
-                                <button class="btn btn-sm btn-secondary" 
+                            <td>${c.ppt_market != null ? `
+                                <button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;"
                                         onclick="applyPptPrice('${c.item_id}', '${sessionId}', ${c.ppt_market}, this)">
-                                    Use PPT
+                                    Apply
                                 </button>` : ''}</td>
                         </tr>`;
                     }).join('')}</tbody>

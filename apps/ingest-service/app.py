@@ -282,24 +282,42 @@ def refresh_session_prices(session_id):
         if cache_key not in price_cache:
             ppt_price = None
             ppt_low = None
+            ppt_name = None
             try:
                 if ptype == "sealed":
                     ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
                     if ppt_data:
-                        ppt_price = ppt_data.get("unopenedPrice")
+                        unopened = ppt_data.get("unopenedPrice")
+                        prices = ppt_data.get("prices") or {}
+                        if isinstance(prices, dict):
+                            prices_market = prices.get("market")
+                            prices_low = prices.get("low")
+                        else:
+                            prices_market = None
+                            prices_low = None
+
+                        ppt_price = unopened
+                        ppt_low = prices_low
+                        ppt_name = ppt_data.get("name")
+                        app.logger.info(
+                            f"PPT sealed {tcg_id}: name='{ppt_name}', "
+                            f"unopenedPrice={unopened}, prices.market={prices_market}, prices.low={prices_low}"
+                        )
                 else:
                     ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
                     if ppt_data:
                         prices = ppt_data.get("prices", {})
                         ppt_price = prices.get("market")
                         ppt_low = prices.get("low")
+                        ppt_name = ppt_data.get("name")
             except PPTError as e:
                 app.logger.warning(f"Price refresh failed for {tcg_id}: {e}")
-            price_cache[cache_key] = {"ppt_price": ppt_price, "ppt_low": ppt_low}
+            price_cache[cache_key] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name}
 
         cached = price_cache[cache_key]
         ppt_price = cached["ppt_price"]
         ppt_low = cached["ppt_low"]
+        ppt_name = cached.get("ppt_name")
 
         collectr_price = float(item.get("market_price") or 0)
         ppt_price_f = float(ppt_price) if ppt_price is not None else None
@@ -310,6 +328,7 @@ def refresh_session_prices(session_id):
         comparisons.append({
             "item_id": item["id"],
             "product_name": item.get("product_name"),
+            "ppt_name": ppt_name,
             "tcgplayer_id": tcg_id,
             "collectr_price": collectr_price,
             "ppt_market": ppt_price_f,
