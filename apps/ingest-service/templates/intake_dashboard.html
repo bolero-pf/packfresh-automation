@@ -233,8 +233,41 @@
 
         /* ─── RESPONSIVE ─── */
         @media (max-width: 768px) {
+            .container { padding: 10px; }
             .form-row { grid-template-columns: 1fr; }
             .stats { grid-template-columns: 1fr 1fr; }
+            .stat { padding: 10px; }
+            .stat-value { font-size: 1.2rem; }
+
+            /* Modal fills screen on mobile */
+            .modal-overlay { padding: 10px; }
+            .modal { max-width: 100%; padding: 16px; max-height: 92vh; }
+            .prompt-modal { max-width: 100%; padding: 16px; }
+
+            /* Table: make it scrollable but keep action column visible */
+            table { font-size: 0.8rem; }
+            th, td { padding: 8px 6px; }
+            
+            /* Stack tab bar and allow scroll */
+            .tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+            .tab { white-space: nowrap; padding: 8px 12px; font-size: 0.82rem; }
+
+            /* Bigger touch targets */
+            .btn { min-height: 40px; padding: 10px 16px; }
+            .btn-sm { min-height: 34px; padding: 8px 12px; }
+            .action-dropdown button { padding: 12px 10px; font-size: 0.85rem; }
+            .search-result { padding: 14px; }
+
+            /* Session detail: hide less important columns */
+            .hide-mobile { display: none; }
+
+            header .container { flex-wrap: wrap; }
+            .logo { font-size: 1.2rem; }
+        }
+
+        @media (max-width: 480px) {
+            .stats { grid-template-columns: 1fr; }
+            .modal { padding: 12px; }
         }
     </style>
 </head>
@@ -736,6 +769,27 @@
                     }).join('')}</tbody>
                 </table>
                 </div>
+
+                ${s.status === 'in_progress' && (s.session_type === 'sealed' || s.session_type === 'mixed') ? `
+                    <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
+                        <h4 style="margin-bottom:12px;">➕ Add Sealed Item</h4>
+                        <div class="form-row">
+                            <div class="form-group" style="flex:2;">
+                                <label>Search PPT</label>
+                                <input type="text" id="session-sealed-search" placeholder="e.g. Celebrations Elite Trainer Box">
+                            </div>
+                            <div class="form-group">
+                                <label>Qty</label>
+                                <input type="number" id="session-sealed-qty" value="1" min="1" style="width:70px;">
+                            </div>
+                            <div class="form-group" style="justify-content:flex-end;">
+                                <label>&nbsp;</label>
+                                <button class="btn btn-primary" onclick="searchSealedForSession('${sessionId}', ${s.offer_percentage})">Search</button>
+                            </div>
+                        </div>
+                        <div id="session-sealed-results" style="margin-top:8px;"></div>
+                    </div>
+                ` : ''}
 
                 ${s.status === 'in_progress' && s.session_type === 'raw' ? `
                     <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
@@ -1375,6 +1429,69 @@
             if (!r.ok) { alert(d.error); return; }
             viewSession(sessionId);
         } catch(err) { alert(err.message); }
+    }
+
+    // ═══════════════════════════════ ADD SEALED ITEM TO EXISTING SESSION ═══════════════════════════════
+    async function searchSealedForSession(sessionId, offerPct) {
+        const searchTerm = document.getElementById('session-sealed-search').value.trim();
+        const resultsDiv = document.getElementById('session-sealed-results');
+        if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a search term</div>'; return; }
+
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
+        try {
+            const r = await fetch('/api/ppt/search-sealed', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ query: searchTerm }),
+            });
+            const d = await r.json();
+            if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+            const products = d.results || [];
+            if (!products.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No results found</div>'; return; }
+
+            const qty = parseInt(document.getElementById('session-sealed-qty').value) || 1;
+            resultsDiv.innerHTML = products.map(p => {
+                const price = p.unopenedPrice || p.prices?.market || 0;
+                const offer = (price * qty * offerPct / 100).toFixed(2);
+                return `<div class="search-result" onclick="addSealedToSession('${sessionId}', ${p.tcgPlayerId || p.tcgplayer_id}, '${(p.name||'').replace(/'/g,"\\'")}', ${price}, ${qty}, ${offerPct})">
+                    <h4>${p.name}</h4>
+                    <p>TCG#${p.tcgPlayerId || p.tcgplayer_id} · $${price.toFixed(2)} each · Qty ${qty} · Offer: $${offer}</p>
+                </div>`;
+            }).join('');
+        } catch(err) {
+            resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    async function addSealedToSession(sessionId, tcgplayerId, name, price, qty, offerPct) {
+        const resultsDiv = document.getElementById('session-sealed-results');
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding...</div>';
+        try {
+            // Add the item via the existing import-like endpoint
+            const offerPrice = price * qty * (offerPct / 100);
+            const r = await fetch('/api/intake/add-sealed-item', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    product_name: name,
+                    tcgplayer_id: tcgplayerId,
+                    market_price: price,
+                    quantity: qty,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+            // Clear and reload
+            document.getElementById('session-sealed-search').value = '';
+            document.getElementById('session-sealed-qty').value = '1';
+            resultsDiv.innerHTML = '<div class="alert alert-success">Added! ✓</div>';
+            setTimeout(() => viewSession(sessionId), 500);
+        } catch(err) {
+            resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
     }
 
     // ═══════════════════════════════ ADD CARD TO EXISTING SESSION ═══════════════════════════════

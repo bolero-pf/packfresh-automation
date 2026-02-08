@@ -561,6 +561,32 @@ def update_quantity(item_id):
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/intake/add-sealed-item", methods=["POST"])
+def add_sealed_item():
+    """Add a sealed item to an existing session (manual add during buy)."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id")
+    product_name = data.get("product_name")
+    tcgplayer_id = data.get("tcgplayer_id")
+    market_price = data.get("market_price")
+    quantity = data.get("quantity", 1)
+
+    if not all([session_id, product_name, market_price]):
+        return jsonify({"error": "session_id, product_name, and market_price required"}), 400
+
+    try:
+        item = intake.add_sealed_item(
+            session_id=session_id,
+            product_name=product_name,
+            tcgplayer_id=int(tcgplayer_id) if tcgplayer_id else None,
+            market_price=Decimal(str(market_price)),
+            quantity=int(quantity),
+        )
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
 # ==========================================
 # FINALIZATION
 # ==========================================
