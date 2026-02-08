@@ -257,6 +257,56 @@ def _recalculate_session_totals(session_id: str):
     """, (session_id, session_id, session_id))
 
 
+def update_offer_percentage(session_id: str, new_percentage: Decimal) -> dict:
+    """
+    Change the offer percentage for a session and recalculate all item offer prices.
+    """
+    session = get_session(session_id)
+    if not session:
+        raise ValueError("Session not found")
+    if session["status"] != "in_progress":
+        raise ValueError("Cannot change offer % on a finalized session")
+
+    # Update session offer_percentage
+    execute("""
+        UPDATE intake_sessions SET offer_percentage = %s WHERE id = %s
+    """, (new_percentage, session_id))
+
+    # Recalculate every item's offer_price
+    execute("""
+        UPDATE intake_items
+        SET offer_price = market_price * quantity * (%s / 100.0)
+        WHERE session_id = %s
+    """, (new_percentage, session_id))
+
+    _recalculate_session_totals(session_id)
+    return get_session(session_id)
+
+
+def update_item_price(item_id: str, new_market_price: Decimal, session_id: str) -> dict:
+    """Update an item's market price and recalculate its offer price."""
+    session = get_session(session_id)
+    if not session:
+        raise ValueError("Session not found")
+
+    offer_pct = session["offer_percentage"]
+
+    item = query_one("SELECT quantity FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    offer_price = new_market_price * item["quantity"] * (offer_pct / Decimal("100"))
+
+    execute("""
+        UPDATE intake_items
+        SET market_price = %s, offer_price = %s
+        WHERE id = %s
+    """, (new_market_price, offer_price, item_id))
+
+    _recalculate_session_totals(session_id)
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
 # ==========================================
 # FINALIZATION
 # ==========================================

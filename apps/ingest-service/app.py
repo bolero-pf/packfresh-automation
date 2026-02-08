@@ -240,9 +240,90 @@ def list_sessions():
     return jsonify({"sessions": [_serialize(s) for s in sessions]})
 
 
-# ==========================================
-# ITEM MAPPING
-# ==========================================
+@app.route("/api/intake/session/<session_id>/offer-percentage", methods=["POST"])
+def update_offer_percentage(session_id):
+    """Update the offer percentage and recalculate all item offers."""
+    data = request.json or {}
+    try:
+        new_pct = Decimal(str(data.get("offer_percentage", "65")))
+    except Exception:
+        return jsonify({"error": "Invalid offer_percentage"}), 400
+
+    try:
+        session = intake.update_offer_percentage(session_id, new_pct)
+        return jsonify({"success": True, "session": _serialize(session)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/intake/session/<session_id>/refresh-prices", methods=["POST"])
+def refresh_session_prices(session_id):
+    """
+    Fetch current PPT prices for all linked items in a session.
+    Returns a comparison: collectr_price vs ppt_price for each item.
+    Does NOT auto-update prices — the user chooses which to accept.
+    """
+    if not ppt:
+        return jsonify({"error": "PPT API not configured"}), 503
+
+    items = intake.get_session_items(session_id)
+    linked = [i for i in items if i.get("tcgplayer_id")]
+
+    comparisons = []
+    for item in linked:
+        tcg_id = item["tcgplayer_id"]
+        ppt_price = None
+        ppt_low = None
+        try:
+            if item.get("product_type") == "sealed":
+                ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+                if ppt_data:
+                    ppt_price = ppt_data.get("unopenedPrice")
+            else:
+                ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
+                if ppt_data:
+                    prices = ppt_data.get("prices", {})
+                    ppt_price = prices.get("market")
+                    ppt_low = prices.get("low")
+        except PPTError as e:
+            app.logger.warning(f"Price refresh failed for {tcg_id}: {e}")
+
+        collectr_price = float(item.get("market_price") or 0)
+        ppt_price_f = float(ppt_price) if ppt_price is not None else None
+        delta_pct = None
+        if ppt_price_f and collectr_price > 0:
+            delta_pct = round((ppt_price_f - collectr_price) / collectr_price * 100, 1)
+
+        comparisons.append({
+            "item_id": item["id"],
+            "product_name": item.get("product_name"),
+            "tcgplayer_id": tcg_id,
+            "collectr_price": collectr_price,
+            "ppt_market": ppt_price_f,
+            "ppt_low": float(ppt_low) if ppt_low is not None else None,
+            "delta_pct": delta_pct,
+            "significant": abs(delta_pct) > 10 if delta_pct is not None else False,
+        })
+
+    return jsonify({"comparisons": comparisons, "count": len(comparisons)})
+
+
+@app.route("/api/intake/update-item-price", methods=["POST"])
+def update_item_price():
+    """Update an individual item's market price (from the price comparison UI)."""
+    data = request.json or {}
+    item_id = data.get("item_id")
+    session_id = data.get("session_id")
+    new_price = data.get("new_price")
+
+    if not all([item_id, session_id, new_price]):
+        return jsonify({"error": "item_id, session_id, and new_price required"}), 400
+
+    try:
+        updated = intake.update_item_price(item_id, Decimal(str(new_price)), session_id)
+        return jsonify({"success": True, "item": _serialize(updated)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route("/api/intake/map-item", methods=["POST"])
 def map_item():

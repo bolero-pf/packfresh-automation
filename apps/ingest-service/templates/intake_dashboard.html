@@ -503,8 +503,29 @@
                     <div class="stat"><div class="stat-label">Customer</div><div class="stat-value" style="font-size:1.1rem;">${s.customer_name}</div></div>
                     <div class="stat"><div class="stat-label">Type</div><div class="stat-value" style="font-size:1.1rem;"><span class="badge badge-blue">${s.session_type}</span></div></div>
                     <div class="stat"><div class="stat-label">Market Value</div><div class="stat-value">$${(s.total_market_value || 0).toFixed(2)}</div></div>
-                    <div class="stat"><div class="stat-label">Offer (${s.offer_percentage}%)</div><div class="stat-value">$${(s.total_offer_amount || 0).toFixed(2)}</div></div>
+                    <div class="stat">
+                        <div class="stat-label">Offer %</div>
+                        <div class="stat-value" style="display:flex; align-items:center; gap:8px;">
+                            <span id="offer-pct-display">${s.offer_percentage}%</span>
+                            ${s.status === 'in_progress' ? `
+                                <button class="btn btn-sm btn-secondary" style="font-size:0.75rem; padding:2px 8px;" 
+                                        onclick="editOfferPct('${sessionId}', ${s.offer_percentage})">Edit</button>
+                            ` : ''}
+                        </div>
+                    </div>
+                    <div class="stat"><div class="stat-label">Offer Total</div><div class="stat-value">$${(s.total_offer_amount || 0).toFixed(2)}</div></div>
                 </div>
+
+                ${s.status === 'in_progress' ? `
+                    <div style="margin-bottom:16px; display:flex; gap:8px;">
+                        <button class="btn btn-secondary btn-sm" onclick="refreshPrices('${sessionId}')">
+                            🔄 Refresh PPT Prices
+                        </button>
+                    </div>
+                ` : ''}
+
+                <!-- Price comparison results go here -->
+                <div id="price-refresh-results"></div>
 
                 ${(s.unmapped_count || 0) > 0 ? `<div class="alert alert-warning">${s.unmapped_count} items need linking before finalization</div>` : ''}
 
@@ -787,6 +808,100 @@
         } catch(err) {
             container.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
+    }
+
+    // ═══════════════════════════════ EDIT OFFER % ═══════════════════════════════
+    async function editOfferPct(sessionId, currentPct) {
+        const newPct = prompt(`Current offer: ${currentPct}%\nEnter new offer percentage:`, currentPct);
+        if (newPct === null || newPct === '') return;
+        const val = parseFloat(newPct);
+        if (isNaN(val) || val <= 0 || val > 100) { alert('Enter a valid percentage (1-100)'); return; }
+
+        try {
+            const r = await fetch(`/api/intake/session/${sessionId}/offer-percentage`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ offer_percentage: val }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            // Reload session view to show updated prices
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    // ═══════════════════════════════ REFRESH PRICES ═══════════════════════════════
+    async function refreshPrices(sessionId) {
+        const panel = document.getElementById('price-refresh-results');
+        if (!panel) return;
+        panel.innerHTML = '<div class="loading"><span class="spinner"></span> Fetching live PPT prices for all linked items...</div>';
+
+        try {
+            const r = await fetch(`/api/intake/session/${sessionId}/refresh-prices`, { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+            const comps = d.comparisons || [];
+            if (!comps.length) {
+                panel.innerHTML = '<div class="alert alert-warning">No linked items to refresh.</div>';
+                return;
+            }
+
+            const sigCount = comps.filter(c => c.significant).length;
+            panel.innerHTML = `
+                ${sigCount > 0 ? `<div class="alert alert-warning">⚠ ${sigCount} item(s) have >10% price difference</div>` : 
+                                  `<div class="alert alert-success">All prices are within 10% of PPT</div>`}
+                <div style="overflow-x:auto; margin-bottom:16px;">
+                <table>
+                    <thead><tr>
+                        <th>Product</th>
+                        <th>Collectr</th>
+                        <th>PPT Market</th>
+                        <th>PPT Low</th>
+                        <th>Delta</th>
+                        <th></th>
+                    </tr></thead>
+                    <tbody>${comps.map(c => {
+                        const delta = c.delta_pct;
+                        const sig = c.significant;
+                        const deltaColor = sig ? (delta > 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+                        const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
+                        return `<tr style="${sig ? 'background:rgba(255,180,0,0.06);' : ''}">
+                            <td>${c.product_name}<br><small style="color:var(--text-dim);">ID: ${c.tcgplayer_id}</small></td>
+                            <td>$${c.collectr_price.toFixed(2)}</td>
+                            <td>${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : '—'}</td>
+                            <td>${c.ppt_low != null ? '$' + c.ppt_low.toFixed(2) : '—'}</td>
+                            <td style="color:${deltaColor}; font-weight:${sig ? '700' : '400'};">
+                                ${delta != null ? arrow + ' ' + Math.abs(delta).toFixed(1) + '%' : '—'}
+                                ${sig ? ' ⚠' : ''}
+                            </td>
+                            <td>${c.ppt_market != null && sig ? `
+                                <button class="btn btn-sm btn-secondary" 
+                                        onclick="applyPptPrice('${c.item_id}', '${sessionId}', ${c.ppt_market})">
+                                    Use PPT
+                                </button>` : ''}</td>
+                        </tr>`;
+                    }).join('')}</tbody>
+                </table>
+                </div>
+            `;
+        } catch(err) {
+            panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    async function applyPptPrice(itemId, sessionId, pptPrice) {
+        try {
+            const r = await fetch('/api/intake/update-item-price', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ item_id: itemId, session_id: sessionId, new_price: pptPrice }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            // Refresh both the session view and the price comparison
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
     }
 
     // ═══════════════════════════════ FINALIZE ═══════════════════════════════
