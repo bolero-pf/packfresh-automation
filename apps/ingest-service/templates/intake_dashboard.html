@@ -175,19 +175,19 @@
         }
         .modal-close-sticky:hover { background: var(--red); color: #fff; border-color: var(--red); }
 
-        /* Action dropdown — must escape table overflow */
-        .action-cell { position: relative; overflow: visible; }
+        /* Action dropdown — fixed position to avoid overflow issues */
         .action-dropdown {
-            display: none; position: absolute; right: 0; top: 100%;
-            z-index: 200; background: var(--surface-2); border: 1px solid var(--border);
-            border-radius: 6px; padding: 4px; min-width: 160px;
+            display: none; position: fixed;
+            z-index: 1050; background: var(--surface-2); border: 1px solid var(--border);
+            border-radius: 6px; padding: 4px; width: 160px;
             box-shadow: 0 4px 16px rgba(0,0,0,0.4);
         }
         .action-dropdown.show { display: block !important; }
         .action-dropdown button {
-            width: 100%; text-align: left; font-size: 0.8rem;
+            display: block; width: 100%; text-align: left; font-size: 0.8rem;
             background: none; color: var(--text); padding: 8px 10px;
             border: none; border-radius: 4px; cursor: pointer;
+            white-space: nowrap;
         }
         .action-dropdown button:hover { background: var(--surface); }
         .action-dropdown hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
@@ -675,7 +675,7 @@
 
                 ${(s.unmapped_count || 0) > 0 ? `<div class="alert alert-warning">${s.unmapped_count} items need linking before finalization</div>` : ''}
 
-                <div style="overflow:visible;">
+                <div style="overflow-x:auto;">
                 <table>
                     <thead><tr>
                         <th>Product</th><th>Qty</th><th>Market</th><th>Offer</th><th>Status</th><th>Actions</th>
@@ -704,7 +704,7 @@
                             <td>$${(i.market_price || 0).toFixed(2)}</td>
                             <td>$${(i.offer_price || 0).toFixed(2)}</td>
                             <td>${statusBadge}</td>
-                            <td style="overflow:visible; position:relative; white-space:nowrap;">
+                            <td style="white-space:nowrap;">
                                 ${s.status === 'in_progress' ? (() => {
                                     let btns = '';
                                     if (isDead) {
@@ -1201,7 +1201,12 @@
     function toggleActionMenu(btn) {
         // Close all others first
         document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
-        btn.nextElementSibling.classList.toggle('show');
+        const dd = btn.nextElementSibling;
+        const rect = btn.getBoundingClientRect();
+        // Position fixed, below the button, aligned right
+        dd.style.top = (rect.bottom + 4) + 'px';
+        dd.style.left = Math.max(8, rect.right - 160) + 'px'; // 160 = dropdown width
+        dd.classList.toggle('show');
     }
 
     async function cancelSession(sessionId) {
