@@ -580,7 +580,14 @@
             const d = await r.json();
             if (r.ok) {
                 const item = d.card || d.product || {};
-                pptPrice = item.prices?.market || item.market_price || null;
+                // Try multiple paths for the price — sealed products may structure it differently
+                pptPrice = d.extracted_price               // backend pre-extracted
+                        || item.prices?.market             // standard card format
+                        || item.prices?.mid                // fallback
+                        || item.market_price               // flat field
+                        || item.marketPrice                // camelCase variant
+                        || item.price                      // simple price field
+                        || null;
                 pptProductName = item.name || item.productName || '';
             } else {
                 // PPT lookup failed — still allow linking, just no price comparison

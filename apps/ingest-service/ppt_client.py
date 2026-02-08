@@ -147,8 +147,8 @@ class PPTClient:
 
     # ── card endpoints ───────────────────────────────────────────────
 
-    def get_card_by_tcgplayer_id(self, tcgplayer_id, *, days=7, include_history=False):
-        params = {"tcgPlayerId": str(int(tcgplayer_id)), "days": int(days)}
+    def get_card_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
+        params = {"tcgPlayerId": str(int(tcgplayer_id))}
         if include_history:
             params["includeHistory"] = "true"
         items = self._extract_data(self._get(f"{self.base_url}/v2/cards", params))
@@ -163,8 +163,8 @@ class PPTClient:
 
     # ── sealed product endpoints ─────────────────────────────────────
 
-    def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, days=7, include_history=False):
-        params = {"tcgPlayerId": str(int(tcgplayer_id)), "days": int(days)}
+    def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
+        params = {"tcgPlayerId": str(int(tcgplayer_id))}
         if include_history:
             params["includeHistory"] = "true"
         items = self._extract_data(self._get(f"{self.base_url}/v2/sealed-products", params))

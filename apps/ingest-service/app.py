@@ -437,9 +437,35 @@ def ppt_lookup_sealed():
         product_data = ppt.get_sealed_product_by_tcgplayer_id(int(tcgplayer_id))
         if not product_data:
             return jsonify({"error": "Sealed product not found in PPT"}), 404
-        return jsonify({"product": product_data})
+
+        # Extract market price with multiple fallback paths
+        market_price = None
+        if isinstance(product_data.get("prices"), dict):
+            market_price = product_data["prices"].get("market")
+        if market_price is None:
+            market_price = product_data.get("market_price") or product_data.get("marketPrice") or product_data.get("price")
+
+        return jsonify({
+            "product": product_data,
+            "extracted_price": market_price,  # explicitly extracted for the frontend
+        })
     except PPTError as e:
         return jsonify({"error": str(e)}), 502
+
+
+@app.route("/api/ppt/debug-sealed/<int:tcgplayer_id>")
+def debug_sealed(tcgplayer_id):
+    """Debug: show raw PPT response for a sealed product. Remove in production."""
+    if not ppt:
+        return jsonify({"error": "PPT not configured"}), 503
+    try:
+        # Get the raw response (before _extract_data)
+        url = f"{ppt.base_url}/v2/sealed-products"
+        params = {"tcgPlayerId": str(tcgplayer_id)}
+        raw = ppt._get(url, params)
+        return jsonify({"raw_response": raw, "type": str(type(raw))})
+    except PPTError as e:
+        return jsonify({"error": str(e), "status": e.status_code}), 502
 
 
 @app.route("/api/ppt/search-sealed", methods=["POST"])
