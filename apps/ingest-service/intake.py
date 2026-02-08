@@ -1,5 +1,6 @@
 """
 Intake business logic.
+# v2.1 — added add_sealed_item, update_item_quantity, item status management
 
 Handles:
     - Session creation and management
@@ -528,6 +529,38 @@ def update_item_quantity(item_id: str, new_qty: int, session_id: str) -> dict:
         SET quantity = %s, offer_price = %s
         WHERE id = %s
     """, (new_qty, offer_price, item_id))
+
+    _recalculate_session_totals(session_id)
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def add_sealed_item(session_id: str, product_name: str, tcgplayer_id: int = None,
+                    market_price: Decimal = Decimal("0"), quantity: int = 1) -> dict:
+    """Add a sealed item to an existing session (manual add during a buy)."""
+    session = get_session(session_id)
+    if not session:
+        raise ValueError("Session not found")
+    if session["status"] != "in_progress":
+        raise ValueError("Cannot add items to a finalized/cancelled session")
+
+    offer_pct = session["offer_percentage"]
+    offer_price = market_price * quantity * (offer_pct / Decimal("100"))
+    unit_cost = offer_price / quantity if quantity > 0 else Decimal("0")
+    is_mapped = tcgplayer_id is not None
+
+    item_id = str(uuid4())
+    execute("""
+        INSERT INTO intake_items (
+            id, session_id, product_name, tcgplayer_id, product_type,
+            quantity, market_price, offer_price, unit_cost_basis,
+            is_mapped, item_status, listing_condition
+        ) VALUES (%s, %s, %s, %s, 'sealed', %s, %s, %s, %s, %s, 'good', 'NM')
+    """, (item_id, session_id, product_name, tcgplayer_id,
+          quantity, market_price, offer_price, unit_cost, is_mapped))
+
+    # Also save the mapping for future imports
+    if tcgplayer_id and product_name:
+        save_mapping(product_name, tcgplayer_id, 'sealed')
 
     _recalculate_session_totals(session_id)
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
