@@ -739,8 +739,8 @@
                         const rowStyle = isDead ? 'opacity:0.45; text-decoration:line-through;' 
                                        : isDamaged ? 'background:rgba(255,170,0,0.08);' : '';
                         const statusBadge = status === 'good' 
-                            ? (i.is_mapped ? '<span class="badge badge-green">Linked</span>' : '<span class="badge badge-amber">Needs Link</span>')
-                            : status === 'damaged' ? '<span class="badge" style="background:#b45309;color:#fff;">Damaged</span>'
+                            ? (i.is_mapped ? `<span class="badge badge-green">Linked</span><br><small style="color:var(--text-dim);">TCG#${i.tcgplayer_id}</small>` : '<span class="badge badge-amber">Needs Link</span>')
+                            : status === 'damaged' ? `<span class="badge" style="background:#b45309;color:#fff;">Damaged</span>${i.is_mapped ? '<br><small style="color:var(--text-dim);">TCG#'+i.tcgplayer_id+'</small>' : ''}`
                             : status === 'missing' ? '<span class="badge" style="background:#666;color:#fff;">Missing</span>'
                             : '<span class="badge" style="background:#666;color:#fff;">Rejected</span>';
                         const overrideNote = i.price_override_note ? `<br><small style="color:var(--accent);" title="${(i.price_override_note||'').replace(/"/g,'&quot;')}">⚡ ${i.price_override_note}</small>` : '';
@@ -762,10 +762,10 @@
                                     if (isDead) {
                                         btns += `<button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="restoreItem('${i.id}','${sessionId}')">Restore</button>`;
                                     } else {
-                                        // Link button for unmapped
-                                        if (!i.is_mapped && !isDamaged) {
-                                            btns += `<button class="btn btn-primary btn-sm" style="font-size:0.7rem;padding:2px 6px;" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" data-price="${i.market_price||0}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type, parseFloat(this.dataset.price))">Link</button> `;
-                                        }
+                                        // Link/Relink button — always show
+                                        const linkLabel = i.is_mapped ? 'Relink' : 'Link';
+                                        const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
+                                        btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" data-price="${i.market_price||0}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type, parseFloat(this.dataset.price))">${linkLabel}</button> `;
                                         // Action dropdown
                                         btns += `<div style="display:inline-block; position:relative;">
                                             <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" 
