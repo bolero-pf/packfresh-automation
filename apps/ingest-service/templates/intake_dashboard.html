@@ -210,6 +210,7 @@
             <button class="tab" onclick="switchTab('raw-intake')">Raw Card Entry</button>
             <button class="tab" onclick="switchTab('active-sessions')">Active Sessions</button>
             <button class="tab" onclick="switchTab('completed')">Completed</button>
+            <button class="tab" onclick="switchTab('cancelled')">Cancelled</button>
         </div>
 
         <!-- ═══════════════════════════════════ SEALED INTAKE TAB ═══════════════════════════════════ -->
@@ -341,6 +342,14 @@
                 <div id="completed-sessions-list" class="loading"><span class="spinner"></span> Loading...</div>
             </div>
         </div>
+
+        <!-- ═══════════════════════════════════ CANCELLED TAB ═══════════════════════════════════ -->
+        <div id="cancelled" class="tab-content">
+            <div class="card">
+                <h2>Cancelled Sessions</h2>
+                <div id="cancelled-sessions-list" class="loading"><span class="spinner"></span> Loading...</div>
+            </div>
+        </div>
     </div>
 
     <!-- ═══════════════════════════════════ SESSION DETAIL MODAL ═══════════════════════════════════ -->
@@ -412,6 +421,7 @@
 
         if (name === 'active-sessions') loadSessions('in_progress', 'active-sessions-list');
         if (name === 'completed') loadSessions('finalized', 'completed-sessions-list');
+        if (name === 'cancelled') loadSessions('cancelled', 'cancelled-sessions-list');
     }
 
     // ═══════════════════════════════ MODAL HELPERS ═══════════════════════════════
@@ -517,9 +527,13 @@
                 </div>
 
                 ${s.status === 'in_progress' ? `
-                    <div style="margin-bottom:16px; display:flex; gap:8px;">
+                    <div style="margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;">
                         <button class="btn btn-secondary btn-sm" onclick="refreshPrices('${sessionId}')">
                             🔄 Refresh PPT Prices
+                        </button>
+                        <button class="btn btn-sm" style="background:var(--red); color:#fff;" 
+                                onclick="cancelSession('${sessionId}')">
+                            ✕ Cancel Session
                         </button>
                     </div>
                 ` : ''}
@@ -532,23 +546,61 @@
                 <div style="overflow-x:auto;">
                 <table>
                     <thead><tr>
-                        <th>Product</th><th>Qty</th><th>Market</th><th>Offer</th><th>Status</th><th></th>
+                        <th>Product</th><th>Qty</th><th>Market</th><th>Offer</th><th>Status</th><th>Actions</th>
                     </tr></thead>
-                    <tbody>${items.map(i => `<tr class="${!i.is_mapped ? 'row-unmapped' : ''}">
-                        <td>
-                            ${i.product_name}
-                            ${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}</small>` : ''}
-                        </td>
-                        <td>${i.quantity}</td>
-                        <td>$${(i.market_price || 0).toFixed(2)}</td>
-                        <td>$${(i.offer_price || 0).toFixed(2)}</td>
-                        <td>${i.is_mapped
-                            ? '<span class="badge badge-green">Linked</span>'
-                            : '<span class="badge badge-amber">Needs Link</span>'}</td>
-                        <td>${!i.is_mapped
-                            ? `<button class="btn btn-primary btn-sm" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" data-price="${i.market_price||0}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type, parseFloat(this.dataset.price))">Link</button>`
-                            : `<small style="color:var(--text-dim);">ID: ${i.tcgplayer_id}</small>`}</td>
-                    </tr>`).join('')}</tbody>
+                    <tbody>${items.map(i => {
+                        const status = i.item_status || 'good';
+                        const isDead = status === 'missing' || status === 'rejected';
+                        const isDamaged = status === 'damaged';
+                        const rowStyle = isDead ? 'opacity:0.45; text-decoration:line-through;' 
+                                       : isDamaged ? 'background:rgba(255,170,0,0.08);' : '';
+                        const statusBadge = status === 'good' 
+                            ? (i.is_mapped ? '<span class="badge badge-green">Linked</span>' : '<span class="badge badge-amber">Needs Link</span>')
+                            : status === 'damaged' ? '<span class="badge" style="background:#b45309;color:#fff;">Damaged</span>'
+                            : status === 'missing' ? '<span class="badge" style="background:#666;color:#fff;">Missing</span>'
+                            : '<span class="badge" style="background:#666;color:#fff;">Rejected</span>';
+                        const overrideNote = i.price_override_note ? `<br><small style="color:var(--accent);" title="${(i.price_override_note||'').replace(/"/g,'&quot;')}">⚡ ${i.price_override_note}</small>` : '';
+                        const parentNote = i.parent_item_id ? '<br><small style="color:var(--text-dim);">↳ split from above</small>' : '';
+                        
+                        return `<tr style="${rowStyle}">
+                            <td>
+                                ${i.product_name}
+                                ${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}</small>` : ''}
+                                ${overrideNote}${parentNote}
+                            </td>
+                            <td>${i.quantity}</td>
+                            <td>$${(i.market_price || 0).toFixed(2)}</td>
+                            <td>$${(i.offer_price || 0).toFixed(2)}</td>
+                            <td>${statusBadge}</td>
+                            <td style="white-space:nowrap;">
+                                ${s.status === 'in_progress' ? (() => {
+                                    let btns = '';
+                                    if (isDead) {
+                                        btns += `<button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="restoreItem('${i.id}','${sessionId}')">Restore</button>`;
+                                    } else {
+                                        // Link button for unmapped
+                                        if (!i.is_mapped && !isDamaged) {
+                                            btns += `<button class="btn btn-primary btn-sm" style="font-size:0.7rem;padding:2px 6px;" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" data-price="${i.market_price||0}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type, parseFloat(this.dataset.price))">Link</button> `;
+                                        }
+                                        // Action dropdown
+                                        btns += `<div style="display:inline-block; position:relative;">
+                                            <button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" 
+                                                    onclick="this.nextElementSibling.classList.toggle('show')">⋮</button>
+                                            <div class="action-dropdown" style="display:none; position:absolute; right:0; top:100%; z-index:100; background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:4px; min-width:140px; box-shadow:0 4px 12px rgba(0,0,0,0.3);">
+                                                ${!isDamaged ? `<button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--text);padding:6px 8px;" onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">🔨 Damage</button>` : ''}
+                                                <button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--text);padding:6px 8px;" onclick="overridePrice('${i.id}','${sessionId}',${i.market_price})">💰 Override Price</button>
+                                                <button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--text);padding:6px 8px;" onclick="markMissing('${i.id}','${sessionId}')">❌ Missing</button>
+                                                <button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--text);padding:6px 8px;" onclick="markRejected('${i.id}','${sessionId}')">🚫 Rejected</button>
+                                                <hr style="border-color:var(--border);margin:4px 0;">
+                                                <button class="btn btn-sm" style="width:100%;text-align:left;font-size:0.75rem;background:none;color:var(--red);padding:6px 8px;" onclick="deleteItem('${i.id}','${sessionId}')">🗑 Delete</button>
+                                            </div>
+                                        </div>`;
+                                    }
+                                    return btns;
+                                })() : (i.is_mapped ? `<small style="color:var(--text-dim);">ID: ${i.tcgplayer_id}</small>` : '')}
+                            </td>
+                        </tr>`;
+                    }).join('')}</tbody>
                 </table>
                 </div>
 
@@ -586,11 +638,32 @@
                     </div>
                 ` : ''}
 
-                ${s.status === 'in_progress' && (s.unmapped_count || 0) === 0 && items.length > 0 ? `
-                    <div style="margin-top:20px;">
-                        <button class="btn btn-success" onclick="finalizeSession('${sessionId}')">Finalize Session</button>
+                ${s.status === 'cancelled' ? `
+                    <div class="alert alert-error" style="margin-top:16px;">
+                        Session cancelled${s.cancel_reason ? ': ' + s.cancel_reason : ''}
                     </div>
                 ` : ''}
+
+                ${(() => {
+                    if (s.status !== 'in_progress') return '';
+                    const activeItems = items.filter(i => (i.item_status || 'good') === 'good' || i.item_status === 'damaged');
+                    const unmappedActive = activeItems.filter(i => !i.is_mapped && (i.item_status || 'good') === 'good');
+                    const excluded = items.filter(i => i.item_status === 'missing' || i.item_status === 'rejected');
+                    let html = '';
+                    if (excluded.length > 0) {
+                        html += `<div style="margin-top:12px;color:var(--text-dim);font-size:0.85rem;">
+                            ${excluded.length} item(s) excluded (missing/rejected)
+                        </div>`;
+                    }
+                    if (unmappedActive.length === 0 && activeItems.length > 0) {
+                        html += `<div style="margin-top:12px;">
+                            <button class="btn btn-success" onclick="finalizeSession('${sessionId}')">
+                                Finalize Session (${activeItems.length} items)
+                            </button>
+                        </div>`;
+                    }
+                    return html;
+                })()}
             `;
         } catch(err) {
             body.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
@@ -975,6 +1048,124 @@
                 });
             } catch(e) { /* stats refresh failed, not critical */ }
 
+        } catch(err) { alert(err.message); }
+    }
+
+    // ═══════════════════════════════ ITEM STATUS MANAGEMENT ═══════════════════════════════
+
+    // Close action dropdowns when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.action-dropdown') && !e.target.matches('[onclick*="toggle"]')) {
+            document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
+        }
+    });
+    // .show class for dropdown
+    const ddStyle = document.createElement('style');
+    ddStyle.textContent = '.action-dropdown.show { display:block !important; }';
+    document.head.appendChild(ddStyle);
+
+    async function cancelSession(sessionId) {
+        const reason = prompt('Reason for cancellation (optional):');
+        if (reason === null) return; // user hit Cancel on prompt
+        if (!confirm('Cancel this session? No inventory will be created.')) return;
+        try {
+            const r = await fetch(`/api/intake/cancel-session/${sessionId}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ reason: reason || 'No reason given' }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function damageItem(itemId, sessionId, currentQty) {
+        let damagedQty = 1;
+        if (currentQty > 1) {
+            const input = prompt(`How many are damaged? (1-${currentQty})`, '1');
+            if (input === null) return;
+            damagedQty = parseInt(input);
+            if (isNaN(damagedQty) || damagedQty < 1 || damagedQty > currentQty) {
+                alert(`Must be between 1 and ${currentQty}`);
+                return;
+            }
+        }
+        const desc = damagedQty === currentQty
+            ? `Mark all ${currentQty} as damaged? (offer becomes 85% of original)`
+            : `Split: ${currentQty - damagedQty} good + ${damagedQty} damaged (at 85% offer)`;
+        if (!confirm(desc)) return;
+
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/damage`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ damaged_qty: damagedQty }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function markMissing(itemId, sessionId) {
+        if (!confirm('Mark as missing? Item will be excluded from payment.')) return;
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/missing`, { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function markRejected(itemId, sessionId) {
+        if (!confirm('Mark as rejected? (Seller kept this item — excluded from payment)')) return;
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/rejected`, { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function restoreItem(itemId, sessionId) {
+        if (!confirm('Restore this item back to good?')) return;
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/restore`, { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function overridePrice(itemId, sessionId, currentPrice) {
+        const newPrice = prompt(`Override market price (currently $${currentPrice.toFixed(2)}):`, currentPrice.toFixed(2));
+        if (newPrice === null) return;
+        const parsed = parseFloat(newPrice);
+        if (isNaN(parsed) || parsed < 0) { alert('Invalid price'); return; }
+
+        const note = prompt('Reason for override (e.g. "better packs version, EV $45"):');
+        if (note === null) return;
+
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/override-price`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ new_price: parsed, note: note, session_id: sessionId }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function deleteItem(itemId, sessionId) {
+        if (!confirm('Permanently delete this item? This cannot be undone.')) return;
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/delete`, { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
         } catch(err) { alert(err.message); }
     }
 

@@ -458,6 +458,95 @@ def add_raw_card():
 
 
 # ==========================================
+# ITEM STATUS MANAGEMENT
+# ==========================================
+
+@app.route("/api/intake/cancel-session/<session_id>", methods=["POST"])
+def cancel_session(session_id):
+    """Cancel an intake session."""
+    data = request.get_json(silent=True) or {}
+    try:
+        result = intake.cancel_session(session_id, reason=data.get("reason"))
+        return jsonify({"success": True, "session": _serialize(result)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/intake/item/<item_id>/damage", methods=["POST"])
+def damage_item(item_id):
+    """Split item into good + damaged quantities."""
+    data = request.get_json(silent=True) or {}
+    damaged_qty = data.get("damaged_qty", 1)
+    try:
+        result = intake.split_damaged(item_id, int(damaged_qty))
+        return jsonify({
+            "success": True,
+            "original_item": _serialize(result["original_item"]),
+            "session": _serialize(result["session"]),
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/intake/item/<item_id>/missing", methods=["POST"])
+def missing_item(item_id):
+    """Mark item as missing."""
+    try:
+        item = intake.mark_item_missing(item_id)
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/intake/item/<item_id>/rejected", methods=["POST"])
+def rejected_item(item_id):
+    """Mark item as rejected (seller kept it)."""
+    try:
+        item = intake.mark_item_rejected(item_id)
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/intake/item/<item_id>/restore", methods=["POST"])
+def restore_item(item_id):
+    """Restore a missing/rejected/damaged item back to good."""
+    try:
+        item = intake.restore_item(item_id)
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/intake/item/<item_id>/override-price", methods=["POST"])
+def override_price(item_id):
+    """Override an item's market price with a note."""
+    data = request.get_json(silent=True) or {}
+    new_price = data.get("new_price")
+    note = data.get("note", "")
+    session_id = data.get("session_id")
+
+    if new_price is None or not session_id:
+        return jsonify({"error": "new_price and session_id required"}), 400
+
+    try:
+        item = intake.override_item_price(item_id, Decimal(str(new_price)), note, session_id)
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/intake/item/<item_id>/delete", methods=["POST"])
+def delete_item(item_id):
+    """Permanently delete an item from a session."""
+    try:
+        session = intake.delete_item(item_id)
+        return jsonify({"success": True, "session": _serialize(session)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# ==========================================
 # FINALIZATION
 # ==========================================
 

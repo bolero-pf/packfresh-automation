@@ -242,16 +242,19 @@ def map_item(item_id: str, tcgplayer_id: int,
 
 
 def _recalculate_session_totals(session_id: str):
-    """Recalculate total_market_value and total_offer_amount for a session."""
+    """Recalculate total_market_value and total_offer_amount for a session.
+    Only includes items with item_status 'good' or 'damaged'."""
     execute("""
         UPDATE intake_sessions SET
             total_market_value = (
                 SELECT COALESCE(SUM(market_price * quantity), 0)
-                FROM intake_items WHERE session_id = %s
+                FROM intake_items 
+                WHERE session_id = %s AND item_status IN ('good', 'damaged')
             ),
             total_offer_amount = (
                 SELECT COALESCE(SUM(offer_price), 0)
-                FROM intake_items WHERE session_id = %s
+                FROM intake_items 
+                WHERE session_id = %s AND item_status IN ('good', 'damaged')
             )
         WHERE id = %s
     """, (session_id, session_id, session_id))
@@ -308,8 +311,199 @@ def update_item_price(item_id: str, new_market_price: Decimal, session_id: str) 
 
 
 # ==========================================
-# FINALIZATION
+# SESSION CANCELLATION
 # ==========================================
+
+def cancel_session(session_id: str, reason: str = None) -> dict:
+    """Cancel an intake session. No inventory is created."""
+    session = get_session(session_id)
+    if not session:
+        raise ValueError("Session not found")
+    if session["status"] == "finalized":
+        raise ValueError("Cannot cancel a finalized session")
+
+    execute("""
+        UPDATE intake_sessions 
+        SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP, cancel_reason = %s
+        WHERE id = %s
+    """, (reason, session_id))
+
+    return get_session(session_id)
+
+
+# ==========================================
+# ITEM STATUS CHANGES (damage, missing, rejected)
+# ==========================================
+
+DAMAGE_DISCOUNT = Decimal("0.85")  # 85% of offer price for damaged items
+
+
+def split_damaged(item_id: str, damaged_qty: int) -> dict:
+    """
+    Split a line item into good + damaged.
+    
+    - Original item: qty decremented by damaged_qty
+    - New item: qty = damaged_qty, item_status = 'damaged', 
+      offer = 85% of original per-unit offer
+    
+    If damaged_qty == original qty, just flips the item to damaged (no split).
+    """
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    session = get_session(item["session_id"])
+    if not session:
+        raise ValueError("Session not found")
+
+    original_qty = item["quantity"]
+    if damaged_qty < 1 or damaged_qty > original_qty:
+        raise ValueError(f"damaged_qty must be between 1 and {original_qty}")
+
+    offer_pct = session["offer_percentage"]
+    per_unit_market = item["market_price"]
+    per_unit_offer = per_unit_market * (offer_pct / Decimal("100"))
+    damaged_per_unit_offer = per_unit_offer * DAMAGE_DISCOUNT
+
+    if damaged_qty == original_qty:
+        # Flip entire item to damaged — no split needed
+        damaged_offer_total = damaged_per_unit_offer * original_qty
+        execute("""
+            UPDATE intake_items 
+            SET item_status = 'damaged',
+                listing_condition = 'Damaged',
+                offer_price = %s,
+                unit_cost_basis = %s
+            WHERE id = %s
+        """, (damaged_offer_total, damaged_per_unit_offer, item_id))
+    else:
+        # Reduce original item quantity
+        good_qty = original_qty - damaged_qty
+        good_offer_total = per_unit_offer * good_qty
+        execute("""
+            UPDATE intake_items 
+            SET quantity = %s, offer_price = %s
+            WHERE id = %s
+        """, (good_qty, good_offer_total, item_id))
+
+        # Create new damaged line item
+        damaged_offer_total = damaged_per_unit_offer * damaged_qty
+        new_id = str(uuid4())
+        execute("""
+            INSERT INTO intake_items (
+                id, session_id, product_name, tcgplayer_id, product_type,
+                set_name, card_number, condition, rarity,
+                quantity, market_price, offer_price, unit_cost_basis,
+                is_mapped, item_status, listing_condition, parent_item_id
+            ) VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, 'damaged', 'Damaged', %s
+            )
+        """, (
+            new_id, item["session_id"], item["product_name"], item["tcgplayer_id"],
+            item["product_type"], item["set_name"], item["card_number"],
+            item["condition"], item["rarity"],
+            damaged_qty, per_unit_market, damaged_offer_total, damaged_per_unit_offer,
+            item["is_mapped"], item_id,
+        ))
+
+    _recalculate_session_totals(item["session_id"])
+    return {
+        "original_item": query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,)),
+        "session": get_session(item["session_id"]),
+    }
+
+
+def mark_item_missing(item_id: str) -> dict:
+    """Mark an item as missing — excluded from totals and payment."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    execute("""
+        UPDATE intake_items SET item_status = 'missing' WHERE id = %s
+    """, (item_id,))
+
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def mark_item_rejected(item_id: str) -> dict:
+    """Mark an item as rejected — seller kept it, excluded from totals."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    execute("""
+        UPDATE intake_items SET item_status = 'rejected' WHERE id = %s
+    """, (item_id,))
+
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def restore_item(item_id: str) -> dict:
+    """Restore a missing/rejected/damaged item back to 'good'."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    session = get_session(item["session_id"])
+    offer_pct = session["offer_percentage"]
+
+    # Recalculate offer at normal rate
+    offer_price = item["market_price"] * item["quantity"] * (offer_pct / Decimal("100"))
+
+    execute("""
+        UPDATE intake_items 
+        SET item_status = 'good', listing_condition = 'NM', offer_price = %s
+        WHERE id = %s
+    """, (offer_price, item_id))
+
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def override_item_price(item_id: str, new_price: Decimal, note: str, session_id: str) -> dict:
+    """Override an item's market price with a reason note."""
+    session = get_session(session_id)
+    if not session:
+        raise ValueError("Session not found")
+
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    offer_pct = session["offer_percentage"]
+    discount = DAMAGE_DISCOUNT if item.get("item_status") == "damaged" else Decimal("1")
+    offer_price = new_price * item["quantity"] * (offer_pct / Decimal("100")) * discount
+
+    execute("""
+        UPDATE intake_items 
+        SET market_price = %s, offer_price = %s, price_override_note = %s
+        WHERE id = %s
+    """, (new_price, offer_price, note, item_id))
+
+    _recalculate_session_totals(session_id)
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def delete_item(item_id: str) -> dict:
+    """Permanently remove an item from a session."""
+    item = query_one("SELECT session_id FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    session_id = item["session_id"]
+    
+    # Also delete any child items (damage splits)
+    execute("DELETE FROM intake_items WHERE parent_item_id = %s", (item_id,))
+    execute("DELETE FROM intake_items WHERE id = %s", (item_id,))
+
+    _recalculate_session_totals(session_id)
+    return get_session(session_id)
 
 def finalize_session(session_id: str) -> dict:
     """
@@ -333,8 +527,13 @@ def finalize_session(session_id: str) -> dict:
     if not items:
         return {"success": False, "error": "Session has no items"}
 
-    # Check all items are mapped
-    unmapped = [i for i in items if not i["is_mapped"]]
+    # Only consider active items (good + damaged) — skip missing/rejected
+    active_items = [i for i in items if i.get("item_status", "good") in ("good", "damaged")]
+    if not active_items:
+        return {"success": False, "error": "No active items in session (all missing/rejected)"}
+
+    # Check all active items are mapped
+    unmapped = [i for i in active_items if not i["is_mapped"]]
     if unmapped:
         names = [i["product_name"] for i in unmapped[:5]]
         return {
@@ -351,13 +550,13 @@ def finalize_session(session_id: str) -> dict:
         "barcodes": [],
     }
 
-    # Process sealed items
-    sealed_items = [i for i in items if i["product_type"] == "sealed"]
+    # Process sealed items (only active)
+    sealed_items = [i for i in active_items if i["product_type"] == "sealed"]
     if sealed_items:
         result["sealed_processed"] = _finalize_sealed(sealed_items, session_id)
 
-    # Process raw items
-    raw_items = [i for i in items if i["product_type"] == "raw"]
+    # Process raw items (only active)
+    raw_items = [i for i in active_items if i["product_type"] == "raw"]
     if raw_items:
         cards = _finalize_raw(raw_items, session_id)
         result["raw_cards_created"] = len(cards)
