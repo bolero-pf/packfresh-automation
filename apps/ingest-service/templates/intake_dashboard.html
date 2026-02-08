@@ -582,11 +582,10 @@
         // Choose endpoint based on product type
         const endpoint = currentMapProductType === 'raw' ? '/api/ppt/search-cards' : '/api/ppt/search-sealed';
 
-        // Pass set_name as separate filter parameter (PPT uses ?search=...&set=...)
+        // PPT's `set` param expects set ID slugs (like "sv08-surging-sparks"),
+        // not display names (like "SV: 151"), so don't pass it.
+        // The product name from Collectr already has enough context.
         const body = { query: productName };
-        if (setName && setName !== 'N/A') {
-            body.set_name = setName;
-        }
 
         try {
             const r = await fetch(endpoint, {
