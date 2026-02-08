@@ -552,7 +552,41 @@
                 </table>
                 </div>
 
-                ${s.status === 'in_progress' && (s.unmapped_count || 0) === 0 ? `
+                ${s.status === 'in_progress' && s.session_type === 'raw' ? `
+                    <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
+                        <h4 style="margin-bottom:12px;">➕ Add Card to This Session</h4>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>TCGPlayer ID</label>
+                                <input type="number" id="session-raw-tcg-id" placeholder="e.g. 490294">
+                            </div>
+                            <div class="form-group">
+                                <label>Condition</label>
+                                <select id="session-raw-condition">
+                                    <option value="NM">Near Mint</option>
+                                    <option value="LP">Lightly Played</option>
+                                    <option value="MP">Moderately Played</option>
+                                    <option value="HP">Heavily Played</option>
+                                    <option value="DMG">Damaged</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Variant</label>
+                                <input type="text" id="session-raw-variant" placeholder="e.g. Holofoil">
+                            </div>
+                            <div class="form-group">
+                                <label>Qty</label>
+                                <input type="number" id="session-raw-qty" value="1" min="1" style="width:70px;">
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" onclick="addCardToExistingSession('${sessionId}', ${s.offer_percentage})">
+                            Look Up &amp; Add
+                        </button>
+                        <div id="session-raw-result" style="margin-top:12px;"></div>
+                    </div>
+                ` : ''}
+
+                ${s.status === 'in_progress' && (s.unmapped_count || 0) === 0 && items.length > 0 ? `
                     <div style="margin-top:20px;">
                         <button class="btn btn-success" onclick="finalizeSession('${sessionId}')">Finalize Session</button>
                     </div>
@@ -877,7 +911,7 @@
                             </td>
                             <td>${c.ppt_market != null && sig ? `
                                 <button class="btn btn-sm btn-secondary" 
-                                        onclick="applyPptPrice('${c.item_id}', '${sessionId}', ${c.ppt_market})">
+                                        onclick="applyPptPrice('${c.item_id}', '${sessionId}', ${c.ppt_market}, this)">
                                     Use PPT
                                 </button>` : ''}</td>
                         </tr>`;
@@ -890,7 +924,7 @@
         }
     }
 
-    async function applyPptPrice(itemId, sessionId, pptPrice) {
+    async function applyPptPrice(itemId, sessionId, pptPrice, btn) {
         try {
             const r = await fetch('/api/intake/update-item-price', {
                 method: 'POST',
@@ -899,8 +933,147 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            // Refresh both the session view and the price comparison
-            viewSession(sessionId);
+
+            // Update the row in-place
+            const row = btn.closest('tr');
+            if (row) {
+                // Update Collectr column to show the new accepted price
+                const cells = row.querySelectorAll('td');
+                cells[1].innerHTML = `<span style="color:var(--green); font-weight:700;">$${pptPrice.toFixed(2)}</span>`;
+                cells[4].innerHTML = `<span style="color:var(--green);">✓ Updated</span>`;
+                cells[5].innerHTML = '<span class="badge badge-green">Applied</span>';
+                row.style.background = 'rgba(0,200,100,0.06)';
+            }
+
+            // Also update the session stats (market value / offer total) without reloading
+            try {
+                const sr = await fetch(`/api/intake/session/${sessionId}`);
+                const sd = await sr.json();
+                const s = sd.session;
+                // Update the stats at the top
+                const offerDisplay = document.getElementById('offer-pct-display');
+                if (offerDisplay) {
+                    // Find the stats container and update totals
+                    const stats = offerDisplay.closest('.stats');
+                    if (stats) {
+                        const statValues = stats.querySelectorAll('.stat-value');
+                        // Market Value stat (index 2)
+                        if (statValues[2]) statValues[2].textContent = `$${(s.total_market_value || 0).toFixed(2)}`;
+                        // Offer Total stat (index 4)
+                        if (statValues[4]) statValues[4].textContent = `$${(s.total_offer_amount || 0).toFixed(2)}`;
+                    }
+                }
+                // Also update the items table
+                const itemRows = document.querySelectorAll('#session-modal-body table:last-of-type tbody tr');
+                const items = sd.items;
+                itemRows.forEach((tr, idx) => {
+                    if (items[idx]) {
+                        const tds = tr.querySelectorAll('td');
+                        tds[2].textContent = `$${(items[idx].market_price || 0).toFixed(2)}`;
+                        tds[3].textContent = `$${(items[idx].offer_price || 0).toFixed(2)}`;
+                    }
+                });
+            } catch(e) { /* stats refresh failed, not critical */ }
+
+        } catch(err) { alert(err.message); }
+    }
+
+    // ═══════════════════════════════ ADD CARD TO EXISTING SESSION ═══════════════════════════════
+    async function addCardToExistingSession(sessionId, offerPct) {
+        const tcgId = document.getElementById('session-raw-tcg-id').value;
+        const condition = document.getElementById('session-raw-condition').value;
+        const variant = document.getElementById('session-raw-variant').value;
+        const quantity = parseInt(document.getElementById('session-raw-qty').value) || 1;
+        const resultDiv = document.getElementById('session-raw-result');
+
+        if (!tcgId) { alert('Enter a TCGPlayer ID'); return; }
+
+        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up card...</div>';
+
+        // Step 1: Look up card via PPT
+        try {
+            const lr = await fetch('/api/ppt/lookup-card', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+            });
+            const ld = await lr.json();
+            if (!lr.ok) {
+                resultDiv.innerHTML = `<div class="alert alert-error">${ld.error || 'Card not found'}</div>`;
+                return;
+            }
+
+            const card = ld.card || {};
+            const variants = ld.variants || {};
+            const primaryPrinting = ld.primary_printing || '';
+
+            // Get price for selected variant + condition
+            const useVariant = variant || primaryPrinting;
+            let price = null;
+            if (variants[useVariant] && variants[useVariant][condition] != null) {
+                price = variants[useVariant][condition];
+            } else if (card.prices?.market) {
+                price = card.prices.market;
+            }
+
+            if (!price) {
+                resultDiv.innerHTML = `<div class="alert alert-warning">Found "${card.name}" but no price for ${useVariant} / ${condition}. Enter price manually below.
+                    <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+                        <input type="number" id="session-raw-manual-price" placeholder="Price" step="0.01" style="width:120px;">
+                        <button class="btn btn-primary btn-sm" onclick="submitCardToSession('${sessionId}', ${parseInt(tcgId)}, '${(card.name||'').replace(/'/g,"\\'")}', '${condition}', '${card.set?.name || ''}', '${card.number || ''}', '${card.rarity || ''}', ${quantity}, parseFloat(document.getElementById('session-raw-manual-price').value))">Add</button>
+                    </div>
+                </div>`;
+                return;
+            }
+
+            // Step 2: Show confirmation and add
+            resultDiv.innerHTML = `
+                <div style="background:var(--surface-2); border-radius:8px; padding:12px; margin-top:8px;">
+                    <strong style="color:var(--accent);">${card.name}</strong>
+                    ${card.set?.name ? `<span style="color:var(--text-dim);"> — ${card.set.name}</span>` : ''}
+                    <br>
+                    <span>${useVariant} / ${condition} — <strong>$${price.toFixed(2)}</strong></span>
+                    <span style="margin-left:8px; color:var(--text-dim);">× ${quantity}</span>
+                    <button class="btn btn-primary btn-sm" style="margin-left:12px;"
+                            onclick="submitCardToSession('${sessionId}', ${parseInt(tcgId)}, '${(card.name||'').replace(/'/g,"\\'")}', '${condition}', '${card.set?.name || ''}', '${card.number || ''}', '${card.rarity || ''}', ${quantity}, ${price})">
+                        Confirm &amp; Add
+                    </button>
+                </div>
+            `;
+        } catch(err) {
+            resultDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    async function submitCardToSession(sessionId, tcgId, cardName, condition, setName, cardNum, rarity, qty, price) {
+        try {
+            const r = await fetch('/api/intake/add-raw-card', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    tcgplayer_id: tcgId,
+                    card_name: cardName,
+                    condition: condition,
+                    set_name: setName,
+                    card_number: cardNum,
+                    rarity: rarity,
+                    quantity: qty,
+                    market_price: price,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+
+            // Clear inputs and reload session
+            document.getElementById('session-raw-tcg-id').value = '';
+            document.getElementById('session-raw-variant').value = '';
+            document.getElementById('session-raw-qty').value = '1';
+            document.getElementById('session-raw-result').innerHTML = 
+                '<div class="alert alert-success">Card added! ✓</div>';
+
+            // Reload session view to show updated table
+            setTimeout(() => viewSession(sessionId), 500);
         } catch(err) { alert(err.message); }
     }
 
