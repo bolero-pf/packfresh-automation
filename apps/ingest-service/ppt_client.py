@@ -159,13 +159,13 @@ class PPTClient:
     # ── card endpoints ───────────────────────────────────────────────
 
     def get_card_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
-        params = {"tcgPlayerId": str(int(tcgplayer_id))}
+        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1}
         if include_history:
             params["includeHistory"] = "true"
         items = self._extract_data(self._get(f"{self.base_url}/v2/cards", params))
         return items[0] if items else None
 
-    def search_cards(self, query, *, set_name=None, limit=10):
+    def search_cards(self, query, *, set_name=None, limit=5):
         """Search cards by name, optionally filtered by set."""
         params = {"search": query, "limit": limit}
         if set_name:
@@ -175,13 +175,13 @@ class PPTClient:
     # ── sealed product endpoints ─────────────────────────────────────
 
     def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
-        params = {"tcgPlayerId": str(int(tcgplayer_id))}
+        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1}
         if include_history:
             params["includeHistory"] = "true"
         items = self._extract_data(self._get(f"{self.base_url}/v2/sealed-products", params))
         return items[0] if items else None
 
-    def search_sealed_products(self, query, *, set_name=None, limit=10):
+    def search_sealed_products(self, query, *, set_name=None, limit=5):
         """Search sealed products by name, optionally filtered by set."""
         params = {"search": query, "limit": limit, "sortBy": "name", "sortOrder": "asc"}
         if set_name:
