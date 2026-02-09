@@ -171,12 +171,31 @@ class PPTClient:
 
     # ── card endpoints ───────────────────────────────────────────────
 
-    def get_card_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
-        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1}
+    def get_card_by_id(self, card_id, *, include_history=False):
+        """Get a card by its PPT internal ID — returns full pricing with all conditions."""
+        params = {}
         if include_history:
             params["includeHistory"] = "true"
+        resp = self._get(f"{self.base_url}/v2/cards/{card_id}", params)
+        data = resp.get("data", resp)
+        if isinstance(data, dict) and ("name" in data or "productName" in data):
+            return data
+        return None
+
+    def get_card_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
+        """Look up a card by TCGPlayer ID. First searches, then fetches by PPT ID for full data."""
+        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1}
         items = self._extract_data(self._get(f"{self.base_url}/v2/cards", params))
-        return items[0] if items else None
+        if not items:
+            return None
+        card = items[0]
+        # If the card has a PPT internal ID, re-fetch via direct endpoint for full pricing
+        ppt_id = card.get("id")
+        if ppt_id:
+            full_card = self.get_card_by_id(ppt_id, include_history=include_history)
+            if full_card:
+                return full_card
+        return card
 
     def search_cards(self, query, *, set_name=None, limit=5):
         """Search cards by name, optionally filtered by set."""
@@ -317,6 +336,26 @@ class PPTClient:
                     code: float((nm * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
                     for code, mult in FALLBACK_MULTIPLIERS.items()
                 }
+
+        # Fill in missing conditions using multipliers from NM price
+        all_conditions = set(FALLBACK_MULTIPLIERS.keys())
+        for variant_name, variant_prices in result.items():
+            nm_price = variant_prices.get("NM")
+            if nm_price is None:
+                # Try to derive NM from whatever condition we have
+                for code, mult in FALLBACK_MULTIPLIERS.items():
+                    if variant_prices.get(code) is not None and float(mult) > 0:
+                        nm_price = variant_prices[code] / float(mult)
+                        break
+            if nm_price is not None:
+                nm_dec = Decimal(str(nm_price))
+                for code in all_conditions:
+                    if variant_prices.get(code) is None:
+                        variant_prices[code] = float(
+                            (nm_dec * FALLBACK_MULTIPLIERS[code]).quantize(
+                                Decimal("0.01"), rounding=ROUND_HALF_UP
+                            )
+                        )
 
         return result
 
