@@ -395,7 +395,13 @@ def map_item():
                 app.logger.warning(f"PPT verification failed for {tcgplayer_id}: {e}")
 
     try:
-        updated = intake.map_item(item_id, tcgplayer_id, new_price)
+        updated = intake.map_item(
+            item_id, tcgplayer_id, new_price,
+            product_name=data.get("product_name"),
+            set_name=data.get("set_name"),
+            card_number=data.get("card_number"),
+            rarity=data.get("rarity"),
+        )
         return jsonify({
             "success": True,
             "item": _serialize(updated),

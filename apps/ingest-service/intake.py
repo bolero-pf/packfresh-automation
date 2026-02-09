@@ -1,6 +1,6 @@
 """
 Intake business logic.
-# v2.1 — added add_sealed_item, update_item_quantity, item status management
+# v2.2 — added update_item_condition, search-based card entry
 
 Handles:
     - Session creation and management
@@ -195,10 +195,13 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
 # ==========================================
 
 def map_item(item_id: str, tcgplayer_id: int,
-             new_market_price: Decimal = None) -> dict:
+             new_market_price: Decimal = None,
+             product_name: str = None, set_name: str = None,
+             card_number: str = None, rarity: str = None) -> dict:
     """
     Map an intake item to a tcgplayer_id.
     Optionally update the market price (e.g., from PPT verification).
+    Optionally update product_name, set_name, card_number, rarity.
     Recalculates offer_price based on session's offer_percentage.
     
     Returns updated item row.
@@ -221,14 +224,22 @@ def map_item(item_id: str, tcgplayer_id: int,
     offer_price = market_price * item["quantity"] * (offer_pct / Decimal("100"))
     unit_cost_basis = offer_price / item["quantity"] if item["quantity"] > 0 else Decimal("0")
 
+    # Build dynamic SET clause
+    name = product_name if product_name else item["product_name"]
+    sname = set_name if set_name else item.get("set_name")
+    cnum = card_number if card_number else item.get("card_number")
+    rar = rarity if rarity else item.get("rarity")
+
     # Update item
     updated = execute_returning("""
         UPDATE intake_items
         SET tcgplayer_id = %s, market_price = %s, offer_price = %s,
-            unit_cost_basis = %s, is_mapped = TRUE
+            unit_cost_basis = %s, is_mapped = TRUE,
+            product_name = %s, set_name = %s, card_number = %s, rarity = %s
         WHERE id = %s
         RETURNING *
-    """, (tcgplayer_id, market_price, offer_price, unit_cost_basis, item_id))
+    """, (tcgplayer_id, market_price, offer_price, unit_cost_basis,
+          name, sname, cnum, rar, item_id))
 
     # Cache the mapping for future imports
     save_mapping(
