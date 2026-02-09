@@ -254,13 +254,18 @@ class PPTClient:
         """
         Extract all variant → condition → price data from the PPT response.
         
+        PPT has two sources of condition pricing:
+        1. prices.variants.{VariantName}.{"Near Mint Holofoil": {price: X}, ...}
+        2. prices.conditions.{"Damaged": {price: X}, "Near Mint": {price: X}, ...}
+        
+        We merge both, preferring variant-specific data when available.
+        
         Returns:
             {
                 "Holofoil": {"NM": 103.85, "LP": 87.80, "MP": 64.95, "HP": None, "DMG": 49.99},
                 "Reverse Holofoil": {"NM": ..., ...},
                 ...
             }
-        Also includes the "primaryPrinting" field if available.
         """
         if not card_data:
             return {}
@@ -270,34 +275,39 @@ class PPTClient:
             return {}
 
         result = {}
-        variants = prices.get("variants", {})
+        primary = prices.get("primaryPrinting", "Default")
 
+        # Source 1: flat "conditions" object → goes into the primary variant bucket
+        conditions = prices.get("conditions", {})
+        if conditions and isinstance(conditions, dict):
+            flat = {}
+            for ppt_cond, cond_data in conditions.items():
+                short_code = _match_condition(ppt_cond)
+                if short_code and isinstance(cond_data, dict):
+                    price = cond_data.get("price")
+                    flat[short_code] = float(price) if price is not None else None
+            if flat:
+                result[primary] = flat
+
+        # Source 2: nested variants → per-variant condition data
+        variants = prices.get("variants", {})
         if variants and isinstance(variants, dict):
-            for variant_name, conditions in variants.items():
-                if not isinstance(conditions, dict):
+            for variant_name, vconditions in variants.items():
+                if not isinstance(vconditions, dict):
                     continue
                 variant_prices = {}
-                for ppt_cond, cond_data in conditions.items():
+                for ppt_cond, cond_data in vconditions.items():
                     short_code = _match_condition(ppt_cond)
                     if short_code and isinstance(cond_data, dict):
                         price = cond_data.get("price")
                         variant_prices[short_code] = float(price) if price is not None else None
                 if variant_prices:
-                    result[variant_name] = variant_prices
-
-        # If no variants found, try the flat "conditions" object
-        if not result:
-            conditions = prices.get("conditions", {})
-            if conditions and isinstance(conditions, dict):
-                flat = {}
-                for ppt_cond, cond_data in conditions.items():
-                    short_code = _match_condition(ppt_cond)
-                    if short_code and isinstance(cond_data, dict):
-                        price = cond_data.get("price")
-                        flat[short_code] = float(price) if price is not None else None
-                if flat:
-                    variant_label = prices.get("primaryPrinting", "Default")
-                    result[variant_label] = flat
+                    # Merge into existing (conditions data) or create new
+                    if variant_name in result:
+                        # Variant-specific data overrides flat conditions
+                        result[variant_name].update(variant_prices)
+                    else:
+                        result[variant_name] = variant_prices
 
         # Last resort: use market price with fallback multipliers
         if not result:

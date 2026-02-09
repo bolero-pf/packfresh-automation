@@ -676,13 +676,20 @@ def ppt_lookup_card():
         prices_raw = card_data.get("prices", {})
         app.logger.info(f"CARD LOOKUP {tcgplayer_id}: prices keys={list(prices_raw.keys()) if isinstance(prices_raw, dict) else type(prices_raw)}")
         if isinstance(prices_raw, dict):
+            # Log top-level conditions
+            raw_conditions = prices_raw.get("conditions", {})
+            if raw_conditions and isinstance(raw_conditions, dict):
+                app.logger.info(f"  TOP-LEVEL conditions keys={list(raw_conditions.keys())}")
+                for ck, cv in raw_conditions.items():
+                    app.logger.info(f"    condition '{ck}' -> price={cv.get('price') if isinstance(cv, dict) else cv}")
+            # Log variants
             raw_variants = prices_raw.get("variants", {})
             app.logger.info(f"  raw variants keys={list(raw_variants.keys()) if isinstance(raw_variants, dict) else type(raw_variants)}")
             for vname, vconds in (raw_variants.items() if isinstance(raw_variants, dict) else []):
                 if isinstance(vconds, dict):
                     app.logger.info(f"  variant '{vname}': cond keys={list(vconds.keys())}")
                     for ck, cv in vconds.items():
-                        app.logger.info(f"    '{ck}' -> price={cv.get('price') if isinstance(cv, dict) else cv}")
+                        app.logger.info(f"    '{ck}' -> {cv if not isinstance(cv, dict) else {k: cv[k] for k in list(cv.keys())[:3]}}")
         app.logger.info(f"  extract_variants result={variants}")
         app.logger.info(f"  primary_printing={primary_printing}")
 
