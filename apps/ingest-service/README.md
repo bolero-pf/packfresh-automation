@@ -110,3 +110,4 @@ new_avg = (old_qty × old_avg + new_qty × new_unit_cost) / (old_qty + new_qty)
 ```
 
 Raw cards get individual `cost_basis` values calculated from `offer_price / quantity`.
+"# retry" 
