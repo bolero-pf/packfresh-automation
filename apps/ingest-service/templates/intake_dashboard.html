@@ -1488,28 +1488,29 @@
                     body: JSON.stringify({ tcgplayer_id: tcgIdDirect }),
                 });
                 const d = await r.json();
-                if (!r.ok) { alert(d.error || 'Card not found'); return; }
+                if (!r.ok) { await themedConfirm('Error', d.error || 'Card not found'); return; }
                 card = d.card || {};
                 variants = d.variants || {};
                 primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
                 if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
                 tcgId = tcgIdDirect;
-            } catch(err) { alert(err.message); return; }
+            } catch(err) { await themedConfirm('Error', err.message); return; }
         } else if (searchName.trim()) {
             // Search by name
             try {
-                const params = { query: searchName.trim() };
-                if (setFilter.trim()) params.set_name = setFilter.trim();
+                const body = { query: searchName.trim() };
+                if (setFilter.trim()) body.set_name = setFilter.trim();
                 const r = await fetch('/api/ppt/search-cards', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(params),
+                    body: JSON.stringify(body),
                 });
                 const d = await r.json();
-                if (!r.ok || !d.cards || !d.cards.length) { alert('No cards found'); return; }
+                const results = d.results || [];
+                if (!r.ok || !results.length) { await themedConfirm('No Results', 'No cards found for "' + searchName.trim() + '"'); return; }
 
                 // Let user pick from results
-                const options = d.cards.slice(0, 6).map(c => {
+                const options = results.slice(0, 6).map(function(c) {
                     const tid = c.tcgPlayerId || c.tcgplayer_id || '';
                     const sn = c.setName || c.set_name || '';
                     const cn = c.cardNumber || c.number || '';
@@ -1525,21 +1526,21 @@
                 if (picked === null) return;
                 tcgId = parseInt(picked);
 
-                // Now do detail lookup for condition pricing
+                // Detail lookup for condition pricing
                 const lr = await fetch('/api/ppt/lookup-card', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ tcgplayer_id: tcgId }),
                 });
                 const ld = await lr.json();
-                if (!lr.ok) { alert(ld.error || 'Lookup failed'); return; }
+                if (!lr.ok) { await themedConfirm('Error', ld.error || 'Lookup failed'); return; }
                 card = ld.card || {};
                 variants = ld.variants || {};
                 primary = ld.primary_printing || Object.keys(variants)[0] || 'Default';
                 if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
-            } catch(err) { alert(err.message); return; }
+            } catch(err) { await themedConfirm('Error', err.message); return; }
         } else {
-            alert('Enter a card name or TCGPlayer ID');
+            await themedConfirm('Missing Input', 'Enter a card name or TCGPlayer ID');
             return;
         }
 
@@ -1550,7 +1551,7 @@
 
         // Step 2: Condition picker
         const conditions = ['NM','LP','MP','HP','DMG'];
-        const condOptions = conditions.map(c => {
+        const condOptions = conditions.map(function(c) {
             const p = variantData[c];
             return { value: c, label: c + (p != null ? ' — $' + Number(p).toFixed(2) : ' — no price') };
         });
@@ -1576,7 +1577,7 @@
                     tcgplayer_id: tcgId, market_price: selectedPrice,
                 }),
             });
-            if (!linkR.ok) { const ld = await linkR.json(); alert(ld.error || 'Link failed'); return; }
+            if (!linkR.ok) { const ld = await linkR.json(); await themedConfirm('Error', ld.error || 'Link failed'); return; }
 
             await fetch('/api/intake/item/' + itemId + '/update-condition', {
                 method: 'POST',
@@ -1585,7 +1586,7 @@
             });
 
             viewSession(sessionId);
-        } catch(err) { alert(err.message); }
+        } catch(err) { await themedConfirm('Error', err.message); }
     }
 
     async function deleteItem(itemId, sessionId) {
