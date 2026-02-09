@@ -593,6 +593,21 @@ def update_quantity(item_id):
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/intake/item/<item_id>/update-condition", methods=["POST"])
+def update_condition(item_id):
+    """Update an item's condition."""
+    data = request.get_json(silent=True) or {}
+    new_condition = data.get("condition", "").strip()
+    session_id = data.get("session_id")
+    if not new_condition or not session_id:
+        return jsonify({"error": "condition and session_id required"}), 400
+    try:
+        item = intake.update_item_condition(item_id, new_condition, session_id)
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
 @app.route("/api/intake/add-sealed-item", methods=["POST"])
 def add_sealed_item():
     """Add a sealed item to an existing session (manual add during buy)."""

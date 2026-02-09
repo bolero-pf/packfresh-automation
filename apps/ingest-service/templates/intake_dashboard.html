@@ -646,6 +646,10 @@
     // ═══════════════════════════════ VIEW SESSION ═══════════════════════════════
     async function viewSession(sessionId) {
         currentSessionId = sessionId;
+        // Also refresh raw tab items table if this is the active raw session
+        if (rawSessionId && sessionId === rawSessionId) {
+            loadRawSessionItems();
+        }
         const body = document.getElementById('session-modal-body');
         body.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
         openModal('session-modal');
@@ -755,11 +759,17 @@
                                             <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" 
                                                     onclick="toggleActionMenu(this)">⋮</button>
                                             <div class="action-dropdown">
-                                                ${!isDamaged ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">🔨 Damage</button>` : ''}
+                                                ${s.session_type === 'raw' ? `
+                                                    <button onclick="editCondition('${i.id}','${sessionId}','${i.condition || 'NM'}')">🏷 Edit Condition</button>
+                                                ` : `
+                                                    ${!isDamaged ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">🔨 Damage</button>` : ''}
+                                                `}
                                                 <button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price})">💰 Override Price</button>
                                                 <button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">✏ Edit Qty</button>
-                                                <button onclick="markMissing('${i.id}','${sessionId}')">❌ Missing</button>
-                                                <button onclick="markRejected('${i.id}','${sessionId}')">🚫 Rejected</button>
+                                                ${s.session_type !== 'raw' ? `
+                                                    <button onclick="markMissing('${i.id}','${sessionId}')">❌ Missing</button>
+                                                    <button onclick="markRejected('${i.id}','${sessionId}')">🚫 Rejected</button>
+                                                ` : ''}
                                                 <hr>
                                                 <button style="color:var(--red);" onclick="deleteItem('${i.id}','${sessionId}')">🗑 Delete</button>
                                             </div>
@@ -1405,6 +1415,30 @@
         } catch(err) { alert(err.message); }
     }
 
+    async function editCondition(itemId, sessionId, currentCond) {
+        const input = await themedPrompt({
+            title: '🏷 Edit Condition',
+            message: `Current condition: ${currentCond}. Enter new condition:`,
+            inputs: [{ type: 'text', label: 'Condition (NM, LP, MP, HP, DMG)', default: currentCond }],
+            confirmText: 'Update Condition',
+        });
+        if (input === null) return;
+        const newCond = input.toUpperCase().trim();
+        if (!['NM','LP','MP','HP','DMG'].includes(newCond)) { alert('Invalid condition. Use NM, LP, MP, HP, or DMG.'); return; }
+        if (newCond === currentCond) return;
+
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/update-condition`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ condition: newCond, session_id: sessionId }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
     async function deleteItem(itemId, sessionId) {
         const ok = await themedConfirm(
             '🗑 Delete Item',
@@ -1650,10 +1684,36 @@
     async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context) {
         const resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : 'raw-search-results');
 
+        // If price came from search (market only), do a detail lookup for condition-specific price
+        if (tcgId && price > 0) {
+            resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up ' + condition + ' price...</div>';
+            try {
+                const lr = await fetch('/api/ppt/lookup-card', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+                });
+                if (lr.ok) {
+                    const ld = await lr.json();
+                    const variants = ld.variants || {};
+                    const primary = ld.primary_printing || Object.keys(variants)[0] || 'Default';
+                    const variantData = variants[primary] || {};
+                    if (variantData[condition] != null) {
+                        price = variantData[condition];
+                    }
+                    // Also grab better metadata if available
+                    const card = ld.card || {};
+                    if (card.setName && !setName) setName = card.setName;
+                    if (card.cardNumber && !cardNum) cardNum = card.cardNumber;
+                    if (card.rarity && !rarity) rarity = card.rarity;
+                }
+            } catch(e) { /* fall through with search price */ }
+        }
+
         if (!price || price <= 0) {
             const manual = await themedPrompt({
                 title: 'No price found',
-                message: `No ${condition} price in PPT. Enter a market price:`,
+                message: 'No ' + condition + ' price in PPT for "' + cardName + '". Enter a market price:',
                 inputs: [{ type: 'number', label: 'Market price ($)', min: 0, step: '0.01', placeholder: '0.00' }],
                 confirmText: 'Add Card',
             });
@@ -1674,18 +1734,18 @@
                 }),
             });
             const d = await r.json();
-            if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+            if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + d.error + '</div>'; return; }
 
             if (context === 'session') {
                 document.getElementById('session-raw-search').value = '';
                 document.getElementById('session-raw-qty').value = '1';
-                resultsDiv.innerHTML = '<div class="alert alert-success">Card added!</div>';
+                resultsDiv.innerHTML = '<div class="alert alert-success">Card added! ' + cardName + ' (' + condition + ') $' + Number(price).toFixed(2) + '</div>';
                 setTimeout(() => viewSession(sessionId), 500);
             } else {
                 document.getElementById('raw-card-search').value = '';
                 document.getElementById('raw-card-set').value = '';
                 document.getElementById('raw-quantity').value = '1';
-                resultsDiv.innerHTML = '<div class="alert alert-success">Card added!</div>';
+                resultsDiv.innerHTML = '<div class="alert alert-success">Card added! ' + cardName + ' (' + condition + ') $' + Number(price).toFixed(2) + '</div>';
                 loadRawSessionItems();
             }
         } catch(err) {
@@ -1741,13 +1801,22 @@
             if (!items.length) { tableDiv.innerHTML = '<p style="color:var(--text-dim);">No cards added yet.</p>'; return; }
             tableDiv.innerHTML = '<div style="margin-bottom:8px; font-weight:600;">' +
                 items.length + ' cards \u2022 Total offer: $' + (s.total_offer_amount || 0).toFixed(2) +
-                '</div><table><thead><tr><th>Card</th><th>Cond</th><th>Qty</th><th>Market</th><th>Offer</th></tr></thead><tbody>' +
+                '</div><table><thead><tr><th>Card</th><th>Cond</th><th>Qty</th><th>Market</th><th>Offer</th><th>Actions</th></tr></thead><tbody>' +
                 items.map(i => '<tr>' +
                     '<td>' + i.product_name + '<br><small style="color:var(--text-dim);">' + (i.set_name || '') + ' ' + (i.card_number ? '#'+i.card_number : '') + '</small></td>' +
                     '<td><span class="badge badge-blue">' + (i.condition || '') + '</span></td>' +
                     '<td>' + i.quantity + '</td>' +
                     '<td>$' + (i.market_price || 0).toFixed(2) + '</td>' +
-                    '<td>$' + (i.offer_price || 0).toFixed(2) + '</td></tr>'
+                    '<td>$' + (i.offer_price || 0).toFixed(2) + '</td>' +
+                    '<td style="white-space:nowrap;"><div style="display:inline-block; position:relative;">' +
+                        '<button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(this)">\u22ee</button>' +
+                        '<div class="action-dropdown">' +
+                            '<button onclick="editCondition(\'' + i.id + '\',\'' + rawSessionId + '\',\'' + (i.condition || 'NM') + '\'); loadRawSessionItems();">🏷 Edit Condition</button>' +
+                            '<button onclick="overridePrice(\'' + i.id + '\',\'' + rawSessionId + '\',' + (i.market_price || 0) + ')">💰 Override Price</button>' +
+                            '<button onclick="editQuantity(\'' + i.id + '\',\'' + rawSessionId + '\',' + i.quantity + ')">✏ Edit Qty</button>' +
+                            '<hr>' +
+                            '<button style="color:var(--red);" onclick="deleteItem(\'' + i.id + '\',\'' + rawSessionId + '\')">🗑 Delete</button>' +
+                        '</div></div></td></tr>'
                 ).join('') + '</tbody></table>';
         } catch(err) { console.error(err); }
     }

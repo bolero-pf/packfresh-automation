@@ -534,6 +534,26 @@ def update_item_quantity(item_id: str, new_qty: int, session_id: str) -> dict:
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
+def update_item_condition(item_id: str, new_condition: str, session_id: str) -> dict:
+    """Update an item's condition."""
+    valid = ('NM', 'LP', 'MP', 'HP', 'DMG')
+    new_condition = new_condition.upper().strip()
+    if new_condition not in valid:
+        raise ValueError(f"Invalid condition: {new_condition}. Must be one of {valid}")
+
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    execute("""
+        UPDATE intake_items
+        SET condition = %s
+        WHERE id = %s
+    """, (new_condition, item_id))
+
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
 def add_sealed_item(session_id: str, product_name: str, tcgplayer_id: int = None,
                     market_price: Decimal = Decimal("0"), quantity: int = 1,
                     set_name: str = None) -> dict:
