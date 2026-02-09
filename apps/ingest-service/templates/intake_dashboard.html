@@ -483,7 +483,16 @@
 
             const inputsDiv = document.getElementById('tp-inputs');
             inputsDiv.innerHTML = inputs.map((inp, idx) => {
-                if (inp.type === 'number') {
+                if (inp.type === 'select') {
+                    const opts = (inp.options || []).map(o => {
+                        const val = typeof o === 'string' ? o : o.value;
+                        const label = typeof o === 'string' ? o : o.label;
+                        const sel = val === (inp.default || '') ? 'selected' : '';
+                        return `<option value="${val}" ${sel}>${label}</option>`;
+                    }).join('');
+                    return `<div class="form-group"><label>${inp.label}</label>
+                        <select id="tp-input-${idx}">${opts}</select></div>`;
+                } else if (inp.type === 'number') {
                     return `<div class="form-group"><label>${inp.label}</label>
                         <input type="number" id="tp-input-${idx}" value="${inp.default || ''}" 
                                min="${inp.min || ''}" max="${inp.max || ''}" step="${inp.step || 'any'}"
@@ -1418,13 +1427,22 @@
     async function editCondition(itemId, sessionId, currentCond) {
         const input = await themedPrompt({
             title: '🏷 Edit Condition',
-            message: `Current condition: ${currentCond}. Enter new condition:`,
-            inputs: [{ type: 'text', label: 'Condition (NM, LP, MP, HP, DMG)', default: currentCond }],
+            message: 'Select new condition:',
+            inputs: [{
+                type: 'select', label: 'Condition',
+                default: currentCond,
+                options: [
+                    { value: 'NM', label: 'Near Mint (NM)' },
+                    { value: 'LP', label: 'Lightly Played (LP)' },
+                    { value: 'MP', label: 'Moderately Played (MP)' },
+                    { value: 'HP', label: 'Heavily Played (HP)' },
+                    { value: 'DMG', label: 'Damaged (DMG)' },
+                ]
+            }],
             confirmText: 'Update Condition',
         });
         if (input === null) return;
         const newCond = input.toUpperCase().trim();
-        if (!['NM','LP','MP','HP','DMG'].includes(newCond)) { alert('Invalid condition. Use NM, LP, MP, HP, or DMG.'); return; }
         if (newCond === currentCond) return;
 
         try {
@@ -1684,36 +1702,121 @@
     async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context) {
         const resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : 'raw-search-results');
 
-        // If price came from search (market only), do a detail lookup for condition-specific price
-        if (tcgId && price > 0) {
-            resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up ' + condition + ' price...</div>';
-            try {
-                const lr = await fetch('/api/ppt/lookup-card', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
-                });
-                if (lr.ok) {
-                    const ld = await lr.json();
-                    const variants = ld.variants || {};
-                    const primary = ld.primary_printing || Object.keys(variants)[0] || 'Default';
-                    const variantData = variants[primary] || {};
-                    if (variantData[condition] != null) {
-                        price = variantData[condition];
-                    }
-                    // Also grab better metadata if available
-                    const card = ld.card || {};
-                    if (card.setName && !setName) setName = card.setName;
-                    if (card.cardNumber && !cardNum) cardNum = card.cardNumber;
-                    if (card.rarity && !rarity) rarity = card.rarity;
-                }
-            } catch(e) { /* fall through with search price */ }
+        // Detail lookup to get all variant/condition prices
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading pricing...</div>';
+        
+        let variants = {};
+        let primaryVariant = 'Default';
+        try {
+            const lr = await fetch('/api/ppt/lookup-card', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+            });
+            if (lr.ok) {
+                const ld = await lr.json();
+                variants = ld.variants || {};
+                primaryVariant = ld.primary_printing || Object.keys(variants)[0] || 'Default';
+                const card = ld.card || {};
+                if (card.setName && !setName) setName = card.setName;
+                if (card.cardNumber && !cardNum) cardNum = card.cardNumber;
+                if (card.rarity && !rarity) rarity = card.rarity;
+            }
+        } catch(e) { /* continue */ }
+
+        const variantNames = Object.keys(variants);
+        if (!variantNames.length) {
+            _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv);
+            return;
         }
+
+        // Store pending card data and show condition picker
+        window._pendingCard = { sessionId, tcgId, cardName, setName, cardNum, rarity, qty, context, variants, primaryVariant };
+        _renderConditionPicker(resultsDiv, condition);
+    }
+
+    function _renderConditionPicker(resultsDiv, selectedCond) {
+        const pc = window._pendingCard;
+        if (!pc) return;
+        const variants = pc.variants;
+        const variantNames = Object.keys(variants);
+        const selectedVariant = pc.primaryVariant;
+        const variantData = variants[selectedVariant] || {};
+        const qty = pc.qty;
+        const divId = pc.context === 'session' ? 'session-raw-results' : 'raw-search-results';
+
+        let html = '<div id="cond-picker" style="background:var(--surface-2); border-radius:8px; padding:16px; margin-top:8px;">';
+        html += '<div style="margin-bottom:12px;"><strong style="color:var(--accent);">' + pc.cardName + '</strong>';
+        html += '<span style="color:var(--text-dim);"> &mdash; ' + (pc.setName || '') + (pc.cardNum ? ' #' + pc.cardNum : '') + ' &bull; TCG#' + pc.tcgId + '</span></div>';
+
+        // Variant selector
+        if (variantNames.length > 1) {
+            html += '<div style="margin-bottom:10px;"><label style="font-size:0.8rem; color:var(--text-dim); display:block; margin-bottom:4px;">Variant / Printing</label><div style="display:flex; gap:6px; flex-wrap:wrap;">';
+            variantNames.forEach(function(v) {
+                var cls = v === selectedVariant ? 'btn-primary' : 'btn-secondary';
+                html += '<button class="btn btn-sm ' + cls + '" data-variant="' + v.replace(/"/g, '&quot;') + '">' + v + '</button>';
+            });
+            html += '</div></div>';
+        } else if (variantNames.length === 1) {
+            html += '<div style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Printing: <strong style="color:var(--text);">' + variantNames[0] + '</strong></div>';
+        }
+
+        // Condition price grid
+        html += '<div style="display:grid; grid-template-columns: repeat(5, 1fr); gap:8px; margin-bottom:12px;">';
+        ['NM','LP','MP','HP','DMG'].forEach(function(cond) {
+            var p = variantData[cond];
+            var isSelected = cond === selectedCond;
+            var hasPrice = p != null && p !== undefined;
+            var bg = isSelected ? 'var(--accent)' : 'var(--surface)';
+            var fg = isSelected ? '#fff' : 'var(--text)';
+            html += '<div data-cond="' + cond + '" style="background:' + bg + '; color:' + fg + '; padding:10px 6px; border-radius:6px; text-align:center; cursor:pointer; border:1px solid var(--border); opacity:' + (hasPrice ? '1' : '0.4') + ';">';
+            html += '<div style="font-size:0.75rem; font-weight:600;">' + cond + '</div>';
+            html += '<div style="font-size:1.05rem; font-weight:700;">' + (hasPrice ? '$' + p.toFixed(2) : '&mdash;') + '</div>';
+            html += '</div>';
+        });
+        html += '</div>';
+
+        // Confirm + Cancel
+        var selectedPrice = variantData[selectedCond];
+        html += '<div style="display:flex; gap:8px; align-items:center;">';
+        html += '<button id="cond-confirm-btn" class="btn btn-primary">Add ' + selectedCond + (selectedPrice ? ' &mdash; $' + selectedPrice.toFixed(2) : '') + '</button>';
+        html += '<button id="cond-cancel-btn" class="btn btn-secondary">Cancel</button>';
+        html += '</div></div>';
+
+        resultsDiv.innerHTML = html;
+
+        // Attach event listeners
+        var picker = document.getElementById('cond-picker');
+        // Condition clicks
+        picker.querySelectorAll('[data-cond]').forEach(function(el) {
+            el.addEventListener('click', function() {
+                _renderConditionPicker(document.getElementById(divId), el.getAttribute('data-cond'));
+            });
+        });
+        // Variant clicks
+        picker.querySelectorAll('[data-variant]').forEach(function(el) {
+            el.addEventListener('click', function() {
+                window._pendingCard.primaryVariant = el.getAttribute('data-variant');
+                _renderConditionPicker(document.getElementById(divId), selectedCond);
+            });
+        });
+        // Confirm
+        document.getElementById('cond-confirm-btn').addEventListener('click', function() {
+            _finalizeCardAdd(pc.sessionId, pc.tcgId, pc.cardName, pc.setName, pc.cardNum, pc.rarity, selectedCond, qty, selectedPrice || 0, pc.context);
+        });
+        // Cancel
+        document.getElementById('cond-cancel-btn').addEventListener('click', function() {
+            document.getElementById(divId).innerHTML = '';
+        });
+    }
+
+    async function _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv) {
+        if (!resultsDiv) resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : 'raw-search-results');
 
         if (!price || price <= 0) {
             const manual = await themedPrompt({
                 title: 'No price found',
-                message: 'No ' + condition + ' price in PPT for "' + cardName + '". Enter a market price:',
+                message: 'No ' + condition + ' price for this card. Enter a market price:',
                 inputs: [{ type: 'number', label: 'Market price ($)', min: 0, step: '0.01', placeholder: '0.00' }],
                 confirmText: 'Add Card',
             });
@@ -1736,20 +1839,21 @@
             const d = await r.json();
             if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + d.error + '</div>'; return; }
 
+            var msg = 'Card added! ' + cardName + ' (' + condition + ') $' + Number(price).toFixed(2);
             if (context === 'session') {
                 document.getElementById('session-raw-search').value = '';
                 document.getElementById('session-raw-qty').value = '1';
-                resultsDiv.innerHTML = '<div class="alert alert-success">Card added! ' + cardName + ' (' + condition + ') $' + Number(price).toFixed(2) + '</div>';
-                setTimeout(() => viewSession(sessionId), 500);
+                resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
+                setTimeout(function() { viewSession(sessionId); }, 500);
             } else {
                 document.getElementById('raw-card-search').value = '';
                 document.getElementById('raw-card-set').value = '';
                 document.getElementById('raw-quantity').value = '1';
-                resultsDiv.innerHTML = '<div class="alert alert-success">Card added! ' + cardName + ' (' + condition + ') $' + Number(price).toFixed(2) + '</div>';
+                resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
                 loadRawSessionItems();
             }
         } catch(err) {
-            resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+            resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
         }
     }
 
