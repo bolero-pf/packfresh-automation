@@ -171,31 +171,12 @@ class PPTClient:
 
     # ── card endpoints ───────────────────────────────────────────────
 
-    def get_card_by_id(self, card_id, *, include_history=False):
-        """Get a card by its PPT internal ID — returns full pricing with all conditions."""
-        params = {}
+    def get_card_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
+        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1, "days": 30}
         if include_history:
             params["includeHistory"] = "true"
-        resp = self._get(f"{self.base_url}/v2/cards/{card_id}", params)
-        data = resp.get("data", resp)
-        if isinstance(data, dict) and ("name" in data or "productName" in data):
-            return data
-        return None
-
-    def get_card_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
-        """Look up a card by TCGPlayer ID. First searches, then fetches by PPT ID for full data."""
-        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1}
         items = self._extract_data(self._get(f"{self.base_url}/v2/cards", params))
-        if not items:
-            return None
-        card = items[0]
-        # If the card has a PPT internal ID, re-fetch via direct endpoint for full pricing
-        ppt_id = card.get("id")
-        if ppt_id:
-            full_card = self.get_card_by_id(ppt_id, include_history=include_history)
-            if full_card:
-                return full_card
-        return card
+        return items[0] if items else None
 
     def search_cards(self, query, *, set_name=None, limit=5):
         """Search cards by name, optionally filtered by set."""
