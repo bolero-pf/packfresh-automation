@@ -595,14 +595,40 @@ def update_quantity(item_id):
 
 @app.route("/api/intake/item/<item_id>/update-condition", methods=["POST"])
 def update_condition(item_id):
-    """Update an item's condition."""
+    """Update an item's condition and re-price from PPT if possible."""
     data = request.get_json(silent=True) or {}
-    new_condition = data.get("condition", "").strip()
+    new_condition = data.get("condition", "").strip().upper()
     session_id = data.get("session_id")
     if not new_condition or not session_id:
         return jsonify({"error": "condition and session_id required"}), 400
     try:
+        # Update the condition
         item = intake.update_item_condition(item_id, new_condition, session_id)
+
+        # Try to re-price from PPT if we have a tcgplayer_id
+        tcg_id = item.get("tcgplayer_id")
+        if tcg_id and ppt:
+            try:
+                card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+                if card_data:
+                    variants = PPTClient.extract_variants(card_data)
+                    primary = PPTClient.get_primary_printing(card_data) or "Default"
+                    if primary not in variants and variants:
+                        primary = list(variants.keys())[0]
+                    variant_data = variants.get(primary, {})
+                    new_price = variant_data.get(new_condition)
+                    if new_price is not None:
+                        from decimal import Decimal
+                        item = intake.update_item_price(
+                            item_id, Decimal(str(new_price)), session_id
+                        )
+                        app.logger.info(
+                            f"Condition change {item_id}: {new_condition} -> ${new_price}"
+                        )
+            except Exception as e:
+                app.logger.warning(f"PPT re-price on condition change failed: {e}")
+                # Condition is still updated, just price stays the same
+
         return jsonify({"success": True, "item": _serialize(item)})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
