@@ -1467,7 +1467,7 @@
             title: '🔗 Relink Raw Card',
             message: 'Current: ' + cardName,
             inputs: [
-                { type: 'text', label: 'Card Name (or leave blank)', default: cardName, placeholder: 'e.g. Charizard ex' },
+                { type: 'text', label: 'Card Name', default: cardName, placeholder: 'e.g. Charizard ex' },
                 { type: 'text', label: 'Set (optional)', placeholder: 'e.g. Paldean Fates' },
                 { type: 'number', label: 'TCGPlayer ID (optional)', placeholder: 'e.g. 535090' },
             ],
@@ -1477,10 +1477,11 @@
         const [searchName, setFilter, rawTcgId] = input;
         const tcgIdDirect = parseInt(rawTcgId);
 
-        let tcgId, card, variants, primary;
+        // Store relink context
+        window._relinkContext = { itemId, sessionId };
 
         if (tcgIdDirect > 0) {
-            // Direct TCGPlayer ID lookup
+            // Direct TCGPlayer ID lookup → show condition picker
             try {
                 const r = await fetch('/api/ppt/lookup-card', {
                     method: 'POST',
@@ -1489,14 +1490,26 @@
                 });
                 const d = await r.json();
                 if (!r.ok) { await themedConfirm('Error', d.error || 'Card not found'); return; }
-                card = d.card || {};
-                variants = d.variants || {};
-                primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
+                const card = d.card || {};
+                const variants = d.variants || {};
+                let primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
                 if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
-                tcgId = tcgIdDirect;
-            } catch(err) { await themedConfirm('Error', err.message); return; }
+                // Use the condition picker
+                window._pendingCard = {
+                    sessionId, tcgId: tcgIdDirect,
+                    cardName: card.name || cardName,
+                    setName: card.setName || card.set_name || '',
+                    cardNum: card.cardNumber || '',
+                    rarity: card.rarity || '',
+                    qty: 1, context: 'session',
+                    variants, primaryVariant: primary,
+                    _relink: true, _relinkItemId: itemId,
+                };
+                const resultsDiv = document.getElementById('session-raw-results');
+                _renderConditionPicker(resultsDiv, 'NM');
+            } catch(err) { await themedConfirm('Error', err.message); }
         } else if (searchName.trim()) {
-            // Search by name
+            // Search by name → show clickable results
             try {
                 const body = { query: searchName.trim() };
                 if (setFilter.trim()) body.set_name = setFilter.trim();
@@ -1509,84 +1522,55 @@
                 const results = d.results || [];
                 if (!r.ok || !results.length) { await themedConfirm('No Results', 'No cards found for "' + searchName.trim() + '"'); return; }
 
-                // Let user pick from results
-                const options = results.slice(0, 6).map(function(c) {
+                // Show results as clickable list — clicking one triggers condition picker for relink
+                const resultsDiv = document.getElementById('session-raw-results');
+                resultsDiv.innerHTML = results.map(function(c) {
                     const tid = c.tcgPlayerId || c.tcgplayer_id || '';
                     const sn = c.setName || c.set_name || '';
                     const cn = c.cardNumber || c.number || '';
-                    return { value: String(tid), label: (c.name || '') + (cn ? ' #'+cn : '') + ' — ' + sn + ' (TCG#' + tid + ')' };
+                    const rarity = c.rarity || '';
+                    const price = c.prices?.market || c.market_price || 0;
+                    const safeName = (c.name||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                    const safeSet = (sn||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                    return '<div class="search-result" data-relink-tcg="' + tid + '" data-relink-name="' + safeName + '" data-relink-set="' + safeSet + '" data-relink-num="' + cn + '" data-relink-rarity="' + rarity + '">' +
+                        '<h4>' + (c.name||'') + (cn ? ' #'+cn : '') + '</h4>' +
+                        '<p>' + sn + (rarity ? ' · '+rarity : '') + ' · TCG#' + tid + '</p></div>';
+                }).join('');
+                // Attach click handlers
+                resultsDiv.querySelectorAll('[data-relink-tcg]').forEach(function(el) {
+                    el.addEventListener('click', async function() {
+                        const tid = parseInt(el.getAttribute('data-relink-tcg'));
+                        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading pricing...</div>';
+                        try {
+                            const lr = await fetch('/api/ppt/lookup-card', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ tcgplayer_id: tid }),
+                            });
+                            const ld = await lr.json();
+                            if (!lr.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + (ld.error||'Failed') + '</div>'; return; }
+                            const card = ld.card || {};
+                            const variants = ld.variants || {};
+                            let primary = ld.primary_printing || Object.keys(variants)[0] || 'Default';
+                            if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
+                            window._pendingCard = {
+                                sessionId, tcgId: tid,
+                                cardName: card.name || el.getAttribute('data-relink-name'),
+                                setName: card.setName || el.getAttribute('data-relink-set'),
+                                cardNum: card.cardNumber || el.getAttribute('data-relink-num'),
+                                rarity: card.rarity || el.getAttribute('data-relink-rarity'),
+                                qty: 1, context: 'session',
+                                variants, primaryVariant: primary,
+                                _relink: true, _relinkItemId: itemId,
+                            };
+                            _renderConditionPicker(resultsDiv, 'NM');
+                        } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
+                    });
                 });
-
-                const picked = await themedPrompt({
-                    title: '🔗 Select Card',
-                    message: 'Choose a card to relink to:',
-                    inputs: [{ type: 'select', label: 'Card', options: options }],
-                    confirmText: 'Select',
-                });
-                if (picked === null) return;
-                tcgId = parseInt(picked);
-
-                // Detail lookup for condition pricing
-                const lr = await fetch('/api/ppt/lookup-card', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ tcgplayer_id: tcgId }),
-                });
-                const ld = await lr.json();
-                if (!lr.ok) { await themedConfirm('Error', ld.error || 'Lookup failed'); return; }
-                card = ld.card || {};
-                variants = ld.variants || {};
-                primary = ld.primary_printing || Object.keys(variants)[0] || 'Default';
-                if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
-            } catch(err) { await themedConfirm('Error', err.message); return; }
+            } catch(err) { await themedConfirm('Error', err.message); }
         } else {
             await themedConfirm('Missing Input', 'Enter a card name or TCGPlayer ID');
-            return;
         }
-
-        const variantData = variants[primary] || {};
-        const newName = card.name || cardName;
-        const setName = card.setName || card.set_name || '';
-        const cardNum = card.cardNumber || '';
-
-        // Step 2: Condition picker
-        const conditions = ['NM','LP','MP','HP','DMG'];
-        const condOptions = conditions.map(function(c) {
-            const p = variantData[c];
-            return { value: c, label: c + (p != null ? ' — $' + Number(p).toFixed(2) : ' — no price') };
-        });
-
-        const condInput = await themedPrompt({
-            title: '🔗 Relink: ' + newName,
-            message: setName + (cardNum ? ' #' + cardNum : '') + ' · TCG#' + tcgId + ' · ' + primary,
-            inputs: [{ type: 'select', label: 'Condition', options: condOptions, default: 'NM' }],
-            confirmText: 'Relink Card',
-        });
-        if (condInput === null) return;
-
-        const selectedCond = condInput;
-        const selectedPrice = variantData[selectedCond] || 0;
-
-        // Step 3: Update the item
-        try {
-            const linkR = await fetch('/api/intake/link-item', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    item_id: itemId, session_id: sessionId,
-                    tcgplayer_id: tcgId, market_price: selectedPrice,
-                }),
-            });
-            if (!linkR.ok) { const ld = await linkR.json(); await themedConfirm('Error', ld.error || 'Link failed'); return; }
-
-            await fetch('/api/intake/item/' + itemId + '/update-condition', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ condition: selectedCond, session_id: sessionId }),
-            });
-
-            viewSession(sessionId);
-        } catch(err) { await themedConfirm('Error', err.message); }
     }
 
     async function deleteItem(itemId, sessionId) {
@@ -1949,45 +1933,73 @@
 
     async function _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv) {
         if (!resultsDiv) resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : 'raw-search-results');
+        const pc = window._pendingCard || {};
+        const isRelink = pc._relink && pc._relinkItemId;
 
         if (!price || price <= 0) {
             const manual = await themedPrompt({
                 title: 'No price found',
                 message: 'No ' + condition + ' price for this card. Enter a market price:',
                 inputs: [{ type: 'number', label: 'Market price ($)', min: 0, step: '0.01', placeholder: '0.00' }],
-                confirmText: 'Add Card',
+                confirmText: isRelink ? 'Relink Card' : 'Add Card',
             });
             if (manual === null) return;
             price = parseFloat(manual);
             if (isNaN(price) || price <= 0) { alert('Invalid price'); return; }
         }
 
-        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding...</div>';
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> ' + (isRelink ? 'Relinking...' : 'Adding...') + '</div>';
         try {
-            const r = await fetch('/api/intake/add-raw-card', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    session_id: sessionId, tcgplayer_id: tcgId, card_name: cardName,
-                    condition: condition, set_name: setName, card_number: cardNum,
-                    rarity: rarity, quantity: qty, market_price: price,
-                }),
-            });
-            const d = await r.json();
-            if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + d.error + '</div>'; return; }
+            if (isRelink) {
+                // Relink: map item to new tcgplayer_id + update price + update condition
+                const mapR = await fetch('/api/intake/map-item', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        item_id: pc._relinkItemId, tcgplayer_id: tcgId,
+                        override_price: price,
+                    }),
+                });
+                const mapD = await mapR.json();
+                if (!mapR.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + (mapD.error || 'Relink failed') + '</div>'; return; }
 
-            var msg = 'Card added! ' + cardName + ' (' + condition + ') $' + Number(price).toFixed(2);
-            if (context === 'session') {
-                document.getElementById('session-raw-search').value = '';
-                document.getElementById('session-raw-qty').value = '1';
-                resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
+                // Update condition
+                await fetch('/api/intake/item/' + pc._relinkItemId + '/update-condition', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ condition: condition, session_id: sessionId }),
+                });
+
+                resultsDiv.innerHTML = '<div class="alert alert-success">Relinked! ' + cardName + ' (' + condition + ') $' + Number(price).toFixed(2) + '</div>';
+                window._pendingCard = null;
                 setTimeout(function() { viewSession(sessionId); }, 500);
             } else {
-                document.getElementById('raw-card-search').value = '';
-                document.getElementById('raw-card-set').value = '';
-                document.getElementById('raw-quantity').value = '1';
-                resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
-                loadRawSessionItems();
+                // Normal add
+                const r = await fetch('/api/intake/add-raw-card', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        session_id: sessionId, tcgplayer_id: tcgId, card_name: cardName,
+                        condition: condition, set_name: setName, card_number: cardNum,
+                        rarity: rarity, quantity: qty, market_price: price,
+                    }),
+                });
+                const d = await r.json();
+                if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + d.error + '</div>'; return; }
+
+                var msg = 'Card added! ' + cardName + ' (' + condition + ') $' + Number(price).toFixed(2);
+                if (context === 'session') {
+                    document.getElementById('session-raw-search').value = '';
+                    document.getElementById('session-raw-qty').value = '1';
+                    resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
+                    setTimeout(function() { viewSession(sessionId); }, 500);
+                } else {
+                    document.getElementById('raw-card-search').value = '';
+                    document.getElementById('raw-card-set').value = '';
+                    document.getElementById('raw-quantity').value = '1';
+                    resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
+                    loadRawSessionItems();
+                }
             }
         } catch(err) {
             resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
