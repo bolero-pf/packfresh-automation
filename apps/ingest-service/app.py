@@ -674,14 +674,17 @@ def ppt_lookup_card():
 
         # Debug logging
         prices_raw = card_data.get("prices", {})
-        logger.info(f"CARD LOOKUP {tcgplayer_id}: prices keys={list(prices_raw.keys()) if isinstance(prices_raw, dict) else type(prices_raw)}")
+        app.logger.info(f"CARD LOOKUP {tcgplayer_id}: prices keys={list(prices_raw.keys()) if isinstance(prices_raw, dict) else type(prices_raw)}")
         if isinstance(prices_raw, dict):
             raw_variants = prices_raw.get("variants", {})
-            logger.info(f"  raw variants keys={list(raw_variants.keys()) if isinstance(raw_variants, dict) else type(raw_variants)}")
+            app.logger.info(f"  raw variants keys={list(raw_variants.keys()) if isinstance(raw_variants, dict) else type(raw_variants)}")
             for vname, vconds in (raw_variants.items() if isinstance(raw_variants, dict) else []):
-                logger.info(f"  variant '{vname}': cond keys={list(vconds.keys()) if isinstance(vconds, dict) else type(vconds)}")
-        logger.info(f"  extract_variants result={variants}")
-        logger.info(f"  primary_printing={primary_printing}")
+                if isinstance(vconds, dict):
+                    app.logger.info(f"  variant '{vname}': cond keys={list(vconds.keys())}")
+                    for ck, cv in vconds.items():
+                        app.logger.info(f"    '{ck}' -> price={cv.get('price') if isinstance(cv, dict) else cv}")
+        app.logger.info(f"  extract_variants result={variants}")
+        app.logger.info(f"  primary_printing={primary_printing}")
 
         return jsonify({
             "card": card_data,
