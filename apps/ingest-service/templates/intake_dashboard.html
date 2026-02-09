@@ -1591,7 +1591,8 @@
 
             const card = d.card || {};
             const variants = d.variants || {};
-            const primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
+            let primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
+            if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
             const variantData = variants[primary] || {};
 
             // Get condition-specific price
@@ -1717,6 +1718,10 @@
                 const ld = await lr.json();
                 variants = ld.variants || {};
                 primaryVariant = ld.primary_printing || Object.keys(variants)[0] || 'Default';
+                // If primaryVariant isn't a key in variants, use first available key
+                if (!variants[primaryVariant] && Object.keys(variants).length) {
+                    primaryVariant = Object.keys(variants)[0];
+                }
                 const card = ld.card || {};
                 if (card.setName && !setName) setName = card.setName;
                 if (card.cardNumber && !cardNum) cardNum = card.cardNumber;
@@ -1874,7 +1879,7 @@
         } catch(err) { alert(err.message); }
     }
 
-    // ═══════════════════════════════ RAW CARD SESSION (tab) woops ═══════════════════════════════
+    // ═══════════════════════════════ RAW CARD SESSION (tab) ═══════════════════════════════
     async function createRawSession() {
         const customer = document.getElementById('raw-customer').value || 'Walk-in';
         const offerPct = document.getElementById('raw-offer-pct').value || '65';

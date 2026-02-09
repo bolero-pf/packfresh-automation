@@ -57,6 +57,19 @@ CONDITION_TO_PPT = {
 }
 PPT_TO_CONDITION = {v: k for k, v in CONDITION_TO_PPT.items()}
 
+
+def _match_condition(ppt_cond: str) -> str | None:
+    """Match a PPT condition string to a short code, handling variants like 'Near Mint Holofoil'."""
+    # Exact match first
+    short = PPT_TO_CONDITION.get(ppt_cond)
+    if short:
+        return short
+    # Try prefix match — PPT sometimes appends variant name e.g. "Near Mint Holofoil"
+    for full_name, code in PPT_TO_CONDITION.items():
+        if ppt_cond.startswith(full_name):
+            return code
+    return None
+
 # Fallback multipliers only used when PPT doesn't return condition data
 FALLBACK_MULTIPLIERS = {
     "NM": Decimal("1.00"), "LP": Decimal("0.80"), "MP": Decimal("0.65"),
@@ -265,7 +278,7 @@ class PPTClient:
                     continue
                 variant_prices = {}
                 for ppt_cond, cond_data in conditions.items():
-                    short_code = PPT_TO_CONDITION.get(ppt_cond)
+                    short_code = _match_condition(ppt_cond)
                     if short_code and isinstance(cond_data, dict):
                         price = cond_data.get("price")
                         variant_prices[short_code] = float(price) if price is not None else None
@@ -278,7 +291,7 @@ class PPTClient:
             if conditions and isinstance(conditions, dict):
                 flat = {}
                 for ppt_cond, cond_data in conditions.items():
-                    short_code = PPT_TO_CONDITION.get(ppt_cond)
+                    short_code = _match_condition(ppt_cond)
                     if short_code and isinstance(cond_data, dict):
                         price = cond_data.get("price")
                         flat[short_code] = float(price) if price is not None else None
