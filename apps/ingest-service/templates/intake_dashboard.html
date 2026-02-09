@@ -320,9 +320,9 @@
         <!-- ═══════════════════════════════════ RAW CARD ENTRY TAB ═══════════════════════════════════ -->
         <div id="raw-intake" class="tab-content">
             <div class="card">
-                <h2>Manual Raw Card Entry</h2>
+                <h2>Raw Card Intake</h2>
                 <p style="color:var(--text-dim); margin-bottom:16px; font-size:0.9rem;">
-                    Create a session, then add cards one at a time. Prices are fetched from PPT by tcgplayer ID + condition.
+                    Create a session, then search and add cards. Prices are fetched from PPT.
                 </p>
 
                 <!-- Create session section -->
@@ -344,60 +344,36 @@
                 <div id="raw-entry-form" style="display:none;">
                     <div class="alert alert-success" id="raw-session-info"></div>
 
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>TCGPlayer ID *</label>
-                            <input type="number" id="raw-tcgplayer-id" placeholder="e.g. 490294">
+                    <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                        <div class="form-group" style="flex:2; min-width:160px; margin:0;">
+                            <label>Card Name</label>
+                            <input type="text" id="raw-card-search" placeholder="e.g. Charizard ex"
+                                   onkeydown="if(event.key==='Enter') searchCardsForRawTab()">
                         </div>
-                        <div class="form-group">
-                            <label>Card Name *</label>
-                            <input type="text" id="raw-card-name" placeholder="e.g. Charizard ex">
+                        <div class="form-group" style="flex:1; min-width:120px; margin:0;">
+                            <label>Set (optional)</label>
+                            <input type="text" id="raw-card-set" placeholder="e.g. Paldean Fates">
                         </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Condition *</label>
+                        <div class="form-group" style="width:80px; margin:0;">
+                            <label>Condition</label>
                             <select id="raw-condition">
-                                <option value="NM">Near Mint (NM)</option>
-                                <option value="LP">Lightly Played (LP)</option>
-                                <option value="MP">Moderately Played (MP)</option>
-                                <option value="HP">Heavily Played (HP)</option>
-                                <option value="DMG">Damaged (DMG)</option>
+                                <option value="NM">NM</option>
+                                <option value="LP">LP</option>
+                                <option value="MP">MP</option>
+                                <option value="HP">HP</option>
+                                <option value="DMG">DMG</option>
                             </select>
                         </div>
-                        <div class="form-group">
-                            <label>Quantity</label>
+                        <div class="form-group" style="width:55px; margin:0;">
+                            <label>Qty</label>
                             <input type="number" id="raw-quantity" value="1" min="1">
                         </div>
-                        <div class="form-group">
-                            <label>Price Override (optional)</label>
-                            <input type="text" id="raw-price-override" placeholder="Leave blank for PPT price">
-                        </div>
+                        <button class="btn btn-primary btn-sm" onclick="searchCardsForRawTab()">Search</button>
                     </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Set Name (auto-filled from PPT)</label>
-                            <input type="text" id="raw-set-name" placeholder="Auto-filled">
-                        </div>
-                        <div class="form-group">
-                            <label>Card Number</label>
-                            <input type="text" id="raw-card-number" placeholder="e.g. 125">
-                        </div>
-                        <div class="form-group">
-                            <label>Rarity</label>
-                            <input type="text" id="raw-rarity" placeholder="Auto-filled">
-                        </div>
-                    </div>
-                    <div style="display:flex; gap:10px; margin-bottom:20px;">
-                        <button class="btn btn-secondary" onclick="lookupRawCard()">
-                            Lookup Price from PPT
-                        </button>
-                        <button class="btn btn-primary" onclick="addRawCard()">Add Card to Session</button>
-                    </div>
-                    <div id="raw-lookup-result"></div>
+                    <div id="raw-search-results" style="margin-top:8px;"></div>
 
                     <!-- Items added so far -->
-                    <div id="raw-items-table"></div>
+                    <div id="raw-items-table" style="margin-top:16px;"></div>
 
                     <div style="margin-top:16px; display:flex; gap:10px;">
                         <button class="btn btn-success" onclick="finalizeRawSession()">Finalize Session</button>
@@ -791,35 +767,34 @@
 
                 ${s.status === 'in_progress' && s.session_type === 'raw' ? `
                     <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
-                        <h4 style="margin-bottom:12px;">➕ Add Card to This Session</h4>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label>TCGPlayer ID</label>
-                                <input type="number" id="session-raw-tcg-id" placeholder="e.g. 490294">
+                        <h4 style="margin-bottom:10px;">➕ Add Card</h4>
+                        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                            <div class="form-group" style="flex:2; min-width:160px; margin:0;">
+                                <label>Card Name</label>
+                                <input type="text" id="session-raw-search" placeholder="e.g. Charizard ex"
+                                       onkeydown="if(event.key==='Enter') searchCardsForSession('${sessionId}', ${s.offer_percentage})">
                             </div>
-                            <div class="form-group">
+                            <div class="form-group" style="flex:1; min-width:120px; margin:0;">
+                                <label>Set (optional)</label>
+                                <input type="text" id="session-raw-set" placeholder="e.g. Paldean Fates">
+                            </div>
+                            <div class="form-group" style="width:80px; margin:0;">
                                 <label>Condition</label>
                                 <select id="session-raw-condition">
-                                    <option value="NM">Near Mint</option>
-                                    <option value="LP">Lightly Played</option>
-                                    <option value="MP">Moderately Played</option>
-                                    <option value="HP">Heavily Played</option>
-                                    <option value="DMG">Damaged</option>
+                                    <option value="NM">NM</option>
+                                    <option value="LP">LP</option>
+                                    <option value="MP">MP</option>
+                                    <option value="HP">HP</option>
+                                    <option value="DMG">DMG</option>
                                 </select>
                             </div>
-                            <div class="form-group">
-                                <label>Variant</label>
-                                <input type="text" id="session-raw-variant" placeholder="e.g. Holofoil">
-                            </div>
-                            <div class="form-group">
+                            <div class="form-group" style="width:55px; margin:0;">
                                 <label>Qty</label>
-                                <input type="number" id="session-raw-qty" value="1" min="1" style="width:70px;">
+                                <input type="number" id="session-raw-qty" value="1" min="1">
                             </div>
+                            <button class="btn btn-primary btn-sm" onclick="searchCardsForSession('${sessionId}', ${s.offer_percentage})">Search</button>
                         </div>
-                        <button class="btn btn-primary" onclick="addCardToExistingSession('${sessionId}', ${s.offer_percentage})">
-                            Look Up &amp; Add
-                        </button>
-                        <div id="session-raw-result" style="margin-top:12px;"></div>
+                        <div id="session-raw-results" style="margin-top:8px;"></div>
                     </div>
                 ` : ''}
 
@@ -1504,104 +1479,120 @@
             resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
     }
+    // ═══════════════════════════════ CARD SEARCH & ADD (shared by session modal + raw tab) ═══════════════════════════════
 
-    // ═══════════════════════════════ ADD CARD TO EXISTING SESSION ═══════════════════════════════
-    async function addCardToExistingSession(sessionId, offerPct) {
-        const tcgId = document.getElementById('session-raw-tcg-id').value;
-        const condition = document.getElementById('session-raw-condition').value;
-        const variant = document.getElementById('session-raw-variant').value;
-        const quantity = parseInt(document.getElementById('session-raw-qty').value) || 1;
-        const resultDiv = document.getElementById('session-raw-result');
+    async function searchCardsForSession(sessionId, offerPct) {
+        const searchTerm = document.getElementById('session-raw-search').value.trim();
+        const setFilter = (document.getElementById('session-raw-set')?.value || '').trim();
+        const resultsDiv = document.getElementById('session-raw-results');
+        if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a card name</div>'; return; }
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+        await _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offerPct, 'session');
+    }
 
-        if (!tcgId) { alert('Enter a TCGPlayer ID'); return; }
+    async function searchCardsForRawTab() {
+        const searchTerm = document.getElementById('raw-card-search').value.trim();
+        const setFilter = (document.getElementById('raw-card-set')?.value || '').trim();
+        const resultsDiv = document.getElementById('raw-search-results');
+        if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a card name</div>'; return; }
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+        const offerPct = parseFloat(document.getElementById('raw-offer-pct').value) || 65;
+        await _doCardSearch(searchTerm, setFilter, resultsDiv, rawSessionId, offerPct, 'raw');
+    }
 
-        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up card...</div>';
-
-        // Step 1: Look up card via PPT
+    async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offerPct, context) {
         try {
-            const lr = await fetch('/api/ppt/lookup-card', {
+            const r = await fetch('/api/ppt/search-cards', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+                body: JSON.stringify({ query: searchTerm, set_name: setFilter || undefined }),
             });
-            const ld = await lr.json();
-            if (!lr.ok) {
-                resultDiv.innerHTML = `<div class="alert alert-error">${ld.error || 'Card not found'}</div>`;
+            const contentType = r.headers.get('content-type') || '';
+            if (!contentType.includes('application/json')) {
+                resultsDiv.innerHTML = `<div class="alert alert-error">Server error (${r.status})</div>`;
                 return;
             }
+            const d = await r.json();
+            if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
-            const card = ld.card || {};
-            const variants = ld.variants || {};
-            const primaryPrinting = ld.primary_printing || '';
+            const cards = d.results || [];
+            if (!cards.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No cards found. Try a different name or set.</div>'; return; }
 
-            // Get price for selected variant + condition
-            const useVariant = variant || primaryPrinting;
-            let price = null;
-            if (variants[useVariant] && variants[useVariant][condition] != null) {
-                price = variants[useVariant][condition];
-            } else if (card.prices?.market) {
-                price = card.prices.market;
-            }
+            const condId = context === 'session' ? 'session-raw-condition' : 'raw-condition';
+            const qtyId = context === 'session' ? 'session-raw-qty' : 'raw-quantity';
+            const condition = document.getElementById(condId).value;
+            const qty = parseInt(document.getElementById(qtyId).value) || 1;
 
-            if (!price) {
-                resultDiv.innerHTML = `<div class="alert alert-warning">Found "${card.name}" but no price for ${useVariant} / ${condition}. Enter price manually below.
-                    <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
-                        <input type="number" id="session-raw-manual-price" placeholder="Price" step="0.01" style="width:120px;">
-                        <button class="btn btn-primary btn-sm" onclick="submitCardToSession('${sessionId}', ${parseInt(tcgId)}, '${(card.name||'').replace(/'/g,"\\'")}', '${condition}', '${card.set?.name || ''}', '${card.number || ''}', '${card.rarity || ''}', ${quantity}, parseFloat(document.getElementById('session-raw-manual-price').value))">Add</button>
-                    </div>
+            resultsDiv.innerHTML = cards.map(c => {
+                const tcgId = c.tcgPlayerId || c.tcgplayer_id || c.id || '';
+                const setName = c.setName || c.set_name || (c.set ? c.set.name : '') || '';
+                const cardNum = c.cardNumber || c.number || '';
+                const rarity = c.rarity || '';
+                let price = null;
+                const prices = c.prices || {};
+                if (typeof prices === 'object') {
+                    price = prices[condition.toLowerCase()] || prices.market || prices.mid || null;
+                }
+                if (!price && c.price) price = c.price;
+                const displayPrice = price ? Number(price).toFixed(2) : 'no price';
+                const offer = price ? (price * qty * offerPct / 100).toFixed(2) : String.fromCharCode(8212);
+                const safeName = (c.name||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                const safeSet = setName.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+
+                return `<div class="search-result" onclick="addCardFromSearch('${sessionId}', ${tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${condition}', ${qty}, ${price || 0}, '${context}')">
+                    <h4>${c.name} ${cardNum ? '#'+cardNum : ''}</h4>
+                    <p>${setName}${rarity ? ' \u00b7 '+rarity : ''} \u00b7 TCG#${tcgId} \u00b7 ${condition}: $${displayPrice} \u00b7 Qty ${qty} \u00b7 Offer: $${offer}</p>
                 </div>`;
-                return;
-            }
-
-            // Step 2: Show confirmation and add
-            resultDiv.innerHTML = `
-                <div style="background:var(--surface-2); border-radius:8px; padding:12px; margin-top:8px;">
-                    <strong style="color:var(--accent);">${card.name}</strong>
-                    ${card.set?.name ? `<span style="color:var(--text-dim);"> — ${card.set.name}</span>` : ''}
-                    <br>
-                    <span>${useVariant} / ${condition} — <strong>$${price.toFixed(2)}</strong></span>
-                    <span style="margin-left:8px; color:var(--text-dim);">× ${quantity}</span>
-                    <button class="btn btn-primary btn-sm" style="margin-left:12px;"
-                            onclick="submitCardToSession('${sessionId}', ${parseInt(tcgId)}, '${(card.name||'').replace(/'/g,"\\'")}', '${condition}', '${card.set?.name || ''}', '${card.number || ''}', '${card.rarity || ''}', ${quantity}, ${price})">
-                        Confirm &amp; Add
-                    </button>
-                </div>
-            `;
+            }).join('');
         } catch(err) {
-            resultDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+            resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
     }
 
-    async function submitCardToSession(sessionId, tcgId, cardName, condition, setName, cardNum, rarity, qty, price) {
+    async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context) {
+        const resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : 'raw-search-results');
+
+        if (!price || price <= 0) {
+            const manual = await themedPrompt({
+                title: 'No price found',
+                message: `No ${condition} price in PPT. Enter a market price:`,
+                inputs: [{ type: 'number', label: 'Market price ($)', min: 0, step: '0.01', placeholder: '0.00' }],
+                confirmText: 'Add Card',
+            });
+            if (manual === null) return;
+            price = parseFloat(manual);
+            if (isNaN(price) || price <= 0) { alert('Invalid price'); return; }
+        }
+
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding...</div>';
         try {
             const r = await fetch('/api/intake/add-raw-card', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    session_id: sessionId,
-                    tcgplayer_id: tcgId,
-                    card_name: cardName,
-                    condition: condition,
-                    set_name: setName,
-                    card_number: cardNum,
-                    rarity: rarity,
-                    quantity: qty,
-                    market_price: price,
+                    session_id: sessionId, tcgplayer_id: tcgId, card_name: cardName,
+                    condition: condition, set_name: setName, card_number: cardNum,
+                    rarity: rarity, quantity: qty, market_price: price,
                 }),
             });
             const d = await r.json();
-            if (!r.ok) { alert(d.error); return; }
+            if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
-            // Clear inputs and reload session
-            document.getElementById('session-raw-tcg-id').value = '';
-            document.getElementById('session-raw-variant').value = '';
-            document.getElementById('session-raw-qty').value = '1';
-            document.getElementById('session-raw-result').innerHTML = 
-                '<div class="alert alert-success">Card added! ✓</div>';
-
-            // Reload session view to show updated table
-            setTimeout(() => viewSession(sessionId), 500);
-        } catch(err) { alert(err.message); }
+            if (context === 'session') {
+                document.getElementById('session-raw-search').value = '';
+                document.getElementById('session-raw-qty').value = '1';
+                resultsDiv.innerHTML = '<div class="alert alert-success">Card added!</div>';
+                setTimeout(() => viewSession(sessionId), 500);
+            } else {
+                document.getElementById('raw-card-search').value = '';
+                document.getElementById('raw-card-set').value = '';
+                document.getElementById('raw-quantity').value = '1';
+                resultsDiv.innerHTML = '<div class="alert alert-success">Card added!</div>';
+                loadRawSessionItems();
+            }
+        } catch(err) {
+            resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
     }
 
     // ═══════════════════════════════ FINALIZE ═══════════════════════════════
@@ -1616,12 +1607,12 @@
             const r = await fetch(`/api/intake/finalize/${sessionId}`, { method: 'POST' });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            alert(`Finalized! ${d.sealed_processed || 0} sealed COGS updated, ${d.raw_cards_created || 0} raw cards created.`);
+            alert('Finalized! ' + (d.sealed_processed || 0) + ' sealed COGS updated, ' + (d.raw_cards_created || 0) + ' raw cards created.');
             closeModal('session-modal');
         } catch(err) { alert(err.message); }
     }
 
-    // ═══════════════════════════════ RAW CARD MANUAL ENTRY ═══════════════════════════════
+    // ═══════════════════════════════ RAW CARD SESSION (tab) ═══════════════════════════════
     async function createRawSession() {
         const customer = document.getElementById('raw-customer').value || 'Walk-in';
         const offerPct = document.getElementById('raw-offer-pct').value || '65';
@@ -1637,193 +1628,41 @@
             document.getElementById('raw-session-setup').style.display = 'none';
             document.getElementById('raw-entry-form').style.display = 'block';
             document.getElementById('raw-session-info').innerHTML =
-                `Session started for <strong>${customer}</strong> • Offer: ${offerPct}% • ID: ${rawSessionId.slice(0,8)}...`;
-        } catch(err) { alert(err.message); }
-    }
-
-    let lastCardLookup = null;
-
-    async function lookupRawCard() {
-        const tcgId = document.getElementById('raw-tcgplayer-id').value;
-        if (!tcgId) { alert('Enter a TCGPlayer ID first'); return; }
-
-        const resultDiv = document.getElementById('raw-lookup-result');
-        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up...</div>';
-
-        try {
-            const r = await fetch('/api/ppt/lookup-card', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
-            });
-            const d = await r.json();
-            if (!r.ok) { resultDiv.innerHTML = `<div class="alert alert-warning">${d.error}</div>`; lastCardLookup = null; return; }
-
-            const c = d.card;
-            lastCardLookup = { card: c, variants: d.variants || {}, primary: d.primary_printing || 'Default' };
-
-            // Auto-fill fields
-            if (c.name) document.getElementById('raw-card-name').value = c.name;
-            if (c.setName) document.getElementById('raw-set-name').value = c.setName;
-            if (c.cardNumber) document.getElementById('raw-card-number').value = c.cardNumber;
-            if (c.rarity) document.getElementById('raw-rarity').value = c.rarity;
-
-            renderVariantPrices();
-        } catch(err) {
-            resultDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
-            lastCardLookup = null;
-        }
-    }
-
-    let selectedVariant = null;
-
-    function renderVariantPrices() {
-        if (!lastCardLookup) return;
-        const resultDiv = document.getElementById('raw-lookup-result');
-        const c = lastCardLookup.card;
-        const variants = lastCardLookup.variants;
-        const variantNames = Object.keys(variants);
-        const selectedCond = document.getElementById('raw-condition').value;
-
-        // Auto-select variant
-        if (!selectedVariant || !variants[selectedVariant]) {
-            selectedVariant = lastCardLookup.primary;
-            if (!variants[selectedVariant] && variantNames.length) selectedVariant = variantNames[0];
-        }
-
-        const currentVariant = variants[selectedVariant] || {};
-
-        resultDiv.innerHTML = `
-            <div class="alert alert-success">
-                <strong>${c.name}</strong> — ${c.setName || ''} #${c.cardNumber || ''}
-            </div>
-
-            ${variantNames.length > 1 ? `
-            <div style="margin-bottom:10px;">
-                <label style="font-size:0.8rem; color:var(--text-dim); margin-bottom:4px; display:block;">Variant / Printing</label>
-                <div style="display:flex; gap:6px; flex-wrap:wrap;">
-                    ${variantNames.map(v => `
-                        <button class="btn btn-sm ${v === selectedVariant ? 'btn-primary' : 'btn-secondary'}"
-                                onclick="selectedVariant='${v.replace(/'/g,"\\'")}'; renderVariantPrices();">
-                            ${v}
-                        </button>
-                    `).join('')}
-                </div>
-            </div>` : (variantNames.length === 1 ? `
-            <div style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">
-                Printing: <strong style="color:var(--text);">${variantNames[0]}</strong>
-            </div>` : '')}
-
-            <div style="display:grid; grid-template-columns: repeat(5, 1fr); gap:8px;">
-                ${['NM','LP','MP','HP','DMG'].map(cond => {
-                    const price = currentVariant[cond];
-                    const isSelected = cond === selectedCond;
-                    const hasPrice = price !== null && price !== undefined;
-                    return `
-                    <div style="background:var(${isSelected ? '--accent' : '--surface-2'});
-                                color:${isSelected ? '#fff' : 'var(--text)'};
-                                padding:10px 6px; border-radius:6px; text-align:center; cursor:pointer;
-                                border:1px solid var(--border); opacity:${hasPrice ? '1' : '0.4'};"
-                         onclick="document.getElementById('raw-condition').value='${cond}'; renderVariantPrices();">
-                        <div style="font-size:0.75rem; font-weight:600;">${cond}</div>
-                        <div style="font-size:1.05rem; font-weight:700;">${hasPrice ? '$'+price.toFixed(2) : '—'}</div>
-                    </div>`;
-                }).join('')}
-            </div>
-            <small style="color:var(--text-dim); margin-top:6px; display:block;">
-                ${selectedVariant !== 'Default' ? `<strong>${selectedVariant}</strong> • ` : ''}
-                Selected: <strong>${selectedCond}</strong>
-                → ${currentVariant[selectedCond] != null ? '$' + currentVariant[selectedCond].toFixed(2) : 'no price data (will use market price)'}
-            </small>
-        `;
-    }
-
-    // Re-render when condition dropdown changes
-    document.getElementById('raw-condition').addEventListener('change', renderVariantPrices);
-
-    async function addRawCard() {
-        if (!rawSessionId) { alert('Start a session first'); return; }
-        const tcgId = document.getElementById('raw-tcgplayer-id').value;
-        const cardName = document.getElementById('raw-card-name').value;
-        const condition = document.getElementById('raw-condition').value;
-        const quantity = document.getElementById('raw-quantity').value || '1';
-
-        if (!tcgId || !cardName || !condition) { alert('TCGPlayer ID, Card Name, and Condition are required'); return; }
-
-        const body = {
-            session_id: rawSessionId,
-            tcgplayer_id: parseInt(tcgId),
-            card_name: cardName,
-            condition: condition,
-            quantity: parseInt(quantity),
-            set_name: document.getElementById('raw-set-name').value,
-            card_number: document.getElementById('raw-card-number').value,
-            rarity: document.getElementById('raw-rarity').value,
-        };
-        const priceOverride = document.getElementById('raw-price-override').value;
-        if (priceOverride) body.market_price = parseFloat(priceOverride);
-
-        try {
-            const r = await fetch('/api/intake/add-raw-card', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(body),
-            });
-            const d = await r.json();
-            if (!r.ok) { alert(d.error); return; }
-
-            // Clear form (except session fields)
-            document.getElementById('raw-tcgplayer-id').value = '';
-            document.getElementById('raw-card-name').value = '';
-            document.getElementById('raw-card-number').value = '';
-            document.getElementById('raw-set-name').value = '';
-            document.getElementById('raw-rarity').value = '';
-            document.getElementById('raw-price-override').value = '';
-            document.getElementById('raw-quantity').value = '1';
-            document.getElementById('raw-lookup-result').innerHTML = '';
-
-            // Reload items table
-            loadRawSessionItems();
+                'Session started for <strong>' + customer + '</strong> \u2022 Offer: ' + offerPct + '% \u2022 ID: ' + rawSessionId.slice(0,8) + '...';
         } catch(err) { alert(err.message); }
     }
 
     async function loadRawSessionItems() {
         if (!rawSessionId) return;
         try {
-            const r = await fetch(`/api/intake/session/${rawSessionId}`);
+            const r = await fetch('/api/intake/session/' + rawSessionId);
             const d = await r.json();
             const items = d.items;
             const s = d.session;
-
             const tableDiv = document.getElementById('raw-items-table');
             if (!items.length) { tableDiv.innerHTML = '<p style="color:var(--text-dim);">No cards added yet.</p>'; return; }
-
-            tableDiv.innerHTML = `
-                <div style="margin-top:16px; margin-bottom:8px; font-weight:600;">
-                    ${items.length} cards • Total offer: $${(s.total_offer_amount || 0).toFixed(2)}
-                </div>
-                <table>
-                    <thead><tr><th>Card</th><th>Condition</th><th>Qty</th><th>Market</th><th>Offer</th></tr></thead>
-                    <tbody>${items.map(i => `<tr>
-                        <td>${i.product_name}<br><small style="color:var(--text-dim);">${i.set_name || ''}</small></td>
-                        <td><span class="badge badge-blue">${i.condition || ''}</span></td>
-                        <td>${i.quantity}</td>
-                        <td>$${(i.market_price || 0).toFixed(2)}</td>
-                        <td>$${(i.offer_price || 0).toFixed(2)}</td>
-                    </tr>`).join('')}</tbody>
-                </table>`;
+            tableDiv.innerHTML = '<div style="margin-bottom:8px; font-weight:600;">' +
+                items.length + ' cards \u2022 Total offer: $' + (s.total_offer_amount || 0).toFixed(2) +
+                '</div><table><thead><tr><th>Card</th><th>Cond</th><th>Qty</th><th>Market</th><th>Offer</th></tr></thead><tbody>' +
+                items.map(i => '<tr>' +
+                    '<td>' + i.product_name + '<br><small style="color:var(--text-dim);">' + (i.set_name || '') + ' ' + (i.card_number ? '#'+i.card_number : '') + '</small></td>' +
+                    '<td><span class="badge badge-blue">' + (i.condition || '') + '</span></td>' +
+                    '<td>' + i.quantity + '</td>' +
+                    '<td>$' + (i.market_price || 0).toFixed(2) + '</td>' +
+                    '<td>$' + (i.offer_price || 0).toFixed(2) + '</td></tr>'
+                ).join('') + '</tbody></table>';
         } catch(err) { console.error(err); }
     }
 
     async function finalizeRawSession() {
         if (!rawSessionId) return;
         await finalizeSession(rawSessionId);
-        // Reset the raw entry form
         rawSessionId = null;
         document.getElementById('raw-session-setup').style.display = 'block';
         document.getElementById('raw-entry-form').style.display = 'none';
         document.getElementById('raw-items-table').innerHTML = '';
     }
+
 
     // ═══════════════════════════════ HEALTH CHECK ═══════════════════════════════
     async function checkHealth() {
