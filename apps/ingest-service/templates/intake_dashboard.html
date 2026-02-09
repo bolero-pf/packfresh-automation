@@ -1519,6 +1519,8 @@
     }
 
     async function _relinkShowConditions(itemId, sessionId, tcgId, oldName) {
+        const resultsDiv = document.getElementById('session-raw-results');
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading pricing...</div>';
         try {
             const r = await fetch('/api/ppt/lookup-card', {
                 method: 'POST',
@@ -1526,59 +1528,132 @@
                 body: JSON.stringify({ tcgplayer_id: tcgId }),
             });
             const d = await r.json();
-            if (!r.ok) { await themedConfirm('Error', d.error || 'Lookup failed'); return; }
+            if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Lookup failed') + '</div>'; return; }
 
             const card = d.card || {};
             const variants = d.variants || {};
             let primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
             if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
-            const variantData = variants[primary] || {};
             const newName = card.name || oldName;
             const setName = card.setName || card.set_name || '';
             const cardNum = card.cardNumber || '';
             const rarity = card.rarity || '';
 
-            const conditions = ['NM', 'LP', 'MP', 'HP', 'DMG'];
-            const condOptions = conditions.map(function(c) {
-                const p = variantData[c];
-                return {
-                    value: c,
-                    label: c + (p != null ? ' \u2014 $' + Number(p).toFixed(2) : ' \u2014 no price')
-                };
+            // Set up _pendingCard with relink metadata for the condition picker
+            window._pendingCard = {
+                sessionId, tcgId, cardName: newName, setName, cardNum, rarity,
+                qty: 1, context: 'session', variants, primaryVariant: primary,
+                _relink: true, _relinkItemId: itemId, _relinkOldName: oldName,
+            };
+            _renderRelinkConditionPicker(resultsDiv, 'NM');
+        } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
+    }
+
+    function _renderRelinkConditionPicker(resultsDiv, selectedCond) {
+        const pc = window._pendingCard;
+        if (!pc) return;
+        const variants = pc.variants;
+        const variantNames = Object.keys(variants);
+        const selectedVariant = pc.primaryVariant;
+        const variantData = variants[selectedVariant] || {};
+        const divId = 'session-raw-results';
+
+        let html = '<div id="relink-picker" style="background:var(--surface-2); border-radius:8px; padding:16px; margin-top:8px;">';
+        html += '<div style="margin-bottom:4px; font-size:0.8rem; color:var(--warning); font-weight:600;">RELINKING</div>';
+        html += '<div style="margin-bottom:4px; font-size:0.8rem; color:var(--text-dim);">From: ' + (pc._relinkOldName || '') + '</div>';
+        html += '<div style="margin-bottom:12px;"><strong style="color:var(--accent);">' + pc.cardName + '</strong>';
+        html += '<span style="color:var(--text-dim);"> &mdash; ' + (pc.setName || '') + (pc.cardNum ? ' #' + pc.cardNum : '') + ' &bull; TCG#' + pc.tcgId + '</span></div>';
+
+        // Variant selector
+        if (variantNames.length > 1) {
+            html += '<div style="margin-bottom:10px;"><label style="font-size:0.8rem; color:var(--text-dim); display:block; margin-bottom:4px;">Variant / Printing</label><div style="display:flex; gap:6px; flex-wrap:wrap;">';
+            variantNames.forEach(function(v) {
+                var cls = v === selectedVariant ? 'btn-primary' : 'btn-secondary';
+                html += '<button class="btn btn-sm ' + cls + '" data-relink-variant="' + v.replace(/"/g, '&quot;') + '">' + v + '</button>';
             });
+            html += '</div></div>';
+        } else if (variantNames.length === 1) {
+            html += '<div style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Printing: <strong style="color:var(--text);">' + variantNames[0] + '</strong></div>';
+        }
 
-            const condInput = await themedPrompt({
-                title: '\u{1f517} Relink to: ' + newName,
-                message: setName + (cardNum ? ' #' + cardNum : '') + ' \u00b7 TCG#' + tcgId + ' \u00b7 ' + primary + '\nReplacing: ' + oldName,
-                inputs: [{ type: 'select', label: 'Condition', options: condOptions, default: 'NM' }],
-                confirmText: 'Relink Card',
+        // Condition price grid
+        html += '<div style="display:grid; grid-template-columns: repeat(5, 1fr); gap:8px; margin-bottom:12px;">';
+        ['NM','LP','MP','HP','DMG'].forEach(function(cond) {
+            var p = variantData[cond];
+            var isSelected = cond === selectedCond;
+            var hasPrice = p != null && p !== undefined;
+            var bg = isSelected ? 'var(--accent)' : 'var(--surface)';
+            var fg = isSelected ? '#fff' : 'var(--text)';
+            html += '<div data-relink-cond="' + cond + '" style="background:' + bg + '; color:' + fg + '; padding:10px 6px; border-radius:6px; text-align:center; cursor:pointer; border:1px solid var(--border); opacity:' + (hasPrice ? '1' : '0.4') + ';">';
+            html += '<div style="font-size:0.75rem; font-weight:600;">' + cond + '</div>';
+            html += '<div style="font-size:1.05rem; font-weight:700;">' + (hasPrice ? '$' + p.toFixed(2) : '&mdash;') + '</div>';
+            html += '</div>';
+        });
+        html += '</div>';
+
+        // Confirm + Cancel
+        var selectedPrice = variantData[selectedCond];
+        html += '<div style="display:flex; gap:8px; align-items:center;">';
+        html += '<button id="relink-confirm-btn" class="btn btn-primary">Relink ' + selectedCond + (selectedPrice ? ' &mdash; $' + selectedPrice.toFixed(2) : '') + '</button>';
+        html += '<button id="relink-cancel-btn" class="btn btn-secondary">Cancel</button>';
+        html += '</div></div>';
+
+        resultsDiv.innerHTML = html;
+
+        // Attach event listeners
+        var picker = document.getElementById('relink-picker');
+        picker.querySelectorAll('[data-relink-cond]').forEach(function(el) {
+            el.addEventListener('click', function() {
+                _renderRelinkConditionPicker(document.getElementById(divId), el.getAttribute('data-relink-cond'));
             });
-            if (condInput === null) return;
-
-            const selectedCond = condInput;
-            const selectedPrice = variantData[selectedCond] || 0;
-
-            const mapR = await fetch('/api/intake/map-item', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    item_id: itemId, tcgplayer_id: tcgId,
-                    override_price: selectedPrice,
-                    product_name: newName, set_name: setName,
-                    card_number: cardNum, rarity: rarity,
-                }),
+        });
+        picker.querySelectorAll('[data-relink-variant]').forEach(function(el) {
+            el.addEventListener('click', function() {
+                window._pendingCard.primaryVariant = el.getAttribute('data-relink-variant');
+                _renderRelinkConditionPicker(document.getElementById(divId), selectedCond);
             });
-            const mapD = await mapR.json();
-            if (!mapR.ok) { await themedConfirm('Error', mapD.error || 'Relink failed'); return; }
-
-            await fetch('/api/intake/item/' + itemId + '/update-condition', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ condition: selectedCond, session_id: sessionId }),
-            });
-
-            viewSession(sessionId);
-        } catch(err) { await themedConfirm('Error', err.message); }
+        });
+        document.getElementById('relink-confirm-btn').addEventListener('click', async function() {
+            var price = selectedPrice || 0;
+            if (!price || price <= 0) {
+                const manual = await themedPrompt({
+                    title: 'No price found',
+                    message: 'No ' + selectedCond + ' price. Enter a market price:',
+                    inputs: [{ type: 'number', label: 'Market price ($)', min: 0, step: '0.01', placeholder: '0.00' }],
+                    confirmText: 'Relink',
+                });
+                if (manual === null) return;
+                price = parseFloat(manual);
+                if (isNaN(price) || price <= 0) return;
+            }
+            resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Relinking...</div>';
+            try {
+                const mapR = await fetch('/api/intake/map-item', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        item_id: pc._relinkItemId, tcgplayer_id: pc.tcgId,
+                        override_price: price,
+                        product_name: pc.cardName, set_name: pc.setName,
+                        card_number: pc.cardNum, rarity: pc.rarity,
+                    }),
+                });
+                const mapD = await mapR.json();
+                if (!mapR.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + (mapD.error || 'Relink failed') + '</div>'; return; }
+                await fetch('/api/intake/item/' + pc._relinkItemId + '/update-condition', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ condition: selectedCond, session_id: pc.sessionId }),
+                });
+                resultsDiv.innerHTML = '<div class="alert alert-success">Relinked to ' + pc.cardName + ' (' + selectedCond + ') $' + Number(price).toFixed(2) + '</div>';
+                window._pendingCard = null;
+                setTimeout(function() { viewSession(pc.sessionId); }, 500);
+            } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
+        });
+        document.getElementById('relink-cancel-btn').addEventListener('click', function() {
+            document.getElementById(divId).innerHTML = '';
+            window._pendingCard = null;
+        });
     }
 
     async function deleteItem(itemId, sessionId) {
