@@ -762,7 +762,11 @@
                                         // Link/Relink button — always show
                                         const linkLabel = i.is_mapped ? 'Relink' : 'Link';
                                         const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
-                                        btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" data-price="${i.market_price||0}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type, parseFloat(this.dataset.price))">${linkLabel}</button> `;
+                                        if (s.session_type === 'raw') {
+                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${s.offer_percentage})">${linkLabel}</button> `;
+                                        } else {
+                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" data-price="${i.market_price||0}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type, parseFloat(this.dataset.price))">${linkLabel}</button> `;
+                                        }
                                         // Action dropdown
                                         btns += `<div style="display:inline-block; position:relative;">
                                             <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" 
@@ -1453,6 +1457,133 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function relinkRawCard(itemId, sessionId, cardName, offerPct) {
+        // Step 1: Ask for search term or TCGPlayer ID
+        const input = await themedPrompt({
+            title: '🔗 Relink Raw Card',
+            message: 'Current: ' + cardName,
+            inputs: [
+                { type: 'text', label: 'Card Name (or leave blank)', default: cardName, placeholder: 'e.g. Charizard ex' },
+                { type: 'text', label: 'Set (optional)', placeholder: 'e.g. Paldean Fates' },
+                { type: 'number', label: 'TCGPlayer ID (optional)', placeholder: 'e.g. 535090' },
+            ],
+            confirmText: 'Search',
+        });
+        if (input === null) return;
+        const [searchName, setFilter, rawTcgId] = input;
+        const tcgIdDirect = parseInt(rawTcgId);
+
+        let tcgId, card, variants, primary;
+
+        if (tcgIdDirect > 0) {
+            // Direct TCGPlayer ID lookup
+            try {
+                const r = await fetch('/api/ppt/lookup-card', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ tcgplayer_id: tcgIdDirect }),
+                });
+                const d = await r.json();
+                if (!r.ok) { alert(d.error || 'Card not found'); return; }
+                card = d.card || {};
+                variants = d.variants || {};
+                primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
+                if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
+                tcgId = tcgIdDirect;
+            } catch(err) { alert(err.message); return; }
+        } else if (searchName.trim()) {
+            // Search by name
+            try {
+                const params = { query: searchName.trim() };
+                if (setFilter.trim()) params.set_name = setFilter.trim();
+                const r = await fetch('/api/ppt/search-cards', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(params),
+                });
+                const d = await r.json();
+                if (!r.ok || !d.cards || !d.cards.length) { alert('No cards found'); return; }
+
+                // Let user pick from results
+                const options = d.cards.slice(0, 6).map(c => {
+                    const tid = c.tcgPlayerId || c.tcgplayer_id || '';
+                    const sn = c.setName || c.set_name || '';
+                    const cn = c.cardNumber || c.number || '';
+                    return { value: String(tid), label: (c.name || '') + (cn ? ' #'+cn : '') + ' — ' + sn + ' (TCG#' + tid + ')' };
+                });
+
+                const picked = await themedPrompt({
+                    title: '🔗 Select Card',
+                    message: 'Choose a card to relink to:',
+                    inputs: [{ type: 'select', label: 'Card', options: options }],
+                    confirmText: 'Select',
+                });
+                if (picked === null) return;
+                tcgId = parseInt(picked);
+
+                // Now do detail lookup for condition pricing
+                const lr = await fetch('/api/ppt/lookup-card', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ tcgplayer_id: tcgId }),
+                });
+                const ld = await lr.json();
+                if (!lr.ok) { alert(ld.error || 'Lookup failed'); return; }
+                card = ld.card || {};
+                variants = ld.variants || {};
+                primary = ld.primary_printing || Object.keys(variants)[0] || 'Default';
+                if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
+            } catch(err) { alert(err.message); return; }
+        } else {
+            alert('Enter a card name or TCGPlayer ID');
+            return;
+        }
+
+        const variantData = variants[primary] || {};
+        const newName = card.name || cardName;
+        const setName = card.setName || card.set_name || '';
+        const cardNum = card.cardNumber || '';
+
+        // Step 2: Condition picker
+        const conditions = ['NM','LP','MP','HP','DMG'];
+        const condOptions = conditions.map(c => {
+            const p = variantData[c];
+            return { value: c, label: c + (p != null ? ' — $' + Number(p).toFixed(2) : ' — no price') };
+        });
+
+        const condInput = await themedPrompt({
+            title: '🔗 Relink: ' + newName,
+            message: setName + (cardNum ? ' #' + cardNum : '') + ' · TCG#' + tcgId + ' · ' + primary,
+            inputs: [{ type: 'select', label: 'Condition', options: condOptions, default: 'NM' }],
+            confirmText: 'Relink Card',
+        });
+        if (condInput === null) return;
+
+        const selectedCond = condInput;
+        const selectedPrice = variantData[selectedCond] || 0;
+
+        // Step 3: Update the item
+        try {
+            const linkR = await fetch('/api/intake/link-item', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    item_id: itemId, session_id: sessionId,
+                    tcgplayer_id: tcgId, market_price: selectedPrice,
+                }),
+            });
+            if (!linkR.ok) { const ld = await linkR.json(); alert(ld.error || 'Link failed'); return; }
+
+            await fetch('/api/intake/item/' + itemId + '/update-condition', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ condition: selectedCond, session_id: sessionId }),
+            });
+
             viewSession(sessionId);
         } catch(err) { alert(err.message); }
     }
