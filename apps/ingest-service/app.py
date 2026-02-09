@@ -672,6 +672,17 @@ def ppt_lookup_card():
         variants = PPTClient.extract_variants(card_data)
         primary_printing = PPTClient.get_primary_printing(card_data)
 
+        # Debug logging
+        prices_raw = card_data.get("prices", {})
+        logger.info(f"CARD LOOKUP {tcgplayer_id}: prices keys={list(prices_raw.keys()) if isinstance(prices_raw, dict) else type(prices_raw)}")
+        if isinstance(prices_raw, dict):
+            raw_variants = prices_raw.get("variants", {})
+            logger.info(f"  raw variants keys={list(raw_variants.keys()) if isinstance(raw_variants, dict) else type(raw_variants)}")
+            for vname, vconds in (raw_variants.items() if isinstance(raw_variants, dict) else []):
+                logger.info(f"  variant '{vname}': cond keys={list(vconds.keys()) if isinstance(vconds, dict) else type(vconds)}")
+        logger.info(f"  extract_variants result={variants}")
+        logger.info(f"  primary_printing={primary_printing}")
+
         return jsonify({
             "card": card_data,
             "variants": variants,            # {"Holofoil": {"NM": 103.85, "LP": 87.80, ...}, ...}
