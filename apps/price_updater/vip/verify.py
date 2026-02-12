@@ -7,7 +7,7 @@ load_dotenv()
 
 VIP_FLOW_SECRET = os.environ.get("VIP_FLOW_SECRET", "")
 
-SAFE_PATHS = {"/vip/ping"}  # allow ping without secret
+SAFE_PATHS = {"/vip/ping", "/screening/ping"}  # allow ping without secret
 
 def verify_flow_signature():
     if request.path in SAFE_PATHS:
@@ -23,4 +23,12 @@ def verify_flow_signature():
         data = request.get_json(silent=True) or {}
         if not (isinstance(data.get("order_id"), str) and data.get("order_id","").startswith("gid://shopify/Order/")
                 and isinstance(data.get("customer_id"), str) and data.get("customer_id","").startswith("gid://shopify/Customer/")):
+            abort(400)
+    if request.path == "/screening/order_created":
+        data = request.get_json(silent=True) or {}
+        if not (isinstance(data.get("order_id"), str) and data.get("order_id","").startswith("gid://shopify/Order/")):
+            abort(400)
+    if request.path in ("/screening/fraud_risk", "/screening/order_cancelled", "/screening/order_fulfilled"):
+        data = request.get_json(silent=True) or {}
+        if not (isinstance(data.get("order_id"), str) and data.get("order_id","").startswith("gid://shopify/Order/")):
             abort(400)

@@ -17,8 +17,10 @@ from dailyrunner import get_shopify_products, get_shopify_products_for_feed
 app = Flask(__name__, template_folder="templates", static_folder="static")
 from vip.routes import bp as vip_bp
 from inventory.routes import bp as inventory_bp
+from screening.routes import bp as screening_bp
 app.register_blueprint(vip_bp)
 app.register_blueprint(inventory_bp)
+app.register_blueprint(screening_bp)
 REDDIT_FEED_USER = os.environ["REDDIT_USER_NAME"]
 REDDIT_FEED_PASS = os.environ["REDDIT_USER_PASS"]
 ROOT = Path(__file__).resolve().parent  # == .../price_updater
