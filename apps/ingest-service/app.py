@@ -8,6 +8,7 @@ Endpoints:
 
     Collectr CSV Flow:
         POST /api/intake/upload-collectr    - Upload & parse Collectr CSV
+        POST /api/intake/upload-collectr-html - Parse pasted Collectr HTML
         GET  /api/intake/session/<id>       - Get session details + items
         POST /api/intake/map-item           - Map item to tcgplayer_id
         POST /api/intake/finalize/<id>      - Finalize session
@@ -45,6 +46,7 @@ from flask_cors import CORS
 import db
 from ppt_client import PPTClient, PPTError
 from collectr_parser import parse_collectr_csv
+from collectr_html_parser import parse_collectr_html
 from barcode_gen import generate_barcode_image
 import intake
 
@@ -183,6 +185,87 @@ def upload_collectr():
         "success": True,
         "session_id": session["id"],
         "customer_name": customer_name or result.portfolio_name,
+        "session_type": session_type,
+        "item_count": len(processed),
+        "total_market_value": float(result.total_market_value),
+        "total_offer": float(sum(p["offer_price"] for p in processed)),
+        "unmapped_count": unmapped_count,
+        "auto_mapped_count": auto_mapped,
+        "parse_errors": result.errors[:10] if result.errors else [],
+    })
+
+
+@app.route("/api/intake/upload-collectr-html", methods=["POST"])
+def upload_collectr_html():
+    """Parse pasted Collectr HTML (from portfolio page) into a session."""
+    data = request.json or {}
+    html_content = data.get("html", "").strip()
+    customer_name = data.get("customer_name", "").strip() or "Unknown"
+    try:
+        offer_pct = Decimal(str(data.get("offer_percentage", "75")))
+    except InvalidOperation:
+        return jsonify({"error": "Invalid offer_percentage"}), 400
+
+    if not html_content:
+        return jsonify({"error": "No HTML content provided"}), 400
+
+    # Parse
+    result = parse_collectr_html(html_content)
+
+    if result.errors and not result.items:
+        return jsonify({"error": "Failed to parse HTML", "details": result.errors}), 400
+
+    # Check for duplicate import
+    dup_session = intake.check_duplicate_import(result.file_hash)
+    if dup_session:
+        return jsonify({
+            "error": "This exact HTML has already been imported",
+            "existing_session_id": dup_session,
+        }), 409
+
+    session_type = "sealed"  # Collectr HTML portfolios are always sealed
+
+    # Create session
+    session = intake.create_session(
+        customer_name=customer_name,
+        session_type=session_type,
+        offer_percentage=offer_pct,
+        file_name="collectr_html_paste",
+        file_hash=result.file_hash,
+    )
+
+    # Process items
+    processed = []
+    for item in result.items:
+        offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
+        unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
+
+        tcgplayer_id = intake.get_cached_mapping(item.product_name, item.product_type)
+
+        processed.append({
+            "product_name": item.product_name,
+            "product_type": item.product_type,
+            "set_name": item.set_name,
+            "card_number": item.card_number,
+            "condition": item.condition,
+            "rarity": item.rarity,
+            "quantity": item.quantity,
+            "market_price": item.market_price,
+            "offer_price": offer_price,
+            "unit_cost_basis": unit_cost,
+            "tcgplayer_id": tcgplayer_id,
+        })
+
+    intake.add_items_to_session(session["id"], processed)
+    intake._recalculate_session_totals(session["id"])
+
+    unmapped_count = sum(1 for p in processed if not p["tcgplayer_id"])
+    auto_mapped = sum(1 for p in processed if p["tcgplayer_id"])
+
+    return jsonify({
+        "success": True,
+        "session_id": session["id"],
+        "customer_name": customer_name,
         "session_type": session_type,
         "item_count": len(processed),
         "total_market_value": float(result.total_market_value),

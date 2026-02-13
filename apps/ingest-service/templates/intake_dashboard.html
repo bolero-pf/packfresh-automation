@@ -61,6 +61,7 @@
         .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
+        .subtab-content { /* shown/hidden via JS */ }
 
         /* ─── CARDS ─── */
         .card {
@@ -295,24 +296,57 @@
         <!-- ═══════════════════════════════════ SEALED INTAKE TAB ═══════════════════════════════════ -->
         <div id="sealed-intake" class="tab-content active">
             <div class="card">
-                <h2>Upload Collectr CSV</h2>
-                <form id="csv-upload-form">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Customer Name</label>
-                            <input type="text" id="csv-customer" placeholder="e.g. Raul" required>
+                <h2>Import Sealed Products</h2>
+                <div style="display:flex; gap:4px; margin-bottom:16px; border-bottom:1px solid var(--border); padding-bottom:0;">
+                    <button class="tab active" data-subtab="csv" onclick="switchSubTab(this, 'csv')">Upload CSV</button>
+                    <button class="tab" data-subtab="html-paste" onclick="switchSubTab(this, 'html-paste')">Paste HTML</button>
+                </div>
+
+                <!-- CSV Upload sub-tab -->
+                <div id="subtab-csv" class="subtab-content">
+                    <form id="csv-upload-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Customer Name</label>
+                                <input type="text" id="csv-customer" placeholder="e.g. Raul" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Offer Percentage (%)</label>
+                                <input type="number" id="csv-offer-pct" value="75" min="1" max="100" step="0.5" required>
+                            </div>
                         </div>
-                        <div class="form-group">
-                            <label>Offer Percentage (%)</label>
-                            <input type="number" id="csv-offer-pct" value="75" min="1" max="100" step="0.5" required>
+                        <div class="form-group" style="margin-bottom:16px;">
+                            <label>Collectr CSV Export</label>
+                            <input type="file" id="csv-file" accept=".csv" required>
                         </div>
-                    </div>
-                    <div class="form-group" style="margin-bottom:16px;">
-                        <label>Collectr CSV Export</label>
-                        <input type="file" id="csv-file" accept=".csv" required>
-                    </div>
-                    <button type="submit" class="btn btn-primary">Upload &amp; Process</button>
-                </form>
+                        <button type="submit" class="btn btn-primary">Upload &amp; Process</button>
+                    </form>
+                </div>
+
+                <!-- HTML Paste sub-tab -->
+                <div id="subtab-html-paste" class="subtab-content" style="display:none;">
+                    <p style="color:var(--text-dim); margin-bottom:12px; font-size:0.85rem;">
+                        Open a Collectr portfolio, right-click the product list → Inspect → copy the <code>&lt;ul class="contents"&gt;</code> HTML.
+                        Or just select all the product rows and paste below.
+                    </p>
+                    <form id="html-paste-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Customer Name</label>
+                                <input type="text" id="html-customer" placeholder="e.g. Raul" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Offer Percentage (%)</label>
+                                <input type="number" id="html-offer-pct" value="75" min="1" max="100" step="0.5" required>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:16px;">
+                            <label>Collectr HTML</label>
+                            <textarea id="html-paste-input" rows="6" placeholder="Paste Collectr HTML here..." style="font-family:monospace; font-size:0.8rem; resize:vertical;"></textarea>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Parse &amp; Import</button>
+                    </form>
+                </div>
             </div>
             <div id="csv-upload-result"></div>
         </div>
@@ -598,6 +632,17 @@
     function openModal(id) { document.getElementById(id).classList.add('active'); }
     function closeModal(id) { document.getElementById(id).classList.remove('active'); }
 
+    // ═══════════════════════════════ SUB-TAB SWITCHING ═══════════════════════════════
+    function switchSubTab(btn, subtabId) {
+        // Deactivate all sibling tabs
+        btn.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+        // Hide all subtab content in same parent card
+        const card = btn.closest('.card');
+        card.querySelectorAll('.subtab-content').forEach(c => c.style.display = 'none');
+        document.getElementById('subtab-' + subtabId).style.display = '';
+    }
+
     // ═══════════════════════════════ CSV UPLOAD ═══════════════════════════════
     document.getElementById('csv-upload-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -631,6 +676,51 @@
             document.getElementById('csv-upload-form').reset();
         } catch(err) {
             resultDiv.innerHTML = `<div class="alert alert-error">Upload failed: ${err.message}</div>`;
+        }
+    });
+
+    // ═══════════════════════════════ HTML PASTE UPLOAD ═══════════════════════════════
+    document.getElementById('html-paste-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const resultDiv = document.getElementById('csv-upload-result');
+        const htmlContent = document.getElementById('html-paste-input').value.trim();
+        if (!htmlContent) {
+            resultDiv.innerHTML = '<div class="alert alert-error">Please paste Collectr HTML first.</div>';
+            return;
+        }
+        resultDiv.innerHTML = '<div class="card"><div class="loading"><span class="spinner"></span> Parsing HTML...</div></div>';
+
+        try {
+            const r = await fetch('/api/intake/upload-collectr-html', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    html: htmlContent,
+                    customer_name: document.getElementById('html-customer').value,
+                    offer_percentage: document.getElementById('html-offer-pct').value,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                resultDiv.innerHTML = `<div class="alert alert-error">${d.error}${d.existing_session_id ? ` (Session: ${d.existing_session_id.slice(0,8)}...)` : ''}</div>`;
+                return;
+            }
+
+            resultDiv.innerHTML = `
+                <div class="alert alert-success">Imported from HTML! Session ${d.session_id.slice(0,8)}...</div>
+                <div class="stats">
+                    <div class="stat"><div class="stat-label">Items</div><div class="stat-value">${d.item_count}</div></div>
+                    <div class="stat"><div class="stat-label">Market Value</div><div class="stat-value">$${d.total_market_value.toFixed(2)}</div></div>
+                    <div class="stat"><div class="stat-label">Your Offer</div><div class="stat-value">$${d.total_offer.toFixed(2)}</div></div>
+                    <div class="stat"><div class="stat-label">Auto-Mapped</div><div class="stat-value">${d.auto_mapped_count}/${d.item_count}</div></div>
+                </div>
+                ${d.parse_errors.length ? `<div class="alert alert-warning">Parse warnings: ${d.parse_errors.join('; ')}</div>` : ''}
+                ${d.unmapped_count > 0 ? `<div class="alert alert-warning">${d.unmapped_count} items need TCGPlayer ID linking</div>` : '<div class="alert alert-success">All items auto-mapped from cache!</div>'}
+                <button class="btn btn-primary" onclick="viewSession('${d.session_id}')">View &amp; Map Items</button>
+            `;
+            document.getElementById('html-paste-form').reset();
+        } catch(err) {
+            resultDiv.innerHTML = `<div class="alert alert-error">Parse failed: ${err.message}</div>`;
         }
     });
 
