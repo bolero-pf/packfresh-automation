@@ -518,3 +518,37 @@ def add_local():
     except Exception as e:
         flash(f"Could not create Shopify draft: {e}", "danger")
         return redirect("/inventory")
+
+
+@bp.route("/__debug_shopify_ping")
+def __debug_shopify_ping():
+    import time, requests, os
+
+    store = os.getenv("SHOPIFY_STORE")
+    token = os.getenv("SHOPIFY_TOKEN")
+
+    url = f"https://{store}/admin/api/2025-10/graphql.json"
+
+    t0 = time.time()
+    try:
+        r = requests.post(
+            url,
+            json={"query": "{ shop { name } }"},
+            headers={
+                "X-Shopify-Access-Token": token,
+                "Content-Type": "application/json",
+            },
+            timeout=10
+        )
+        return {
+            "url": url,
+            "elapsed": time.time() - t0,
+            "status": r.status_code,
+            "text": r.text[:1000],
+        }
+    except Exception as e:
+        return {
+            "url": url,
+            "elapsed": time.time() - t0,
+            "exception": repr(e),
+        }, 500
