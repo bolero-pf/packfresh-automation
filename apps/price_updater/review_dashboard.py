@@ -10,6 +10,15 @@ import os
 import io
 import csv
 from pathlib import Path
+
+import socket
+
+_old_getaddrinfo = socket.getaddrinfo
+
+def ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return _old_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+socket.getaddrinfo = ipv4_only_getaddrinfo
 from dailyrunner import get_shopify_products, get_shopify_products_for_feed
 
 
