@@ -300,6 +300,7 @@
                 <div style="display:flex; gap:4px; margin-bottom:16px; border-bottom:1px solid var(--border); padding-bottom:0;">
                     <button class="tab active" data-subtab="csv" onclick="switchSubTab(this, 'csv')">Upload CSV</button>
                     <button class="tab" data-subtab="html-paste" onclick="switchSubTab(this, 'html-paste')">Paste HTML</button>
+                    <button class="tab" data-subtab="manual-sealed" onclick="switchSubTab(this, 'manual-sealed')">Manual Entry</button>
                 </div>
 
                 <!-- CSV Upload sub-tab -->
@@ -346,6 +347,55 @@
                         </div>
                         <button type="submit" class="btn btn-primary">Parse &amp; Import</button>
                     </form>
+                </div>
+
+                <!-- Manual Sealed Entry sub-tab -->
+                <div id="subtab-manual-sealed" class="subtab-content" style="display:none;">
+                    <p style="color:var(--text-dim); margin-bottom:12px; font-size:0.85rem;">
+                        Start a session, then search PPT for sealed products and add them one at a time.
+                    </p>
+
+                    <!-- Create session section -->
+                    <div id="sealed-manual-setup">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Customer Name</label>
+                                <input type="text" id="sealed-manual-customer" value="Walk-in">
+                            </div>
+                            <div class="form-group">
+                                <label>Offer Percentage (%)</label>
+                                <input type="number" id="sealed-manual-offer-pct" value="75" min="1" max="100" step="0.5">
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" onclick="createManualSealedSession()">Start Sealed Intake Session</button>
+                    </div>
+
+                    <!-- Active sealed session entry -->
+                    <div id="sealed-manual-entry" style="display:none;">
+                        <div class="alert alert-success" id="sealed-manual-session-info"></div>
+
+                        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                            <div class="form-group" style="flex:2; min-width:160px; margin:0;">
+                                <label>Product Name</label>
+                                <input type="text" id="sealed-manual-search" placeholder="e.g. Booster Box, ETB..."
+                                       onkeydown="if(event.key==='Enter') manualSealedSearch()">
+                            </div>
+                            <div class="form-group" style="width:70px; margin:0;">
+                                <label>Qty</label>
+                                <input type="number" id="sealed-manual-qty" value="1" min="1">
+                            </div>
+                            <button class="btn btn-primary btn-sm" onclick="manualSealedSearch()">Search</button>
+                        </div>
+
+                        <div id="sealed-manual-results"></div>
+
+                        <div id="sealed-manual-items-table" style="margin-top:16px;"></div>
+
+                        <div style="margin-top:16px; display:flex; gap:8px;">
+                            <button class="btn btn-primary" onclick="finalizeSealedManualSession()" id="sealed-manual-finalize-btn" style="display:none;">Finalize Session</button>
+                            <button class="btn btn-secondary" onclick="viewSession(sealedManualSessionId)" id="sealed-manual-view-btn" style="display:none;">View Full Session</button>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div id="csv-upload-result"></div>
@@ -723,6 +773,143 @@
             resultDiv.innerHTML = `<div class="alert alert-error">Parse failed: ${err.message}</div>`;
         }
     });
+
+    // ═══════════════════════════════ MANUAL SEALED ENTRY ═══════════════════════════════
+    let sealedManualSessionId = null;
+
+    async function createManualSealedSession() {
+        const customer = document.getElementById('sealed-manual-customer').value || 'Walk-in';
+        const offerPct = document.getElementById('sealed-manual-offer-pct').value || '75';
+        try {
+            const r = await fetch('/api/intake/create-session', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ customer_name: customer, session_type: 'sealed', offer_percentage: parseFloat(offerPct) }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            sealedManualSessionId = d.session.id;
+            document.getElementById('sealed-manual-setup').style.display = 'none';
+            document.getElementById('sealed-manual-entry').style.display = 'block';
+            document.getElementById('sealed-manual-session-info').innerHTML =
+                'Session started for <strong>' + customer + '</strong> \u2022 Offer: ' + offerPct + '% \u2022 ID: ' + sealedManualSessionId.slice(0,8) + '...';
+            document.getElementById('sealed-manual-search').focus();
+        } catch(err) { alert(err.message); }
+    }
+
+    async function manualSealedSearch() {
+        const searchTerm = document.getElementById('sealed-manual-search').value.trim();
+        const resultsDiv = document.getElementById('sealed-manual-results');
+        if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a search term</div>'; return; }
+
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
+        try {
+            const r = await fetch('/api/ppt/search-sealed', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ query: searchTerm }),
+            });
+            const contentType = r.headers.get('content-type') || '';
+            if (!contentType.includes('application/json')) {
+                const text = await r.text();
+                resultsDiv.innerHTML = `<div class="alert alert-error">Server error (${r.status}): ${text.substring(0, 100)}</div>`;
+                return;
+            }
+            const d = await r.json();
+            if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+            const products = d.results || [];
+            if (!products.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No results found</div>'; return; }
+
+            const qty = parseInt(document.getElementById('sealed-manual-qty').value) || 1;
+            const offerPct = parseFloat(document.getElementById('sealed-manual-offer-pct').value) || 75;
+            resultsDiv.innerHTML = products.map(p => {
+                const price = p.unopenedPrice || (p.prices ? p.prices.market : null) || 0;
+                const offer = (price * qty * offerPct / 100).toFixed(2);
+                const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.id || '';
+                const setName = (p.setName || p.set_name || '').replace(/'/g, "\\'");
+                const safeName = (p.name || '').replace(/'/g, "\\'");
+                return `<div class="search-result" onclick="addManualSealed(${tcgId}, '${safeName}', '${setName}', ${price}, ${qty})">
+                    <h4>${p.name}</h4>
+                    <p>${p.setName || p.set_name || ''} \u00b7 TCG#${tcgId} \u00b7 $${Number(price).toFixed(2)} each \u00b7 Qty ${qty} \u00b7 Offer: $${offer}</p>
+                </div>`;
+            }).join('');
+        } catch(err) {
+            resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    async function addManualSealed(tcgplayerId, name, setName, price, qty) {
+        const resultsDiv = document.getElementById('sealed-manual-results');
+        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding...</div>';
+        try {
+            const r = await fetch('/api/intake/add-sealed-item', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: sealedManualSessionId,
+                    product_name: name,
+                    set_name: setName,
+                    tcgplayer_id: tcgplayerId,
+                    market_price: price,
+                    quantity: qty,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+            document.getElementById('sealed-manual-search').value = '';
+            document.getElementById('sealed-manual-qty').value = '1';
+            resultsDiv.innerHTML = '<div class="alert alert-success">Added! \u2713</div>';
+            setTimeout(() => { resultsDiv.innerHTML = ''; }, 1500);
+            loadManualSealedItems();
+            document.getElementById('sealed-manual-search').focus();
+        } catch(err) {
+            resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    async function loadManualSealedItems() {
+        if (!sealedManualSessionId) return;
+        try {
+            const r = await fetch('/api/intake/session/' + sealedManualSessionId);
+            const d = await r.json();
+            const items = d.items;
+            const s = d.session;
+            const tableDiv = document.getElementById('sealed-manual-items-table');
+            document.getElementById('sealed-manual-finalize-btn').style.display = items.length ? '' : 'none';
+            document.getElementById('sealed-manual-view-btn').style.display = items.length ? '' : 'none';
+            if (!items.length) { tableDiv.innerHTML = '<p style="color:var(--text-dim);">No products added yet.</p>'; return; }
+            tableDiv.innerHTML = '<div style="margin-bottom:8px; font-weight:600;">' +
+                items.length + ' products \u2022 Market: $' + (s.total_market_value || 0).toFixed(2) +
+                ' \u2022 Offer: $' + (s.total_offer_amount || 0).toFixed(2) +
+                '</div><table><thead><tr><th>Product</th><th>Set</th><th>Qty</th><th>Market</th><th>Offer</th><th></th></tr></thead><tbody>' +
+                items.map(i => '<tr>' +
+                    '<td>' + i.product_name + '</td>' +
+                    '<td><small style="color:var(--text-dim);">' + (i.set_name || '') + '</small></td>' +
+                    '<td>' + i.quantity + '</td>' +
+                    '<td>$' + (i.market_price || 0).toFixed(2) + '</td>' +
+                    '<td>$' + (i.offer_price || 0).toFixed(2) + '</td>' +
+                    '<td><button class="btn btn-sm" style="color:var(--red); font-size:0.7rem; padding:2px 6px;" onclick="deleteManualSealedItem(\'' + i.id + '\')">✕</button></td>' +
+                '</tr>').join('') + '</tbody></table>';
+        } catch(err) { console.error(err); }
+    }
+
+    async function deleteManualSealedItem(itemId) {
+        try {
+            await fetch('/api/intake/item/' + itemId + '/delete', { method: 'POST' });
+            loadManualSealedItems();
+        } catch(err) { alert(err.message); }
+    }
+
+    async function finalizeSealedManualSession() {
+        if (!sealedManualSessionId) return;
+        await finalizeSession(sealedManualSessionId);
+        sealedManualSessionId = null;
+        document.getElementById('sealed-manual-entry').style.display = 'none';
+        document.getElementById('sealed-manual-setup').style.display = '';
+        document.getElementById('sealed-manual-items-table').innerHTML = '';
+    }
 
     // ═══════════════════════════════ SESSION LIST ═══════════════════════════════
     async function loadSessions(status, containerId) {
