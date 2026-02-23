@@ -63,6 +63,7 @@ class ShopifyClient:
                 title
                 handle
                 status
+                tags
                 variants(first: 10) {
                   edges {
                     node {
@@ -119,6 +120,9 @@ class ShopifyClient:
                     if variant.get("inventoryItem"):
                         inv_item_id = variant["inventoryItem"]["id"].split("/")[-1]
 
+                    tags = node.get("tags", [])
+                    is_damaged = ("damaged" in [t.lower() for t in tags]) or "[DAMAGED]" in node.get("title", "").upper()
+
                     products.append({
                         "product_gid": node["id"],
                         "shopify_product_id": int(node["id"].split("/")[-1]),
@@ -131,6 +135,7 @@ class ShopifyClient:
                         "sku": variant.get("sku"),
                         "inventory_item_id": inv_item_id,
                         "tcgplayer_id": tcg_id,
+                        "is_damaged": is_damaged,
                     })
 
             has_next = data["products"]["pageInfo"]["hasNextPage"]

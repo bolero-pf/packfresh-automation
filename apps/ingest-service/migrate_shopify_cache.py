@@ -50,6 +50,60 @@ if not cur.fetchone():
 else:
     print("  ✓ sealed_cogs.shopify_variant_id already exists")
 
+# Add is_damaged to shopify_product_cache if missing
+cur.execute("""
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'shopify_product_cache' AND column_name = 'is_damaged'
+""")
+if not cur.fetchone():
+    cur.execute("ALTER TABLE shopify_product_cache ADD COLUMN is_damaged BOOLEAN DEFAULT FALSE")
+    print("  ✓ Added is_damaged to shopify_product_cache")
+else:
+    print("  ✓ shopify_product_cache.is_damaged already exists")
+
+# Add status transition timestamps to intake_sessions if missing
+for col in ['offered_at', 'accepted_at', 'received_at', 'ingested_at', 'rejected_at']:
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'intake_sessions' AND column_name = %s
+    """, (col,))
+    if not cur.fetchone():
+        cur.execute(f"ALTER TABLE intake_sessions ADD COLUMN {col} TIMESTAMP")
+        print(f"  ✓ Added {col} to intake_sessions")
+    else:
+        print(f"  ✓ intake_sessions.{col} already exists")
+
+conn.commit()
+
+# Recreate the intake_session_summary view to include new columns
+print("Updating intake_session_summary view...")
+cur.execute("DROP VIEW IF EXISTS intake_session_summary")
+cur.execute("""
+    CREATE VIEW intake_session_summary AS
+    SELECT 
+        s.id,
+        s.customer_name,
+        s.session_type,
+        s.status,
+        s.total_market_value,
+        s.offer_percentage,
+        s.total_offer_amount,
+        s.created_at,
+        s.finalized_at,
+        s.offered_at,
+        s.accepted_at,
+        s.received_at,
+        s.ingested_at,
+        s.rejected_at,
+        COUNT(i.id) as item_count,
+        SUM(i.quantity) as total_quantity,
+        COUNT(*) FILTER (WHERE i.is_mapped = FALSE) as unmapped_count
+    FROM intake_sessions s
+    LEFT JOIN intake_items i ON s.id = i.session_id
+    GROUP BY s.id
+""")
+print("  ✓ View updated")
+
 conn.commit()
 cur.close()
 conn.close()

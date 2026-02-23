@@ -41,8 +41,9 @@ import logging
 import time
 from decimal import Decimal, InvalidOperation
 
-from flask import Flask, request, jsonify, render_template, send_file
+from flask import Flask, request, jsonify, render_template, send_file, Response
 from flask_cors import CORS
+from functools import wraps
 
 import db
 from ppt_client import PPTClient, PPTError
@@ -83,6 +84,28 @@ if SHOPIFY_TOKEN and SHOPIFY_STORE:
 else:
     app.logger.warning("SHOPIFY_TOKEN/SHOPIFY_STORE not set — store lookups unavailable")
 
+# ── Auth ──────────────────────────────────────────────────────────
+DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
+DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "secret")
+
+def check_auth(user, pwd):
+    return user == DASHBOARD_USER and pwd == DASHBOARD_PASS
+
+def authenticate():
+    return Response(
+        "🚫 Access Denied. You must provide valid credentials.", 401,
+        {"WWW-Authenticate": 'Basic realm="Login Required"'}
+    )
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
+
 
 # Initialize DB pool on first request
 @app.before_request
@@ -103,6 +126,7 @@ def close_db(exception):
 # ==========================================
 
 @app.route("/")
+@requires_auth
 def index():
     return render_template("intake_dashboard.html")
 
@@ -793,16 +817,129 @@ def add_sealed_item():
 
 
 # ==========================================
-# FINALIZATION
+# SESSION STATUS FLOW
+# in_progress → offered → accepted → received → (handed to ingest service)
+#                       → rejected
 # ==========================================
 
 @app.route("/api/intake/finalize/<session_id>", methods=["POST"])
 def finalize(session_id):
-    """Finalize an intake session."""
-    result = intake.finalize_session(session_id)
-    if result["success"]:
-        return jsonify(result)
-    return jsonify(result), 400
+    """Legacy finalize — now means 'offer'. Kept for backward compat."""
+    return offer_session(session_id)
+
+
+@app.route("/api/intake/session/<session_id>/offer", methods=["POST"])
+def offer_session(session_id):
+    """Lock in the offer. Validates all items are mapped."""
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    if session["status"] not in ("in_progress",):
+        return jsonify({"error": f"Cannot offer — session is '{session['status']}'"}), 400
+
+    items = intake.get_session_items(session_id)
+    active = [i for i in items if i.get("item_status", "good") in ("good", "damaged")]
+    if not active:
+        return jsonify({"error": "No active items in session"}), 400
+    unmapped = [i for i in active if not i.get("is_mapped")]
+    if unmapped:
+        names = [i["product_name"] for i in unmapped[:5]]
+        return jsonify({"error": f"{len(unmapped)} items still need mapping", "unmapped_names": names}), 400
+
+    db.execute("UPDATE intake_sessions SET status = 'offered', offered_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
+    return jsonify({"success": True, "status": "offered"})
+
+
+@app.route("/api/intake/session/<session_id>/accept", methods=["POST"])
+def accept_session(session_id):
+    """Customer accepted the offer."""
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    if session["status"] not in ("offered",):
+        return jsonify({"error": f"Cannot accept — session is '{session['status']}'"}), 400
+    db.execute("UPDATE intake_sessions SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
+    return jsonify({"success": True, "status": "accepted"})
+
+
+@app.route("/api/intake/session/<session_id>/receive", methods=["POST"])
+def receive_session(session_id):
+    """Product received — ready for verification and eventually ingest."""
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    if session["status"] not in ("accepted",):
+        return jsonify({"error": f"Cannot receive — session is '{session['status']}'"}), 400
+    db.execute("UPDATE intake_sessions SET status = 'received', received_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
+    return jsonify({"success": True, "status": "received"})
+
+
+@app.route("/api/intake/session/<session_id>/reject", methods=["POST"])
+def reject_session(session_id):
+    """Customer rejected the offer."""
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    if session["status"] in ("ingested",):
+        return jsonify({"error": "Cannot reject — already ingested"}), 400
+    db.execute("UPDATE intake_sessions SET status = 'rejected', rejected_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
+    return jsonify({"success": True, "status": "rejected"})
+
+
+@app.route("/api/intake/session/<session_id>/reopen", methods=["POST"])
+def reopen_session(session_id):
+    """Reopen a session back to in_progress (for edits before ingest)."""
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    if session["status"] in ("ingested",):
+        return jsonify({"error": "Cannot reopen — already ingested"}), 400
+    db.execute("UPDATE intake_sessions SET status = 'in_progress' WHERE id = %s", (session_id,))
+    return jsonify({"success": True, "status": "in_progress"})
+
+
+@app.route("/api/intake/session/<session_id>/export-csv")
+def export_session_csv(session_id):
+    """Export session items as CSV for pen-and-paper verification."""
+    import csv
+    import io
+
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    items = intake.get_session_items(session_id)
+    active = [i for i in items if i.get("item_status", "good") in ("good", "damaged")]
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Product Name", "TCGPlayer ID", "Condition", "Quantity", "Unit Price", "Offer Total", "Present", "Notes"])
+    for item in active:
+        qty = item.get("quantity", 1)
+        offer = float(item.get("offer_price") or 0)
+        unit = offer / qty if qty > 0 else 0
+        writer.writerow([
+            item.get("product_name", ""),
+            item.get("tcgplayer_id", ""),
+            item.get("condition", ""),
+            qty,
+            f"${unit:.2f}",
+            f"${offer:.2f}",
+            "",  # Present column — blank for checking off
+            "DAMAGED" if item.get("item_status") == "damaged" else "",
+        ])
+    writer.writerow([])
+    writer.writerow(["TOTAL", "", "", sum(i.get("quantity", 1) for i in active), "",
+                     f"${sum(float(i.get('offer_price') or 0) for i in active):.2f}", "", ""])
+
+    output.seek(0)
+    customer = session.get("customer_name", "export")
+    filename = f"offer_{customer}_{session_id[:8]}.csv"
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 
 # ==========================================
@@ -1072,14 +1209,15 @@ def shopify_sync():
             db.execute("""
                 INSERT INTO shopify_product_cache
                     (tcgplayer_id, shopify_product_id, shopify_variant_id,
-                     title, handle, sku, shopify_price, shopify_qty, status, last_synced)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                     title, handle, sku, shopify_price, shopify_qty, status, is_damaged, last_synced)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (tcgplayer_id, shopify_variant_id)
                 DO UPDATE SET title = EXCLUDED.title, handle = EXCLUDED.handle, sku = EXCLUDED.sku,
                     shopify_price = EXCLUDED.shopify_price, shopify_qty = EXCLUDED.shopify_qty,
-                    status = EXCLUDED.status, last_synced = CURRENT_TIMESTAMP
+                    status = EXCLUDED.status, is_damaged = EXCLUDED.is_damaged, last_synced = CURRENT_TIMESTAMP
             """, (p["tcgplayer_id"], p["shopify_product_id"], p["variant_id"],
-                  p["title"], p["handle"], p.get("sku"), p["shopify_price"], p["shopify_qty"], p.get("status", "ACTIVE")))
+                  p["title"], p["handle"], p.get("sku"), p["shopify_price"], p["shopify_qty"],
+                  p.get("status", "ACTIVE"), p.get("is_damaged", False)))
             upserted += 1
         # Backfill sealed_cogs linkage
         db.execute("""
@@ -1122,7 +1260,10 @@ def shopify_session_store_check(session_id):
         return jsonify({"items": [], "cache_hit_rate": 0})
     placeholders = ",".join(["%s"] * len(tcg_ids))
     try:
-        cache_rows = db.query(f"SELECT * FROM shopify_product_cache WHERE tcgplayer_id IN ({placeholders})", tuple(tcg_ids))
+        cache_rows = db.query(
+            f"SELECT * FROM shopify_product_cache WHERE tcgplayer_id IN ({placeholders}) AND (is_damaged IS NULL OR is_damaged = FALSE)",
+            tuple(tcg_ids)
+        )
     except Exception:
         return jsonify({"error": "Shopify cache table not found. Run the migration first, then sync."}), 500
     cache_map = {}

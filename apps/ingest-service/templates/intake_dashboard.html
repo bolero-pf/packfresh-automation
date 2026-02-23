@@ -668,16 +668,16 @@
             t.classList.toggle('active', t.getAttribute('data-tab') === name);
         });
         window.location.hash = name;
-        if (name === 'active-sessions') loadSessions('in_progress', 'active-sessions-list');
-        if (name === 'completed') loadSessions('finalized', 'completed-sessions-list');
-        if (name === 'cancelled') loadSessions('cancelled', 'cancelled-sessions-list');
+        if (name === 'active-sessions') loadSessions('in_progress,offered,accepted', 'active-sessions-list');
+        if (name === 'completed') loadSessions('received,ingested,finalized', 'completed-sessions-list');
+        if (name === 'cancelled') loadSessions('cancelled,rejected', 'cancelled-sessions-list');
     }
     // Restore tab from hash on load
     (function() {
         const hash = window.location.hash.replace('#', '');
         const validTabs = ['sealed-intake','raw-intake','active-sessions','completed','cancelled'];
         if (hash && validTabs.includes(hash)) { switchTab(hash); }
-        else { loadSessions('in_progress', 'active-sessions-list'); }
+        else { loadSessions('in_progress,offered,accepted', 'active-sessions-list'); }
     })();
 
     // ═══════════════════════════════ MODAL HELPERS ═══════════════════════════════
@@ -924,20 +924,31 @@
 
             c.innerHTML = `<table>
                 <thead><tr>
-                    <th>Customer</th><th>Type</th><th>Items</th><th>Offer</th>
-                    <th>Unmapped</th><th>Created</th><th></th>
+                    <th>Customer</th><th>Type</th><th>Status</th><th>Items</th><th>Offer</th>
+                    <th>Created</th><th></th>
                 </tr></thead>
-                <tbody>${d.sessions.map(s => `<tr>
+                <tbody>${d.sessions.map(s => {
+                    const statusColors = {
+                        'in_progress': 'background:var(--surface-2);color:var(--text);',
+                        'offered': 'background:#2563eb;color:#fff;',
+                        'accepted': 'background:#059669;color:#fff;',
+                        'received': 'background:#7c3aed;color:#fff;',
+                        'ingested': 'background:#16a34a;color:#fff;',
+                        'finalized': 'background:#16a34a;color:#fff;',
+                        'rejected': 'background:#dc2626;color:#fff;',
+                        'cancelled': 'background:#666;color:#fff;',
+                    };
+                    const statusStyle = statusColors[s.status] || '';
+                    return `<tr>
                     <td>${s.customer_name || 'Unknown'}</td>
                     <td><span class="badge badge-blue">${s.session_type}</span></td>
+                    <td><span class="badge" style="${statusStyle}">${s.status.replace('_', ' ')}</span></td>
                     <td>${s.item_count || 0}</td>
                     <td>$${(s.total_offer_amount || 0).toFixed(2)}</td>
-                    <td>${(s.unmapped_count || 0) > 0
-                        ? `<span class="badge badge-amber">${s.unmapped_count}</span>`
-                        : '<span class="badge badge-green">✓</span>'}</td>
                     <td>${new Date(s.created_at).toLocaleDateString()}</td>
                     <td><button class="btn btn-secondary btn-sm" onclick="viewSession('${s.id}')">View</button></td>
-                </tr>`).join('')}</tbody>
+                </tr>`;
+                }).join('')}</tbody>
             </table>`;
         } catch(err) {
             c.innerHTML = `<div class="alert alert-error">Failed to load: ${err.message}</div>`;
@@ -970,7 +981,7 @@
                         <div class="stat-label">Offer %</div>
                         <div class="stat-value" style="display:flex; align-items:center; gap:8px;">
                             <span id="offer-pct-display">${s.offer_percentage}%</span>
-                            ${s.status === 'in_progress' ? `
+                            ${!['ingested','cancelled','rejected'].includes(s.status) ? `
                                 <button class="btn btn-sm btn-secondary" style="font-size:0.75rem; padding:2px 8px;" 
                                         onclick="editOfferPct('${sessionId}', ${s.offer_percentage})">Edit</button>
                             ` : ''}
@@ -979,7 +990,7 @@
                     <div class="stat"><div class="stat-label">Offer Total</div><div class="stat-value">$${(s.total_offer_amount || 0).toFixed(2)}</div></div>
                 </div>
 
-                ${s.status === 'in_progress' ? `
+                ${!['ingested','cancelled','rejected'].includes(s.status) ? `
                     <div style="margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;">
                         <button class="btn btn-secondary btn-sm" onclick="refreshPrices('${sessionId}')">
                             🔄 Refresh PPT Prices
@@ -1005,7 +1016,7 @@
                 <!-- Store check results go here -->
                 <div id="store-check-results"></div>
 
-                ${s.status === 'in_progress' && (s.session_type === 'sealed' || s.session_type === 'mixed') ? `
+                ${!['ingested','cancelled','rejected'].includes(s.status) && (s.session_type === 'sealed' || s.session_type === 'mixed') ? `
                     <div style="margin-bottom:16px; padding:12px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
                         <h4 style="margin-bottom:10px; font-size:0.95rem;">➕ Add Sealed Item</h4>
                         <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
@@ -1057,7 +1068,7 @@
                             <td>$${(i.offer_price || 0).toFixed(2)}</td>
                             <td>${statusBadge}</td>
                             <td style="white-space:nowrap;">
-                                ${s.status === 'in_progress' ? (() => {
+                                ${!['ingested','cancelled','rejected'].includes(s.status) ? (() => {
                                     let btns = '';
                                     if (isDead) {
                                         btns += `<button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="restoreItem('${i.id}','${sessionId}')">Restore</button>`;
@@ -1099,7 +1110,7 @@
                 </table>
                 </div>
 
-                ${s.status === 'in_progress' && s.session_type === 'raw' ? `
+                ${!['ingested','cancelled','rejected'].includes(s.status) && s.session_type === 'raw' ? `
                     <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
                         <h4 style="margin-bottom:10px;">➕ Add Card</h4>
                         <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
@@ -1137,14 +1148,13 @@
                     </div>
                 ` : ''}
 
-                ${s.status === 'cancelled' ? `
+                ${s.status === 'cancelled' || s.status === 'rejected' ? `
                     <div class="alert alert-error" style="margin-top:16px;">
-                        Session cancelled${s.cancel_reason ? ': ' + s.cancel_reason : ''}
+                        Session ${s.status}${s.cancel_reason ? ': ' + s.cancel_reason : ''}
                     </div>
                 ` : ''}
 
                 ${(() => {
-                    if (s.status !== 'in_progress') return '';
                     const activeItems = items.filter(i => (i.item_status || 'good') === 'good' || i.item_status === 'damaged');
                     const unmappedActive = activeItems.filter(i => !i.is_mapped && (i.item_status || 'good') === 'good');
                     const excluded = items.filter(i => i.item_status === 'missing' || i.item_status === 'rejected');
@@ -1154,13 +1164,41 @@
                             ${excluded.length} item(s) excluded (missing/rejected)
                         </div>`;
                     }
-                    if (unmappedActive.length === 0 && activeItems.length > 0) {
-                        html += `<div style="margin-top:12px;">
-                            <button class="btn btn-success" onclick="finalizeSession('${sessionId}')">
-                                Finalize Session (${activeItems.length} items)
-                            </button>
-                        </div>`;
+
+                    // Status timestamps
+                    const timestamps = [];
+                    if (s.offered_at) timestamps.push('Offered: ' + new Date(s.offered_at).toLocaleString());
+                    if (s.accepted_at) timestamps.push('Accepted: ' + new Date(s.accepted_at).toLocaleString());
+                    if (s.received_at) timestamps.push('Received: ' + new Date(s.received_at).toLocaleString());
+                    if (s.rejected_at) timestamps.push('Rejected: ' + new Date(s.rejected_at).toLocaleString());
+                    if (s.ingested_at) timestamps.push('Ingested: ' + new Date(s.ingested_at).toLocaleString());
+                    if (timestamps.length > 0) {
+                        html += '<div style="margin-top:12px;font-size:0.8rem;color:var(--text-dim);">' + timestamps.join(' · ') + '</div>';
                     }
+
+                    // CSV export — always available
+                    html += '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">';
+                    html += '<a href="/api/intake/session/' + sessionId + '/export-csv" class="btn btn-secondary btn-sm" style="font-size:0.8rem;">📋 Export CSV</a>';
+
+                    if (!['ingested','cancelled','rejected'].includes(s.status)) {
+                        if (unmappedActive.length === 0 && activeItems.length > 0) {
+                            html += '<button class="btn btn-success" onclick="transitionSession(\\'' + sessionId + '\\', \\'offer\\')">📤 Lock & Offer (' + activeItems.length + ' items)</button>';
+                        }
+                    } else if (s.status === 'offered') {
+                        html += '<button class="btn btn-success" onclick="transitionSession(\\'' + sessionId + '\\', \\'accept\\')">✅ Customer Accepted</button>';
+                        html += '<button class="btn btn-error" onclick="transitionSession(\\'' + sessionId + '\\', \\'reject\\')">❌ Customer Rejected</button>';
+                        html += '<button class="btn btn-secondary btn-sm" onclick="transitionSession(\\'' + sessionId + '\\', \\'reopen\\')">↩ Reopen for Edits</button>';
+                    } else if (s.status === 'accepted') {
+                        html += '<button class="btn btn-success" onclick="transitionSession(\\'' + sessionId + '\\', \\'receive\\')">📦 Product Received</button>';
+                        html += '<button class="btn btn-secondary btn-sm" onclick="transitionSession(\\'' + sessionId + '\\', \\'reopen\\')">↩ Reopen for Edits</button>';
+                    } else if (s.status === 'received') {
+                        html += '<span style="color:var(--green); font-weight:600;">✅ Ready for Ingest Service</span>';
+                        html += '<button class="btn btn-secondary btn-sm" onclick="transitionSession(\\'' + sessionId + '\\', \\'reopen\\')">↩ Reopen for Edits</button>';
+                    } else if (s.status === 'ingested') {
+                        html += '<span style="color:var(--green); font-weight:600;">✅ Ingested</span>';
+                    }
+
+                    html += '</div>';
                     return html;
                 })()}
             `;
@@ -2492,21 +2530,30 @@
             resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
         }
     }
-    // ═══════════════════════════════ FINALIZE ═══════════════════════════════
-    async function finalizeSession(sessionId) {
-        const ok = await themedConfirm(
-            'Finalize Session',
-            'This will lock all prices and create inventory/COGS records. This cannot be undone.',
-            { confirmText: 'Finalize' }
-        );
+    // ═══════════════════════════════ SESSION STATUS TRANSITIONS ═══════════════════════════════
+    const transitionLabels = {
+        offer: { title: 'Lock & Offer', msg: 'This will lock all prices and present the offer to the customer.', btn: 'Lock & Offer' },
+        accept: { title: 'Customer Accepted', msg: 'Mark this offer as accepted by the customer.', btn: 'Mark Accepted' },
+        receive: { title: 'Product Received', msg: 'Mark the product as received. You can still make adjustments before ingest.', btn: 'Mark Received' },
+        reject: { title: 'Customer Rejected', msg: 'Mark this offer as rejected. The session will be archived.', btn: 'Mark Rejected' },
+        reopen: { title: 'Reopen Session', msg: 'Reopen this session for edits.', btn: 'Reopen' },
+    };
+
+    async function transitionSession(sessionId, action) {
+        const label = transitionLabels[action] || { title: action, msg: `Transition to ${action}?`, btn: action };
+        const ok = await themedConfirm(label.title, label.msg, { confirmText: label.btn });
         if (!ok) return;
         try {
-            const r = await fetch(`/api/intake/finalize/${sessionId}`, { method: 'POST' });
+            const r = await fetch(`/api/intake/session/${sessionId}/${action}`, { method: 'POST' });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            alert('Finalized! ' + (d.sealed_processed || 0) + ' sealed COGS updated, ' + (d.raw_cards_created || 0) + ' raw cards created.');
-            closeModal('session-modal');
+            viewSession(sessionId);
+            loadSessions();
         } catch(err) { alert(err.message); }
+    }
+
+    async function finalizeSession(sessionId) {
+        return transitionSession(sessionId, 'offer');
     }
 
     // ═══════════════════════════════ RAW CARD SESSION (tab) ═══════════════════════════════

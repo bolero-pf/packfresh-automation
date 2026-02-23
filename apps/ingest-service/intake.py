@@ -106,13 +106,23 @@ def get_session_items(session_id: str) -> list[dict]:
 
 
 def list_sessions(status: str = "in_progress", limit: int = 50) -> list[dict]:
-    """List intake sessions by status."""
-    return query("""
-        SELECT * FROM intake_session_summary
-        WHERE status = %s
-        ORDER BY created_at DESC
-        LIMIT %s
-    """, (status, limit))
+    """List intake sessions by status. Accepts comma-separated statuses."""
+    statuses = [s.strip() for s in status.split(",") if s.strip()]
+    if len(statuses) == 1:
+        return query("""
+            SELECT * FROM intake_session_summary
+            WHERE status = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (statuses[0], limit))
+    else:
+        placeholders = ",".join(["%s"] * len(statuses))
+        return query(f"""
+            SELECT * FROM intake_session_summary
+            WHERE status IN ({placeholders})
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, tuple(statuses) + (limit,))
 
 
 def check_duplicate_import(file_hash: str) -> Optional[str]:
