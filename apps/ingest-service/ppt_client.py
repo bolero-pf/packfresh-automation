@@ -111,7 +111,6 @@ class PPTClient:
 
             if r.status_code < 400:
                 data = r.json()
-                # Log a summary of what came back
                 if isinstance(data, dict):
                     d = data.get('data', data)
                     count = len(d) if isinstance(d, list) else 1
@@ -119,29 +118,28 @@ class PPTClient:
                 return data
 
             if r.status_code == 429:
-                # NEVER sleep long — this blocks gunicorn sync workers.
-                # On first 429, do a short retry. On second, fail immediately.
-                if attempt < max_tries:
-                    wait = min(2.0 * attempt, 5.0)  # max 5s wait
-                    logger.warning(f"PPT 429, short retry in {wait:.1f}s (attempt {attempt})")
-                    time.sleep(wait)
-                    continue
+                # Extract retry-after info and fail immediately — caller handles pacing
+                reset = r.headers.get("X-Ratelimit-Minute-Reset")
+                retry_after = None
+                if reset:
+                    try:
+                        retry_after = max(0, int(float(reset) - time.time()))
+                    except (ValueError, TypeError):
+                        retry_after = 60  # safe default
                 else:
-                    # Extract retry-after info for the caller
-                    reset = r.headers.get("X-Ratelimit-Minute-Reset")
-                    retry_after = None
-                    if reset:
-                        try:
-                            retry_after = max(0, int(float(reset) - time.time()))
-                        except (ValueError, TypeError):
-                            pass
-                    daily_remaining = r.headers.get("X-RateLimit-Daily-Remaining")
-                    msg = "PPT rate limit exceeded"
-                    if daily_remaining and int(daily_remaining) <= 0:
-                        msg = "PPT daily credit limit reached (100/day on free tier)"
-                    elif retry_after:
-                        msg = f"PPT rate limited — try again in {retry_after}s"
-                    raise PPTError(msg, 429, {"retry_after": retry_after})
+                    retry_after = 60
+
+                daily_remaining = r.headers.get("X-RateLimit-Daily-Remaining")
+                if daily_remaining and int(daily_remaining) <= 0:
+                    raise PPTError("PPT daily limit reached", 429, {"retry_after": retry_after, "daily_exhausted": True})
+                raise PPTError(f"PPT rate limited — retry in {retry_after}s", 429, {"retry_after": retry_after})
+
+            if r.status_code == 403:
+                try:
+                    body = r.json()
+                except Exception:
+                    body = r.text
+                raise PPTError(f"PPT 403 Forbidden", 403, body)
 
             last_err = r
             time.sleep(1.0 * attempt)

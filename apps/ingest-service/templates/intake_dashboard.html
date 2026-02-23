@@ -1480,13 +1480,20 @@
     }
 
     // ═══════════════════════════════ REFRESH PRICES ═══════════════════════════════
-    async function refreshPrices(sessionId) {
+    async function refreshPrices(sessionId, offset) {
+        offset = offset || 0;
         const panel = document.getElementById('price-refresh-results');
         if (!panel) return;
-        panel.innerHTML = '<div class="loading"><span class="spinner"></span> Fetching live PPT prices (this may take a minute for large lists)...</div>';
+        if (offset === 0) {
+            panel.innerHTML = '<div class="loading"><span class="spinner"></span> Fetching PPT prices...</div>';
+        }
 
         try {
-            const r = await fetch(`/api/intake/session/${sessionId}/refresh-prices`, { method: 'POST' });
+            const r = await fetch(`/api/intake/session/${sessionId}/refresh-prices`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ offset: offset }),
+            });
             const d = await r.json();
             if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
@@ -1496,42 +1503,60 @@
                 return;
             }
 
-            const sigCount = comps.filter(c => c.significant).length;
-            const failCount = d.failed || 0;
-            let headerHtml = '';
-            if (d.aborted) {
-                headerHtml = `<div class="alert alert-error">⚠ ${d.abort_reason || 'PPT API error — refresh aborted'}. ${d.succeeded || 0} of ${d.count} items fetched.</div>`;
-            } else if (failCount > 0) {
-                headerHtml = `<div class="alert alert-warning">⚠ ${failCount} item(s) failed to fetch. ${sigCount > 0 ? sigCount + ' have >10% price difference.' : ''}</div>`;
-            } else if (sigCount > 0) {
-                headerHtml = `<div class="alert alert-warning">⚠ ${sigCount} item(s) have >10% price difference</div>`;
+            // Build progress bar
+            const fetched = comps.filter(c => c.fetched).length;
+            const total = d.total_unique || comps.length;
+            const pct = Math.round(fetched / total * 100);
+            const succeeded = d.succeeded || 0;
+            const pending = d.pending || 0;
+
+            let statusHtml = '';
+            if (d.rate_limited && d.retry_after && !d.complete) {
+                statusHtml = `<div class="alert alert-warning" id="ppt-countdown">
+                    ⏳ Rate limited — auto-continuing in <strong id="ppt-wait">${d.retry_after}</strong>s...
+                    (${fetched}/${total} unique products fetched)
+                </div>`;
+            } else if (d.complete) {
+                const sigCount = comps.filter(c => c.significant).length;
+                const failCount = comps.filter(c => c.fetched && c.ppt_market == null && c.error).length;
+                if (failCount > 0) {
+                    statusHtml = `<div class="alert alert-warning">⚠ ${failCount} failed. ${sigCount > 0 ? sigCount + ' have >10% diff.' : ''} (${succeeded}/${total} fetched)</div>`;
+                } else if (sigCount > 0) {
+                    statusHtml = `<div class="alert alert-warning">⚠ ${sigCount} item(s) have >10% price difference</div>`;
+                } else {
+                    statusHtml = `<div class="alert alert-success">✅ All ${succeeded} prices within 10% of PPT</div>`;
+                }
             } else {
-                headerHtml = `<div class="alert alert-success">All prices are within 10% of PPT</div>`;
+                statusHtml = `<div class="alert" style="background:var(--surface-2);">
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <span class="spinner"></span> Fetching... ${fetched}/${total} (${pct}%)
+                    </div>
+                </div>`;
             }
-            panel.innerHTML = `
-                ${headerHtml}
+
+            // Progress bar
+            const progressHtml = `<div style="height:4px;background:var(--surface-2);border-radius:2px;margin-bottom:12px;overflow:hidden;">
+                <div style="height:100%;width:${pct}%;background:var(--accent);transition:width 0.3s;"></div>
+            </div>`;
+
+            // Table of fetched results
+            const fetchedComps = comps.filter(c => c.fetched);
+            const tableHtml = fetchedComps.length ? `
                 <div style="overflow-x:auto; margin-bottom:16px;">
                 <table>
                     <thead><tr>
-                        <th>Product</th>
-                        <th>Current</th>
-                        <th>PPT Price</th>
-                        <th>PPT Low</th>
-                        <th>Delta</th>
-                        <th></th>
+                        <th>Product</th><th>Current</th><th>PPT Price</th><th>PPT Low</th><th>Delta</th><th></th>
                     </tr></thead>
-                    <tbody>${comps.map(c => {
+                    <tbody>${fetchedComps.map(c => {
                         const delta = c.delta_pct;
                         const sig = c.significant;
                         const hasError = c.error && c.ppt_market == null;
                         const deltaColor = sig ? (delta > 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
                         const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
                         return `<tr style="${hasError ? 'background:rgba(255,60,60,0.06);' : sig ? 'background:rgba(255,180,0,0.06);' : ''}">
-                            <td>
-                                ${c.product_name}
-                                <br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small>
-                                ${c.ppt_name && c.ppt_name !== c.product_name ? `<br><small style="color:var(--amber);">⚠ PPT: ${c.ppt_name}</small>` : ''}
-                                ${hasError ? `<br><small style="color:var(--red);">✕ ${c.error}</small>` : ''}
+                            <td>${c.product_name}<br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small>
+                                ${c.ppt_name && c.ppt_name !== c.product_name ? '<br><small style="color:var(--amber);">⚠ PPT: ' + c.ppt_name + '</small>' : ''}
+                                ${hasError ? '<br><small style="color:var(--red);">✕ ' + c.error + '</small>' : ''}
                             </td>
                             <td>$${c.collectr_price.toFixed(2)}</td>
                             <td style="${sig ? 'font-weight:700; color:var(--accent);' : ''}">
@@ -1540,18 +1565,29 @@
                             <td>${c.ppt_low != null ? '$' + c.ppt_low.toFixed(2) : '—'}</td>
                             <td style="color:${deltaColor}; font-weight:${sig ? '700' : '400'};">
                                 ${delta != null ? arrow + ' ' + Math.abs(delta).toFixed(1) + '%' : '—'}
-                                ${sig ? ' ⚠' : ''}
                             </td>
-                            <td>${c.ppt_market != null ? `
-                                <button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;"
-                                        onclick="applyPptPrice('${c.item_id}', '${sessionId}', ${c.ppt_market}, this)">
-                                    Apply
-                                </button>` : ''}</td>
+                            <td>${c.ppt_market != null ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="applyPptPrice(\'' + c.item_id + '\', \'' + sessionId + '\', ' + c.ppt_market + ', this)">Apply</button>' : ''}</td>
                         </tr>`;
                     }).join('')}</tbody>
                 </table>
                 </div>
-            `;
+            ` : '';
+
+            panel.innerHTML = statusHtml + progressHtml + tableHtml;
+
+            // Auto-continue after rate limit delay
+            if (d.rate_limited && d.retry_after && !d.complete) {
+                let wait = d.retry_after;
+                const countdownEl = document.getElementById('ppt-wait');
+                const countdown = setInterval(() => {
+                    wait--;
+                    if (countdownEl) countdownEl.textContent = wait;
+                    if (wait <= 0) {
+                        clearInterval(countdown);
+                        refreshPrices(sessionId, d.next_offset);
+                    }
+                }, 1000);
+            }
         } catch(err) {
             panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }

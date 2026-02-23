@@ -378,89 +378,106 @@ def update_offer_percentage(session_id):
 @app.route("/api/intake/session/<session_id>/refresh-prices", methods=["POST"])
 def refresh_session_prices(session_id):
     """
-    Fetch current PPT prices for all linked items in a session.
-    Returns a comparison: collectr_price vs ppt_price for each item.
-    Does NOT auto-update prices — the user chooses which to accept.
-    Deduplicates API calls: same tcgplayer_id only looked up once.
-    No wrapper retries — ppt_client handles its own retries internally.
-    Aborts early on fatal errors (blocked key, daily limit).
+    Fetch current PPT prices for linked items in a session.
+    Supports pagination: send {"offset": N} to continue from item N.
+    Fires requests until rate-limited, then returns partial results
+    with retry_after and next_offset so the frontend can continue.
     """
     if not ppt:
         return jsonify({"error": "PPT API not configured"}), 503
 
+    data = request.json or {}
+    offset = int(data.get("offset", 0))
+
     items = intake.get_session_items(session_id)
     linked = [i for i in items if i.get("tcgplayer_id") and i.get("item_status", "good") in ("good", "damaged")]
 
-    # Deduplicate: group by (tcgplayer_id, product_type) to avoid redundant API calls
-    price_cache = {}  # (tcg_id, product_type) -> {ppt_price, ppt_low, ppt_name, error}
-    aborted = False
-    abort_reason = None
+    # Deduplicate: build ordered list of unique (tcg_id, ptype) to fetch
+    seen = set()
+    unique_lookups = []
+    for item in linked:
+        key = (item["tcgplayer_id"], item.get("product_type", "sealed"))
+        if key not in seen:
+            seen.add(key)
+            unique_lookups.append(key)
 
+    # Fetch starting from offset
+    price_cache = {}
+    rate_limited = False
+    retry_after = None
+    fetched_count = 0
+
+    for idx in range(offset, len(unique_lookups)):
+        tcg_id, ptype = unique_lookups[idx]
+
+        ppt_price = None
+        ppt_low = None
+        ppt_name = None
+        error = None
+
+        try:
+            if ptype == "sealed":
+                ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+            else:
+                ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
+
+            if ppt_data:
+                if ptype == "sealed":
+                    unopened = ppt_data.get("unopenedPrice")
+                    prices = ppt_data.get("prices") or {}
+                    if isinstance(prices, dict):
+                        prices_market = prices.get("market")
+                        prices_low = prices.get("low")
+                    else:
+                        prices_market = None
+                        prices_low = None
+                    ppt_price = unopened
+                    ppt_low = prices_low
+                    ppt_name = ppt_data.get("name")
+                else:
+                    prices = ppt_data.get("prices", {})
+                    ppt_price = prices.get("market")
+                    ppt_low = prices.get("low")
+                    ppt_name = ppt_data.get("name")
+
+            fetched_count += 1
+
+        except PPTError as e:
+            status_code = getattr(e, 'status_code', None)
+            if status_code == 429:
+                # Rate limited — stop here, tell frontend when to continue
+                body = getattr(e, 'body', {}) or {}
+                retry_after = body.get("retry_after", 60) if isinstance(body, dict) else 60
+                rate_limited = True
+                app.logger.info(f"PPT rate limited after {fetched_count} fetches, retry in {retry_after}s")
+                break
+            elif status_code == 403:
+                error = str(e)
+                app.logger.warning(f"PPT 403 for {tcg_id}: {e}")
+                # Fatal — stop all
+                price_cache[(tcg_id, ptype)] = {"ppt_price": None, "ppt_low": None, "ppt_name": None, "error": error}
+                rate_limited = True
+                retry_after = None
+                break
+            else:
+                error = str(e)
+                app.logger.warning(f"PPT error for {tcg_id}: {e}")
+        except Exception as e:
+            error = str(e)
+            app.logger.warning(f"Unexpected error for {tcg_id}: {e}")
+
+        price_cache[(tcg_id, ptype)] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name, "error": error}
+
+    # Build comparisons for ALL linked items (using whatever we've fetched so far)
     comparisons = []
     for item in linked:
         tcg_id = item["tcgplayer_id"]
         ptype = item.get("product_type", "sealed")
-        cache_key = (tcg_id, ptype)
+        cached = price_cache.get((tcg_id, ptype))
 
-        if cache_key not in price_cache:
-            if aborted:
-                price_cache[cache_key] = {"ppt_price": None, "ppt_low": None, "ppt_name": None, "error": abort_reason}
-            else:
-                ppt_price = None
-                ppt_low = None
-                ppt_name = None
-                error = None
-
-                try:
-                    if ptype == "sealed":
-                        ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
-                    else:
-                        ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
-
-                    if ppt_data:
-                        if ptype == "sealed":
-                            unopened = ppt_data.get("unopenedPrice")
-                            prices = ppt_data.get("prices") or {}
-                            if isinstance(prices, dict):
-                                prices_market = prices.get("market")
-                                prices_low = prices.get("low")
-                            else:
-                                prices_market = None
-                                prices_low = None
-                            ppt_price = unopened
-                            ppt_low = prices_low
-                            ppt_name = ppt_data.get("name")
-                            app.logger.info(
-                                f"PPT sealed {tcg_id}: name='{ppt_name}', "
-                                f"unopenedPrice={unopened}, prices.market={prices_market}, prices.low={prices_low}"
-                            )
-                        else:
-                            prices = ppt_data.get("prices", {})
-                            ppt_price = prices.get("market")
-                            ppt_low = prices.get("low")
-                            ppt_name = ppt_data.get("name")
-
-                except PPTError as e:
-                    error = str(e)
-                    status = getattr(e, 'status_code', None)
-                    app.logger.warning(f"Price refresh failed for {tcg_id}: {e} (status={status})")
-                    # Abort on fatal errors — no point hammering a blocked/expired key
-                    if status == 403 or "blocked" in error.lower() or "abuse" in error.lower():
-                        aborted = True
-                        abort_reason = error
-                    elif status == 429 and "daily" in error.lower():
-                        aborted = True
-                        abort_reason = error
-                except Exception as e:
-                    error = str(e)
-                    app.logger.warning(f"Unexpected error refreshing {tcg_id}: {e}")
-
-                price_cache[cache_key] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name, "error": error}
-
-        cached = price_cache[cache_key]
-        ppt_price = cached["ppt_price"]
-        ppt_low = cached["ppt_low"]
-        ppt_name = cached.get("ppt_name")
+        ppt_price = cached["ppt_price"] if cached else None
+        ppt_low = cached["ppt_low"] if cached else None
+        ppt_name = cached.get("ppt_name") if cached else None
 
         collectr_price = float(item.get("market_price") or 0)
         ppt_price_f = float(ppt_price) if ppt_price is not None else None
@@ -478,14 +495,27 @@ def refresh_session_prices(session_id):
             "ppt_low": float(ppt_low) if ppt_low is not None else None,
             "delta_pct": delta_pct,
             "significant": abs(delta_pct) > 10 if delta_pct is not None else False,
-            "error": cached.get("error"),
+            "error": cached.get("error") if cached else None,
+            "fetched": cached is not None,
         })
 
     succeeded = sum(1 for c in comparisons if c.get("ppt_market") is not None)
-    result = {"comparisons": comparisons, "count": len(comparisons), "succeeded": succeeded, "failed": len(comparisons) - succeeded}
-    if aborted:
-        result["aborted"] = True
-        result["abort_reason"] = abort_reason
+    next_offset = offset + fetched_count
+
+    result = {
+        "comparisons": comparisons,
+        "count": len(comparisons),
+        "succeeded": succeeded,
+        "failed": sum(1 for c in comparisons if c.get("fetched") and c.get("ppt_market") is None),
+        "pending": sum(1 for c in comparisons if not c.get("fetched")),
+        "total_unique": len(unique_lookups),
+        "fetched_this_batch": fetched_count,
+        "next_offset": next_offset,
+        "complete": next_offset >= len(unique_lookups),
+    }
+    if rate_limited:
+        result["rate_limited"] = True
+        result["retry_after"] = retry_after
     return jsonify(result)
 
 
