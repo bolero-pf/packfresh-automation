@@ -1622,8 +1622,9 @@
                     </tr></thead>
                     <tbody>${items.map(i => {
                         const found = i.in_store;
-                        const margin = found && i.store_price && i.offer_price
-                            ? ((i.store_price - i.offer_price) / i.store_price * 100).toFixed(1)
+                        const unitOffer = i.quantity > 0 ? (i.offer_price || 0) / i.quantity : 0;
+                        const margin = found && i.store_price && unitOffer
+                            ? ((i.store_price - unitOffer) / i.store_price * 100).toFixed(1)
                             : null;
                         const marginColor = margin !== null
                             ? (parseFloat(margin) > 30 ? 'var(--green)' : parseFloat(margin) > 15 ? 'var(--amber)' : 'var(--red)')
@@ -1633,7 +1634,7 @@
                                 ${i.product_name}
                                 ${found && i.store_title !== i.product_name ? `<br><small style="color:var(--text-dim);">Shopify: ${i.store_title}</small>` : ''}
                             </td>
-                            <td>$${(i.offer_price || 0).toFixed(2)} × ${i.quantity}</td>
+                            <td>$${unitOffer.toFixed(2)}${i.quantity > 1 ? ' × ' + i.quantity : ''}</td>
                             <td style="${found ? 'font-weight:600;' : ''}">
                                 ${found ? '$' + i.store_price.toFixed(2) : '<span style="color:var(--text-dim);">—</span>'}
                             </td>
