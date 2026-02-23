@@ -35,9 +35,11 @@ class ShopifyClient:
         if variables:
             payload["variables"] = variables
         resp = requests.post(self.endpoint, headers=self.headers, json=payload, timeout=30)
+        logger.info(f"Shopify GraphQL: status={resp.status_code}")
         resp.raise_for_status()
         body = resp.json()
         if "errors" in body:
+            logger.error(f"Shopify GraphQL errors: {body['errors']}")
             raise ShopifyError(f"GraphQL errors: {body['errors']}")
         return body.get("data", {})
 
@@ -94,7 +96,11 @@ class ShopifyClient:
                 node = edge["node"]
                 # Extract tcgplayer_id from metafields
                 tcg_id = None
-                for mf in node.get("metafields", {}).get("edges", []):
+                mf_edges = (node.get("metafields") or {}).get("edges", [])
+                if not products and not mf_edges:
+                    # Log first product's raw metafields for debugging
+                    logger.warning(f"First product '{node.get('title')}' has no metafield edges. Raw metafields: {node.get('metafields')}")
+                for mf in mf_edges:
                     if mf["node"]["key"] == "tcgplayer_id":
                         val = mf["node"]["value"]
                         # Handle JSON array format: ["12345"] or plain "12345"
@@ -103,6 +109,7 @@ class ShopifyClient:
                         try:
                             tcg_id = int(val) if val else None
                         except (ValueError, TypeError):
+                            logger.warning(f"Could not parse tcgplayer_id '{val}' for {node.get('title')}")
                             tcg_id = None
                         break
 

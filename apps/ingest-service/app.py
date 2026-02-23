@@ -1056,9 +1056,16 @@ def shopify_sync():
     if not shopify:
         return jsonify({"error": "Shopify not configured (set SHOPIFY_TOKEN + SHOPIFY_STORE)"}), 503
     try:
+        app.logger.info("Starting Shopify sync...")
         products = shopify.get_all_products()
+        app.logger.info(f"Shopify returned {len(products)} total variants")
         with_tcg = [p for p in products if p.get("tcgplayer_id")]
-        if not with_tcg:
+        app.logger.info(f"  {len(with_tcg)} have tcgplayer_id")
+        if products and not with_tcg:
+            # Log a sample to debug metafield issue
+            sample = products[:3]
+            for s in sample:
+                app.logger.info(f"  Sample product: {s.get('title')} tcg_id={s.get('tcgplayer_id')}")
             return jsonify({"synced": 0, "total_variants": len(products), "message": "No products with tcgplayer_id metafield found"})
         upserted = 0
         for p in with_tcg:
@@ -1080,6 +1087,7 @@ def shopify_sync():
             FROM shopify_product_cache spc
             WHERE sc.tcgplayer_id = spc.tcgplayer_id AND sc.shopify_product_id IS NULL
         """)
+        app.logger.info(f"Shopify sync complete: {upserted} upserted")
         return jsonify({"synced": upserted, "total_variants": len(products), "with_tcg_id": len(with_tcg)})
     except (ShopifyError, Exception) as e:
         app.logger.error(f"Shopify sync failed: {e}")
