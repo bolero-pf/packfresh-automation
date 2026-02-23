@@ -38,6 +38,7 @@ Endpoints:
 import os
 import hashlib
 import logging
+import time
 from decimal import Decimal, InvalidOperation
 
 from flask import Flask, request, jsonify, render_template, send_file
@@ -346,6 +347,7 @@ def refresh_session_prices(session_id):
     Returns a comparison: collectr_price vs ppt_price for each item.
     Does NOT auto-update prices — the user chooses which to accept.
     Deduplicates API calls: same tcgplayer_id only looked up once.
+    Rate-limit aware: pauses between API calls and retries on 429/HTML errors.
     """
     if not ppt:
         return jsonify({"error": "PPT API not configured"}), 503
@@ -355,6 +357,42 @@ def refresh_session_prices(session_id):
 
     # Deduplicate: group by (tcgplayer_id, product_type) to avoid redundant API calls
     price_cache = {}  # (tcg_id, product_type) -> {ppt_price, ppt_low}
+    api_call_count = 0
+    RATE_LIMIT_DELAY = 1.0       # seconds between API calls
+    RATE_LIMIT_BACKOFF = 5.0     # seconds to wait on rate-limit hit
+    MAX_RETRIES = 3              # retries per item on rate-limit
+
+    def fetch_ppt_price(tcg_id, ptype):
+        """Fetch price from PPT with retry logic for rate limits."""
+        nonlocal api_call_count
+        for attempt in range(MAX_RETRIES):
+            try:
+                if ptype == "sealed":
+                    return ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+                else:
+                    return ppt.get_card_by_tcgplayer_id(tcg_id)
+            except PPTError as e:
+                err_str = str(e).lower()
+                # Check for rate limit indicators (429, HTML response, etc.)
+                if "429" in err_str or "rate" in err_str or "too many" in err_str or "<" in str(e)[:5]:
+                    wait = RATE_LIMIT_BACKOFF * (attempt + 1)
+                    app.logger.warning(f"PPT rate limit hit for {tcg_id} (attempt {attempt+1}), waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+                else:
+                    app.logger.warning(f"Price refresh failed for {tcg_id}: {e}")
+                    return None
+            except Exception as e:
+                err_str = str(e)
+                # Catch JSON decode errors from HTML rate-limit pages
+                if "json" in err_str.lower() or "Expecting value" in err_str or "<!DOCTYPE" in err_str or "<html" in err_str:
+                    wait = RATE_LIMIT_BACKOFF * (attempt + 1)
+                    app.logger.warning(f"PPT returned non-JSON for {tcg_id} (attempt {attempt+1}), waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+                raise
+        app.logger.warning(f"PPT exhausted retries for {tcg_id}")
+        return None
 
     comparisons = []
     for item in linked:
@@ -363,38 +401,40 @@ def refresh_session_prices(session_id):
         cache_key = (tcg_id, ptype)
 
         if cache_key not in price_cache:
+            # Throttle: wait between unique API calls to stay under rate limit
+            if api_call_count > 0:
+                time.sleep(RATE_LIMIT_DELAY)
+            api_call_count += 1
+
             ppt_price = None
             ppt_low = None
             ppt_name = None
-            try:
-                if ptype == "sealed":
-                    ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
-                    if ppt_data:
-                        unopened = ppt_data.get("unopenedPrice")
-                        prices = ppt_data.get("prices") or {}
-                        if isinstance(prices, dict):
-                            prices_market = prices.get("market")
-                            prices_low = prices.get("low")
-                        else:
-                            prices_market = None
-                            prices_low = None
 
-                        ppt_price = unopened
-                        ppt_low = prices_low
-                        ppt_name = ppt_data.get("name")
-                        app.logger.info(
-                            f"PPT sealed {tcg_id}: name='{ppt_name}', "
-                            f"unopenedPrice={unopened}, prices.market={prices_market}, prices.low={prices_low}"
-                        )
+            ppt_data = fetch_ppt_price(tcg_id, ptype)
+            if ppt_data:
+                if ptype == "sealed":
+                    unopened = ppt_data.get("unopenedPrice")
+                    prices = ppt_data.get("prices") or {}
+                    if isinstance(prices, dict):
+                        prices_market = prices.get("market")
+                        prices_low = prices.get("low")
+                    else:
+                        prices_market = None
+                        prices_low = None
+
+                    ppt_price = unopened
+                    ppt_low = prices_low
+                    ppt_name = ppt_data.get("name")
+                    app.logger.info(
+                        f"PPT sealed {tcg_id}: name='{ppt_name}', "
+                        f"unopenedPrice={unopened}, prices.market={prices_market}, prices.low={prices_low}"
+                    )
                 else:
-                    ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
-                    if ppt_data:
-                        prices = ppt_data.get("prices", {})
-                        ppt_price = prices.get("market")
-                        ppt_low = prices.get("low")
-                        ppt_name = ppt_data.get("name")
-            except PPTError as e:
-                app.logger.warning(f"Price refresh failed for {tcg_id}: {e}")
+                    prices = ppt_data.get("prices", {})
+                    ppt_price = prices.get("market")
+                    ppt_low = prices.get("low")
+                    ppt_name = ppt_data.get("name")
+
             price_cache[cache_key] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name}
 
         cached = price_cache[cache_key]

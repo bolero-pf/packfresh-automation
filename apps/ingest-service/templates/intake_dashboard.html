@@ -643,8 +643,10 @@
             if (session.classList.contains('active')) { closeModal('session-modal'); return; }
         }
     });
-    // Click outside modal to close
+    // Click outside modal to close (only for mapping/relink modals — session & prompt require explicit close)
     document.querySelectorAll('.modal-overlay').forEach(overlay => {
+        if (overlay.id === 'themed-prompt-overlay') return; // only close via Cancel/Confirm/Escape
+        if (overlay.id === 'session-modal') return;          // only close via × button or Escape
         overlay.addEventListener('click', (e) => {
             if (e.target === overlay) {
                 overlay.classList.remove('active');
@@ -1432,7 +1434,7 @@
     async function refreshPrices(sessionId) {
         const panel = document.getElementById('price-refresh-results');
         if (!panel) return;
-        panel.innerHTML = '<div class="loading"><span class="spinner"></span> Fetching live PPT prices for all linked items...</div>';
+        panel.innerHTML = '<div class="loading"><span class="spinner"></span> Fetching live PPT prices (this may take a minute for large lists)...</div>';
 
         try {
             const r = await fetch(`/api/intake/session/${sessionId}/refresh-prices`, { method: 'POST' });
