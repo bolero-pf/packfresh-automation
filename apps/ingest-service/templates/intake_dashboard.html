@@ -1180,20 +1180,20 @@
                     html += '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">';
                     html += '<a href="/api/intake/session/' + sessionId + '/export-csv" class="btn btn-secondary btn-sm" style="font-size:0.8rem;">📋 Export CSV</a>';
 
-                    if (!['ingested','cancelled','rejected'].includes(s.status)) {
+                    if (s.status === 'in_progress') {
                         if (unmappedActive.length === 0 && activeItems.length > 0) {
-                            html += '<button class="btn btn-success" onclick="transitionSession(\\'' + sessionId + '\\', \\'offer\\')">📤 Lock & Offer (' + activeItems.length + ' items)</button>';
+                            html += "<button class=\"btn btn-success\" onclick=\"transitionSession('" + sessionId + "', 'offer')\">📤 Lock &amp; Offer (" + activeItems.length + " items)</button>";
                         }
                     } else if (s.status === 'offered') {
-                        html += '<button class="btn btn-success" onclick="transitionSession(\\'' + sessionId + '\\', \\'accept\\')">✅ Customer Accepted</button>';
-                        html += '<button class="btn btn-error" onclick="transitionSession(\\'' + sessionId + '\\', \\'reject\\')">❌ Customer Rejected</button>';
-                        html += '<button class="btn btn-secondary btn-sm" onclick="transitionSession(\\'' + sessionId + '\\', \\'reopen\\')">↩ Reopen for Edits</button>';
+                        html += "<button class=\"btn btn-success\" onclick=\"transitionSession('" + sessionId + "', 'accept')\">✅ Customer Accepted</button>";
+                        html += "<button class=\"btn btn-error\" onclick=\"transitionSession('" + sessionId + "', 'reject')\">❌ Customer Rejected</button>";
+                        html += "<button class=\"btn btn-secondary btn-sm\" onclick=\"transitionSession('" + sessionId + "', 'reopen')\">↩ Reopen for Edits</button>";
                     } else if (s.status === 'accepted') {
-                        html += '<button class="btn btn-success" onclick="transitionSession(\\'' + sessionId + '\\', \\'receive\\')">📦 Product Received</button>';
-                        html += '<button class="btn btn-secondary btn-sm" onclick="transitionSession(\\'' + sessionId + '\\', \\'reopen\\')">↩ Reopen for Edits</button>';
+                        html += "<button class=\"btn btn-success\" onclick=\"transitionSession('" + sessionId + "', 'receive')\">📦 Product Received</button>";
+                        html += "<button class=\"btn btn-secondary btn-sm\" onclick=\"transitionSession('" + sessionId + "', 'reopen')\">↩ Reopen for Edits</button>";
                     } else if (s.status === 'received') {
                         html += '<span style="color:var(--green); font-weight:600;">✅ Ready for Ingest Service</span>';
-                        html += '<button class="btn btn-secondary btn-sm" onclick="transitionSession(\\'' + sessionId + '\\', \\'reopen\\')">↩ Reopen for Edits</button>';
+                        html += "<button class=\"btn btn-secondary btn-sm\" onclick=\"transitionSession('" + sessionId + "', 'reopen')\">↩ Reopen for Edits</button>";
                     } else if (s.status === 'ingested') {
                         html += '<span style="color:var(--green); font-weight:600;">✅ Ingested</span>';
                     }
