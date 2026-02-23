@@ -49,6 +49,7 @@ from ppt_client import PPTClient, PPTError
 from collectr_parser import parse_collectr_csv
 from collectr_html_parser import parse_collectr_html
 from barcode_gen import generate_barcode_image
+from shopify_client import ShopifyClient, ShopifyError
 import intake
 
 # ==========================================
@@ -71,6 +72,16 @@ if PPT_API_KEY:
     app.logger.info("PPT client initialized")
 else:
     app.logger.warning("PPT_API_KEY not set — price lookups will be unavailable")
+
+# Initialize Shopify client (optional — for store inventory lookups)
+SHOPIFY_TOKEN = os.getenv("SHOPIFY_TOKEN")
+SHOPIFY_STORE = os.getenv("SHOPIFY_STORE")
+shopify: ShopifyClient | None = None
+if SHOPIFY_TOKEN and SHOPIFY_STORE:
+    shopify = ShopifyClient(SHOPIFY_TOKEN, SHOPIFY_STORE)
+    app.logger.info(f"Shopify client initialized for {SHOPIFY_STORE}")
+else:
+    app.logger.warning("SHOPIFY_TOKEN/SHOPIFY_STORE not set — store lookups unavailable")
 
 
 # Initialize DB pool on first request
@@ -347,7 +358,8 @@ def refresh_session_prices(session_id):
     Returns a comparison: collectr_price vs ppt_price for each item.
     Does NOT auto-update prices — the user chooses which to accept.
     Deduplicates API calls: same tcgplayer_id only looked up once.
-    Rate-limit aware: pauses between API calls and retries on 429/HTML errors.
+    No wrapper retries — ppt_client handles its own retries internally.
+    Aborts early on fatal errors (blocked key, daily limit).
     """
     if not ppt:
         return jsonify({"error": "PPT API not configured"}), 503
@@ -356,43 +368,9 @@ def refresh_session_prices(session_id):
     linked = [i for i in items if i.get("tcgplayer_id") and i.get("item_status", "good") in ("good", "damaged")]
 
     # Deduplicate: group by (tcgplayer_id, product_type) to avoid redundant API calls
-    price_cache = {}  # (tcg_id, product_type) -> {ppt_price, ppt_low}
-    api_call_count = 0
-    RATE_LIMIT_DELAY = 1.0       # seconds between API calls
-    RATE_LIMIT_BACKOFF = 5.0     # seconds to wait on rate-limit hit
-    MAX_RETRIES = 3              # retries per item on rate-limit
-
-    def fetch_ppt_price(tcg_id, ptype):
-        """Fetch price from PPT with retry logic for rate limits."""
-        nonlocal api_call_count
-        for attempt in range(MAX_RETRIES):
-            try:
-                if ptype == "sealed":
-                    return ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
-                else:
-                    return ppt.get_card_by_tcgplayer_id(tcg_id)
-            except PPTError as e:
-                err_str = str(e).lower()
-                # Check for rate limit indicators (429, HTML response, etc.)
-                if "429" in err_str or "rate" in err_str or "too many" in err_str or "<" in str(e)[:5]:
-                    wait = RATE_LIMIT_BACKOFF * (attempt + 1)
-                    app.logger.warning(f"PPT rate limit hit for {tcg_id} (attempt {attempt+1}), waiting {wait}s...")
-                    time.sleep(wait)
-                    continue
-                else:
-                    app.logger.warning(f"Price refresh failed for {tcg_id}: {e}")
-                    return None
-            except Exception as e:
-                err_str = str(e)
-                # Catch JSON decode errors from HTML rate-limit pages
-                if "json" in err_str.lower() or "Expecting value" in err_str or "<!DOCTYPE" in err_str or "<html" in err_str:
-                    wait = RATE_LIMIT_BACKOFF * (attempt + 1)
-                    app.logger.warning(f"PPT returned non-JSON for {tcg_id} (attempt {attempt+1}), waiting {wait}s...")
-                    time.sleep(wait)
-                    continue
-                raise
-        app.logger.warning(f"PPT exhausted retries for {tcg_id}")
-        return None
+    price_cache = {}  # (tcg_id, product_type) -> {ppt_price, ppt_low, ppt_name, error}
+    aborted = False
+    abort_reason = None
 
     comparisons = []
     for item in linked:
@@ -401,41 +379,59 @@ def refresh_session_prices(session_id):
         cache_key = (tcg_id, ptype)
 
         if cache_key not in price_cache:
-            # Throttle: wait between unique API calls to stay under rate limit
-            if api_call_count > 0:
-                time.sleep(RATE_LIMIT_DELAY)
-            api_call_count += 1
+            if aborted:
+                price_cache[cache_key] = {"ppt_price": None, "ppt_low": None, "ppt_name": None, "error": abort_reason}
+            else:
+                ppt_price = None
+                ppt_low = None
+                ppt_name = None
+                error = None
 
-            ppt_price = None
-            ppt_low = None
-            ppt_name = None
-
-            ppt_data = fetch_ppt_price(tcg_id, ptype)
-            if ppt_data:
-                if ptype == "sealed":
-                    unopened = ppt_data.get("unopenedPrice")
-                    prices = ppt_data.get("prices") or {}
-                    if isinstance(prices, dict):
-                        prices_market = prices.get("market")
-                        prices_low = prices.get("low")
+                try:
+                    if ptype == "sealed":
+                        ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
                     else:
-                        prices_market = None
-                        prices_low = None
+                        ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
 
-                    ppt_price = unopened
-                    ppt_low = prices_low
-                    ppt_name = ppt_data.get("name")
-                    app.logger.info(
-                        f"PPT sealed {tcg_id}: name='{ppt_name}', "
-                        f"unopenedPrice={unopened}, prices.market={prices_market}, prices.low={prices_low}"
-                    )
-                else:
-                    prices = ppt_data.get("prices", {})
-                    ppt_price = prices.get("market")
-                    ppt_low = prices.get("low")
-                    ppt_name = ppt_data.get("name")
+                    if ppt_data:
+                        if ptype == "sealed":
+                            unopened = ppt_data.get("unopenedPrice")
+                            prices = ppt_data.get("prices") or {}
+                            if isinstance(prices, dict):
+                                prices_market = prices.get("market")
+                                prices_low = prices.get("low")
+                            else:
+                                prices_market = None
+                                prices_low = None
+                            ppt_price = unopened
+                            ppt_low = prices_low
+                            ppt_name = ppt_data.get("name")
+                            app.logger.info(
+                                f"PPT sealed {tcg_id}: name='{ppt_name}', "
+                                f"unopenedPrice={unopened}, prices.market={prices_market}, prices.low={prices_low}"
+                            )
+                        else:
+                            prices = ppt_data.get("prices", {})
+                            ppt_price = prices.get("market")
+                            ppt_low = prices.get("low")
+                            ppt_name = ppt_data.get("name")
 
-            price_cache[cache_key] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name}
+                except PPTError as e:
+                    error = str(e)
+                    status = getattr(e, 'status_code', None)
+                    app.logger.warning(f"Price refresh failed for {tcg_id}: {e} (status={status})")
+                    # Abort on fatal errors — no point hammering a blocked/expired key
+                    if status == 403 or "blocked" in error.lower() or "abuse" in error.lower():
+                        aborted = True
+                        abort_reason = error
+                    elif status == 429 and "daily" in error.lower():
+                        aborted = True
+                        abort_reason = error
+                except Exception as e:
+                    error = str(e)
+                    app.logger.warning(f"Unexpected error refreshing {tcg_id}: {e}")
+
+                price_cache[cache_key] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name, "error": error}
 
         cached = price_cache[cache_key]
         ppt_price = cached["ppt_price"]
@@ -458,9 +454,15 @@ def refresh_session_prices(session_id):
             "ppt_low": float(ppt_low) if ppt_low is not None else None,
             "delta_pct": delta_pct,
             "significant": abs(delta_pct) > 10 if delta_pct is not None else False,
+            "error": cached.get("error"),
         })
 
-    return jsonify({"comparisons": comparisons, "count": len(comparisons)})
+    succeeded = sum(1 for c in comparisons if c.get("ppt_market") is not None)
+    result = {"comparisons": comparisons, "count": len(comparisons), "succeeded": succeeded, "failed": len(comparisons) - succeeded}
+    if aborted:
+        result["aborted"] = True
+        result["abort_reason"] = abort_reason
+    return jsonify(result)
 
 
 @app.route("/api/intake/update-item-price", methods=["POST"])
@@ -1042,6 +1044,104 @@ def _serialize(obj):
         else:
             out[k] = v
     return out
+
+
+# ==========================================
+# SHOPIFY STORE INTEGRATION
+# ==========================================
+
+@app.route("/api/shopify/sync", methods=["POST"])
+def shopify_sync():
+    """Sync all Shopify products with tcgplayer_id metafield into local cache."""
+    if not shopify:
+        return jsonify({"error": "Shopify not configured (set SHOPIFY_TOKEN + SHOPIFY_STORE)"}), 503
+    try:
+        products = shopify.get_all_products()
+        with_tcg = [p for p in products if p.get("tcgplayer_id")]
+        if not with_tcg:
+            return jsonify({"synced": 0, "total_variants": len(products), "message": "No products with tcgplayer_id metafield found"})
+        upserted = 0
+        for p in with_tcg:
+            db.execute("""
+                INSERT INTO shopify_product_cache
+                    (tcgplayer_id, shopify_product_id, shopify_variant_id,
+                     title, handle, sku, shopify_price, shopify_qty, status, last_synced)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (tcgplayer_id, shopify_variant_id)
+                DO UPDATE SET title = EXCLUDED.title, handle = EXCLUDED.handle, sku = EXCLUDED.sku,
+                    shopify_price = EXCLUDED.shopify_price, shopify_qty = EXCLUDED.shopify_qty,
+                    status = EXCLUDED.status, last_synced = CURRENT_TIMESTAMP
+            """, (p["tcgplayer_id"], p["shopify_product_id"], p["variant_id"],
+                  p["title"], p["handle"], p.get("sku"), p["shopify_price"], p["shopify_qty"], p.get("status", "ACTIVE")))
+            upserted += 1
+        # Backfill sealed_cogs linkage
+        db.execute("""
+            UPDATE sealed_cogs sc SET shopify_product_id = spc.shopify_product_id
+            FROM shopify_product_cache spc
+            WHERE sc.tcgplayer_id = spc.tcgplayer_id AND sc.shopify_product_id IS NULL
+        """)
+        return jsonify({"synced": upserted, "total_variants": len(products), "with_tcg_id": len(with_tcg)})
+    except (ShopifyError, Exception) as e:
+        app.logger.error(f"Shopify sync failed: {e}")
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/api/shopify/status")
+def shopify_status():
+    """Check Shopify integration status and cache stats."""
+    configured = shopify is not None
+    cache_count = 0
+    last_sync = None
+    if configured:
+        try:
+            row = db.query_one("SELECT COUNT(*) as cnt, MAX(last_synced) as last_sync FROM shopify_product_cache")
+            if row:
+                cache_count = row["cnt"]
+                last_sync = row["last_sync"].isoformat() if row["last_sync"] else None
+        except Exception:
+            pass  # Table might not exist yet
+    return jsonify({"configured": configured, "store": SHOPIFY_STORE if configured else None,
+                    "cache_count": cache_count, "last_sync": last_sync})
+
+
+@app.route("/api/shopify/session/<session_id>/store-check")
+def shopify_session_store_check(session_id):
+    """Check Shopify cache for inventory/price of all mapped items in a session."""
+    items = intake.get_session_items(session_id)
+    linked = [i for i in items if i.get("tcgplayer_id")]
+    tcg_ids = list(set(i["tcgplayer_id"] for i in linked))
+    if not tcg_ids:
+        return jsonify({"items": [], "cache_hit_rate": 0})
+    placeholders = ",".join(["%s"] * len(tcg_ids))
+    try:
+        cache_rows = db.query(f"SELECT * FROM shopify_product_cache WHERE tcgplayer_id IN ({placeholders})", tuple(tcg_ids))
+    except Exception:
+        return jsonify({"error": "Shopify cache table not found. Run the migration first, then sync."}), 500
+    cache_map = {}
+    for r in cache_rows:
+        tcg = r["tcgplayer_id"]
+        if tcg not in cache_map:
+            cache_map[tcg] = {"title": r["title"], "handle": r["handle"],
+                              "shopify_price": float(r["shopify_price"]) if r["shopify_price"] else None,
+                              "shopify_qty": 0, "shopify_product_id": r["shopify_product_id"],
+                              "status": r["status"], "last_synced": r["last_synced"].isoformat() if r["last_synced"] else None}
+        cache_map[tcg]["shopify_qty"] += (r["shopify_qty"] or 0)
+    result_items = []
+    for item in linked:
+        tcg_id = item["tcgplayer_id"]
+        sd = cache_map.get(tcg_id)
+        result_items.append({
+            "item_id": item["id"], "product_name": item.get("product_name"), "tcgplayer_id": tcg_id,
+            "offer_price": float(item.get("offer_price") or 0), "market_price": float(item.get("market_price") or 0),
+            "quantity": item.get("quantity", 1), "in_store": sd is not None,
+            "store_title": sd["title"] if sd else None, "store_price": sd["shopify_price"] if sd else None,
+            "store_qty": sd["shopify_qty"] if sd else None, "store_handle": sd["handle"] if sd else None,
+            "store_product_id": sd["shopify_product_id"] if sd else None,
+        })
+    hit = sum(1 for i in result_items if i["in_store"])
+    return jsonify({"items": result_items, "total": len(result_items), "in_store": hit,
+                    "not_in_store": len(result_items) - hit,
+                    "cache_hit_rate": round(hit / len(result_items) * 100, 1) if result_items else 0})
 
 
 # ==========================================

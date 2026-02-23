@@ -1,0 +1,139 @@
+"""
+Shopify GraphQL client for the ingest service.
+Queries store products by TCGPlayer ID metafield to check inventory and pricing.
+
+Env vars:
+    SHOPIFY_TOKEN  — Admin API access token
+    SHOPIFY_STORE  — Store domain (e.g., my-store.myshopify.com)
+"""
+
+import os
+import time
+import logging
+import requests
+
+logger = logging.getLogger(__name__)
+
+
+class ShopifyClient:
+    """Lightweight Shopify Admin GraphQL client."""
+
+    def __init__(self, token: str, store: str, api_version: str = "2025-10"):
+        self.token = token
+        self.store = store
+        self.endpoint = f"https://{store}/admin/api/{api_version}/graphql.json"
+        self.headers = {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": token,
+        }
+
+    # ─── Low-level GraphQL ──────────────────────────────────────────
+
+    def _gql(self, query: str, variables: dict = None) -> dict:
+        """Execute a GraphQL query and return the data payload."""
+        payload = {"query": query}
+        if variables:
+            payload["variables"] = variables
+        resp = requests.post(self.endpoint, headers=self.headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        body = resp.json()
+        if "errors" in body:
+            raise ShopifyError(f"GraphQL errors: {body['errors']}")
+        return body.get("data", {})
+
+    # ─── Fetch all products with TCG metafields ─────────────────────
+
+    def get_all_products(self, batch_size: int = 100) -> list[dict]:
+        """
+        Paginate through all store products, returning a flat list with:
+            product_gid, title, handle, variant_id, shopify_price,
+            shopify_qty, sku, tcgplayer_id, inventory_item_id
+        Mirrors the price_updater's get_shopify_products() structure.
+        """
+        query = """
+        query getProducts($first: Int!, $cursor: String) {
+          products(first: $first, after: $cursor) {
+            pageInfo { hasNextPage }
+            edges {
+              cursor
+              node {
+                id
+                title
+                handle
+                status
+                variants(first: 10) {
+                  edges {
+                    node {
+                      id
+                      price
+                      sku
+                      inventoryQuantity
+                      inventoryItem { id }
+                    }
+                  }
+                }
+                metafields(namespace: "tcg", first: 5) {
+                  edges {
+                    node { key value }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        products = []
+        cursor = None
+        has_next = True
+
+        while has_next:
+            data = self._gql(query, {"first": batch_size, "cursor": cursor})
+            edges = data["products"]["edges"]
+
+            for edge in edges:
+                node = edge["node"]
+                # Extract tcgplayer_id from metafields
+                tcg_id = None
+                for mf in node.get("metafields", {}).get("edges", []):
+                    if mf["node"]["key"] == "tcgplayer_id":
+                        val = mf["node"]["value"]
+                        # Handle JSON array format: ["12345"] or plain "12345"
+                        if isinstance(val, str) and val.startswith("["):
+                            val = val.strip("[]").replace('"', '').replace("'", '')
+                        try:
+                            tcg_id = int(val) if val else None
+                        except (ValueError, TypeError):
+                            tcg_id = None
+                        break
+
+                for var_edge in node["variants"]["edges"]:
+                    variant = var_edge["node"]
+                    inv_item_id = None
+                    if variant.get("inventoryItem"):
+                        inv_item_id = variant["inventoryItem"]["id"].split("/")[-1]
+
+                    products.append({
+                        "product_gid": node["id"],
+                        "shopify_product_id": int(node["id"].split("/")[-1]),
+                        "title": node["title"],
+                        "handle": node["handle"],
+                        "status": node.get("status", "ACTIVE"),
+                        "variant_id": int(variant["id"].split("/")[-1]),
+                        "shopify_price": float(variant["price"]),
+                        "shopify_qty": variant["inventoryQuantity"],
+                        "sku": variant.get("sku"),
+                        "inventory_item_id": inv_item_id,
+                        "tcgplayer_id": tcg_id,
+                    })
+
+            has_next = data["products"]["pageInfo"]["hasNextPage"]
+            if has_next:
+                cursor = edges[-1]["cursor"]
+                time.sleep(0.3)  # respect rate limits
+
+        logger.info(f"Fetched {len(products)} variants from Shopify")
+        return products
+
+
+class ShopifyError(Exception):
+    pass

@@ -984,15 +984,26 @@
                         <button class="btn btn-secondary btn-sm" onclick="refreshPrices('${sessionId}')">
                             🔄 Refresh PPT Prices
                         </button>
+                        <button class="btn btn-secondary btn-sm" onclick="storeCheck('${sessionId}')">
+                            🏪 Store Check
+                        </button>
                         <button class="btn btn-sm" style="background:var(--red); color:#fff;" 
                                 onclick="cancelSession('${sessionId}')">
                             ✕ Cancel Session
                         </button>
                     </div>
-                ` : ''}
+                ` : `
+                    <div style="margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn btn-secondary btn-sm" onclick="storeCheck('${sessionId}')">
+                            🏪 Store Check
+                        </button>
+                    </div>
+                `}
 
                 <!-- Price comparison results go here -->
                 <div id="price-refresh-results"></div>
+                <!-- Store check results go here -->
+                <div id="store-check-results"></div>
 
                 ${s.status === 'in_progress' && (s.session_type === 'sealed' || s.session_type === 'mixed') ? `
                     <div style="margin-bottom:16px; padding:12px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
@@ -1448,9 +1459,19 @@
             }
 
             const sigCount = comps.filter(c => c.significant).length;
+            const failCount = d.failed || 0;
+            let headerHtml = '';
+            if (d.aborted) {
+                headerHtml = `<div class="alert alert-error">⚠ ${d.abort_reason || 'PPT API error — refresh aborted'}. ${d.succeeded || 0} of ${d.count} items fetched.</div>`;
+            } else if (failCount > 0) {
+                headerHtml = `<div class="alert alert-warning">⚠ ${failCount} item(s) failed to fetch. ${sigCount > 0 ? sigCount + ' have >10% price difference.' : ''}</div>`;
+            } else if (sigCount > 0) {
+                headerHtml = `<div class="alert alert-warning">⚠ ${sigCount} item(s) have >10% price difference</div>`;
+            } else {
+                headerHtml = `<div class="alert alert-success">All prices are within 10% of PPT</div>`;
+            }
             panel.innerHTML = `
-                ${sigCount > 0 ? `<div class="alert alert-warning">⚠ ${sigCount} item(s) have >10% price difference</div>` : 
-                                  `<div class="alert alert-success">All prices are within 10% of PPT</div>`}
+                ${headerHtml}
                 <div style="overflow-x:auto; margin-bottom:16px;">
                 <table>
                     <thead><tr>
@@ -1464,17 +1485,19 @@
                     <tbody>${comps.map(c => {
                         const delta = c.delta_pct;
                         const sig = c.significant;
+                        const hasError = c.error && c.ppt_market == null;
                         const deltaColor = sig ? (delta > 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
                         const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
-                        return `<tr style="${sig ? 'background:rgba(255,180,0,0.06);' : ''}">
+                        return `<tr style="${hasError ? 'background:rgba(255,60,60,0.06);' : sig ? 'background:rgba(255,180,0,0.06);' : ''}">
                             <td>
                                 ${c.product_name}
                                 <br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small>
                                 ${c.ppt_name && c.ppt_name !== c.product_name ? `<br><small style="color:var(--amber);">⚠ PPT: ${c.ppt_name}</small>` : ''}
+                                ${hasError ? `<br><small style="color:var(--red);">✕ ${c.error}</small>` : ''}
                             </td>
                             <td>$${c.collectr_price.toFixed(2)}</td>
                             <td style="${sig ? 'font-weight:700; color:var(--accent);' : ''}">
-                                ${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : '—'}
+                                ${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : hasError ? '<span style="color:var(--red);">Error</span>' : '—'}
                             </td>
                             <td>${c.ppt_low != null ? '$' + c.ppt_low.toFixed(2) : '—'}</td>
                             <td style="color:${deltaColor}; font-weight:${sig ? '700' : '400'};">
@@ -1544,6 +1567,129 @@
             } catch(e) { /* stats update is best-effort */ }
         } catch(err) { alert(err.message); }
     }
+
+    // ═══════════════════════════════ SHOPIFY STORE CHECK ═══════════════════════════════
+
+    async function storeCheck(sessionId) {
+        const panel = document.getElementById('store-check-results');
+        if (!panel) return;
+        panel.innerHTML = '<div class="loading"><span class="spinner"></span> Checking store inventory...</div>';
+
+        try {
+            const r = await fetch(`/api/shopify/session/${sessionId}/store-check`);
+            const d = await r.json();
+            if (!r.ok) {
+                if (r.status === 503) {
+                    panel.innerHTML = `<div class="alert alert-warning">Shopify not configured. Set SHOPIFY_TOKEN and SHOPIFY_STORE env vars.</div>`;
+                } else {
+                    panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`;
+                }
+                return;
+            }
+
+            const items = d.items || [];
+            if (!items.length) {
+                panel.innerHTML = '<div class="alert alert-warning">No mapped items to check.</div>';
+                return;
+            }
+
+            const inStoreCount = d.in_store || 0;
+            const notInStore = d.not_in_store || 0;
+
+            panel.innerHTML = `
+                <div style="margin-bottom:12px;">
+                    <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+                        <span class="badge badge-blue" style="font-size:0.85rem; padding:4px 10px;">
+                            🏪 ${inStoreCount} in store
+                        </span>
+                        <span class="badge" style="font-size:0.85rem; padding:4px 10px; background:var(--surface-2);">
+                            ${notInStore} not found
+                        </span>
+                        <button class="btn btn-secondary btn-sm" onclick="shopifySync()" style="font-size:0.75rem;">
+                            ↻ Refresh Shopify Cache
+                        </button>
+                    </div>
+                </div>
+                <div style="overflow-x:auto;">
+                <table>
+                    <thead><tr>
+                        <th>Product</th>
+                        <th>Offer</th>
+                        <th>Store Price</th>
+                        <th>Store Qty</th>
+                        <th>Margin</th>
+                        <th></th>
+                    </tr></thead>
+                    <tbody>${items.map(i => {
+                        const found = i.in_store;
+                        const margin = found && i.store_price && i.offer_price
+                            ? ((i.store_price - i.offer_price) / i.store_price * 100).toFixed(1)
+                            : null;
+                        const marginColor = margin !== null
+                            ? (parseFloat(margin) > 30 ? 'var(--green)' : parseFloat(margin) > 15 ? 'var(--amber)' : 'var(--red)')
+                            : 'var(--text-dim)';
+                        return `<tr style="${!found ? 'opacity:0.6;' : ''}">
+                            <td>
+                                ${i.product_name}
+                                ${found && i.store_title !== i.product_name ? `<br><small style="color:var(--text-dim);">Shopify: ${i.store_title}</small>` : ''}
+                            </td>
+                            <td>$${(i.offer_price || 0).toFixed(2)} × ${i.quantity}</td>
+                            <td style="${found ? 'font-weight:600;' : ''}">
+                                ${found ? '$' + i.store_price.toFixed(2) : '<span style="color:var(--text-dim);">—</span>'}
+                            </td>
+                            <td>
+                                ${found
+                                    ? '<span style="font-weight:600; color:' + (i.store_qty > 0 ? 'var(--green)' : 'var(--red)') + ';">'
+                                        + i.store_qty + '</span>'
+                                    : '<span style="color:var(--text-dim);">—</span>'}
+                            </td>
+                            <td style="color:${marginColor}; font-weight:${margin !== null ? '600' : '400'};">
+                                ${margin !== null ? margin + '%' : '—'}
+                            </td>
+                            <td>
+                                ${found && i.store_handle
+                                    ? '<a href="https://' + (window.__shopifyStore || '') + '/products/' + i.store_handle + '"'
+                                      + ' target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px;">'
+                                      + 'View ↗</a>'
+                                    : ''}
+                            </td>
+                        </tr>`;
+                    }).join('')}</tbody>
+                </table>
+                </div>
+            `;
+        } catch(err) {
+            panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    async function shopifySync() {
+        const panel = document.getElementById('store-check-results');
+        if (panel) panel.innerHTML = '<div class="loading"><span class="spinner"></span> Syncing from Shopify (this may take a minute)...</div>';
+        try {
+            const r = await fetch('/api/shopify/sync', { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok) {
+                if (panel) panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`;
+                return;
+            }
+            if (panel) panel.innerHTML = `<div class="alert alert-success">
+                Synced ${d.synced} products from Shopify (${d.with_tcg_id} with TCGPlayer ID out of ${d.total_variants} total variants).
+                Click <strong>🏪 Store Check</strong> again to refresh the table.
+            </div>`;
+        } catch(err) {
+            if (panel) panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    // Fetch shopify store domain for product links
+    (async function() {
+        try {
+            const r = await fetch('/api/shopify/status');
+            const d = await r.json();
+            if (d.store) window.__shopifyStore = d.store;
+        } catch(e) {}
+    })();
 
     // ═══════════════════════════════ ADD SEALED ITEM TO EXISTING SESSION ═══════════════════════════════
 
