@@ -410,6 +410,15 @@ def refresh_session_prices(session_id):
     for idx in range(offset, len(unique_lookups)):
         tcg_id, ptype = unique_lookups[idx]
 
+        # Check rate limit BEFORE making the request — never trigger a 429
+        if ppt.should_throttle():
+            rate_info = ppt.get_rate_limit_info()
+            retry_after = rate_info.get("retry_after") or 60
+            rate_limited = True
+            app.logger.info(f"PPT throttle: minute_remaining={rate_info['minute_remaining']}, "
+                            f"pausing at offset {idx} (fetched {fetched_count}), retry in {retry_after}s")
+            break
+
         ppt_price = None
         ppt_low = None
         ppt_name = None
@@ -445,16 +454,15 @@ def refresh_session_prices(session_id):
         except PPTError as e:
             status_code = getattr(e, 'status_code', None)
             if status_code == 429:
-                # Rate limited — stop here, tell frontend when to continue
+                # Shouldn't happen since we check should_throttle, but handle gracefully
                 body = getattr(e, 'body', {}) or {}
                 retry_after = body.get("retry_after", 60) if isinstance(body, dict) else 60
                 rate_limited = True
-                app.logger.info(f"PPT rate limited after {fetched_count} fetches, retry in {retry_after}s")
+                app.logger.warning(f"PPT 429 despite throttle check — pausing at {idx}, retry in {retry_after}s")
                 break
             elif status_code == 403:
                 error = str(e)
                 app.logger.warning(f"PPT 403 for {tcg_id}: {e}")
-                # Fatal — stop all
                 price_cache[(tcg_id, ptype)] = {"ppt_price": None, "ppt_low": None, "ppt_name": None, "error": error}
                 rate_limited = True
                 retry_after = None

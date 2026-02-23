@@ -89,6 +89,53 @@ class PPTClient:
     def __init__(self, api_key: str, base_url: str = "https://www.pokemonpricetracker.com/api"):
         self.base_url = base_url.rstrip("/")
         self.headers = {**DEFAULT_HEADERS, "Authorization": f"Bearer {api_key}"}
+        # Rate limit tracking — updated after every response
+        self.minute_remaining = None
+        self.minute_reset = None      # epoch timestamp
+        self.daily_remaining = None
+
+    def get_rate_limit_info(self) -> dict:
+        """Return current rate limit state."""
+        retry_after = None
+        if self.minute_reset:
+            try:
+                retry_after = max(0, int(self.minute_reset - time.time()))
+            except (ValueError, TypeError):
+                retry_after = 60
+        return {
+            "minute_remaining": self.minute_remaining,
+            "daily_remaining": self.daily_remaining,
+            "retry_after": retry_after,
+        }
+
+    def should_throttle(self) -> bool:
+        """Return True if caller should NOT make another request right now."""
+        if self.minute_remaining is not None and self.minute_remaining <= 1:
+            return True
+        if self.daily_remaining is not None and self.daily_remaining <= 0:
+            return True
+        return False
+
+    def _update_rate_limits(self, r):
+        """Read rate limit headers from response."""
+        mr = r.headers.get("X-Ratelimit-Minute-Remaining")
+        if mr is not None:
+            try:
+                self.minute_remaining = int(mr)
+            except (ValueError, TypeError):
+                pass
+        reset = r.headers.get("X-Ratelimit-Minute-Reset")
+        if reset:
+            try:
+                self.minute_reset = float(reset)
+            except (ValueError, TypeError):
+                pass
+        dr = r.headers.get("X-RateLimit-Daily-Remaining")
+        if dr is not None:
+            try:
+                self.daily_remaining = int(dr)
+            except (ValueError, TypeError):
+                pass
 
     # ── request engine ───────────────────────────────────────────────
 
@@ -105,9 +152,11 @@ class PPTClient:
                 time.sleep(min(1.0 * attempt, 3.0))
                 continue
 
+            self._update_rate_limits(r)
+
             logger.info(f"PPT response: status={r.status_code} "
-                        f"daily_remaining={r.headers.get('X-RateLimit-Daily-Remaining','?')} "
-                        f"minute_remaining={r.headers.get('X-Ratelimit-Minute-Remaining','?')}")
+                        f"daily_remaining={self.daily_remaining} "
+                        f"minute_remaining={self.minute_remaining}")
 
             if r.status_code < 400:
                 data = r.json()
@@ -118,19 +167,8 @@ class PPTClient:
                 return data
 
             if r.status_code == 429:
-                # Extract retry-after info and fail immediately — caller handles pacing
-                reset = r.headers.get("X-Ratelimit-Minute-Reset")
-                retry_after = None
-                if reset:
-                    try:
-                        retry_after = max(0, int(float(reset) - time.time()))
-                    except (ValueError, TypeError):
-                        retry_after = 60  # safe default
-                else:
-                    retry_after = 60
-
-                daily_remaining = r.headers.get("X-RateLimit-Daily-Remaining")
-                if daily_remaining and int(daily_remaining) <= 0:
+                retry_after = self.get_rate_limit_info()["retry_after"] or 60
+                if self.daily_remaining is not None and self.daily_remaining <= 0:
                     raise PPTError("PPT daily limit reached", 429, {"retry_after": retry_after, "daily_exhausted": True})
                 raise PPTError(f"PPT rate limited — retry in {retry_after}s", 429, {"retry_after": retry_after})
 
