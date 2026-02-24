@@ -1311,41 +1311,89 @@ def shopify_status():
 
 @app.route("/api/shopify/session/<session_id>/store-check")
 def shopify_session_store_check(session_id):
-    """Check Shopify cache for inventory/price of all mapped items in a session."""
+    """Check Shopify cache for inventory/price of all mapped items in a session.
+    Damaged items look for damaged variants first, then fall back to 88% of normal price."""
+    DAMAGED_DISCOUNT = 0.88  # We sell damaged at 12% off
+
     items = intake.get_session_items(session_id)
     linked = [i for i in items if i.get("tcgplayer_id")]
     tcg_ids = list(set(i["tcgplayer_id"] for i in linked))
     if not tcg_ids:
         return jsonify({"items": [], "cache_hit_rate": 0})
     placeholders = ",".join(["%s"] * len(tcg_ids))
+
     try:
-        cache_rows = db.query(
-            f"SELECT * FROM shopify_product_cache WHERE tcgplayer_id IN ({placeholders}) AND (is_damaged IS NULL OR is_damaged = FALSE)",
+        # Fetch ALL variants (both damaged and non-damaged) for these tcgplayer_ids
+        all_rows = db.query(
+            f"SELECT * FROM shopify_product_cache WHERE tcgplayer_id IN ({placeholders})",
             tuple(tcg_ids)
         )
     except Exception:
         return jsonify({"error": "Shopify cache table not found. Run the migration first, then sync."}), 500
-    cache_map = {}
-    for r in cache_rows:
+
+    # Build separate maps for normal and damaged variants
+    normal_map = {}   # tcg_id -> {title, handle, shopify_price, shopify_qty, ...}
+    damaged_map = {}  # tcg_id -> {title, handle, shopify_price, shopify_qty, ...}
+
+    for r in all_rows:
         tcg = r["tcgplayer_id"]
-        if tcg not in cache_map:
-            cache_map[tcg] = {"title": r["title"], "handle": r["handle"],
-                              "shopify_price": float(r["shopify_price"]) if r["shopify_price"] else None,
-                              "shopify_qty": 0, "shopify_product_id": r["shopify_product_id"],
-                              "status": r["status"], "last_synced": r["last_synced"].isoformat() if r["last_synced"] else None}
-        cache_map[tcg]["shopify_qty"] += (r["shopify_qty"] or 0)
+        is_dmg = r.get("is_damaged") or False
+        target = damaged_map if is_dmg else normal_map
+
+        if tcg not in target:
+            target[tcg] = {
+                "title": r["title"], "handle": r["handle"],
+                "shopify_price": float(r["shopify_price"]) if r["shopify_price"] else None,
+                "shopify_qty": 0, "shopify_product_id": r["shopify_product_id"],
+                "status": r["status"],
+                "last_synced": r["last_synced"].isoformat() if r["last_synced"] else None,
+                "is_damaged": is_dmg,
+            }
+        target[tcg]["shopify_qty"] += (r["shopify_qty"] or 0)
+
     result_items = []
     for item in linked:
         tcg_id = item["tcgplayer_id"]
-        sd = cache_map.get(tcg_id)
+        item_status = item.get("item_status", "good")
+        is_damaged_item = (item_status == "damaged")
+
+        sd = None
+        damaged_variant_exists = tcg_id in damaged_map
+        normal_variant = normal_map.get(tcg_id)
+        store_note = None
+
+        if is_damaged_item:
+            if damaged_variant_exists:
+                # Best case: we have a damaged listing in the store
+                sd = damaged_map[tcg_id]
+                store_note = "Matched damaged variant"
+            elif normal_variant and normal_variant["shopify_price"]:
+                # Fallback: use normal price × 88%
+                sd = {
+                    **normal_variant,
+                    "shopify_price": round(normal_variant["shopify_price"] * DAMAGED_DISCOUNT, 2),
+                    "shopify_qty": 0,  # we don't have damaged stock
+                    "title": normal_variant["title"] + " [est. damaged]",
+                    "is_damaged": True,
+                }
+                store_note = f"No damaged variant — estimated at {int(DAMAGED_DISCOUNT*100)}% of ${normal_variant['shopify_price']:.2f}"
+            # else: sd stays None — not in store at all
+        else:
+            # Normal item — use non-damaged variant
+            sd = normal_variant
+
         result_items.append({
             "item_id": item["id"], "product_name": item.get("product_name"), "tcgplayer_id": tcg_id,
             "offer_price": float(item.get("offer_price") or 0), "market_price": float(item.get("market_price") or 0),
-            "quantity": item.get("quantity", 1), "in_store": sd is not None,
+            "quantity": item.get("quantity", 1), "item_status": item_status,
+            "in_store": sd is not None,
             "store_title": sd["title"] if sd else None, "store_price": sd["shopify_price"] if sd else None,
             "store_qty": sd["shopify_qty"] if sd else None, "store_handle": sd["handle"] if sd else None,
             "store_product_id": sd["shopify_product_id"] if sd else None,
+            "damaged_variant_exists": damaged_variant_exists if is_damaged_item else None,
+            "store_note": store_note,
         })
+
     hit = sum(1 for i in result_items if i["in_store"])
     return jsonify({"items": result_items, "total": len(result_items), "in_store": hit,
                     "not_in_store": len(result_items) - hit,

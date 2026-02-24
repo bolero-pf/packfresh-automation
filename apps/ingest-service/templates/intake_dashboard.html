@@ -1799,6 +1799,7 @@
         if (_storeFilter === 'not_in_store') filtered = notInStore;
         else if (_storeFilter === 'restock') filtered = zeroQty;
         else if (_storeFilter === 'negative_margin') filtered = enriched.filter(i => i.margin !== null && i.margin < 0);
+        else if (_storeFilter === 'needs_listing') filtered = enriched.filter(i => i.item_status === 'damaged' && !i.damaged_variant_exists);
 
         const filterBtn = (id, label, count) => {
             const active = _storeFilter === id;
@@ -1819,6 +1820,7 @@
                 ${filterBtn('not_in_store', 'Not in Store', notInStore.length)}
                 ${filterBtn('restock', 'Will Restock', zeroQty.length)}
                 ${filterBtn('negative_margin', 'Negative Margin', enriched.filter(i => i.margin !== null && i.margin < 0).length)}
+                ${filterBtn('needs_listing', 'Needs Listing', enriched.filter(i => i.item_status === 'damaged' && !i.damaged_variant_exists).length)}
                 <button class="btn btn-secondary btn-sm" onclick="shopifySync()" style="font-size:0.75rem; margin-left:auto;">↻ Refresh Cache</button>
             </div>
 
@@ -1837,6 +1839,8 @@
                         <td>
                             ${i.product_name}
                             ${found && i.store_title !== i.product_name ? '<br><small style="color:var(--text-dim);">Shopify: ' + i.store_title + '</small>' : ''}
+                            ${i.store_note ? '<br><small style="color:var(--amber);">⚠ ' + i.store_note + '</small>' : ''}
+                            ${i.item_status === 'damaged' ? '<br><span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>' + (!i.damaged_variant_exists ? ' <span class="badge" style="background:var(--red);color:#fff;font-size:0.65rem;">Needs Listing</span>' : '') : ''}
                         </td>
                         <td>$${i.unitOffer.toFixed(2)}${i.quantity > 1 ? ' × ' + i.quantity : ''}</td>
                         <td style="${found ? 'font-weight:600;' : ''}">
