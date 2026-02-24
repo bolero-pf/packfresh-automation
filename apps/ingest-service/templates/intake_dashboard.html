@@ -1116,12 +1116,12 @@
                                                 btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
                                             }
                                             btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button><div class="action-dropdown">';
-                                            btns += status !== 'damaged' ? `<button onclick="markItemStatus('${i.id}','${sessionId}','damaged')">Mark Damaged</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
+                                            btns += status !== 'damaged' ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">Mark Damaged</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
                                             btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','missing')">Mark Missing</button>`;
                                             btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','rejected')">Reject</button><hr>`;
                                             btns += `<button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price||0})">Override Price</button>`;
                                             btns += `<button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">Change Qty (${i.quantity})</button>`;
-                                            if (i.quantity > 1) btns += `<button onclick="splitItem('${i.id}','${sessionId}')">Split Item</button>`;
+                                            if (i.quantity > 1) btns += `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">Split (Damage Partial)</button>`;
                                             btns += '</div></div>';
                                         }
                                         return btns;
@@ -1990,9 +1990,13 @@
         // Close dropdown
         document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
 
-        const labels = { damaged: 'Mark Damaged', missing: 'Mark Missing', rejected: 'Reject', good: 'Mark Good' };
+        // Damaged has its own flow with 15% price reduction
+        if (newStatus === 'damaged') {
+            return damageItem(itemId, sessionId, 1);
+        }
+
+        const labels = { missing: 'Mark Missing', rejected: 'Reject', good: 'Mark Good' };
         const messages = {
-            damaged: 'This item will be marked as damaged. Offer price stays but it will be flagged.',
             missing: 'This item will be excluded from payment and Shopify push.',
             rejected: 'Seller kept this item. It will be excluded from payment.',
             good: 'Restore this item to good status?',
