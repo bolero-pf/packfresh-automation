@@ -956,9 +956,19 @@
     }
 
     // ═══════════════════════════════ VIEW SESSION ═══════════════════════════════
+
+    function switchSessionTab(btn, tabId) {
+        const parent = btn.closest('#session-modal-body');
+        if (!parent) return;
+        parent.querySelectorAll('[data-stab]').forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+        parent.querySelectorAll('.session-tab-content').forEach(c => c.style.display = 'none');
+        const target = document.getElementById('stab-' + tabId);
+        if (target) target.style.display = '';
+    }
+
     async function viewSession(sessionId) {
         currentSessionId = sessionId;
-        // Also refresh raw tab items table if this is the active raw session
         if (rawSessionId && sessionId === rawSessionId) {
             loadRawSessionItems();
         }
@@ -971,6 +981,7 @@
             const d = await r.json();
             const s = d.session;
             const items = d.items;
+            const editable = !['ingested','cancelled','rejected'].includes(s.status);
 
             body.innerHTML = `
                 <div class="stats">
@@ -981,7 +992,7 @@
                         <div class="stat-label">Offer %</div>
                         <div class="stat-value" style="display:flex; align-items:center; gap:8px;">
                             <span id="offer-pct-display">${s.offer_percentage}%</span>
-                            ${!['ingested','cancelled','rejected'].includes(s.status) ? `
+                            ${editable ? `
                                 <button class="btn btn-sm btn-secondary" style="font-size:0.75rem; padding:2px 8px;" 
                                         onclick="editOfferPct('${sessionId}', ${s.offer_percentage})">Edit</button>
                             ` : ''}
@@ -990,163 +1001,138 @@
                     <div class="stat"><div class="stat-label">Offer Total</div><div class="stat-value">$${(s.total_offer_amount || 0).toFixed(2)}</div></div>
                 </div>
 
-                ${!['ingested','cancelled','rejected'].includes(s.status) ? `
-                    <div style="margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;">
-                        <button class="btn btn-secondary btn-sm" onclick="refreshPrices('${sessionId}')">
-                            🔄 Refresh PPT Prices
-                        </button>
-                        <button class="btn btn-secondary btn-sm" onclick="storeCheck('${sessionId}')">
-                            🏪 Store Check
-                        </button>
-                        <button class="btn btn-sm" style="background:var(--red); color:#fff;" 
-                                onclick="cancelSession('${sessionId}')">
-                            ✕ Cancel Session
-                        </button>
-                    </div>
-                ` : `
-                    <div style="margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;">
-                        <button class="btn btn-secondary btn-sm" onclick="storeCheck('${sessionId}')">
-                            🏪 Store Check
-                        </button>
-                    </div>
-                `}
-
-                <!-- Price comparison results go here -->
-                <div id="price-refresh-results"></div>
-                <!-- Store check results go here -->
-                <div id="store-check-results"></div>
-
-                ${!['ingested','cancelled','rejected'].includes(s.status) && (s.session_type === 'sealed' || s.session_type === 'mixed') ? `
-                    <div style="margin-bottom:16px; padding:12px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
-                        <h4 style="margin-bottom:10px; font-size:0.95rem;">➕ Add Sealed Item</h4>
-                        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
-                            <div class="form-group" style="flex:2; min-width:180px; margin:0;">
-                                <label>Search PPT</label>
-                                <input type="text" id="session-sealed-search" placeholder="e.g. Celebrations Elite Trainer Box"
-                                       onkeydown="if(event.key==='Enter') searchSealedForSession('${sessionId}', ${s.offer_percentage})">
-                            </div>
-                            <div class="form-group" style="width:60px; margin:0;">
-                                <label>Qty</label>
-                                <input type="number" id="session-sealed-qty" value="1" min="1">
-                            </div>
-                            <button class="btn btn-primary btn-sm" onclick="searchSealedForSession('${sessionId}', ${s.offer_percentage})">Search</button>
-                        </div>
-                        <div id="session-sealed-results" style="margin-top:8px;"></div>
-                    </div>
-                ` : ''}
-
-                ${(s.unmapped_count || 0) > 0 ? `<div class="alert alert-warning">${s.unmapped_count} items need linking before finalization</div>` : ''}
-
-                <div style="overflow-x:auto;">
-                <table>
-                    <thead><tr>
-                        <th>Product</th>${s.session_type === 'raw' ? '<th>Cond</th>' : ''}<th>Qty</th><th>Market</th><th>Offer</th><th>Status</th><th>Actions</th>
-                    </tr></thead>
-                    <tbody>${items.map(i => {
-                        const status = i.item_status || 'good';
-                        const isDead = status === 'missing' || status === 'rejected';
-                        const isDamaged = status === 'damaged';
-                        const rowStyle = isDead ? 'opacity:0.45; text-decoration:line-through;' 
-                                       : isDamaged ? 'background:rgba(255,170,0,0.08);' : '';
-                        const statusBadge = status === 'good' 
-                            ? (i.is_mapped ? `<span class="badge badge-green">Linked</span><br><small style="color:var(--text-dim);">TCG#${i.tcgplayer_id}</small>` : '<span class="badge badge-amber">Needs Link</span>')
-                            : status === 'damaged' ? `<span class="badge" style="background:#b45309;color:#fff;">Damaged</span>${i.is_mapped ? '<br><small style="color:var(--text-dim);">TCG#'+i.tcgplayer_id+'</small>' : ''}`
-                            : status === 'missing' ? '<span class="badge" style="background:#666;color:#fff;">Missing</span>'
-                            : '<span class="badge" style="background:#666;color:#fff;">Rejected</span>';
-                        const overrideNote = i.price_override_note ? `<br><small style="color:var(--accent);" title="${(i.price_override_note||'').replace(/"/g,'&quot;')}">⚡ ${i.price_override_note}</small>` : '';
-                        const parentNote = i.parent_item_id ? '<br><small style="color:var(--text-dim);">↳ split from above</small>' : '';
-                        
-                        return `<tr style="${rowStyle}">
-                            <td>
-                                ${i.product_name}
-                                ${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}
-                                ${overrideNote}${parentNote}
-                            </td>
-                            ${s.session_type === 'raw' ? `<td><span class="badge badge-blue">${i.condition || i.listing_condition || '—'}</span></td>` : ''}
-                            <td>${i.quantity}</td>
-                            <td>$${(i.market_price || 0).toFixed(2)}</td>
-                            <td>$${(i.offer_price || 0).toFixed(2)}</td>
-                            <td>${statusBadge}</td>
-                            <td style="white-space:nowrap;">
-                                ${!['ingested','cancelled','rejected'].includes(s.status) ? (() => {
-                                    let btns = '';
-                                    if (isDead) {
-                                        btns += `<button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="restoreItem('${i.id}','${sessionId}')">Restore</button>`;
-                                    } else {
-                                        // Link/Relink button — always show
-                                        const linkLabel = i.is_mapped ? 'Relink' : 'Link';
-                                        const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
-                                        if (s.session_type === 'raw') {
-                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${s.offer_percentage})">${linkLabel}</button> `;
-                                        } else {
-                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" data-item-id="${i.id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-set="${(i.set_name||'').replace(/"/g,'&quot;')}" data-type="${i.product_type||'sealed'}" data-price="${i.market_price||0}" onclick="openMapping(this.dataset.itemId, this.dataset.name, this.dataset.set, this.dataset.type, parseFloat(this.dataset.price))">${linkLabel}</button> `;
-                                        }
-                                        // Action dropdown
-                                        btns += `<div style="display:inline-block; position:relative;">
-                                            <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" 
-                                                    onclick="toggleActionMenu(this)">⋮</button>
-                                            <div class="action-dropdown">
-                                                ${s.session_type === 'raw' ? `
-                                                    <button onclick="editCondition('${i.id}','${sessionId}','${i.condition || 'NM'}')">🏷 Edit Condition</button>
-                                                ` : `
-                                                    ${!isDamaged ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">🔨 Damage</button>` : ''}
-                                                `}
-                                                <button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price})">💰 Override Price</button>
-                                                <button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">✏ Edit Qty</button>
-                                                ${s.session_type !== 'raw' ? `
-                                                    <button onclick="markMissing('${i.id}','${sessionId}')">❌ Missing</button>
-                                                    <button onclick="markRejected('${i.id}','${sessionId}')">🚫 Rejected</button>
-                                                ` : ''}
-                                                <hr>
-                                                <button style="color:var(--red);" onclick="deleteItem('${i.id}','${sessionId}')">🗑 Delete</button>
-                                            </div>
-                                        </div>`;
-                                    }
-                                    return btns;
-                                })() : (i.is_mapped ? `<small style="color:var(--text-dim);">ID: ${i.tcgplayer_id}</small>` : '')}
-                            </td>
-                        </tr>`;
-                    }).join('')}</tbody>
-                </table>
+                <!-- Session Sub-tabs -->
+                <div style="display:flex; gap:2px; margin-bottom:16px; border-bottom:1px solid var(--border);">
+                    <button class="tab active" data-stab="offer" onclick="switchSessionTab(this,'offer')">📋 Offer</button>
+                    <button class="tab" data-stab="ppt" onclick="switchSessionTab(this,'ppt'); if(!document.getElementById('stab-ppt').dataset.loaded){ refreshPrices('${sessionId}'); document.getElementById('stab-ppt').dataset.loaded='1'; }">💰 PPT Prices</button>
+                    <button class="tab" data-stab="store" onclick="switchSessionTab(this,'store'); if(!document.getElementById('stab-store').dataset.loaded){ storeCheck('${sessionId}'); document.getElementById('stab-store').dataset.loaded='1'; }">🏪 Store</button>
                 </div>
 
-                ${!['ingested','cancelled','rejected'].includes(s.status) && s.session_type === 'raw' ? `
-                    <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
-                        <h4 style="margin-bottom:10px;">➕ Add Card</h4>
-                        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
-                            <div class="form-group" style="flex:2; min-width:140px; margin:0;">
-                                <label>Card Name</label>
-                                <input type="text" id="session-raw-search" placeholder="e.g. Charizard ex"
-                                       onkeydown="if(event.key==='Enter') searchCardsForSession('${sessionId}', ${s.offer_percentage})">
-                            </div>
-                            <div class="form-group" style="flex:1; min-width:100px; margin:0;">
-                                <label>Set (optional)</label>
-                                <input type="text" id="session-raw-set" placeholder="e.g. Paldean Fates">
-                            </div>
-                            <div class="form-group" style="width:90px; margin:0;">
-                                <label>TCG ID</label>
-                                <input type="number" id="session-raw-tcgid" placeholder="optional"
-                                       onkeydown="if(event.key==='Enter') lookupByTcgId('${sessionId}', ${s.offer_percentage}, 'session')">
-                            </div>
-                            <div class="form-group" style="width:70px; margin:0;">
-                                <label>Cond</label>
-                                <select id="session-raw-condition">
-                                    <option value="NM">NM</option>
-                                    <option value="LP">LP</option>
-                                    <option value="MP">MP</option>
-                                    <option value="HP">HP</option>
-                                    <option value="DMG">DMG</option>
-                                </select>
-                            </div>
-                            <div class="form-group" style="width:50px; margin:0;">
-                                <label>Qty</label>
-                                <input type="number" id="session-raw-qty" value="1" min="1">
-                            </div>
-                            <button class="btn btn-primary btn-sm" onclick="smartCardSearch('${sessionId}', ${s.offer_percentage}, 'session')">Search</button>
+                <!-- ═══ OFFER TAB ═══ -->
+                <div id="stab-offer" class="session-tab-content">
+                    ${editable ? `
+                        <div style="margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap;">
+                            <button class="btn btn-sm" style="background:var(--red); color:#fff;" onclick="cancelSession('${sessionId}')">✕ Cancel Session</button>
                         </div>
-                        <div id="session-raw-results" style="margin-top:8px;"></div>
+                    ` : ''}
+
+                    ${(s.unmapped_count || 0) > 0 ? `<div class="alert alert-warning" style="margin-bottom:12px;">${s.unmapped_count} items need linking</div>` : ''}
+
+                    ${editable && (s.session_type === 'sealed' || s.session_type === 'mixed') ? `
+                        <div style="margin-bottom:16px; padding:12px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
+                            <h4 style="margin-bottom:10px; font-size:0.95rem;">➕ Add Sealed Item</h4>
+                            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+                                <div class="form-group" style="flex:2; min-width:180px; margin:0;">
+                                    <label>Search PPT</label>
+                                    <input type="text" id="session-sealed-search" placeholder="e.g. Celebrations ETB"
+                                           onkeydown="if(event.key==='Enter') searchSealedForSession('${sessionId}', ${s.offer_percentage})">
+                                </div>
+                                <div class="form-group" style="width:60px; margin:0;">
+                                    <label>Qty</label>
+                                    <input type="number" id="session-sealed-qty" value="1" min="1">
+                                </div>
+                                <button class="btn btn-primary btn-sm" onclick="searchSealedForSession('${sessionId}', ${s.offer_percentage})">Search</button>
+                            </div>
+                            <div id="session-sealed-results" style="margin-top:8px;"></div>
+                        </div>
+                    ` : ''}
+
+                    ${editable && s.session_type === 'raw' ? `
+                        <div style="margin-bottom:16px; padding:12px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
+                            <h4 style="margin-bottom:10px; font-size:0.95rem;">➕ Add Raw Card</h4>
+                            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+                                <div class="form-group" style="flex:2; min-width:160px; margin:0;">
+                                    <label>Card Search</label>
+                                    <input type="text" id="session-raw-search" placeholder="e.g. Charizard ex"
+                                           onkeydown="if(event.key==='Enter') smartCardSearch('${sessionId}', ${s.offer_percentage}, 'session')">
+                                </div>
+                                <div class="form-group" style="flex:1; min-width:120px; margin:0;">
+                                    <label>Set</label>
+                                    <input type="text" id="session-raw-set" placeholder="optional">
+                                </div>
+                                <div class="form-group" style="width:70px; margin:0;">
+                                    <label>Cond</label>
+                                    <select id="session-raw-condition">
+                                        <option value="NM">NM</option><option value="LP">LP</option><option value="MP">MP</option><option value="HP">HP</option><option value="DMG">DMG</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" style="width:50px; margin:0;">
+                                    <label>Qty</label>
+                                    <input type="number" id="session-raw-qty" value="1" min="1">
+                                </div>
+                                <button class="btn btn-primary btn-sm" onclick="smartCardSearch('${sessionId}', ${s.offer_percentage}, 'session')">Search</button>
+                            </div>
+                            <div id="session-raw-results" style="margin-top:8px;"></div>
+                        </div>
+                    ` : ''}
+
+                    <div style="overflow-x:auto;">
+                    <table>
+                        <thead><tr>
+                            <th>Product</th>${s.session_type === 'raw' ? '<th>Cond</th>' : ''}<th>Qty</th><th>Market</th><th>Offer</th><th>Status</th><th>Actions</th>
+                        </tr></thead>
+                        <tbody>${items.map(i => {
+                            const status = i.item_status || 'good';
+                            const isDead = status === 'missing' || status === 'rejected';
+                            const isDamaged = status === 'damaged';
+                            const rowStyle = isDead ? 'opacity:0.45; text-decoration:line-through;' : isDamaged ? 'background:rgba(255,170,0,0.08);' : '';
+                            const statusBadge = status === 'good' 
+                                ? (i.is_mapped ? `<span class="badge badge-green">Linked</span><br><small style="color:var(--text-dim);">TCG#${i.tcgplayer_id}</small>` : '<span class="badge badge-amber">Needs Link</span>')
+                                : status === 'damaged' ? `<span class="badge" style="background:#b45309;color:#fff;">Damaged</span>${i.is_mapped ? '<br><small style="color:var(--text-dim);">TCG#'+i.tcgplayer_id+'</small>' : ''}`
+                                : status === 'missing' ? '<span class="badge" style="background:#666;color:#fff;">Missing</span>'
+                                : '<span class="badge" style="background:#666;color:#fff;">Rejected</span>';
+                            const overrideNote = i.price_override_note ? `<br><small style="color:var(--accent);" title="${(i.price_override_note||'').replace(/"/g,'&quot;')}">⚡ ${i.price_override_note}</small>` : '';
+                            const parentNote = i.parent_item_id ? '<br><small style="color:var(--text-dim);">↳ split from above</small>' : '';
+                            return `<tr style="${rowStyle}">
+                                <td>${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}</td>
+                                ${s.session_type === 'raw' ? `<td><span class="badge badge-blue">${i.condition || i.listing_condition || '—'}</span></td>` : ''}
+                                <td>${i.quantity}</td>
+                                <td>$${(i.market_price || 0).toFixed(2)}</td>
+                                <td>$${(i.offer_price || 0).toFixed(2)}</td>
+                                <td>${statusBadge}</td>
+                                <td style="white-space:nowrap;">
+                                    ${editable ? (() => {
+                                        let btns = '';
+                                        if (isDead) {
+                                            btns += `<button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="restoreItem('${i.id}','${sessionId}')">Restore</button>`;
+                                        } else {
+                                            const linkLabel = i.is_mapped ? 'Relink' : 'Link';
+                                            const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
+                                            if (s.session_type === 'raw') {
+                                                btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${s.offer_percentage})">${linkLabel}</button> `;
+                                            } else {
+                                                btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
+                                            }
+                                            btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'block\'?\'none\':\'block\'">⋯</button><div class="action-dropdown" style="display:none;">';
+                                            btns += status !== 'damaged' ? `<button onclick="markItemStatus('${i.id}','${sessionId}','damaged')">Mark Damaged</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
+                                            btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','missing')">Mark Missing</button>`;
+                                            btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','rejected')">Reject</button><hr>`;
+                                            btns += `<button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price||0})">Override Price</button>`;
+                                            if (i.quantity > 1) btns += `<button onclick="splitItem('${i.id}','${sessionId}')">Split Item</button>`;
+                                            btns += '</div></div>';
+                                        }
+                                        return btns;
+                                    })() : ''}
+                                </td>
+                            </tr>`;
+                        }).join('')}</tbody>
+                    </table>
                     </div>
-                ` : ''}
+                </div>
+
+                <!-- ═══ PPT PRICES TAB ═══ -->
+                <div id="stab-ppt" class="session-tab-content" style="display:none;">
+                    <div id="price-refresh-results">
+                        <p style="color:var(--text-dim); text-align:center; padding:40px;">Loading PPT prices...</p>
+                    </div>
+                </div>
+
+                <!-- ═══ STORE CHECK TAB ═══ -->
+                <div id="stab-store" class="session-tab-content" style="display:none;">
+                    <div id="store-check-results">
+                        <p style="color:var(--text-dim); text-align:center; padding:40px;">Loading store data...</p>
+                    </div>
+                </div>
 
                 ${s.status === 'cancelled' || s.status === 'rejected' ? `
                     <div class="alert alert-error" style="margin-top:16px;">
@@ -1160,12 +1146,8 @@
                     const excluded = items.filter(i => i.item_status === 'missing' || i.item_status === 'rejected');
                     let html = '';
                     if (excluded.length > 0) {
-                        html += `<div style="margin-top:12px;color:var(--text-dim);font-size:0.85rem;">
-                            ${excluded.length} item(s) excluded (missing/rejected)
-                        </div>`;
+                        html += '<div style="margin-top:12px;color:var(--text-dim);font-size:0.85rem;">' + excluded.length + ' item(s) excluded (missing/rejected)</div>';
                     }
-
-                    // Status timestamps
                     const timestamps = [];
                     if (s.offered_at) timestamps.push('Offered: ' + new Date(s.offered_at).toLocaleString());
                     if (s.accepted_at) timestamps.push('Accepted: ' + new Date(s.accepted_at).toLocaleString());
@@ -1175,11 +1157,8 @@
                     if (timestamps.length > 0) {
                         html += '<div style="margin-top:12px;font-size:0.8rem;color:var(--text-dim);">' + timestamps.join(' · ') + '</div>';
                     }
-
-                    // CSV export — always available
                     html += '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">';
                     html += '<a href="/api/intake/session/' + sessionId + '/export-csv" class="btn btn-secondary btn-sm" style="font-size:0.8rem;">📋 Export CSV</a>';
-
                     if (s.status === 'in_progress') {
                         if (unmappedActive.length === 0 && activeItems.length > 0) {
                             html += "<button class=\"btn btn-success\" onclick=\"transitionSession('" + sessionId + "', 'offer')\">📤 Lock &amp; Offer (" + activeItems.length + " items)</button>";
@@ -1197,7 +1176,6 @@
                     } else if (s.status === 'ingested') {
                         html += '<span style="color:var(--green); font-weight:600;">✅ Ingested</span>';
                     }
-
                     html += '</div>';
                     return html;
                 })()}
@@ -1658,6 +1636,10 @@
 
     // ═══════════════════════════════ SHOPIFY STORE CHECK ═══════════════════════════════
 
+    // Store check state for filtering
+    let _storeCheckData = null;
+    let _storeFilter = 'all';
+
     async function storeCheck(sessionId) {
         const panel = document.getElementById('store-check-results');
         if (!panel) return;
@@ -1675,81 +1657,115 @@
                 return;
             }
 
-            const items = d.items || [];
-            if (!items.length) {
-                panel.innerHTML = '<div class="alert alert-warning">No mapped items to check.</div>';
-                return;
-            }
-
-            const inStoreCount = d.in_store || 0;
-            const notInStore = d.not_in_store || 0;
-
-            panel.innerHTML = `
-                <div style="margin-bottom:12px;">
-                    <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
-                        <span class="badge badge-blue" style="font-size:0.85rem; padding:4px 10px;">
-                            🏪 ${inStoreCount} in store
-                        </span>
-                        <span class="badge" style="font-size:0.85rem; padding:4px 10px; background:var(--surface-2);">
-                            ${notInStore} not found
-                        </span>
-                        <button class="btn btn-secondary btn-sm" onclick="shopifySync()" style="font-size:0.75rem;">
-                            ↻ Refresh Shopify Cache
-                        </button>
-                    </div>
-                </div>
-                <div style="overflow-x:auto;">
-                <table>
-                    <thead><tr>
-                        <th>Product</th>
-                        <th>Offer</th>
-                        <th>Store Price</th>
-                        <th>Store Qty</th>
-                        <th>Margin</th>
-                        <th></th>
-                    </tr></thead>
-                    <tbody>${items.map(i => {
-                        const found = i.in_store;
-                        const unitOffer = i.quantity > 0 ? (i.offer_price || 0) / i.quantity : 0;
-                        const margin = found && i.store_price && unitOffer
-                            ? ((i.store_price - unitOffer) / i.store_price * 100).toFixed(1)
-                            : null;
-                        const marginColor = margin !== null
-                            ? (parseFloat(margin) > 30 ? 'var(--green)' : parseFloat(margin) > 15 ? 'var(--amber)' : 'var(--red)')
-                            : 'var(--text-dim)';
-                        return `<tr style="${!found ? 'opacity:0.6;' : ''}">
-                            <td>
-                                ${i.product_name}
-                                ${found && i.store_title !== i.product_name ? `<br><small style="color:var(--text-dim);">Shopify: ${i.store_title}</small>` : ''}
-                            </td>
-                            <td>$${unitOffer.toFixed(2)}${i.quantity > 1 ? ' × ' + i.quantity : ''}</td>
-                            <td style="${found ? 'font-weight:600;' : ''}">
-                                ${found ? '$' + i.store_price.toFixed(2) : '<span style="color:var(--text-dim);">—</span>'}
-                            </td>
-                            <td>
-                                ${found
-                                    ? '<span style="font-weight:600; color:' + (i.store_qty > 0 ? 'var(--green)' : 'var(--red)') + ';">'
-                                        + i.store_qty + '</span>'
-                                    : '<span style="color:var(--text-dim);">—</span>'}
-                            </td>
-                            <td style="color:${marginColor}; font-weight:${margin !== null ? '600' : '400'};">
-                                ${margin !== null ? margin + '%' : '—'}
-                            </td>
-                            <td>
-                                ${found && i.store_handle
-                                    ? '<a href="https://' + (window.__shopifyStore || '') + '/products/' + i.store_handle + '"'
-                                      + ' target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px;">'
-                                      + 'View ↗</a>'
-                                    : ''}
-                            </td>
-                        </tr>`;
-                    }).join('')}</tbody>
-                </table>
-                </div>
-            `;
+            _storeCheckData = { items: d.items || [], sessionId: sessionId };
+            _storeFilter = 'all';
+            renderStoreCheck();
         } catch(err) {
             panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
+    }
+
+    function renderStoreCheck() {
+        const panel = document.getElementById('store-check-results');
+        if (!panel || !_storeCheckData) return;
+        const items = _storeCheckData.items;
+        const sessionId = _storeCheckData.sessionId;
+
+        if (!items.length) {
+            panel.innerHTML = '<div class="alert alert-warning">No mapped items to check.</div>';
+            return;
+        }
+
+        // Compute per-item unit offer and margin
+        const enriched = items.map(i => {
+            const unitOffer = i.quantity > 0 ? (i.offer_price || 0) / i.quantity : 0;
+            const margin = i.in_store && i.store_price && unitOffer > 0
+                ? ((i.store_price - unitOffer) / i.store_price * 100)
+                : null;
+            return { ...i, unitOffer, margin };
+        });
+
+        // Stats
+        const inStore = enriched.filter(i => i.in_store);
+        const notInStore = enriched.filter(i => !i.in_store);
+        const zeroQty = inStore.filter(i => i.store_qty === 0);
+        const withMargin = inStore.filter(i => i.margin !== null);
+
+        const totalOfferValue = enriched.reduce((s, i) => s + (i.offer_price || 0), 0);
+        const totalStoreValue = inStore.reduce((s, i) => s + (i.store_price || 0) * (i.quantity || 1), 0);
+        const assumedMarginPct = notInStore.length > 0 ? 22 : 0; // fallback for unmatched
+        const notInStoreOffer = notInStore.reduce((s, i) => s + (i.offer_price || 0), 0);
+        const notInStoreRevenue = notInStoreOffer / 0.78; // assume 78% offer = ~22% margin
+        const totalRevenue = totalStoreValue + notInStoreRevenue;
+        const grossMarginPct = totalOfferValue > 0 ? ((totalRevenue - totalOfferValue) / totalRevenue * 100) : 0;
+        const avgMargin = withMargin.length > 0 ? withMargin.reduce((s, i) => s + i.margin, 0) / withMargin.length : 0;
+
+        // Filter
+        let filtered = enriched;
+        if (_storeFilter === 'not_in_store') filtered = notInStore;
+        else if (_storeFilter === 'restock') filtered = zeroQty;
+        else if (_storeFilter === 'negative_margin') filtered = enriched.filter(i => i.margin !== null && i.margin < 0);
+
+        const filterBtn = (id, label, count) => {
+            const active = _storeFilter === id;
+            return `<button class="btn btn-sm ${active ? 'btn-primary' : 'btn-secondary'}" style="font-size:0.75rem;padding:3px 8px;" onclick="_storeFilter='${id}'; renderStoreCheck();">${label} (${count})</button>`;
+        };
+
+        panel.innerHTML = `
+            <div class="stats" style="margin-bottom:12px;">
+                <div class="stat"><div class="stat-label">In Store</div><div class="stat-value" style="color:var(--green);">${inStore.length}</div></div>
+                <div class="stat"><div class="stat-label">Not Found</div><div class="stat-value" style="color:${notInStore.length > 0 ? 'var(--red)' : 'var(--text-dim)'};">${notInStore.length}</div></div>
+                <div class="stat"><div class="stat-label">Restock (qty=0)</div><div class="stat-value">${zeroQty.length}</div></div>
+                <div class="stat"><div class="stat-label">Store Value</div><div class="stat-value">$${totalStoreValue.toFixed(0)}</div></div>
+                <div class="stat"><div class="stat-label">Est. Gross Margin</div><div class="stat-value" style="color:${grossMarginPct > 20 ? 'var(--green)' : grossMarginPct > 10 ? 'var(--amber)' : 'var(--red)'};">${grossMarginPct.toFixed(1)}%</div></div>
+            </div>
+
+            <div style="display:flex; gap:4px; flex-wrap:wrap; margin-bottom:12px;">
+                ${filterBtn('all', 'All', enriched.length)}
+                ${filterBtn('not_in_store', 'Not in Store', notInStore.length)}
+                ${filterBtn('restock', 'Will Restock', zeroQty.length)}
+                ${filterBtn('negative_margin', 'Negative Margin', enriched.filter(i => i.margin !== null && i.margin < 0).length)}
+                <button class="btn btn-secondary btn-sm" onclick="shopifySync()" style="font-size:0.75rem; margin-left:auto;">↻ Refresh Cache</button>
+            </div>
+
+            <div style="overflow-x:auto;">
+            <table>
+                <thead><tr>
+                    <th>Product</th><th>Offer/Unit</th><th>Store Price</th><th>Store Qty</th><th>Margin</th><th></th>
+                </tr></thead>
+                <tbody>${filtered.map(i => {
+                    const found = i.in_store;
+                    const margin = i.margin;
+                    const marginColor = margin !== null
+                        ? (margin > 30 ? 'var(--green)' : margin > 15 ? 'var(--amber)' : 'var(--red)')
+                        : 'var(--text-dim)';
+                    return `<tr style="${!found ? 'opacity:0.6;' : ''}">
+                        <td>
+                            ${i.product_name}
+                            ${found && i.store_title !== i.product_name ? '<br><small style="color:var(--text-dim);">Shopify: ' + i.store_title + '</small>' : ''}
+                        </td>
+                        <td>$${i.unitOffer.toFixed(2)}${i.quantity > 1 ? ' × ' + i.quantity : ''}</td>
+                        <td style="${found ? 'font-weight:600;' : ''}">
+                            ${found ? '$' + i.store_price.toFixed(2) : '<span style="color:var(--text-dim);">—</span>'}
+                        </td>
+                        <td>
+                            ${found
+                                ? '<span style="font-weight:600; color:' + (i.store_qty > 0 ? 'var(--green)' : 'var(--red)') + ';">' + i.store_qty + '</span>'
+                                : '<span style="color:var(--text-dim);">—</span>'}
+                        </td>
+                        <td style="color:${marginColor}; font-weight:${margin !== null ? '600' : '400'};">
+                            ${margin !== null ? margin.toFixed(1) + '%' : '—'}
+                        </td>
+                        <td>
+                            ${found && i.store_handle
+                                ? '<a href="https://' + (window.__shopifyStore || '') + '/products/' + i.store_handle + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px;">View ↗</a>'
+                                : ''}
+                        </td>
+                    </tr>`;
+                }).join('')}</tbody>
+            </table>
+            </div>
+        `;
     }
 
     async function shopifySync() {
