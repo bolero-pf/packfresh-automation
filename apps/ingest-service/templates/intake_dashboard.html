@@ -1460,6 +1460,10 @@
     // ═══════════════════════════════ REFRESH PRICES ═══════════════════════════════
     // Accumulated PPT price results across batches
     let _pptResults = {};  // keyed by item_id
+    let _pptAllComps = []; // ordered list from last response
+    let _pptMeta = {};     // total_unique, complete, etc
+    let _pptFilter = 'all';
+    let _pptSessionId = null;
 
     async function refreshPrices(sessionId, offset) {
         offset = offset || 0;
@@ -1492,83 +1496,24 @@
                 if (c.fetched) {
                     _pptResults[c.item_id] = c;
                 } else if (!_pptResults[c.item_id]) {
-                    // Keep unfetched placeholder only if we don't already have it
                     _pptResults[c.item_id] = c;
                 }
             }
 
-            // Build full list preserving order from server
-            const allItems = comps.map(c => _pptResults[c.item_id] || c);
-            const fetchedItems = allItems.filter(c => c.fetched);
-            const totalUnique = d.total_unique || 0;
-            const fetchedCount = fetchedItems.length;
-            const pct = totalUnique > 0 ? Math.round(fetchedCount / totalUnique * 100) : 0;
-
-            let statusHtml = '';
-            if (d.rate_limited && d.retry_after && !d.complete) {
-                statusHtml = `<div class="alert alert-warning" id="ppt-countdown">
-                    ⏳ Pausing for rate limit — auto-continuing in <strong id="ppt-wait">${d.retry_after}</strong>s
-                    (${fetchedCount}/${totalUnique} unique products fetched)
-                </div>`;
-            } else if (d.complete) {
-                const sigCount = fetchedItems.filter(c => c.significant).length;
-                const failCount = fetchedItems.filter(c => c.ppt_market == null && c.error).length;
-                if (failCount > 0) {
-                    statusHtml = `<div class="alert alert-warning">⚠ ${failCount} failed. ${sigCount > 0 ? sigCount + ' have >10% diff.' : ''} (${fetchedCount}/${totalUnique})</div>`;
-                } else if (sigCount > 0) {
-                    statusHtml = `<div class="alert alert-warning">⚠ ${sigCount} item(s) have >10% price difference</div>`;
-                } else {
-                    statusHtml = `<div class="alert alert-success">✅ All ${fetchedCount} prices within 10% of PPT</div>`;
-                }
-            } else {
-                statusHtml = `<div class="alert" style="background:var(--surface-2);">
-                    <div style="display:flex; align-items:center; gap:12px;">
-                        <span class="spinner"></span> Fetching... ${fetchedCount}/${totalUnique} (${pct}%)
-                    </div>
-                </div>`;
-            }
-
-            const progressHtml = `<div style="height:4px;background:var(--surface-2);border-radius:2px;margin-bottom:12px;overflow:hidden;">
-                <div style="height:100%;width:${pct}%;background:var(--accent);transition:width 0.3s;"></div>
-            </div>`;
-
-            const tableHtml = fetchedItems.length ? `
-                <div style="overflow-x:auto; margin-bottom:16px;">
-                <table>
-                    <thead><tr>
-                        <th>Product</th><th>Current</th><th>PPT Price</th><th>PPT Low</th><th>Delta</th><th></th>
-                    </tr></thead>
-                    <tbody>${fetchedItems.map(c => {
-                        const delta = c.delta_pct;
-                        const sig = c.significant;
-                        const hasError = c.error && c.ppt_market == null;
-                        const deltaColor = sig ? (delta > 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
-                        const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
-                        return `<tr style="${hasError ? 'background:rgba(255,60,60,0.06);' : sig ? 'background:rgba(255,180,0,0.06);' : ''}">
-                            <td>${c.product_name}<br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small>
-                                ${c.ppt_name && c.ppt_name !== c.product_name ? '<br><small style="color:var(--amber);">⚠ PPT: ' + c.ppt_name + '</small>' : ''}
-                                ${hasError ? '<br><small style="color:var(--red);">✕ ' + c.error + '</small>' : ''}
-                            </td>
-                            <td>$${c.collectr_price.toFixed(2)}</td>
-                            <td style="${sig ? 'font-weight:700; color:var(--accent);' : ''}">
-                                ${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : hasError ? '<span style="color:var(--red);">Error</span>' : '—'}
-                            </td>
-                            <td>${c.ppt_low != null ? '$' + c.ppt_low.toFixed(2) : '—'}</td>
-                            <td style="color:${deltaColor}; font-weight:${sig ? '700' : '400'};">
-                                ${delta != null ? arrow + ' ' + Math.abs(delta).toFixed(1) + '%' : '—'}
-                            </td>
-                            <td>${c.ppt_market != null ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="applyPptPrice(\'' + c.item_id + '\', \'' + sessionId + '\', ' + c.ppt_market + ', this)">Apply</button>' : ''}</td>
-                        </tr>`;
-                    }).join('')}</tbody>
-                </table>
-                </div>
-            ` : '';
-
-            panel.innerHTML = statusHtml + progressHtml + tableHtml;
+            _pptAllComps = comps;
+            _pptSessionId = sessionId;
+            _pptMeta = {
+                total_unique: d.total_unique || 0,
+                complete: d.complete,
+                rate_limited: d.rate_limited,
+                retry_after: d.retry_after,
+                next_offset: d.next_offset,
+            };
+            renderPptResults();
 
             // Auto-continue after rate limit delay
             if (d.rate_limited && d.retry_after && !d.complete) {
-                let wait = d.retry_after + 5;  // add 5s buffer so the API minute window fully resets
+                let wait = d.retry_after + 5;
                 const countdownEl = document.getElementById('ppt-wait');
                 if (countdownEl) countdownEl.textContent = wait;
                 const countdown = setInterval(() => {
@@ -1583,6 +1528,114 @@
         } catch(err) {
             panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
+    }
+
+    function renderPptResults() {
+        const panel = document.getElementById('price-refresh-results');
+        if (!panel || !_pptAllComps.length) return;
+        const sessionId = _pptSessionId;
+        const m = _pptMeta;
+
+        const allItems = _pptAllComps.map(c => _pptResults[c.item_id] || c);
+        const fetchedItems = allItems.filter(c => c.fetched);
+        const totalUnique = m.total_unique || 0;
+        const fetchedCount = fetchedItems.length;
+        const pct = totalUnique > 0 ? Math.round(fetchedCount / totalUnique * 100) : 0;
+
+        // Stats
+        const sigItems = fetchedItems.filter(c => c.significant);
+        const failItems = fetchedItems.filter(c => c.ppt_market == null && c.error);
+        const pptHigher = fetchedItems.filter(c => c.delta_pct != null && c.delta_pct > 10);
+        const pptLower = fetchedItems.filter(c => c.delta_pct != null && c.delta_pct < -10);
+        const totalCollectr = fetchedItems.reduce((s, c) => s + (c.collectr_price || 0), 0);
+        const totalPpt = fetchedItems.filter(c => c.ppt_market != null).reduce((s, c) => s + c.ppt_market, 0);
+
+        let statusHtml = '';
+        if (m.rate_limited && m.retry_after && !m.complete) {
+            statusHtml = `<div class="alert alert-warning" id="ppt-countdown">
+                ⏳ Pausing for rate limit — auto-continuing in <strong id="ppt-wait">${m.retry_after}</strong>s
+                (${fetchedCount}/${totalUnique} unique products fetched)
+            </div>`;
+        } else if (m.complete) {
+            statusHtml = '';  // stats below replace this
+        } else {
+            statusHtml = `<div class="alert" style="background:var(--surface-2);">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <span class="spinner"></span> Fetching... ${fetchedCount}/${totalUnique} (${pct}%)
+                </div>
+            </div>`;
+        }
+
+        const progressHtml = `<div style="height:4px;background:var(--surface-2);border-radius:2px;margin-bottom:12px;overflow:hidden;">
+            <div style="height:100%;width:${pct}%;background:var(--accent);transition:width 0.3s;"></div>
+        </div>`;
+
+        // Stats row (only show when we have data)
+        const statsHtml = fetchedCount > 0 ? `
+            <div class="stats" style="margin-bottom:12px;">
+                <div class="stat"><div class="stat-label">Fetched</div><div class="stat-value">${fetchedCount}/${totalUnique}</div></div>
+                <div class="stat"><div class="stat-label">Current Total</div><div class="stat-value">$${totalCollectr.toFixed(0)}</div></div>
+                <div class="stat"><div class="stat-label">PPT Total</div><div class="stat-value">$${totalPpt.toFixed(0)}</div></div>
+                <div class="stat"><div class="stat-label">>10% Off</div><div class="stat-value" style="color:${sigItems.length > 0 ? 'var(--amber)' : 'var(--green)'};">${sigItems.length}</div></div>
+                ${failItems.length > 0 ? `<div class="stat"><div class="stat-label">Errors</div><div class="stat-value" style="color:var(--red);">${failItems.length}</div></div>` : ''}
+            </div>
+        ` : '';
+
+        // Filter buttons
+        const pptFilterBtn = (id, label, count) => {
+            const active = _pptFilter === id;
+            return `<button class="btn btn-sm ${active ? 'btn-primary' : 'btn-secondary'}" style="font-size:0.75rem;padding:3px 8px;" onclick="_pptFilter='${id}'; renderPptResults();">${label} (${count})</button>`;
+        };
+        const filterHtml = fetchedCount > 0 ? `
+            <div style="display:flex; gap:4px; flex-wrap:wrap; margin-bottom:12px;">
+                ${pptFilterBtn('all', 'All', fetchedItems.length)}
+                ${pptFilterBtn('sig', '>10% Off', sigItems.length)}
+                ${pptFilterBtn('ppt_higher', 'PPT Higher', pptHigher.length)}
+                ${pptFilterBtn('ppt_lower', 'PPT Lower', pptLower.length)}
+                ${pptFilterBtn('errors', 'Errors', failItems.length)}
+            </div>
+        ` : '';
+
+        // Apply filter
+        let filtered = fetchedItems;
+        if (_pptFilter === 'sig') filtered = sigItems;
+        else if (_pptFilter === 'ppt_higher') filtered = pptHigher;
+        else if (_pptFilter === 'ppt_lower') filtered = pptLower;
+        else if (_pptFilter === 'errors') filtered = failItems;
+
+        const tableHtml = filtered.length ? `
+            <div style="overflow-x:auto; margin-bottom:16px;">
+            <table>
+                <thead><tr>
+                    <th>Product</th><th>Current</th><th>PPT Price</th><th>PPT Low</th><th>Delta</th><th></th>
+                </tr></thead>
+                <tbody>${filtered.map(c => {
+                    const delta = c.delta_pct;
+                    const sig = c.significant;
+                    const hasError = c.error && c.ppt_market == null;
+                    const deltaColor = sig ? (delta > 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+                    const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
+                    return `<tr style="${hasError ? 'background:rgba(255,60,60,0.06);' : sig ? 'background:rgba(255,180,0,0.06);' : ''}">
+                        <td>${c.product_name}<br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small>
+                            ${c.ppt_name && c.ppt_name !== c.product_name ? '<br><small style="color:var(--amber);">⚠ PPT: ' + c.ppt_name + '</small>' : ''}
+                            ${hasError ? '<br><small style="color:var(--red);">✕ ' + c.error + '</small>' : ''}
+                        </td>
+                        <td>$${c.collectr_price.toFixed(2)}</td>
+                        <td style="${sig ? 'font-weight:700; color:var(--accent);' : ''}">
+                            ${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : hasError ? '<span style="color:var(--red);">Error</span>' : '—'}
+                        </td>
+                        <td>${c.ppt_low != null ? '$' + c.ppt_low.toFixed(2) : '—'}</td>
+                        <td style="color:${deltaColor}; font-weight:${sig ? '700' : '400'};">
+                            ${delta != null ? arrow + ' ' + Math.abs(delta).toFixed(1) + '%' : '—'}
+                        </td>
+                        <td>${c.ppt_market != null ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="applyPptPrice(\'' + c.item_id + '\', \'' + sessionId + '\', ' + c.ppt_market + ', this)">Apply</button>' : ''}</td>
+                    </tr>`;
+                }).join('')}</tbody>
+            </table>
+            </div>
+        ` : (fetchedCount > 0 ? '<p style="color:var(--text-dim); text-align:center; padding:20px;">No items match this filter.</p>' : '');
+
+        panel.innerHTML = statusHtml + progressHtml + statsHtml + filterHtml + tableHtml;
     }
 
     async function applyPptPrice(itemId, sessionId, pptPrice, btn) {
@@ -1693,11 +1746,9 @@
 
         const totalOfferValue = enriched.reduce((s, i) => s + (i.offer_price || 0), 0);
         const totalStoreValue = inStore.reduce((s, i) => s + (i.store_price || 0) * (i.quantity || 1), 0);
-        const assumedMarginPct = notInStore.length > 0 ? 22 : 0; // fallback for unmatched
-        const notInStoreOffer = notInStore.reduce((s, i) => s + (i.offer_price || 0), 0);
-        const notInStoreRevenue = notInStoreOffer / 0.78; // assume 78% offer = ~22% margin
-        const totalRevenue = totalStoreValue + notInStoreRevenue;
-        const grossMarginPct = totalOfferValue > 0 ? ((totalRevenue - totalOfferValue) / totalRevenue * 100) : 0;
+        const notInStoreMarketValue = notInStore.reduce((s, i) => s + (i.offer_price || 0) / 0.78, 0); // estimate retail from offer
+        const combinedStoreValue = totalStoreValue + notInStoreMarketValue;
+        const grossMarginPct = combinedStoreValue > 0 ? ((combinedStoreValue - totalOfferValue) / combinedStoreValue * 100) : 0;
         const avgMargin = withMargin.length > 0 ? withMargin.reduce((s, i) => s + i.margin, 0) / withMargin.length : 0;
 
         // Filter
@@ -1716,7 +1767,7 @@
                 <div class="stat"><div class="stat-label">In Store</div><div class="stat-value" style="color:var(--green);">${inStore.length}</div></div>
                 <div class="stat"><div class="stat-label">Not Found</div><div class="stat-value" style="color:${notInStore.length > 0 ? 'var(--red)' : 'var(--text-dim)'};">${notInStore.length}</div></div>
                 <div class="stat"><div class="stat-label">Restock (qty=0)</div><div class="stat-value">${zeroQty.length}</div></div>
-                <div class="stat"><div class="stat-label">Store Value</div><div class="stat-value">$${totalStoreValue.toFixed(0)}</div></div>
+                <div class="stat"><div class="stat-label">Est. Store Value</div><div class="stat-value">$${combinedStoreValue.toFixed(0)}</div></div>
                 <div class="stat"><div class="stat-label">Est. Gross Margin</div><div class="stat-value" style="color:${grossMarginPct > 20 ? 'var(--green)' : grossMarginPct > 10 ? 'var(--amber)' : 'var(--red)'};">${grossMarginPct.toFixed(1)}%</div></div>
             </div>
 
