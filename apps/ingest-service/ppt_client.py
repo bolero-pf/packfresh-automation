@@ -110,6 +110,11 @@ class PPTClient:
 
     def should_throttle(self) -> bool:
         """Return True if caller should NOT make another request right now."""
+        # If the minute window has reset, clear stale limits
+        if self.minute_reset and time.time() >= self.minute_reset:
+            self.minute_remaining = None
+            self.minute_reset = None
+
         if self.minute_remaining is not None and self.minute_remaining <= 1:
             return True
         if self.daily_remaining is not None and self.daily_remaining <= 0:

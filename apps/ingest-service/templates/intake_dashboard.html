@@ -1480,11 +1480,17 @@
     }
 
     // ═══════════════════════════════ REFRESH PRICES ═══════════════════════════════
+    // Accumulated PPT price results across batches
+    let _pptResults = {};  // keyed by item_id
+
     async function refreshPrices(sessionId, offset) {
         offset = offset || 0;
         const panel = document.getElementById('price-refresh-results');
         if (!panel) return;
+
+        // Reset accumulator on first batch
         if (offset === 0) {
+            _pptResults = {};
             panel.innerHTML = '<div class="loading"><span class="spinner"></span> Fetching PPT prices...</div>';
         }
 
@@ -1498,56 +1504,63 @@
             if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
             const comps = d.comparisons || [];
-            if (!comps.length) {
+            if (!comps.length && offset === 0) {
                 panel.innerHTML = '<div class="alert alert-warning">No linked items to refresh.</div>';
                 return;
             }
 
-            // Build progress bar
-            const fetched = comps.filter(c => c.fetched).length;
-            const total = d.total_unique || comps.length;
-            const pct = Math.round(fetched / total * 100);
-            const succeeded = d.succeeded || 0;
-            const pending = d.pending || 0;
+            // Merge this batch's fetched results into accumulator
+            for (const c of comps) {
+                if (c.fetched) {
+                    _pptResults[c.item_id] = c;
+                } else if (!_pptResults[c.item_id]) {
+                    // Keep unfetched placeholder only if we don't already have it
+                    _pptResults[c.item_id] = c;
+                }
+            }
+
+            // Build full list preserving order from server
+            const allItems = comps.map(c => _pptResults[c.item_id] || c);
+            const fetchedItems = allItems.filter(c => c.fetched);
+            const totalUnique = d.total_unique || 0;
+            const fetchedCount = fetchedItems.length;
+            const pct = totalUnique > 0 ? Math.round(fetchedCount / totalUnique * 100) : 0;
 
             let statusHtml = '';
             if (d.rate_limited && d.retry_after && !d.complete) {
                 statusHtml = `<div class="alert alert-warning" id="ppt-countdown">
-                    ⏳ Rate limited — auto-continuing in <strong id="ppt-wait">${d.retry_after}</strong>s...
-                    (${fetched}/${total} unique products fetched)
+                    ⏳ Pausing for rate limit — auto-continuing in <strong id="ppt-wait">${d.retry_after}</strong>s
+                    (${fetchedCount}/${totalUnique} unique products fetched)
                 </div>`;
             } else if (d.complete) {
-                const sigCount = comps.filter(c => c.significant).length;
-                const failCount = comps.filter(c => c.fetched && c.ppt_market == null && c.error).length;
+                const sigCount = fetchedItems.filter(c => c.significant).length;
+                const failCount = fetchedItems.filter(c => c.ppt_market == null && c.error).length;
                 if (failCount > 0) {
-                    statusHtml = `<div class="alert alert-warning">⚠ ${failCount} failed. ${sigCount > 0 ? sigCount + ' have >10% diff.' : ''} (${succeeded}/${total} fetched)</div>`;
+                    statusHtml = `<div class="alert alert-warning">⚠ ${failCount} failed. ${sigCount > 0 ? sigCount + ' have >10% diff.' : ''} (${fetchedCount}/${totalUnique})</div>`;
                 } else if (sigCount > 0) {
                     statusHtml = `<div class="alert alert-warning">⚠ ${sigCount} item(s) have >10% price difference</div>`;
                 } else {
-                    statusHtml = `<div class="alert alert-success">✅ All ${succeeded} prices within 10% of PPT</div>`;
+                    statusHtml = `<div class="alert alert-success">✅ All ${fetchedCount} prices within 10% of PPT</div>`;
                 }
             } else {
                 statusHtml = `<div class="alert" style="background:var(--surface-2);">
                     <div style="display:flex; align-items:center; gap:12px;">
-                        <span class="spinner"></span> Fetching... ${fetched}/${total} (${pct}%)
+                        <span class="spinner"></span> Fetching... ${fetchedCount}/${totalUnique} (${pct}%)
                     </div>
                 </div>`;
             }
 
-            // Progress bar
             const progressHtml = `<div style="height:4px;background:var(--surface-2);border-radius:2px;margin-bottom:12px;overflow:hidden;">
                 <div style="height:100%;width:${pct}%;background:var(--accent);transition:width 0.3s;"></div>
             </div>`;
 
-            // Table of fetched results
-            const fetchedComps = comps.filter(c => c.fetched);
-            const tableHtml = fetchedComps.length ? `
+            const tableHtml = fetchedItems.length ? `
                 <div style="overflow-x:auto; margin-bottom:16px;">
                 <table>
                     <thead><tr>
                         <th>Product</th><th>Current</th><th>PPT Price</th><th>PPT Low</th><th>Delta</th><th></th>
                     </tr></thead>
-                    <tbody>${fetchedComps.map(c => {
+                    <tbody>${fetchedItems.map(c => {
                         const delta = c.delta_pct;
                         const sig = c.significant;
                         const hasError = c.error && c.ppt_market == null;
@@ -1577,11 +1590,12 @@
 
             // Auto-continue after rate limit delay
             if (d.rate_limited && d.retry_after && !d.complete) {
-                let wait = d.retry_after;
+                let wait = d.retry_after + 5;  // add 5s buffer so the API minute window fully resets
                 const countdownEl = document.getElementById('ppt-wait');
+                if (countdownEl) countdownEl.textContent = wait;
                 const countdown = setInterval(() => {
                     wait--;
-                    if (countdownEl) countdownEl.textContent = wait;
+                    if (countdownEl) countdownEl.textContent = Math.max(0, wait);
                     if (wait <= 0) {
                         clearInterval(countdown);
                         refreshPrices(sessionId, d.next_offset);
