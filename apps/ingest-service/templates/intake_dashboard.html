@@ -1986,6 +1986,37 @@
         } catch(err) { alert(err.message); }
     }
 
+    async function markItemStatus(itemId, sessionId, newStatus) {
+        // Close dropdown
+        document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
+
+        const labels = { damaged: 'Mark Damaged', missing: 'Mark Missing', rejected: 'Reject', good: 'Mark Good' };
+        const messages = {
+            damaged: 'This item will be marked as damaged. Offer price stays but it will be flagged.',
+            missing: 'This item will be excluded from payment and Shopify push.',
+            rejected: 'Seller kept this item. It will be excluded from payment.',
+            good: 'Restore this item to good status?',
+        };
+
+        const ok = await themedConfirm(
+            labels[newStatus] || newStatus,
+            messages[newStatus] || `Change status to ${newStatus}?`,
+            { confirmText: labels[newStatus] || 'Confirm', dangerous: ['missing','rejected'].includes(newStatus) }
+        );
+        if (!ok) return;
+
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/status`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ status: newStatus }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
     async function markMissing(itemId, sessionId) {
         const ok = await themedConfirm(
             '❌ Mark as Missing',

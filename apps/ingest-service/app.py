@@ -713,6 +713,33 @@ def damage_item(item_id):
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/intake/item/<item_id>/status", methods=["POST"])
+def set_item_status(item_id):
+    """Set item status to any valid value."""
+    data = request.get_json(silent=True) or {}
+    new_status = data.get("status")
+    if new_status not in ("good", "damaged", "missing", "rejected"):
+        return jsonify({"error": f"Invalid status: {new_status}"}), 400
+    try:
+        if new_status == "missing":
+            item = intake.mark_item_missing(item_id)
+        elif new_status == "rejected":
+            item = intake.mark_item_rejected(item_id)
+        elif new_status == "good":
+            item = intake.restore_item(item_id)
+        elif new_status == "damaged":
+            # Mark as damaged — use direct DB update
+            db = intake.get_db()
+            db.execute("UPDATE intake_items SET item_status = 'damaged' WHERE id = %s RETURNING *", (item_id,))
+            item = db.fetchone()
+            if not item:
+                raise ValueError("Item not found")
+            db.connection.commit()
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
 @app.route("/api/intake/item/<item_id>/missing", methods=["POST"])
 def missing_item(item_id):
     """Mark item as missing."""
