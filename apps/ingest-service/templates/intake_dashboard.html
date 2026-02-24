@@ -1115,11 +1115,12 @@
                                             } else {
                                                 btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
                                             }
-                                            btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 6px;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'block\'?\'none\':\'block\'">⋯</button><div class="action-dropdown" style="display:none;">';
+                                            btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button><div class="action-dropdown">';
                                             btns += status !== 'damaged' ? `<button onclick="markItemStatus('${i.id}','${sessionId}','damaged')">Mark Damaged</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
                                             btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','missing')">Mark Missing</button>`;
                                             btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','rejected')">Reject</button><hr>`;
                                             btns += `<button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price||0})">Override Price</button>`;
+                                            btns += `<button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">Change Qty (${i.quantity})</button>`;
                                             if (i.quantity > 1) btns += `<button onclick="splitItem('${i.id}','${sessionId}')">Split Item</button>`;
                                             btns += '</div></div>';
                                         }
@@ -1900,14 +1901,31 @@
         }
     });
 
-    function toggleActionMenu(btn) {
+    function toggleActionMenu(event, dd) {
+        // Support both old call signature (btn) and new (event, dd)
+        if (!dd) {
+            // Old signature: toggleActionMenu(btn) — dd is next sibling
+            const btn = event;
+            dd = btn.nextElementSibling;
+            event = null;
+        }
+        if (event) event.stopPropagation();
+
         // Close all others first
-        document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
-        const dd = btn.nextElementSibling;
+        document.querySelectorAll('.action-dropdown.show').forEach(d => { if (d !== dd) d.classList.remove('show'); });
+
+        // Find the trigger button (previous sibling of dd)
+        const btn = dd.previousElementSibling;
         const rect = btn.getBoundingClientRect();
-        // Position fixed, below the button, aligned right
-        dd.style.top = (rect.bottom + 4) + 'px';
-        dd.style.left = Math.max(8, rect.right - 160) + 'px'; // 160 = dropdown width
+        const dropdownHeight = 220; // approximate max height
+
+        // Position below button, or above if not enough space below
+        if (rect.bottom + dropdownHeight > window.innerHeight) {
+            dd.style.top = Math.max(4, rect.top - dropdownHeight) + 'px';
+        } else {
+            dd.style.top = (rect.bottom + 4) + 'px';
+        }
+        dd.style.left = Math.max(8, rect.right - 160) + 'px';
         dd.classList.toggle('show');
     }
 
