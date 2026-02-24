@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pack Fresh — Ingest</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface-2: #22263a;
+            --border: #2d3148;
+            --text: #e8eaf0;
+            --text-dim: #8b90a5;
+            --accent: #4f7df9;
+            --accent-hover: #3b6ae8;
+            --green: #2dd4a0;
+            --green-bg: rgba(45, 212, 160, 0.12);
+            --amber: #f5a623;
+            --amber-bg: rgba(245, 166, 35, 0.12);
+            --red: #f05252;
+            --red-bg: rgba(240, 82, 82, 0.1);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg); color: var(--text); line-height: 1.55;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+        /* ─── HEADER ─── */
+        header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 0; margin-bottom: 24px;
+        }
+        header .container { display: flex; align-items: center; gap: 16px; }
+        .logo { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px; }
+        .logo span { color: var(--green); }
+        header .status { margin-left: auto; font-size: 0.85rem; color: var(--text-dim); }
+
+        /* ─── CARDS ─── */
+        .card {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 10px; padding: 24px; margin-bottom: 20px;
+        }
+        .card h2 { font-size: 1.2rem; font-weight: 600; margin-bottom: 16px; }
+
+        /* ─── BUTTONS ─── */
+        .btn {
+            padding: 10px 20px; border: none; border-radius: 6px;
+            font-size: 0.9rem; font-weight: 500; cursor: pointer;
+            transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px;
+        }
+        .btn-primary { background: var(--accent); color: #fff; }
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+        .btn-secondary:hover { border-color: var(--accent); }
+        .btn-success { background: var(--green); color: #000; font-weight: 600; }
+        .btn-danger { background: var(--red); color: #fff; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-sm { padding: 6px 12px; font-size: 0.82rem; }
+
+        /* ─── STATS ─── */
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .stat {
+            background: var(--surface-2); border-radius: 8px; padding: 16px;
+            border: 1px solid var(--border);
+        }
+        .stat-label { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
+        .stat-value { font-size: 1.6rem; font-weight: 700; }
+
+        /* ─── BADGES ─── */
+        .badge {
+            display: inline-block; padding: 3px 10px; border-radius: 10px;
+            font-size: 0.78rem; font-weight: 600;
+        }
+        .badge-green { background: var(--green-bg); color: var(--green); }
+        .badge-amber { background: var(--amber-bg); color: var(--amber); }
+        .badge-blue { background: rgba(79,125,249,0.12); color: var(--accent); }
+        .badge-red { background: var(--red-bg); color: var(--red); }
+        .badge-dim { background: var(--surface-2); color: var(--text-dim); }
+
+        /* ─── ALERTS ─── */
+        .alert {
+            padding: 12px 16px; border-radius: 8px; margin-bottom: 16px;
+            font-size: 0.9rem; border: 1px solid;
+        }
+        .alert-success { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+        .alert-warning { background: var(--amber-bg); border-color: var(--amber); color: var(--amber); }
+        .alert-error { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+
+        /* ─── TABLE ─── */
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
+        th { font-weight: 600; color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; }
+        tr:hover { background: rgba(255,255,255,0.02); }
+
+        /* ─── MODAL ─── */
+        .modal-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.6); z-index: 1000;
+            align-items: flex-start; justify-content: center;
+            backdrop-filter: blur(4px); padding: 40px 20px; overflow-y: auto;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 12px; padding: 28px; width: 90%; max-width: 800px;
+            max-height: 85vh; overflow-y: auto; position: relative;
+        }
+        .modal-close-sticky {
+            position: sticky; top: 0; float: right;
+            background: var(--surface-2); border: 1px solid var(--border);
+            color: var(--text); font-size: 1.3rem; cursor: pointer;
+            width: 36px; height: 36px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            z-index: 10; margin-top: -8px; margin-right: -8px;
+            transition: all 0.15s;
+        }
+        .modal-close-sticky:hover { background: var(--red); color: #fff; border-color: var(--red); }
+
+        /* ─── CONFIRM DIALOG ─── */
+        #confirm-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.6); z-index: 2000;
+            align-items: center; justify-content: center;
+            backdrop-filter: blur(4px);
+        }
+        #confirm-overlay.active { display: flex; }
+        .confirm-box {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 12px; padding: 24px; width: 90%; max-width: 420px;
+        }
+        .confirm-box h3 { margin-bottom: 8px; }
+        .confirm-box p { color: var(--text-dim); margin-bottom: 16px; font-size: 0.9rem; }
+        .confirm-box .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
+
+        /* ─── LOADING ─── */
+        .loading { text-align: center; padding: 40px; color: var(--text-dim); }
+        .spinner {
+            display: inline-block; width: 20px; height: 20px;
+            border: 2px solid var(--border); border-top-color: var(--accent);
+            border-radius: 50%; animation: spin 0.6s linear infinite;
+            vertical-align: middle; margin-right: 8px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ─── SESSION LIST ─── */
+        .session-row {
+            display: grid; grid-template-columns: 1fr auto auto auto;
+            gap: 16px; align-items: center;
+            padding: 14px 16px; border: 1px solid var(--border);
+            border-radius: 8px; margin-bottom: 8px;
+            cursor: pointer; transition: all 0.15s;
+        }
+        .session-row:hover { border-color: var(--accent); background: var(--surface-2); }
+        .session-row .name { font-weight: 600; }
+        .session-row .meta { font-size: 0.82rem; color: var(--text-dim); }
+
+        /* ─── SEARCH RESULT ITEMS ─── */
+        .search-result {
+            cursor: pointer; padding: 10px 12px;
+            border: 1px solid var(--border); border-radius: 6px;
+            margin-bottom: 4px; transition: all 0.15s;
+        }
+        .search-result:hover { border-color: var(--accent); background: var(--surface-2); }
+
+        /* ─── PROGRESS BAR ─── */
+        .progress-bar {
+            height: 6px; background: var(--border); border-radius: 3px;
+            overflow: hidden; margin: 8px 0;
+        }
+        .progress-bar .fill {
+            height: 100%; background: var(--green); border-radius: 3px;
+            transition: width 0.3s;
+        }
+
+        /* ─── FILTER BUTTONS ─── */
+        .filter-row { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+        .filter-btn {
+            padding: 5px 12px; border: 1px solid var(--border); border-radius: 16px;
+            background: none; color: var(--text-dim); font-size: 0.78rem;
+            cursor: pointer; transition: all 0.15s;
+        }
+        .filter-btn:hover { border-color: var(--accent); color: var(--text); }
+        .filter-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="container">
+        <div class="logo">Pack Fresh <span>Ingest</span></div>
+        <div class="status" id="header-status"></div>
+    </div>
+</header>
+
+<div class="container">
+    <!-- Session List -->
+    <div id="session-list-view">
+        <div class="card">
+            <h2>📦 Ingest Queue</h2>
+            <p style="color:var(--text-dim); margin-bottom:16px;">Sessions ready for warehouse processing. Click to open.</p>
+            <div id="sessions-list">
+                <div class="loading"><span class="spinner"></span> Loading sessions...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Session Detail (hidden until clicked) -->
+    <div id="session-detail-view" style="display:none;">
+        <div style="margin-bottom:16px;">
+            <button class="btn btn-secondary btn-sm" onclick="showList()">← Back to Queue</button>
+        </div>
+        <div id="session-detail-content"></div>
+    </div>
+</div>
+
+<!-- Break Down Modal -->
+<div id="breakdown-modal" class="modal-overlay">
+    <div class="modal" style="max-width:700px;">
+        <button class="modal-close-sticky" onclick="closeBreakdown()">×</button>
+        <div id="breakdown-body"></div>
+    </div>
+</div>
+
+<!-- Confirm Dialog -->
+<div id="confirm-overlay">
+    <div class="confirm-box">
+        <h3 id="confirm-title"></h3>
+        <p id="confirm-msg"></p>
+        <div class="btn-row">
+            <button class="btn btn-secondary btn-sm" id="confirm-cancel">Cancel</button>
+            <button class="btn btn-sm" id="confirm-ok">OK</button>
+        </div>
+    </div>
+</div>
+
+<script>
+
+// ═══════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════
+
+let _currentSessionId = null;
+let _breakDownComponents = [];
+let _breakDownItemId = null;
+
+// ═══════════════════════════════════════════════════════════════════
+// CONFIRM DIALOG
+// ═══════════════════════════════════════════════════════════════════
+
+function themedConfirm(title, msg, opts = {}) {
+    return new Promise(resolve => {
+        document.getElementById('confirm-title').textContent = title;
+        document.getElementById('confirm-msg').textContent = msg;
+        const okBtn = document.getElementById('confirm-ok');
+        okBtn.textContent = opts.confirmText || 'Confirm';
+        okBtn.className = opts.dangerous ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+        document.getElementById('confirm-overlay').classList.add('active');
+
+        const cleanup = (val) => {
+            document.getElementById('confirm-overlay').classList.remove('active');
+            okBtn.onclick = null;
+            document.getElementById('confirm-cancel').onclick = null;
+            resolve(val);
+        };
+        okBtn.onclick = () => cleanup(true);
+        document.getElementById('confirm-cancel').onclick = () => cleanup(false);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SESSION LIST
+// ═══════════════════════════════════════════════════════════════════
+
+async function loadSessions() {
+    const el = document.getElementById('sessions-list');
+    try {
+        const r = await fetch('/api/ingest/sessions');
+        const sessions = await r.json();
+        if (!sessions.length) {
+            el.innerHTML = '<p style="color:var(--text-dim); text-align:center; padding:20px;">No sessions in queue.</p>';
+            return;
+        }
+        el.innerHTML = sessions.map(s => {
+            const status = s.status;
+            const badgeClass = status === 'received' ? 'badge-amber' : 'badge-green';
+            const badgeLabel = status === 'received' ? 'Ready' : 'Ingested';
+            const date = new Date(s.created_at).toLocaleDateString();
+            return `<div class="session-row" onclick="viewSession('${s.id}')">
+                <div>
+                    <div class="name">${s.customer_name || 'Unknown'}</div>
+                    <div class="meta">${s.session_type || 'sealed'} · ${date}</div>
+                </div>
+                <div><span class="badge ${badgeClass}">${badgeLabel}</span></div>
+                <div style="text-align:right;">
+                    <div style="font-weight:600;">${s.item_count || 0} items</div>
+                    <div class="meta">${s.total_qty || 0} units</div>
+                </div>
+                <div style="font-weight:700; font-size:1.1rem;">$${(s.total_offer_amount || 0).toFixed(2)}</div>
+            </div>`;
+        }).join('');
+    } catch(err) {
+        el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+function showList() {
+    document.getElementById('session-list-view').style.display = '';
+    document.getElementById('session-detail-view').style.display = 'none';
+    _currentSessionId = null;
+    loadSessions();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SESSION DETAIL
+// ═══════════════════════════════════════════════════════════════════
+
+async function viewSession(sessionId) {
+    _currentSessionId = sessionId;
+    document.getElementById('session-list-view').style.display = 'none';
+    document.getElementById('session-detail-view').style.display = '';
+    const el = document.getElementById('session-detail-content');
+    el.innerHTML = '<div class="loading"><span class="spinner"></span> Loading session...</div>';
+
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}`);
+        const data = await r.json();
+        const s = data.session;
+        const items = data.items;
+
+        const isReceived = s.status === 'received';
+        const activeItems = items.filter(i => ['good','damaged'].includes(i.item_status || 'good'));
+        const brokenItems = items.filter(i => i.item_status === 'broken_down');
+        const childItems = items.filter(i => i.parent_item_id);
+        const totalQty = activeItems.reduce((sum, i) => sum + (i.quantity || 1), 0);
+
+        let html = `
+            <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+                    <h2 style="margin:0;">${s.customer_name || 'Unknown'}</h2>
+                    <span class="badge ${isReceived ? 'badge-amber' : 'badge-green'}">${isReceived ? 'Ready to Ingest' : 'Ingested'}</span>
+                </div>
+
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-label">Items</div>
+                        <div class="stat-value">${activeItems.length}</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Total Units</div>
+                        <div class="stat-value">${totalQty}</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Offer Total</div>
+                        <div class="stat-value">$${(s.total_offer_amount || 0).toFixed(2)}</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Market Value</div>
+                        <div class="stat-value">$${(s.total_market_value || 0).toFixed(2)}</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>📦 Items</h2>
+                <div style="overflow-x:auto;">
+                <table>
+                    <thead><tr>
+                        <th>Product</th><th>Qty</th><th>Status</th><th>Market</th>
+                        ${isReceived ? '<th>Actions</th>' : ''}
+                    </tr></thead>
+                    <tbody>`;
+
+        // Show items — parents first, then children grouped
+        const topLevel = items.filter(i => !i.parent_item_id);
+        for (const item of topLevel) {
+            html += renderItemRow(item, isReceived, sessionId);
+            // Show children underneath
+            const children = items.filter(c => c.parent_item_id === item.id);
+            for (const child of children) {
+                html += renderItemRow(child, isReceived, sessionId, true);
+            }
+        }
+
+        html += `</tbody></table></div></div>`;
+
+        // Store Check section
+        html += `
+            <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                    <h2 style="margin:0;">🏪 Store Match Preview</h2>
+                    <button class="btn btn-secondary btn-sm" onclick="runStoreCheck('${sessionId}')">Check Store</button>
+                </div>
+                <div id="store-check-results">
+                    <p style="color:var(--text-dim);">Click "Check Store" to see what matches your Shopify inventory.</p>
+                </div>
+            </div>`;
+
+        // Push Live button (only for received)
+        if (isReceived) {
+            html += `
+                <div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                        <div>
+                            <h2 style="margin:0; color:var(--green);">🚀 Push Live</h2>
+                            <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
+                                Increment inventory for matched items, create damaged listings, and mark session as ingested.
+                            </p>
+                        </div>
+                        <button class="btn btn-success" onclick="pushLive('${sessionId}')" style="font-size:1.05rem; padding:12px 28px;">
+                            🚀 Push Live to Shopify
+                        </button>
+                    </div>
+                    <div id="push-live-results" style="margin-top:16px;"></div>
+                </div>`;
+        }
+
+        el.innerHTML = html;
+    } catch(err) {
+        el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+function renderItemRow(item, isReceived, sessionId, isChild = false) {
+    const st = item.item_status || 'good';
+    const isBroken = st === 'broken_down';
+    const isDamaged = st === 'damaged';
+    const name = item.product_name || 'Unknown';
+    const escName = name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+
+    let rowStyle = '';
+    if (isBroken) rowStyle = 'opacity:0.35; text-decoration:line-through;';
+    else if (isDamaged) rowStyle = 'background:rgba(255,170,0,0.06);';
+
+    let badges = '';
+    if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
+    if (isBroken) badges += ' <span class="badge badge-dim" style="font-size:0.65rem;">BROKEN DOWN</span>';
+    if (isChild) badges += ' <span class="badge badge-blue" style="font-size:0.65rem;">FROM BREAKDOWN</span>';
+    if (!item.is_mapped) badges += ' <span class="badge badge-amber" style="font-size:0.65rem;">UNMAPPED</span>';
+
+    let actions = '';
+    if (isReceived && !isBroken) {
+        actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="openBreakdown('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1})">🔨 Break Down</button> `;
+        if (!isDamaged) {
+            actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="markDamaged('${item.id}', '${sessionId}')">⚠ Damage</button> `;
+        } else {
+            actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="markGood('${item.id}', '${sessionId}')">✅ Good</button> `;
+        }
+    }
+
+    return `<tr style="${rowStyle}">
+        <td>${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
+        <td>${item.quantity || 1}</td>
+        <td><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
+        <td>$${(item.market_price || 0).toFixed(2)}</td>
+        ${isReceived ? '<td>' + actions + '</td>' : ''}
+    </tr>`;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// DAMAGE / GOOD
+// ═══════════════════════════════════════════════════════════════════
+
+async function markDamaged(itemId, sessionId) {
+    const ok = await themedConfirm('Mark as Damaged', 'This item will be flagged as damaged for ingest.');
+    if (!ok) return;
+    try {
+        await fetch(`/api/ingest/item/${itemId}/damage`, { method: 'POST' });
+        viewSession(sessionId);
+    } catch(err) { alert(err.message); }
+}
+
+async function markGood(itemId, sessionId) {
+    try {
+        await fetch(`/api/ingest/item/${itemId}/mark-good`, { method: 'POST' });
+        viewSession(sessionId);
+    } catch(err) { alert(err.message); }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// BREAK DOWN
+// ═══════════════════════════════════════════════════════════════════
+
+function openBreakdown(itemId, sessionId, productName, parentQty) {
+    _breakDownItemId = itemId;
+    _breakDownComponents = [];
+    _currentSessionId = sessionId;
+
+    document.getElementById('breakdown-body').innerHTML = `
+        <h3 style="margin-bottom:8px;">🔨 Break Down: ${productName}</h3>
+        <p style="color:var(--text-dim); margin-bottom:16px;">
+            Quantity: <strong>${parentQty}</strong> — Each component's qty will be multiplied by ${parentQty}.
+        </p>
+
+        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px;">
+            <div style="flex:2; min-width:200px;">
+                <label>Search PPT for Component</label>
+                <input type="text" id="bd-search" placeholder="e.g. Mega Evolution Booster Pack"
+                       style="width:100%; margin-top:4px;"
+                       onkeydown="if(event.key==='Enter') bdSearch()">
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="bdSearch()" style="height:40px;">Search</button>
+        </div>
+
+        <div id="bd-search-results" style="max-height:250px; overflow-y:auto; margin-bottom:16px;"></div>
+
+        <h4 style="margin-bottom:8px;">Components:</h4>
+        <div id="bd-components-list"><p style="color:var(--text-dim);">No components added yet. Search above.</p></div>
+
+        <div style="margin-top:20px; display:flex; gap:8px;">
+            <button class="btn btn-success" onclick="submitBreakDown()">✅ Confirm Break Down</button>
+            <button class="btn btn-secondary" onclick="closeBreakdown()">Cancel</button>
+        </div>
+    `;
+    document.getElementById('breakdown-modal').classList.add('active');
+    setTimeout(() => document.getElementById('bd-search').focus(), 100);
+}
+
+function closeBreakdown() {
+    document.getElementById('breakdown-modal').classList.remove('active');
+}
+
+async function bdSearch() {
+    const q = document.getElementById('bd-search').value.trim();
+    if (!q) return;
+    const panel = document.getElementById('bd-search-results');
+    panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+
+    try {
+        const r = await fetch('/api/ppt/search-sealed', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query: q }),
+        });
+        const d = await r.json();
+        if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+        const results = d.results || [];
+        if (!results.length) { panel.innerHTML = '<p style="color:var(--text-dim);">No results found</p>'; return; }
+
+        panel.innerHTML = results.slice(0, 15).map(p => {
+            const name = (p.name || p.productName || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+            const setName = (p.setName || p.set_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+            const tcgId = p.tcgplayerId || p.tcgplayer_id || 0;
+            const price = p.unopenedPrice || p.marketPrice || 0;
+            return `<div class="search-result" onclick="bdAddComponent(${tcgId}, '${name}', '${setName}', ${price})">
+                <strong>${p.name || p.productName}</strong>
+                <br><small style="color:var(--text-dim);">${p.setName || ''} · TCG#${tcgId} · $${(price||0).toFixed(2)}</small>
+            </div>`;
+        }).join('');
+    } catch(err) {
+        panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+function bdAddComponent(tcgId, name, setName, price) {
+    _breakDownComponents.push({
+        product_name: name, set_name: setName,
+        tcgplayer_id: tcgId, market_price: price, quantity: 1,
+    });
+    bdRenderComponents();
+    document.getElementById('bd-search-results').innerHTML = '';
+    document.getElementById('bd-search').value = '';
+    document.getElementById('bd-search').focus();
+}
+
+function bdRenderComponents() {
+    const el = document.getElementById('bd-components-list');
+    if (!_breakDownComponents.length) {
+        el.innerHTML = '<p style="color:var(--text-dim);">No components added yet.</p>';
+        return;
+    }
+    el.innerHTML = `<table><thead><tr><th>Component</th><th>Qty Each</th><th>Market Price</th><th></th></tr></thead><tbody>` +
+        _breakDownComponents.map((c, idx) =>
+            `<tr>
+                <td>${c.product_name}<br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small></td>
+                <td><input type="number" value="${c.quantity}" min="1" style="width:60px;" 
+                    onchange="_breakDownComponents[${idx}].quantity = parseInt(this.value) || 1"></td>
+                <td>$${(c.market_price || 0).toFixed(2)}</td>
+                <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 8px;"
+                    onclick="_breakDownComponents.splice(${idx},1); bdRenderComponents();">✕</button></td>
+            </tr>`
+        ).join('') + '</tbody></table>';
+}
+
+async function submitBreakDown() {
+    if (!_breakDownComponents.length) { alert('Add at least one component.'); return; }
+
+    const ok = await themedConfirm(
+        'Confirm Break Down',
+        `Break this item into ${_breakDownComponents.length} component(s)? The original item will be marked as broken down.`,
+    );
+    if (!ok) return;
+
+    try {
+        const r = await fetch(`/api/ingest/item/${_breakDownItemId}/break-down`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ components: _breakDownComponents }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Break down failed'); return; }
+        closeBreakdown();
+        viewSession(_currentSessionId);
+    } catch(err) { alert(err.message); }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// STORE CHECK
+// ═══════════════════════════════════════════════════════════════════
+
+async function runStoreCheck(sessionId) {
+    const el = document.getElementById('store-check-results');
+    el.innerHTML = '<div class="loading"><span class="spinner"></span> Checking Shopify...</div>';
+
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/store-check`);
+        const d = await r.json();
+        if (!r.ok) { el.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+        const results = d.results || [];
+        let html = `
+            <div class="stats" style="margin-bottom:12px;">
+                <div class="stat"><div class="stat-label">In Store</div><div class="stat-value" style="color:var(--green);">${d.in_store}</div></div>
+                <div class="stat"><div class="stat-label">Needs Listing</div><div class="stat-value" style="color:${d.needs_listing > 0 ? 'var(--amber)' : 'var(--text-dim)'};">${d.needs_listing}</div></div>
+            </div>
+        `;
+
+        if (results.length) {
+            html += '<table><thead><tr><th>Product</th><th>Qty to Add</th><th>Store Status</th><th>Store Price</th><th>Store Qty</th></tr></thead><tbody>';
+            html += results.map(r => {
+                const badge = r.in_store
+                    ? '<span class="badge badge-green">In Store</span>'
+                    : r.needs_listing
+                        ? '<span class="badge badge-amber">Needs Listing</span>'
+                        : '<span class="badge badge-red">Not Found</span>';
+                return `<tr>
+                    <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}</td>
+                    <td>${r.quantity}</td>
+                    <td>${badge}${r.store_note ? '<br><small style="color:var(--text-dim);">' + r.store_note + '</small>' : ''}</td>
+                    <td>${r.shopify_price != null ? '$' + r.shopify_price.toFixed(2) : '—'}</td>
+                    <td>${r.in_store ? r.shopify_qty : '—'}</td>
+                </tr>`;
+            }).join('');
+            html += '</tbody></table>';
+        }
+
+        el.innerHTML = html;
+    } catch(err) {
+        el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// PUSH LIVE
+// ═══════════════════════════════════════════════════════════════════
+
+async function pushLive(sessionId) {
+    const ok = await themedConfirm(
+        '🚀 Push Live to Shopify',
+        'This will increment inventory for matched items, create damaged listings where needed, and mark the session as ingested. This cannot be easily undone.',
+        { confirmText: 'Push Live', dangerous: true }
+    );
+    if (!ok) return;
+
+    const panel = document.getElementById('push-live-results');
+    panel.innerHTML = '<div class="loading"><span class="spinner"></span> Pushing to Shopify... This may take a moment.</div>';
+
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/push-live`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok && !d.results) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+        let html = `<div class="stats" style="margin-bottom:12px;">
+            <div class="stat"><div class="stat-label">Incremented</div><div class="stat-value" style="color:var(--green);">${d.incremented || 0}</div></div>
+            <div class="stat"><div class="stat-label">Damaged Created</div><div class="stat-value">${d.created_damaged || 0}</div></div>
+            <div class="stat"><div class="stat-label">Needs Listing</div><div class="stat-value" style="color:${(d.needs_listing||0) > 0 ? 'var(--amber)' : 'var(--text-dim)'};">${d.needs_listing || 0}</div></div>
+            <div class="stat"><div class="stat-label">Errors</div><div class="stat-value" style="color:${(d.error_count||0) > 0 ? 'var(--red)' : 'var(--green)'};">${d.error_count || 0}</div></div>
+        </div>`;
+
+        if (d.ingested) {
+            html += '<div class="alert alert-success">✅ Session ingested! All items pushed to Shopify.</div>';
+        } else if (d.error_count > 0) {
+            html += '<div class="alert alert-warning">⚠ Some items had errors. Session NOT marked as ingested. Fix errors and retry.</div>';
+        }
+
+        const allResults = [...(d.results || []), ...(d.errors || [])];
+        if (allResults.length) {
+            html += '<table><thead><tr><th>Product</th><th>Qty</th><th>Action</th></tr></thead><tbody>';
+            html += allResults.map(r => {
+                const color = r.action === 'inventory_incremented' ? 'var(--green)'
+                    : r.action === 'created_damaged_listing' ? 'var(--accent)'
+                    : r.action === 'needs_listing' ? 'var(--amber)'
+                    : 'var(--red)';
+                const label = r.action === 'inventory_incremented' ? '✅ Inventory +' + r.quantity
+                    : r.action === 'created_damaged_listing' ? '🆕 Created: ' + (r.new_title || 'Damaged Listing')
+                    : r.action === 'needs_listing' ? '⚠ Needs Manual Listing'
+                    : '❌ ' + (r.error || 'Error');
+                return `<tr>
+                    <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}</td>
+                    <td>${r.quantity}</td>
+                    <td style="color:${color};font-size:0.85rem;">${label}</td>
+                </tr>`;
+            }).join('');
+            html += '</tbody></table>';
+        }
+
+        panel.innerHTML = html;
+
+        // If ingested, disable the push button
+        if (d.ingested) {
+            const pushBtn = panel.closest('.card').querySelector('.btn-success');
+            if (pushBtn) { pushBtn.disabled = true; pushBtn.textContent = '✅ Ingested'; }
+        }
+    } catch(err) {
+        panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════════
+
+loadSessions();
+
+</script>
+</body>
+</html>
