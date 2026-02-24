@@ -998,7 +998,16 @@
                             ` : ''}
                         </div>
                     </div>
-                    <div class="stat"><div class="stat-label">Offer Total</div><div class="stat-value">$${(s.total_offer_amount || 0).toFixed(2)}</div></div>
+                    <div class="stat">
+                        <div class="stat-label">Offer Total</div>
+                        <div class="stat-value" style="display:flex; align-items:center; gap:8px;">
+                            <span id="offer-total-display">$${(s.total_offer_amount || 0).toFixed(2)}</span>
+                            ${editable ? `
+                                <button class="btn btn-sm btn-secondary" style="font-size:0.75rem; padding:2px 8px;" 
+                                        onclick="editOfferTotal('${sessionId}', ${s.total_offer_amount || 0}, ${s.total_market_value || 0})">Edit</button>
+                            ` : ''}
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Session Sub-tabs -->
@@ -1016,7 +1025,10 @@
                         </div>
                     ` : ''}
 
-                    ${(s.unmapped_count || 0) > 0 ? `<div class="alert alert-warning" style="margin-bottom:12px;">${s.unmapped_count} items need linking</div>` : ''}
+                    ${(() => {
+                        const activeUnmapped = items.filter(i => !i.is_mapped && ['good','damaged'].includes(i.item_status || 'good'));
+                        return activeUnmapped.length > 0 ? `<div class="alert alert-warning" style="margin-bottom:12px;">${activeUnmapped.length} items need linking</div>` : '';
+                    })()}
 
                     ${editable && (s.session_type === 'sealed' || s.session_type === 'mixed') ? `
                         <div style="margin-bottom:16px; padding:12px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
@@ -1142,7 +1154,7 @@
 
                 ${(() => {
                     const activeItems = items.filter(i => (i.item_status || 'good') === 'good' || i.item_status === 'damaged');
-                    const unmappedActive = activeItems.filter(i => !i.is_mapped && (i.item_status || 'good') === 'good');
+                    const unmappedActive = activeItems.filter(i => !i.is_mapped);
                     const excluded = items.filter(i => i.item_status === 'missing' || i.item_status === 'rejected');
                     let html = '';
                     if (excluded.length > 0) {
@@ -1452,7 +1464,37 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            // Reload session view to show updated prices
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function editOfferTotal(sessionId, currentTotal, marketValue) {
+        const rounded = Math.round(currentTotal);
+        const newTotal = await themedPrompt({
+            title: 'Edit Offer Total',
+            message: `Market value: $${marketValue.toFixed(2)}. Enter the round number you want to offer.`,
+            inputs: [{ type: 'number', label: 'Offer total ($)', default: String(rounded), min: 1, step: '1' }],
+            confirmText: 'Update',
+        });
+        if (newTotal === null || newTotal === '') return;
+        const val = parseFloat(newTotal);
+        if (isNaN(val) || val <= 0) { alert('Enter a valid dollar amount'); return; }
+        if (marketValue <= 0) { alert('Market value is 0 — cannot calculate percentage'); return; }
+
+        // Back-calculate percentage from desired total
+        const newPct = Math.round((val / marketValue) * 10000) / 100; // 2 decimal places
+        if (newPct > 100) {
+            if (!confirm(`This offer ($${val}) is ${newPct.toFixed(1)}% of market value — more than 100%. Continue?`)) return;
+        }
+
+        try {
+            const r = await fetch(`/api/intake/session/${sessionId}/offer-percentage`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ offer_percentage: newPct }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
             viewSession(sessionId);
         } catch(err) { alert(err.message); }
     }

@@ -525,18 +525,35 @@ def process_product(product):
     new_price = round_competitive_price(tcg_price)
 
     if new_price < current_price:
-        # price cut → send to review
-        percent_diff = safe_percent_diff(current_price, new_price)
-        return ("review",
-                {**product,
-                 "shopify_price": current_price,
-                 "price_to_upload": "",  # empty until you approve it
-                 "current_price": current_price,  # optional alias for clarity
-                 "product_gid": product["product_gid"],
-                 "tcg_price": tcg_price,
-                 "suggested_price": new_price,
-                 "percent_diff": percent_diff,
-                 "reason": "Lower to stay near market"})
+        shopify_qty = int(product.get("shopify_qty") or product.get("inventory_quantity") or 0)
+        if shopify_qty <= 0:
+            # Out of stock → auto-update to keep prices accurate for when we restock
+            print(f"  ⬇ OOS auto-update {product['title']}: ${current_price:.2f} → ${new_price:.2f} (qty=0)")
+            update_variant_price(product["product_gid"], product["variant_id"], new_price)
+            percent_diff = safe_percent_diff(current_price, new_price)
+            return ("updated",
+                    {**product,
+                     "shopify_price": current_price,
+                     "current_price": current_price,
+                     "product_gid": product["product_gid"],
+                     "tcg_price": tcg_price,
+                     "uploaded_price": new_price,
+                     "new_price": new_price,
+                     "percent_diff": percent_diff,
+                     "reason": "OOS auto-lower to market"})
+        else:
+            # In stock → send to review (don't auto-cut prices on live inventory)
+            percent_diff = safe_percent_diff(current_price, new_price)
+            return ("review",
+                    {**product,
+                     "shopify_price": current_price,
+                     "price_to_upload": "",  # empty until you approve it
+                     "current_price": current_price,
+                     "product_gid": product["product_gid"],
+                     "tcg_price": tcg_price,
+                     "suggested_price": new_price,
+                     "percent_diff": percent_diff,
+                     "reason": "Lower to stay near market (in stock — needs review)"})
 
     elif new_price > current_price:
         # price increase → auto-update
