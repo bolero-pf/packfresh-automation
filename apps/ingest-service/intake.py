@@ -452,6 +452,20 @@ def mark_item_missing(item_id: str) -> dict:
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
+def mark_item_damaged(item_id: str) -> dict:
+    """Mark an item as damaged — stays in totals but flagged."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    execute("""
+        UPDATE intake_items SET item_status = 'damaged' WHERE id = %s
+    """, (item_id,))
+
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
 def mark_item_rejected(item_id: str) -> dict:
     """Mark an item as rejected — seller kept it, excluded from totals."""
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))

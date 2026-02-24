@@ -728,13 +728,7 @@ def set_item_status(item_id):
         elif new_status == "good":
             item = intake.restore_item(item_id)
         elif new_status == "damaged":
-            # Mark as damaged — use direct DB update
-            db = intake.get_db()
-            db.execute("UPDATE intake_items SET item_status = 'damaged' WHERE id = %s RETURNING *", (item_id,))
-            item = db.fetchone()
-            if not item:
-                raise ValueError("Item not found")
-            db.connection.commit()
+            item = intake.mark_item_damaged(item_id)
         return jsonify({"success": True, "item": _serialize(item)})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
