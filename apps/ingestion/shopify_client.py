@@ -113,6 +113,7 @@ class ShopifyClient:
             "input": {
                 "reason": "correction",
                 "name": "available",
+                "ignoreCompareQuantity": True,
                 "quantities": [{
                     "inventoryItemId": f"gid://shopify/InventoryItem/{inventory_item_id}",
                     "locationId": location_id,
