@@ -118,12 +118,65 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
 
 
 def mark_item_damaged(item_id: str) -> dict:
-    """Mark an item as damaged (no price change — that's the offers service's job)."""
+    """Mark an entire item as damaged."""
     execute(
         "UPDATE intake_items SET item_status = 'damaged' WHERE id = %s",
         (item_id,)
     )
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def split_damaged(item_id: str, damaged_qty: int) -> dict:
+    """
+    Split an item into good + damaged portions.
+    If damaged_qty == total qty, just marks the whole thing damaged.
+    """
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    total_qty = item.get("quantity", 1)
+    if damaged_qty < 1 or damaged_qty > total_qty:
+        raise ValueError(f"damaged_qty must be 1-{total_qty}")
+
+    if damaged_qty == total_qty:
+        # Damage the whole thing
+        return mark_item_damaged(item_id)
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    market_price = Decimal(str(item.get("market_price", 0)))
+    DAMAGE_DISCOUNT = Decimal("0.85")
+
+    # Reduce original item qty
+    good_qty = total_qty - damaged_qty
+    good_offer = (market_price * offer_pct * good_qty).quantize(Decimal("0.01"))
+    execute("""
+        UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s
+    """, (good_qty, good_offer, item_id))
+
+    # Create damaged split
+    damaged_id = str(uuid4())
+    damaged_offer = (market_price * DAMAGE_DISCOUNT * offer_pct * damaged_qty).quantize(Decimal("0.01"))
+    execute("""
+        INSERT INTO intake_items (
+            id, session_id, product_name, set_name, tcgplayer_id,
+            quantity, market_price, offer_price, product_type,
+            is_mapped, item_status, parent_item_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        damaged_id, item["session_id"], item.get("product_name"), item.get("set_name"),
+        item.get("tcgplayer_id"), damaged_qty, market_price,
+        damaged_offer, item.get("product_type", "sealed"),
+        item.get("is_mapped", False), "damaged", item_id,
+    ))
+
+    _recalculate_session_totals(item["session_id"])
+
+    return {
+        "good_item": query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,)),
+        "damaged_item": query_one("SELECT * FROM intake_items WHERE id = %s", (damaged_id,)),
+    }
 
 
 def mark_item_good(item_id: str) -> dict:

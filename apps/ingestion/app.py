@@ -108,8 +108,20 @@ def break_down_item(item_id):
 
 @app.route("/api/ingest/item/<item_id>/damage", methods=["POST"])
 def damage_item(item_id):
-    item = ingest.mark_item_damaged(item_id)
-    return jsonify({"success": True, "item": _serialize(item)})
+    """Mark item (or partial qty) as damaged."""
+    data = request.get_json(silent=True) or {}
+    damaged_qty = data.get("damaged_qty")  # None = damage all
+
+    if damaged_qty is not None:
+        # Partial damage — split the item
+        try:
+            result = ingest.split_damaged(item_id, int(damaged_qty))
+            return jsonify({"success": True, "result": _serialize(result)})
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+    else:
+        item = ingest.mark_item_damaged(item_id)
+        return jsonify({"success": True, "item": _serialize(item)})
 
 
 @app.route("/api/ingest/item/<item_id>/mark-good", methods=["POST"])
@@ -129,7 +141,7 @@ def ppt_search_sealed():
     if not q:
         return jsonify({"error": "No query"}), 400
     try:
-        results = ppt.search_sealed(q)
+        results = ppt.search_sealed_products(q, limit=10)
         return jsonify({"results": results})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -139,7 +151,76 @@ def ppt_search_sealed():
 # PUSH LIVE TO SHOPIFY
 # ═══════════════════════════════════════════════════════════════════
 
-DAMAGED_STORE_DISCOUNT = 0.88  # 12% discount for damaged items in store
+@app.route("/api/ingest/session/<session_id>/push-dry-run", methods=["POST"])
+def push_dry_run(session_id):
+    """Dry run — shows exactly what push-live would do without calling Shopify."""
+    session = ingest.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    items = ingest.get_session_items(session_id)
+    active = [i for i in items if i.get("item_status") in ("good", "damaged") and i.get("is_mapped")]
+
+    if not active:
+        return jsonify({"error": "No active mapped items to push"}), 400
+
+    tcg_ids = list(set(i["tcgplayer_id"] for i in active if i.get("tcgplayer_id")))
+    normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
+
+    results = []
+    for item in active:
+        tcg_id = item["tcgplayer_id"]
+        qty = item.get("quantity", 1)
+        is_damaged = item.get("item_status") == "damaged"
+        entry = {
+            "item_id": item["id"],
+            "product_name": item.get("product_name"),
+            "tcgplayer_id": tcg_id,
+            "quantity": qty,
+            "is_damaged": is_damaged,
+        }
+
+        if not is_damaged:
+            cache_row = normal_cache.get(tcg_id)
+            if cache_row and cache_row.get("shopify_variant_id"):
+                entry["action"] = "would_increment"
+                entry["shopify_variant_id"] = cache_row["shopify_variant_id"]
+                entry["shopify_title"] = cache_row.get("title")
+                entry["current_qty"] = cache_row.get("shopify_qty", 0)
+                entry["new_qty"] = cache_row.get("shopify_qty", 0) + qty
+            else:
+                entry["action"] = "needs_listing"
+        else:
+            cache_row = damaged_cache.get(tcg_id)
+            if cache_row and cache_row.get("shopify_variant_id"):
+                entry["action"] = "would_increment"
+                entry["shopify_variant_id"] = cache_row["shopify_variant_id"]
+                entry["shopify_title"] = cache_row.get("title")
+                entry["current_qty"] = cache_row.get("shopify_qty", 0)
+                entry["new_qty"] = cache_row.get("shopify_qty", 0) + qty
+            else:
+                normal_row = normal_cache.get(tcg_id)
+                if normal_row and normal_row.get("shopify_product_id"):
+                    entry["action"] = "would_create_damaged"
+                    entry["source_title"] = normal_row.get("title")
+                    entry["damaged_title"] = f"{normal_row.get('title', '')} [DAMAGED]"
+                    entry["store_price"] = float(normal_row.get("shopify_price", 0))
+                    entry["note"] = "Price stays the same — 'damaged' tag triggers automatic discount on site"
+                else:
+                    entry["action"] = "needs_listing"
+
+        results.append(entry)
+
+    return jsonify({
+        "dry_run": True,
+        "results": [_serialize(r) for r in results],
+        "total": len(active),
+        "would_increment": sum(1 for r in results if r.get("action") == "would_increment"),
+        "would_create_damaged": sum(1 for r in results if r.get("action") == "would_create_damaged"),
+        "needs_listing": sum(1 for r in results if r.get("action") == "needs_listing"),
+    })
+
+
 
 @app.route("/api/ingest/session/<session_id>/push-live", methods=["POST"])
 def push_session_live(session_id):
@@ -248,16 +329,12 @@ def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
             product_gid = f"gid://shopify/Product/{normal_row['shopify_product_id']}"
             original_title = normal_row.get("title", item.get("product_name", "Unknown"))
             damaged_title = f"{original_title} [DAMAGED]"
-            damaged_price = round(float(normal_row.get("shopify_price", 0)) * DAMAGED_STORE_DISCOUNT, 2)
 
             new_product = shopify.duplicate_product_as_damaged(product_gid, damaged_title)
             shopify.add_tags(new_product["id"], ["damaged"])
 
-            # Set the damaged price
-            new_var = new_product["variants"]["edges"][0]["node"]
-            shopify.update_variant_price(new_product["id"], new_var["id"], damaged_price)
-
             # Set inventory
+            new_var = new_product["variants"]["edges"][0]["node"]
             new_inv_id = new_var.get("inventoryItem", {}).get("id", "").split("/")[-1]
             if new_inv_id:
                 shopify.set_inventory_quantity(new_inv_id, qty)
@@ -265,7 +342,7 @@ def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
             entry.update(
                 action="created_damaged_listing",
                 new_title=damaged_title,
-                damaged_price=damaged_price,
+                store_price=float(normal_row.get("shopify_price", 0)),
             )
         else:
             entry["action"] = "needs_listing"
@@ -305,7 +382,7 @@ def store_check(session_id):
         }
 
         if is_damaged and not cache and normal:
-            r["store_note"] = f"No damaged variant — will create at {DAMAGED_STORE_DISCOUNT*100:.0f}% of ${float(normal.get('shopify_price', 0)):.2f}"
+            r["store_note"] = f"No damaged variant — will duplicate listing, site applies auto-discount via 'damaged' tag"
             r["needs_listing"] = True
         elif not cache:
             r["store_note"] = "No Shopify listing found"

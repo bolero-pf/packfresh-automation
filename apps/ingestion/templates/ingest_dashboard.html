@@ -410,9 +410,14 @@ async function viewSession(sessionId) {
                                 Increment inventory for matched items, create damaged listings, and mark session as ingested.
                             </p>
                         </div>
-                        <button class="btn btn-success" onclick="pushLive('${sessionId}')" style="font-size:1.05rem; padding:12px 28px;">
-                            🚀 Push Live to Shopify
-                        </button>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                            <button class="btn btn-secondary" onclick="pushDryRun('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;">
+                                🔍 Debug Dry Run
+                            </button>
+                            <button class="btn btn-success" id="push-live-btn" onclick="pushLive('${sessionId}')" style="font-size:1.05rem; padding:12px 28px;">
+                                🚀 Push Live to Shopify
+                            </button>
+                        </div>
                     </div>
                     <div id="push-live-results" style="margin-top:16px;"></div>
                 </div>`;
@@ -445,7 +450,7 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     if (isReceived && !isBroken) {
         actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="openBreakdown('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1})">🔨 Break Down</button> `;
         if (!isDamaged) {
-            actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="markDamaged('${item.id}', '${sessionId}')">⚠ Damage</button> `;
+            actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠ Damage</button> `;
         } else {
             actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="markGood('${item.id}', '${sessionId}')">✅ Good</button> `;
         }
@@ -465,11 +470,34 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
 // DAMAGE / GOOD
 // ═══════════════════════════════════════════════════════════════════
 
-async function markDamaged(itemId, sessionId) {
-    const ok = await themedConfirm('Mark as Damaged', 'This item will be flagged as damaged for ingest.');
+async function markDamaged(itemId, sessionId, totalQty) {
+    let damagedQty = totalQty;
+
+    if (totalQty > 1) {
+        const input = prompt(`How many are damaged? (1-${totalQty})`, totalQty);
+        if (input === null) return;
+        damagedQty = parseInt(input);
+        if (isNaN(damagedQty) || damagedQty < 1 || damagedQty > totalQty) {
+            alert(`Must be between 1 and ${totalQty}`);
+            return;
+        }
+    }
+
+    const ok = await themedConfirm(
+        'Mark as Damaged',
+        damagedQty === totalQty
+            ? `Mark all ${totalQty} unit(s) as damaged?`
+            : `Split: ${damagedQty} damaged, ${totalQty - damagedQty} good.`,
+    );
     if (!ok) return;
+
     try {
-        await fetch(`/api/ingest/item/${itemId}/damage`, { method: 'POST' });
+        const body = damagedQty < totalQty ? { damaged_qty: damagedQty } : {};
+        await fetch(`/api/ingest/item/${itemId}/damage`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
         viewSession(sessionId);
     } catch(err) { alert(err.message); }
 }
@@ -654,6 +682,62 @@ async function runStoreCheck(sessionId) {
         el.innerHTML = html;
     } catch(err) {
         el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// PUSH DRY RUN
+// ═══════════════════════════════════════════════════════════════════
+
+async function pushDryRun(sessionId) {
+    const panel = document.getElementById('push-live-results');
+    panel.innerHTML = '<div class="loading"><span class="spinner"></span> Running dry run...</div>';
+
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/push-dry-run`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+
+        let html = '<div class="alert" style="background:rgba(79,125,249,0.1); border-color:var(--accent); color:var(--accent);">🔍 <strong>DRY RUN</strong> — No changes made. This is what Push Live would do:</div>';
+
+        html += `<div class="stats" style="margin-bottom:12px;">
+            <div class="stat"><div class="stat-label">Would Increment</div><div class="stat-value" style="color:var(--green);">${d.would_increment || 0}</div></div>
+            <div class="stat"><div class="stat-label">Would Create Damaged</div><div class="stat-value">${d.would_create_damaged || 0}</div></div>
+            <div class="stat"><div class="stat-label">Needs Listing</div><div class="stat-value" style="color:${(d.needs_listing||0) > 0 ? 'var(--amber)' : 'var(--text-dim)'};">${d.needs_listing || 0}</div></div>
+        </div>`;
+
+        const results = d.results || [];
+        if (results.length) {
+            html += '<table><thead><tr><th>Product</th><th>Qty</th><th>Action</th><th>Details</th></tr></thead><tbody>';
+            html += results.map(r => {
+                let actionLabel, color, details = '';
+                if (r.action === 'would_increment') {
+                    actionLabel = '✅ Increment Inventory';
+                    color = 'var(--green)';
+                    details = `${r.shopify_title || ''}<br><small>Qty: ${r.current_qty} → <strong>${r.new_qty}</strong></small>`;
+                } else if (r.action === 'would_create_damaged') {
+                    actionLabel = '🆕 Create Damaged Listing';
+                    color = 'var(--accent)';
+                    details = `"${r.damaged_title}"<br><small>Price: $${r.store_price?.toFixed(2)} (same — site auto-discounts via tag)</small>`;
+                } else {
+                    actionLabel = '⚠ Needs Manual Listing';
+                    color = 'var(--amber)';
+                    details = 'No Shopify product found';
+                }
+                return `<tr>
+                    <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}</td>
+                    <td>${r.quantity}</td>
+                    <td style="color:${color};font-size:0.85rem;">${actionLabel}</td>
+                    <td style="font-size:0.82rem;">${details}</td>
+                </tr>`;
+            }).join('');
+            html += '</tbody></table>';
+        }
+
+        panel.innerHTML = html;
+    } catch(err) {
+        panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
 }
 
