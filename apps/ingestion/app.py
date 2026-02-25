@@ -230,7 +230,9 @@ def push_dry_run(session_id):
                 entry["current_qty"] = cache_row.get("shopify_qty", 0)
                 entry["new_qty"] = cache_row.get("shopify_qty", 0) + qty
             else:
-                entry["action"] = "needs_listing"
+                entry["action"] = "would_create_listing"
+                entry["new_title"] = item.get("product_name", "Unknown")
+                entry["listing_price"] = float(item.get("market_price", 0))
         else:
             cache_row = damaged_cache.get(tcg_id)
             if cache_row and cache_row.get("shopify_variant_id"):
@@ -248,7 +250,10 @@ def push_dry_run(session_id):
                     entry["store_price"] = float(normal_row.get("shopify_price", 0))
                     entry["note"] = "Price stays the same — 'damaged' tag triggers automatic discount on site"
                 else:
-                    entry["action"] = "needs_listing"
+                    entry["action"] = "would_create_listing"
+                    damaged_title = f"{item.get('product_name', 'Unknown')} [DAMAGED]"
+                    entry["new_title"] = damaged_title
+                    entry["listing_price"] = float(item.get("market_price", 0))
 
         results.append(entry)
 
@@ -258,7 +263,7 @@ def push_dry_run(session_id):
         "total": len(active),
         "would_increment": sum(1 for r in results if r.get("action") == "would_increment"),
         "would_create_damaged": sum(1 for r in results if r.get("action") == "would_create_damaged"),
-        "needs_listing": sum(1 for r in results if r.get("action") == "needs_listing"),
+        "would_create_listing": sum(1 for r in results if r.get("action") == "would_create_listing"),
     })
 
 
@@ -303,7 +308,7 @@ def push_session_live(session_id):
 
         try:
             if not is_damaged:
-                entry = _push_normal_item(entry, tcg_id, qty, normal_cache)
+                entry = _push_normal_item(entry, tcg_id, qty, item, normal_cache)
             else:
                 entry = _push_damaged_item(entry, tcg_id, qty, item, normal_cache, damaged_cache)
         except Exception as e:
@@ -327,14 +332,14 @@ def push_session_live(session_id):
         "total": len(active),
         "incremented": sum(1 for r in results if r.get("action") == "inventory_incremented"),
         "created_damaged": sum(1 for r in results if r.get("action") == "created_damaged_listing"),
-        "needs_listing": sum(1 for r in results if r.get("action") == "needs_listing"),
+        "created_listing": sum(1 for r in results if r.get("action") == "created_listing"),
         "error_count": len(errors),
         "ingested": len(errors) == 0,
     })
 
 
-def _push_normal_item(entry: dict, tcg_id: int, qty: int, normal_cache: dict) -> dict:
-    """Push a normal (non-damaged) item: find variant, increment inventory."""
+def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cache: dict) -> dict:
+    """Push a normal (non-damaged) item: find variant and increment, or create new listing."""
     cache_row = normal_cache.get(tcg_id)
     if cache_row and cache_row.get("shopify_variant_id"):
         inv_item_id = shopify.get_inventory_item_id(cache_row["shopify_variant_id"])
@@ -345,7 +350,20 @@ def _push_normal_item(entry: dict, tcg_id: int, qty: int, normal_cache: dict) ->
         else:
             entry.update(action="error", error="Could not find inventory item ID")
     else:
-        entry["action"] = "needs_listing"
+        # No Shopify match — create a new product
+        product_name = item.get("product_name", "Unknown Product")
+        market_price = float(item.get("market_price", 0))
+        new_product = shopify.create_product(
+            title=product_name,
+            price=market_price,
+            tags=["auto-created", "ingest"],
+            tcgplayer_id=tcg_id if tcg_id else None,
+            quantity=qty,
+        )
+        entry["action"] = "created_listing"
+        entry["new_product_id"] = new_product["id"]
+        entry["new_title"] = product_name
+        entry["listing_price"] = market_price
     return entry
 
 
@@ -386,7 +404,21 @@ def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
                 store_price=float(normal_row.get("shopify_price", 0)),
             )
         else:
-            entry["action"] = "needs_listing"
+            # No normal product to duplicate — create fresh damaged listing
+            product_name = item.get("product_name", "Unknown Product")
+            damaged_title = f"{product_name} [DAMAGED]"
+            market_price = float(item.get("market_price", 0))
+            new_product = shopify.create_product(
+                title=damaged_title,
+                price=market_price,
+                tags=["auto-created", "ingest", "damaged"],
+                tcgplayer_id=tcg_id if tcg_id else None,
+                quantity=qty,
+            )
+            entry.update(
+                action="created_damaged_listing",
+                new_title=damaged_title,
+            )
 
     return entry
 

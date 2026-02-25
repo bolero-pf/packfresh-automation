@@ -731,7 +731,7 @@ async function pushDryRun(sessionId) {
         html += `<div class="stats" style="margin-bottom:12px;">
             <div class="stat"><div class="stat-label">Would Increment</div><div class="stat-value" style="color:var(--green);">${d.would_increment || 0}</div></div>
             <div class="stat"><div class="stat-label">Would Create Damaged</div><div class="stat-value">${d.would_create_damaged || 0}</div></div>
-            <div class="stat"><div class="stat-label">Needs Listing</div><div class="stat-value" style="color:${(d.needs_listing||0) > 0 ? 'var(--amber)' : 'var(--text-dim)'};">${d.needs_listing || 0}</div></div>
+            <div class="stat"><div class="stat-label">Would Create Listing</div><div class="stat-value" style="color:var(--accent);">${d.would_create_listing || 0}</div></div>
         </div>`;
 
         const results = d.results || [];
@@ -747,10 +747,10 @@ async function pushDryRun(sessionId) {
                     actionLabel = '🆕 Create Damaged Listing';
                     color = 'var(--accent)';
                     details = `"${r.damaged_title}"<br><small>Price: $${r.store_price?.toFixed(2)} (same — site auto-discounts via tag)</small>`;
-                } else {
-                    actionLabel = '⚠ Needs Manual Listing';
-                    color = 'var(--amber)';
-                    details = 'No Shopify product found';
+                } else if (r.action === 'would_create_listing') {
+                    actionLabel = '🆕 Create New Listing';
+                    color = 'var(--accent)';
+                    details = `"${r.new_title}"<br><small>Price: $${r.listing_price?.toFixed(2)} · Qty: ${r.quantity}</small>`;
                 }
                 return `<tr>
                     <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}</td>
@@ -792,7 +792,7 @@ async function pushLive(sessionId) {
         let html = `<div class="stats" style="margin-bottom:12px;">
             <div class="stat"><div class="stat-label">Incremented</div><div class="stat-value" style="color:var(--green);">${d.incremented || 0}</div></div>
             <div class="stat"><div class="stat-label">Damaged Created</div><div class="stat-value">${d.created_damaged || 0}</div></div>
-            <div class="stat"><div class="stat-label">Needs Listing</div><div class="stat-value" style="color:${(d.needs_listing||0) > 0 ? 'var(--amber)' : 'var(--text-dim)'};">${d.needs_listing || 0}</div></div>
+            <div class="stat"><div class="stat-label">New Listings</div><div class="stat-value" style="color:var(--accent);">${d.created_listing || 0}</div></div>
             <div class="stat"><div class="stat-label">Errors</div><div class="stat-value" style="color:${(d.error_count||0) > 0 ? 'var(--red)' : 'var(--green)'};">${d.error_count || 0}</div></div>
         </div>`;
 
@@ -808,11 +808,11 @@ async function pushLive(sessionId) {
             html += allResults.map(r => {
                 const color = r.action === 'inventory_incremented' ? 'var(--green)'
                     : r.action === 'created_damaged_listing' ? 'var(--accent)'
-                    : r.action === 'needs_listing' ? 'var(--amber)'
+                    : r.action === 'created_listing' ? 'var(--accent)'
                     : 'var(--red)';
                 const label = r.action === 'inventory_incremented' ? '✅ Inventory +' + r.quantity
                     : r.action === 'created_damaged_listing' ? '🆕 Created: ' + (r.new_title || 'Damaged Listing')
-                    : r.action === 'needs_listing' ? '⚠ Needs Manual Listing'
+                    : r.action === 'created_listing' ? '🆕 Created: ' + (r.new_title || 'New Listing')
                     : '❌ ' + (r.error || 'Error');
                 return `<tr>
                     <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}</td>
