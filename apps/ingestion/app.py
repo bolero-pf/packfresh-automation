@@ -142,6 +142,12 @@ def ppt_search_sealed():
         return jsonify({"error": "No query"}), 400
     try:
         results = ppt.search_sealed_products(q, limit=10)
+        # Normalize tcgplayer_id field — PPT may return it as tcgplayerId, tcgPlayerId, etc.
+        for r in results:
+            if not r.get("tcgplayer_id"):
+                tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("tcgplayer_id") or r.get("id")
+                if tcg_id:
+                    r["tcgplayer_id"] = int(tcg_id)
         return jsonify({"results": results})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

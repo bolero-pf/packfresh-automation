@@ -575,7 +575,7 @@ async function bdSearch() {
         panel.innerHTML = results.slice(0, 15).map(p => {
             const name = (p.name || p.productName || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
             const setName = (p.setName || p.set_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-            const tcgId = p.tcgplayerId || p.tcgplayer_id || 0;
+            const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || p.id || 0;
             const price = p.unopenedPrice || p.marketPrice || 0;
             return `<div class="search-result" onclick="bdAddComponent(${tcgId}, '${name}', '${setName}', ${price})">
                 <strong>${p.name || p.productName}</strong>
@@ -607,7 +607,7 @@ function bdRenderComponents() {
     el.innerHTML = `<table><thead><tr><th>Component</th><th>Qty Each</th><th>Market Price</th><th></th></tr></thead><tbody>` +
         _breakDownComponents.map((c, idx) =>
             `<tr>
-                <td>${c.product_name}<br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small></td>
+                <td>${c.product_name}<br><small style="color:${c.tcgplayer_id ? 'var(--text-dim)' : 'var(--red)'};">${c.tcgplayer_id ? 'TCG#' + c.tcgplayer_id : '⚠ NO TCG ID'}</small></td>
                 <td><input type="number" value="${c.quantity}" min="1" style="width:60px;" 
                     onchange="_breakDownComponents[${idx}].quantity = parseInt(this.value) || 1"></td>
                 <td>$${(c.market_price || 0).toFixed(2)}</td>
