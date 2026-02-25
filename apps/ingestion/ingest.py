@@ -74,6 +74,9 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
     if not item:
         raise ValueError("Item not found")
 
+    if item.get("item_status") == "broken_down":
+        raise ValueError("Item is already broken down. Undo the breakdown first.")
+
     session_id = item["session_id"]
     session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,))
     if not session:
@@ -144,6 +147,32 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
     return {
         "parent_item": query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,)),
         "child_items": child_items,
+        "session": query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,)),
+    }
+
+
+def undo_break_down(item_id: str) -> dict:
+    """
+    Undo a break-down: delete all children and restore parent to 'good' status.
+    """
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+    if item.get("item_status") != "broken_down":
+        raise ValueError("Item is not broken down")
+
+    session_id = item["session_id"]
+
+    # Delete all children of this item
+    execute("DELETE FROM intake_items WHERE parent_item_id = %s", (item_id,))
+
+    # Restore parent
+    execute("UPDATE intake_items SET item_status = 'good' WHERE id = %s", (item_id,))
+
+    _recalculate_session_totals(session_id)
+
+    return {
+        "item": query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,)),
         "session": query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,)),
     }
 

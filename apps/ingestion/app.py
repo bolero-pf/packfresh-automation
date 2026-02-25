@@ -9,7 +9,7 @@ shopify_product_cache) but serves a different audience (warehouse vs buying team
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 from flask import Flask, render_template, request, jsonify
 
@@ -22,6 +22,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+
+# ─── JSON error handlers ────────────────────────────────────────────
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "Not found"}), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    logger.exception("Internal server error")
+    return jsonify({"error": "Internal server error", "detail": str(e)}), 500
 
 # ─── Init services ──────────────────────────────────────────────────
 
@@ -49,6 +60,10 @@ def _serialize(obj):
         return float(obj)
     if isinstance(obj, datetime):
         return obj.isoformat()
+    if isinstance(obj, date):
+        return obj.isoformat()
+    if hasattr(obj, '__str__') and type(obj).__name__ in ('UUID', 'uuid'):
+        return str(obj)
     return obj
 
 
@@ -104,6 +119,26 @@ def break_down_item(item_id):
         })
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Break down failed for item {item_id}")
+        return jsonify({"error": f"Break down failed: {str(e)}"}), 500
+
+
+@app.route("/api/ingest/item/<item_id>/undo-breakdown", methods=["POST"])
+def undo_breakdown(item_id):
+    """Undo a break-down: delete children, restore parent."""
+    try:
+        result = ingest.undo_break_down(item_id)
+        return jsonify({
+            "success": True,
+            "item": _serialize(result["item"]),
+            "session": _serialize(result["session"]),
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Undo breakdown failed for item {item_id}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/ingest/item/<item_id>/damage", methods=["POST"])
