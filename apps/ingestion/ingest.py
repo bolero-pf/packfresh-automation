@@ -63,6 +63,11 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
     Child items are created with the parent's session, each with their own
     tcgplayer_id, name, quantity (multiplied by parent qty), and market price.
 
+    COGS allocation: The parent's offer_price (what we paid) is distributed
+    proportionally across children based on their relative market values.
+    e.g. parent paid $100, child A market $90, child B market $60:
+         total market = $150, A COGS = $100 * 90/150 = $60, B COGS = $100 * 60/150 = $40
+
     components: list of {product_name, tcgplayer_id, quantity, market_price, set_name?}
     """
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
@@ -75,16 +80,42 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
         raise ValueError("Session not found")
 
     parent_qty = item.get("quantity", 1)
-    offer_pct = Decimal(str(session.get("offer_percentage", 65)))
+    parent_offer = Decimal(str(item.get("offer_price", 0)))  # Total we paid for the parent
 
     # Mark parent as broken down
     execute("UPDATE intake_items SET item_status = 'broken_down' WHERE id = %s", (item_id,))
 
-    child_items = []
+    # Calculate total market value of all components (per parent unit)
+    # Each component has a market_price (per unit) and a quantity (per parent unit)
+    total_component_market = Decimal("0")
     for comp in components:
+        comp_market = Decimal(str(comp.get("market_price", 0)))
+        comp_qty_per_parent = int(comp["quantity"])
+        total_component_market += comp_market * comp_qty_per_parent
+
+    child_items = []
+    allocated_offer = Decimal("0")
+    for idx, comp in enumerate(components):
         child_qty = int(comp["quantity"]) * parent_qty
         market_price = Decimal(str(comp.get("market_price", 0)))
-        per_unit_offer = (market_price * offer_pct / 100).quantize(Decimal("0.01"))
+        comp_qty_per_parent = int(comp["quantity"])
+
+        # Proportional COGS: this component's share of the parent's cost
+        if total_component_market > 0:
+            # Market value of this component (per parent unit)
+            comp_value = market_price * comp_qty_per_parent
+            # Its share of total market value
+            share = comp_value / total_component_market
+            # COGS for all units of this component
+            comp_offer = (parent_offer * share).quantize(Decimal("0.01"))
+        else:
+            # Fallback: split evenly
+            comp_offer = (parent_offer / len(components)).quantize(Decimal("0.01"))
+
+        # For the last component, assign whatever's left to avoid rounding drift
+        if idx == len(components) - 1:
+            comp_offer = parent_offer - allocated_offer
+        allocated_offer += comp_offer
 
         child_id = str(uuid4())
         execute("""
@@ -96,7 +127,7 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
         """, (
             child_id, session_id, comp["product_name"], comp.get("set_name"),
             comp.get("tcgplayer_id"), child_qty, market_price,
-            per_unit_offer * child_qty, "sealed",
+            comp_offer, "sealed",
             comp.get("tcgplayer_id") is not None, "good", item_id,
         ))
 

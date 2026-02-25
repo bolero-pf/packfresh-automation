@@ -369,7 +369,7 @@ async function viewSession(sessionId) {
                 <div style="overflow-x:auto;">
                 <table>
                     <thead><tr>
-                        <th>Product</th><th>Qty</th><th>Status</th><th>Market</th>
+                        <th>Product</th><th>Qty</th><th>Status</th><th>Market</th><th>COGS</th>
                         ${isReceived ? '<th>Actions</th>' : ''}
                     </tr></thead>
                     <tbody>`;
@@ -457,10 +457,11 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     }
 
     return `<tr style="${rowStyle}">
-        <td>${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
+        <td>${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
         <td>${item.quantity || 1}</td>
         <td><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
         <td>$${(item.market_price || 0).toFixed(2)}</td>
+        <td>$${(item.offer_price || 0).toFixed(2)}${(item.quantity || 1) > 1 ? '<br><small style="color:var(--text-dim);">$' + ((item.offer_price || 0) / (item.quantity || 1)).toFixed(2) + '/ea</small>' : ''}</td>
         ${isReceived ? '<td>' + actions + '</td>' : ''}
     </tr>`;
 }
@@ -661,7 +662,7 @@ async function runStoreCheck(sessionId) {
         `;
 
         if (results.length) {
-            html += '<table><thead><tr><th>Product</th><th>Qty to Add</th><th>Store Status</th><th>Store Price</th><th>Store Qty</th></tr></thead><tbody>';
+            html += '<table><thead><tr><th>Product</th><th>TCG ID</th><th>Qty to Add</th><th>Store Status</th><th>Store Price</th><th>Store Qty</th></tr></thead><tbody>';
             html += results.map(r => {
                 const badge = r.in_store
                     ? '<span class="badge badge-green">In Store</span>'
@@ -670,6 +671,7 @@ async function runStoreCheck(sessionId) {
                         : '<span class="badge badge-red">Not Found</span>';
                 return `<tr>
                     <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}</td>
+                    <td style="font-size:0.8rem; color:var(--text-dim);">${r.tcgplayer_id || '—'}</td>
                     <td>${r.quantity}</td>
                     <td>${badge}${r.store_note ? '<br><small style="color:var(--text-dim);">' + r.store_note + '</small>' : ''}</td>
                     <td>${r.shopify_price != null ? '$' + r.shopify_price.toFixed(2) : '—'}</td>
