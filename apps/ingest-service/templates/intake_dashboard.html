@@ -1009,7 +1009,7 @@
                         ${s.is_distribution === true ? '<div style="margin-top:4px;"><span class="badge" style="background:#7c3aed;color:#fff;">📦 DISTRIBUTION</span></div>' : ''}
                     </div>
                     <div class="stat"><div class="stat-label">Type</div><div class="stat-value" style="font-size:1.1rem;"><span class="badge badge-blue">${s.session_type}</span>
-                        ${editable ? `<div style="margin-top:6px;"><label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;color:var(--text-dim);"><input type="checkbox" style="width:auto;" ${s.is_distribution === true ? 'checked' : ''} onchange="toggleDistribution('${sessionId}')"> Distribution</label></div>` : ''}
+                        ${editable ? `<div style="margin-top:6px;"><button class="btn btn-sm" style="font-size:0.75rem;padding:2px 8px;background:${s.is_distribution === true ? '#7c3aed' : 'var(--surface-2)'};color:${s.is_distribution === true ? '#fff' : 'var(--text-dim)'};border:1px solid ${s.is_distribution === true ? '#7c3aed' : 'var(--border)'};" onclick="toggleDistribution('${sessionId}')">${s.is_distribution === true ? '📦 Distribution ✓' : '📦 Distribution'}</button></div>` : ''}
                     </div></div>
                     <div class="stat"><div class="stat-label">Market Value</div><div class="stat-value">$${(s.total_market_value || 0).toFixed(2)}</div></div>
                     <div class="stat">
