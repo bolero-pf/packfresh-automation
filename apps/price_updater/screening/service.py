@@ -409,7 +409,7 @@ def check_high_value_first_order(order_gid: str) -> dict:
     order = data["data"]["order"]
     customer = order.get("customer") or {}
 
-    order_count = customer.get("numberOfOrders", 0)
+    order_count = int(customer.get("numberOfOrders", 0) or 0)
     if order_count > 1:
         return {"flagged": False, "reason": "repeat_customer", "order_count": order_count}
 
