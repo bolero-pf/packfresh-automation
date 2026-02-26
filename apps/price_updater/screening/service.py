@@ -43,7 +43,7 @@ query OrderDetail($id: ID!) {
     displayFinancialStatus
     currentTotalPriceSet { shopMoney { amount currencyCode } }
     discountCodes
-    risk { level recommendation }
+    risk { recommendation assessments { riskLevel } }
     customer {
       id
       email
@@ -479,15 +479,22 @@ def check_fraud_risk(order_gid: str) -> dict:
 
     risk = order.get("risk") or {}
     risk_level = None
-    if isinstance(risk, dict):
-        risk_level = (risk.get("level") or "").upper()
-    elif isinstance(risk, list):
-        for r in risk:
-            level = (r.get("level") or "").upper()
+
+    # OrderRiskSummary uses 'recommendation' (ACCEPT/INVESTIGATE/CANCEL)
+    # and 'assessments' array with 'riskLevel' (HIGH/MEDIUM/LOW)
+    recommendation = (risk.get("recommendation") or "").upper()
+    if recommendation == "CANCEL":
+        risk_level = "HIGH"
+    elif recommendation == "INVESTIGATE":
+        risk_level = "MEDIUM"
+    else:
+        # Fall back to checking individual assessments
+        for a in (risk.get("assessments") or []):
+            level = (a.get("riskLevel") or "").upper()
             if level == "HIGH":
                 risk_level = "HIGH"
                 break
-            elif level == "MEDIUM":
+            elif level == "MEDIUM" and risk_level != "HIGH":
                 risk_level = "MEDIUM"
 
     if risk_level not in ("MEDIUM", "HIGH"):
