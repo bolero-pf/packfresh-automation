@@ -449,11 +449,14 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     let actions = '';
     if (isReceived && !isBroken) {
         actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="openBreakdown('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1})">🔨 Break Down</button> `;
+        actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="relinkItem('${item.id}', '${sessionId}')">🔗 Relink</button> `;
+        actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏ Qty</button> `;
         if (!isDamaged) {
             actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠ Damage</button> `;
         } else {
             actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="markGood('${item.id}', '${sessionId}')">✅ Good</button> `;
         }
+        actions += `<button class="btn btn-sm" style="font-size:0.72rem;padding:3px 8px;color:var(--red);" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕</button> `;
     }
     if (isReceived && isBroken) {
         actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;border-color:var(--amber);" onclick="undoBreakdown('${item.id}', '${sessionId}')">↩ Undo Breakdown</button> `;
@@ -526,6 +529,80 @@ async function undoBreakdown(itemId, sessionId) {
         let d;
         try { d = JSON.parse(text); } catch(e) { alert('Server error: ' + text.substring(0, 200)); return; }
         if (!r.ok) { alert(d.error || 'Undo failed'); return; }
+        viewSession(sessionId);
+    } catch(err) { alert(err.message); }
+}
+
+async function relinkItem(itemId, sessionId) {
+    const query = prompt('Search PPT for the correct product:');
+    if (!query) return;
+
+    try {
+        const sr = await fetch('/api/ppt/search-sealed', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query }),
+        });
+        const sd = await sr.json();
+        if (!sr.ok) { alert(sd.error); return; }
+        const results = sd.results || [];
+        if (!results.length) { alert('No results found'); return; }
+
+        // Build a simple selection list
+        let msg = 'Select the correct product:\n\n';
+        results.slice(0, 8).forEach((p, i) => {
+            const name = p.name || p.productName || '';
+            const tcgId = p.tcgplayer_id || p.tcgplayerId || 0;
+            const price = p.unopenedPrice || p.marketPrice || 0;
+            msg += `${i + 1}. ${name} (TCG#${tcgId}, $${price.toFixed(2)})\n`;
+        });
+        msg += '\nEnter number:';
+        const choice = prompt(msg);
+        if (!choice) return;
+        const idx = parseInt(choice) - 1;
+        if (isNaN(idx) || idx < 0 || idx >= results.length) { alert('Invalid choice'); return; }
+
+        const selected = results[idx];
+        const r = await fetch(`/api/ingest/item/${itemId}/relink`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                product_name: selected.name || selected.productName,
+                tcgplayer_id: selected.tcgplayer_id || selected.tcgplayerId,
+                market_price: selected.unopenedPrice || selected.marketPrice || 0,
+                set_name: selected.setName || selected.set_name || null,
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error); return; }
+        viewSession(sessionId);
+    } catch(err) { alert(err.message); }
+}
+
+async function editItemQty(itemId, sessionId, currentQty) {
+    const input = prompt(`New quantity (currently ${currentQty}):`, currentQty);
+    if (input === null) return;
+    const qty = parseInt(input);
+    if (isNaN(qty) || qty < 1) { alert('Must be at least 1'); return; }
+    try {
+        const r = await fetch(`/api/ingest/item/${itemId}/update-qty`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ quantity: qty }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error); return; }
+        viewSession(sessionId);
+    } catch(err) { alert(err.message); }
+}
+
+async function deleteItem(itemId, sessionId, name) {
+    const ok = await themedConfirm('Delete Item', `Remove "${name}" from this session?`, { confirmText: 'Delete', dangerous: true });
+    if (!ok) return;
+    try {
+        const r = await fetch(`/api/ingest/item/${itemId}/delete`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error); return; }
         viewSession(sessionId);
     } catch(err) { alert(err.message); }
 }
@@ -695,7 +772,7 @@ async function runStoreCheck(sessionId) {
                         ? '<span class="badge badge-amber">Needs Listing</span>'
                         : '<span class="badge badge-red">Not Found</span>';
                 return `<tr>
-                    <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}</td>
+                    <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}${r.consolidated_from > 1 ? ' <span class="badge badge-dim" style="font-size:0.6rem;">×' + r.consolidated_from + ' items</span>' : ''}</td>
                     <td style="font-size:0.8rem; color:var(--text-dim);">${r.tcgplayer_id || '—'}</td>
                     <td>${r.quantity}</td>
                     <td>${badge}${r.store_note ? '<br><small style="color:var(--text-dim);">' + r.store_note + '</small>' : ''}</td>
@@ -753,7 +830,7 @@ async function pushDryRun(sessionId) {
                     details = `"${r.new_title}"<br><small>Price: $${r.listing_price?.toFixed(2)} · Qty: ${r.quantity}</small>`;
                 }
                 return `<tr>
-                    <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}</td>
+                    <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}${r.consolidated_from > 1 ? ' <span class="badge badge-dim" style="font-size:0.6rem;">×' + r.consolidated_from + ' items</span>' : ''}</td>
                     <td>${r.quantity}</td>
                     <td style="color:${color};font-size:0.85rem;">${actionLabel}</td>
                     <td style="font-size:0.82rem;">${details}</td>

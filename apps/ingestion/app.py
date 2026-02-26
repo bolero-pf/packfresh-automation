@@ -165,6 +165,48 @@ def mark_good(item_id):
     return jsonify({"success": True, "item": _serialize(item)})
 
 
+@app.route("/api/ingest/item/<item_id>/relink", methods=["POST"])
+def relink_item(item_id):
+    """Relink an item to a different PPT product (change name, tcgplayer_id, market price)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        result = ingest.relink_item(item_id, data)
+        return jsonify({"success": True, "item": _serialize(result)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Relink failed for item {item_id}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ingest/item/<item_id>/update-qty", methods=["POST"])
+def update_item_qty(item_id):
+    """Update item quantity."""
+    data = request.get_json(silent=True) or {}
+    new_qty = data.get("quantity")
+    if not new_qty or int(new_qty) < 1:
+        return jsonify({"error": "Invalid quantity"}), 400
+    try:
+        result = ingest.update_item_quantity(item_id, int(new_qty))
+        return jsonify({"success": True, "item": _serialize(result)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ingest/item/<item_id>/delete", methods=["POST"])
+def delete_item(item_id):
+    """Remove an item from the session."""
+    try:
+        result = ingest.delete_item(item_id)
+        return jsonify({"success": True, "result": _serialize(result)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ═══════════════════════════════════════════════════════════════════
 # PPT SEARCH (for break-down modal)
 # ═══════════════════════════════════════════════════════════════════
@@ -209,16 +251,27 @@ def push_dry_run(session_id):
     normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
 
     results = []
+
+    # Consolidate by (tcg_id, is_damaged)
+    consolidated = {}
     for item in active:
         tcg_id = item["tcgplayer_id"]
-        qty = item.get("quantity", 1)
         is_damaged = item.get("item_status") == "damaged"
+        key = (tcg_id, is_damaged)
+        if key not in consolidated:
+            consolidated[key] = {"tcg_id": tcg_id, "is_damaged": is_damaged, "total_qty": 0, "items": [], "product_name": item.get("product_name")}
+        consolidated[key]["total_qty"] += item.get("quantity", 1)
+        consolidated[key]["items"].append(item)
+
+    for key, group in consolidated.items():
+        tcg_id, is_damaged = key
+        qty = group["total_qty"]
         entry = {
-            "item_id": item["id"],
-            "product_name": item.get("product_name"),
+            "product_name": group["product_name"],
             "tcgplayer_id": tcg_id,
             "quantity": qty,
             "is_damaged": is_damaged,
+            "consolidated_from": len(group["items"]),
         }
 
         if not is_damaged:
@@ -294,23 +347,40 @@ def push_session_live(session_id):
     results = []
     errors = []
 
+    # ── Consolidate items by (tcg_id, is_damaged) to minimize Shopify API calls ──
+    consolidated = {}  # (tcg_id, is_damaged) -> {total_qty, items[], ...}
     for item in active:
         tcg_id = item["tcgplayer_id"]
-        qty = item.get("quantity", 1)
         is_damaged = item.get("item_status") == "damaged"
+        key = (tcg_id, is_damaged)
+        if key not in consolidated:
+            consolidated[key] = {
+                "tcg_id": tcg_id,
+                "is_damaged": is_damaged,
+                "total_qty": 0,
+                "items": [],
+                "product_name": item.get("product_name"),
+            }
+        consolidated[key]["total_qty"] += item.get("quantity", 1)
+        consolidated[key]["items"].append(item)
+
+    for key, group in consolidated.items():
+        tcg_id, is_damaged = key
+        qty = group["total_qty"]
+        item_names = ", ".join(set(i.get("product_name", "") for i in group["items"]))
         entry = {
-            "item_id": item["id"],
-            "product_name": item.get("product_name"),
+            "product_name": group["product_name"],
             "tcgplayer_id": tcg_id,
             "quantity": qty,
             "is_damaged": is_damaged,
+            "consolidated_from": len(group["items"]),
         }
 
         try:
             if not is_damaged:
-                entry = _push_normal_item(entry, tcg_id, qty, item, normal_cache)
+                entry = _push_normal_item(entry, tcg_id, qty, group["items"][0], normal_cache)
             else:
-                entry = _push_damaged_item(entry, tcg_id, qty, item, normal_cache, damaged_cache)
+                entry = _push_damaged_item(entry, tcg_id, qty, group["items"][0], normal_cache, damaged_cache)
         except Exception as e:
             entry.update(action="error", error=str(e))
             errors.append(entry)

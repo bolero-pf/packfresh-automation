@@ -248,6 +248,85 @@ def mark_item_good(item_id: str) -> dict:
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
+def relink_item(item_id: str, data: dict) -> dict:
+    """
+    Relink an item to a different product.
+    data: {product_name, tcgplayer_id, market_price, set_name?}
+    """
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    product_name = data.get("product_name", item.get("product_name"))
+    tcgplayer_id = data.get("tcgplayer_id")
+    market_price = Decimal(str(data.get("market_price", item.get("market_price", 0))))
+    set_name = data.get("set_name", item.get("set_name"))
+
+    # Recalculate offer proportionally — keep the same COGS ratio
+    old_market = Decimal(str(item.get("market_price", 0)))
+    old_offer = Decimal(str(item.get("offer_price", 0)))
+    qty = item.get("quantity", 1)
+
+    if old_market > 0 and qty > 0:
+        # Preserve the offer ratio (COGS per unit / market per unit)
+        ratio = old_offer / (old_market * qty)
+        new_offer = (market_price * qty * ratio).quantize(Decimal("0.01"))
+    else:
+        # Fallback: use session offer percentage
+        session = query_one("SELECT offer_percentage FROM intake_sessions WHERE id = %s", (item["session_id"],))
+        pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+        new_offer = (market_price * qty * pct).quantize(Decimal("0.01"))
+
+    execute("""
+        UPDATE intake_items
+        SET product_name = %s, tcgplayer_id = %s, market_price = %s,
+            set_name = %s, offer_price = %s, is_mapped = %s
+        WHERE id = %s
+    """, (product_name, tcgplayer_id, market_price, set_name, new_offer,
+          tcgplayer_id is not None, item_id))
+
+    # Save mapping
+    if tcgplayer_id:
+        _save_mapping(product_name, int(tcgplayer_id), "sealed", set_name=set_name)
+
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def update_item_quantity(item_id: str, new_qty: int) -> dict:
+    """Update an item's quantity and recalculate offer price proportionally."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    old_qty = item.get("quantity", 1)
+    old_offer = Decimal(str(item.get("offer_price", 0)))
+    # Scale offer proportionally
+    if old_qty > 0:
+        per_unit_offer = old_offer / old_qty
+        new_offer = (per_unit_offer * new_qty).quantize(Decimal("0.01"))
+    else:
+        new_offer = Decimal("0")
+
+    execute("UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s",
+            (new_qty, new_offer, item_id))
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def delete_item(item_id: str) -> dict:
+    """Delete an item from a session."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+    session_id = item["session_id"]
+    # Also delete any children
+    execute("DELETE FROM intake_items WHERE parent_item_id = %s", (item_id,))
+    execute("DELETE FROM intake_items WHERE id = %s", (item_id,))
+    _recalculate_session_totals(session_id)
+    return {"deleted": item_id, "session_id": session_id}
+
+
 # ==========================================
 # PUSH LIVE
 # ==========================================
