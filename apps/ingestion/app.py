@@ -284,8 +284,8 @@ def push_dry_run(session_id):
                 entry["new_qty"] = cache_row.get("shopify_qty", 0) + qty
             else:
                 entry["action"] = "would_create_listing"
-                entry["new_title"] = item.get("product_name", "Unknown")
-                entry["listing_price"] = float(item.get("market_price", 0))
+                entry["new_title"] = group["product_name"] or "Unknown"
+                entry["listing_price"] = float(group["items"][0].get("market_price", 0))
         else:
             cache_row = damaged_cache.get(tcg_id)
             if cache_row and cache_row.get("shopify_variant_id"):
@@ -304,9 +304,9 @@ def push_dry_run(session_id):
                     entry["note"] = "Price stays the same — 'damaged' tag triggers automatic discount on site"
                 else:
                     entry["action"] = "would_create_listing"
-                    damaged_title = f"{item.get('product_name', 'Unknown')} [DAMAGED]"
+                    damaged_title = f"{group['product_name'] or 'Unknown'} [DAMAGED]"
                     entry["new_title"] = damaged_title
-                    entry["listing_price"] = float(item.get("market_price", 0))
+                    entry["listing_price"] = float(group["items"][0].get("market_price", 0))
 
         results.append(entry)
 
