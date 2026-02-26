@@ -876,7 +876,8 @@ async function pushLive(sessionId) {
         if (d.ingested) {
             html += '<div class="alert alert-success">✅ Session ingested! All items pushed to Shopify.</div>';
         } else if (d.error_count > 0) {
-            html += '<div class="alert alert-warning">⚠ Some items had errors. Session NOT marked as ingested. Fix errors and retry.</div>';
+            html += `<div class="alert alert-warning">⚠ ${d.error_count} item(s) had errors. ${(d.results||[]).length} succeeded and won't be re-pushed.<br>
+                <button class="btn btn-sm" style="margin-top:8px;background:var(--amber);color:#000;" onclick="pushLive('${sessionId}')">🔄 Retry Failed Items</button></div>`;
         }
 
         const allResults = [...(d.results || []), ...(d.errors || [])];

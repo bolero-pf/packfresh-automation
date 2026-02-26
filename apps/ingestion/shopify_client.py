@@ -202,10 +202,10 @@ class ShopifyClient:
     def create_product(self, title: str, price: float, sku: str = None,
                        tags: list[str] = None, tcgplayer_id: int = None,
                        quantity: int = 0) -> dict:
-        """Create a new product with a single variant."""
+        """Create a new product with a single variant using productSet (2025+ API)."""
         mutation = """
-        mutation productCreate($input: ProductInput!) {
-          productCreate(input: $input) {
+        mutation productSet($input: ProductSetInput!) {
+          productSet(input: $input) {
             product {
               id title handle
               variants(first: 1) {
@@ -224,16 +224,20 @@ class ShopifyClient:
 
         product_input = {
             "title": title,
-            "tags": tags or [],
-            "variants": [variant_input],
+            "productOptions": [{"name": "Title", "position": 1, "values": [{"name": "Default Title"}]}],
+            "variants": [{"optionValues": [{"optionName": "Title", "name": "Default Title"}], "price": str(price)}],
         }
+        if tags:
+            product_input["tags"] = tags
+        if sku:
+            product_input["variants"][0]["sku"] = sku
 
         data = self._gql(mutation, {"input": product_input})
-        errors = data.get("productCreate", {}).get("userErrors", [])
+        errors = data.get("productSet", {}).get("userErrors", [])
         if errors:
             raise ShopifyError(f"Product create failed: {errors}")
 
-        product = data["productCreate"]["product"]
+        product = data["productSet"]["product"]
 
         # Set tcgplayer_id metafield if provided
         if tcgplayer_id:

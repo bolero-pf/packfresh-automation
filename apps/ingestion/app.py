@@ -335,9 +335,18 @@ def push_session_live(session_id):
 
     items = ingest.get_session_items(session_id)
     # Only push good/damaged mapped items (not broken_down, missing, rejected)
-    active = [i for i in items if i.get("item_status") in ("good", "damaged") and i.get("is_mapped")]
+    # Skip items already pushed (have pushed_at timestamp) — allows retry of just failed items
+    active = [i for i in items if i.get("item_status") in ("good", "damaged")
+              and i.get("is_mapped") and not i.get("pushed_at")]
 
     if not active:
+        # If nothing to push but there ARE pushed items, everything succeeded — mark ingested
+        already_pushed = [i for i in items if i.get("pushed_at")]
+        if already_pushed:
+            ingest.mark_session_ingested(session_id)
+            return jsonify({"success": True, "results": [], "errors": [],
+                            "total": 0, "ingested": True,
+                            "message": "All items already pushed. Session marked ingested."})
         return jsonify({"error": "No active mapped items to push"}), 400
 
     # Build cache maps
@@ -390,6 +399,10 @@ def push_session_live(session_id):
             errors.append(entry)
         else:
             results.append(entry)
+            # Mark successfully pushed items so retry skips them
+            for pushed_item in group["items"]:
+                db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
+                           (pushed_item["id"],))
 
     # Mark session as ingested if no errors
     if not errors:
@@ -405,6 +418,7 @@ def push_session_live(session_id):
         "created_listing": sum(1 for r in results if r.get("action") == "created_listing"),
         "error_count": len(errors),
         "ingested": len(errors) == 0,
+        "can_retry": len(errors) > 0,
     })
 
 
