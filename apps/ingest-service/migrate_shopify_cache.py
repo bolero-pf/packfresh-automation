@@ -73,6 +73,20 @@ for col in ['offered_at', 'accepted_at', 'received_at', 'ingested_at', 'rejected
     else:
         print(f"  ✓ intake_sessions.{col} already exists")
 
+# Add fulfillment_method, tracking_number, is_distribution to intake_sessions
+for col, coltype in [('fulfillment_method', "VARCHAR(20) DEFAULT 'pickup'"),
+                     ('tracking_number', 'VARCHAR(500)'),
+                     ('is_distribution', 'BOOLEAN DEFAULT FALSE')]:
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'intake_sessions' AND column_name = %s
+    """, (col,))
+    if not cur.fetchone():
+        cur.execute(f"ALTER TABLE intake_sessions ADD COLUMN {col} {coltype}")
+        print(f"  ✓ Added {col} to intake_sessions")
+    else:
+        print(f"  ✓ intake_sessions.{col} already exists")
+
 conn.commit()
 
 # Recreate the intake_session_summary view to include new columns

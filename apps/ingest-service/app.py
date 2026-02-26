@@ -911,14 +911,22 @@ def offer_session(session_id):
 
 @app.route("/api/intake/session/<session_id>/accept", methods=["POST"])
 def accept_session(session_id):
-    """Customer accepted the offer."""
+    """Customer accepted the offer. Optionally set fulfillment method and tracking."""
     session = intake.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
     if session["status"] not in ("offered",):
         return jsonify({"error": f"Cannot accept — session is '{session['status']}'"}), 400
-    db.execute("UPDATE intake_sessions SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
-    return jsonify({"success": True, "status": "accepted"})
+    data = request.get_json(silent=True) or {}
+    fulfillment = data.get("fulfillment_method", "pickup")  # pickup or mail
+    tracking = data.get("tracking_number", "").strip() or None
+    db.execute("""
+        UPDATE intake_sessions
+        SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP,
+            fulfillment_method = %s, tracking_number = %s
+        WHERE id = %s
+    """, (fulfillment, tracking, session_id))
+    return jsonify({"success": True, "status": "accepted", "fulfillment_method": fulfillment})
 
 
 @app.route("/api/intake/session/<session_id>/receive", methods=["POST"])
@@ -955,6 +963,30 @@ def reopen_session(session_id):
         return jsonify({"error": "Cannot reopen — already ingested"}), 400
     db.execute("UPDATE intake_sessions SET status = 'in_progress' WHERE id = %s", (session_id,))
     return jsonify({"success": True, "status": "in_progress"})
+
+
+@app.route("/api/intake/session/<session_id>/toggle-distribution", methods=["POST"])
+def toggle_distribution(session_id):
+    """Toggle the distribution flag on a session."""
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    new_val = not session.get("is_distribution", False)
+    db.execute("UPDATE intake_sessions SET is_distribution = %s WHERE id = %s", (new_val, session_id))
+    return jsonify({"success": True, "is_distribution": new_val})
+
+
+@app.route("/api/intake/session/<session_id>/tracking", methods=["POST"])
+def update_tracking(session_id):
+    """Update tracking number/link for a mailed session."""
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    data = request.get_json(silent=True) or {}
+    tracking = data.get("tracking_number", "").strip() or None
+    db.execute("UPDATE intake_sessions SET tracking_number = %s WHERE id = %s", (tracking, session_id))
+    return jsonify({"success": True, "tracking_number": tracking})
+
 
 
 @app.route("/api/intake/session/<session_id>/export-csv")

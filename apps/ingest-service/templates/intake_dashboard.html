@@ -981,11 +981,17 @@
             const d = await r.json();
             const s = d.session;
             const items = d.items;
-            const editable = !['ingested','cancelled','rejected'].includes(s.status);
+            const editable = !['received','ingested','cancelled','rejected'].includes(s.status);
 
             body.innerHTML = `
                 <div class="stats">
-                    <div class="stat"><div class="stat-label">Customer</div><div class="stat-value" style="font-size:1.1rem;">${s.customer_name}</div></div>
+                    <div class="stat">
+                        <div class="stat-label">Customer</div>
+                        <div class="stat-value" style="font-size:1.1rem;">${s.customer_name}
+                            ${s.is_distribution ? '<span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;margin-left:6px;">DISTRIBUTION</span>' : ''}
+                            ${editable ? `<button class="btn btn-sm btn-secondary" style="font-size:0.65rem;padding:1px 6px;margin-left:4px;" onclick="toggleDistribution('${sessionId}')">${s.is_distribution ? '✕ Dist' : '📦 Dist'}</button>` : ''}
+                        </div>
+                    </div>
                     <div class="stat"><div class="stat-label">Type</div><div class="stat-value" style="font-size:1.1rem;"><span class="badge badge-blue">${s.session_type}</span></div></div>
                     <div class="stat"><div class="stat-label">Market Value</div><div class="stat-value">$${(s.total_market_value || 0).toFixed(2)}</div></div>
                     <div class="stat">
@@ -1177,12 +1183,28 @@
                             html += "<button class=\"btn btn-success\" onclick=\"transitionSession('" + sessionId + "', 'offer')\">📤 Lock &amp; Offer (" + activeItems.length + " items)</button>";
                         }
                     } else if (s.status === 'offered') {
-                        html += "<button class=\"btn btn-success\" onclick=\"transitionSession('" + sessionId + "', 'accept')\">✅ Customer Accepted</button>";
+                        html += "<button class=\"btn btn-success\" onclick=\"acceptSession('" + sessionId + "', 'pickup')\">🚗 Accepted — Pickup</button>";
+                        html += "<button class=\"btn btn-success\" onclick=\"acceptSession('" + sessionId + "', 'mail')\">📬 Accepted — Mail</button>";
                         html += "<button class=\"btn btn-error\" onclick=\"transitionSession('" + sessionId + "', 'reject')\">❌ Customer Rejected</button>";
                         html += "<button class=\"btn btn-secondary btn-sm\" onclick=\"transitionSession('" + sessionId + "', 'reopen')\">↩ Reopen for Edits</button>";
                     } else if (s.status === 'accepted') {
                         html += "<button class=\"btn btn-success\" onclick=\"transitionSession('" + sessionId + "', 'receive')\">📦 Product Received</button>";
                         html += "<button class=\"btn btn-secondary btn-sm\" onclick=\"transitionSession('" + sessionId + "', 'reopen')\">↩ Reopen for Edits</button>";
+                        if (s.fulfillment_method === 'mail') {
+                            html += '<div style="margin-top:8px; display:flex; align-items:center; gap:8px;">';
+                            html += '<span class="badge badge-blue">📬 Mail</span>';
+                            html += '<span style="font-size:0.85rem;color:var(--text-dim);">Tracking: </span>';
+                            if (s.tracking_number) {
+                                var isUrl = s.tracking_number.startsWith('http');
+                                html += isUrl ? '<a href="' + s.tracking_number + '" target="_blank" style="color:var(--accent);font-size:0.85rem;">' + s.tracking_number + '</a>' : '<span style="font-size:0.85rem;">' + s.tracking_number + '</span>';
+                            } else {
+                                html += '<span style="font-size:0.85rem;color:var(--text-dim);">None</span>';
+                            }
+                            html += " <button class=\"btn btn-sm btn-secondary\" style=\"font-size:0.7rem;padding:2px 6px;\" onclick=\"editTracking('" + sessionId + "', '" + (s.tracking_number || '').replace(/'/g, "\\'") + "')\">Edit</button>";
+                            html += '</div>';
+                        } else {
+                            html += '<div style="margin-top:8px;"><span class="badge badge-green">🚗 Pickup</span></div>';
+                        }
                     } else if (s.status === 'received') {
                         html += '<span style="color:var(--green); font-weight:600;">✅ Ready for Ingest Service</span>';
                         html += "<button class=\"btn btn-secondary btn-sm\" onclick=\"transitionSession('" + sessionId + "', 'reopen')\">↩ Reopen for Edits</button>";
@@ -2749,11 +2771,62 @@
     // ═══════════════════════════════ SESSION STATUS TRANSITIONS ═══════════════════════════════
     const transitionLabels = {
         offer: { title: 'Lock & Offer', msg: 'This will lock all prices and present the offer to the customer.', btn: 'Lock & Offer' },
-        accept: { title: 'Customer Accepted', msg: 'Mark this offer as accepted by the customer.', btn: 'Mark Accepted' },
         receive: { title: 'Product Received', msg: 'Mark the product as received. You can still make adjustments before ingest.', btn: 'Mark Received' },
         reject: { title: 'Customer Rejected', msg: 'Mark this offer as rejected. The session will be archived.', btn: 'Mark Rejected' },
         reopen: { title: 'Reopen Session', msg: 'Reopen this session for edits.', btn: 'Reopen' },
     };
+
+    // ═══════════════════════════════ ACCEPT (PICKUP / MAIL) ═══════════════════════════════
+
+    async function acceptSession(sessionId, method) {
+        let tracking = null;
+        if (method === 'mail') {
+            tracking = prompt('Tracking number or link (optional — you can add it later):');
+            if (tracking === null) return; // cancelled
+        }
+        const ok = await themedConfirm(
+            method === 'pickup' ? '🚗 Accept — Pickup' : '📬 Accept — Mail',
+            method === 'pickup'
+                ? 'Customer accepted. You will pick up the product.'
+                : 'Customer accepted. They will mail the product.' + (tracking ? '\nTracking: ' + tracking : ''),
+            { confirmText: 'Confirm Accepted' }
+        );
+        if (!ok) return;
+        try {
+            const r = await fetch(`/api/intake/session/${sessionId}/accept`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ fulfillment_method: method, tracking_number: tracking || '' }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function toggleDistribution(sessionId) {
+        try {
+            const r = await fetch(`/api/intake/session/${sessionId}/toggle-distribution`, { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function editTracking(sessionId, current) {
+        const tracking = prompt('Tracking number or URL:', current || '');
+        if (tracking === null) return;
+        try {
+            const r = await fetch(`/api/intake/session/${sessionId}/tracking`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ tracking_number: tracking }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
 
     async function transitionSession(sessionId, action) {
         const label = transitionLabels[action] || { title: action, msg: `Transition to ${action}?`, btn: action };
