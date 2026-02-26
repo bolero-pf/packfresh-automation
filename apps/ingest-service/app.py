@@ -185,6 +185,10 @@ def upload_collectr():
         file_hash=result.file_hash,
     )
 
+    # Set distribution flag if provided
+    if request.form.get("is_distribution") == "1":
+        db.execute("UPDATE intake_sessions SET is_distribution = TRUE WHERE id = %s", (session["id"],))
+
     # Process items: calculate offers and check for cached mappings
     processed = []
     for item in result.items:
@@ -270,6 +274,10 @@ def upload_collectr_html():
         file_hash=result.file_hash,
     )
 
+    # Set distribution flag if provided
+    if data.get("is_distribution"):
+        db.execute("UPDATE intake_sessions SET is_distribution = TRUE WHERE id = %s", (session["id"],))
+
     # Process items
     processed = []
     for item in result.items:
@@ -334,6 +342,10 @@ def create_session():
         employee_id=data.get("employee_id"),
         notes=data.get("notes"),
     )
+    # Set distribution flag if provided
+    if data.get("is_distribution"):
+        db.execute("UPDATE intake_sessions SET is_distribution = TRUE WHERE id = %s", (session["id"],))
+        session["is_distribution"] = True
     return jsonify({"success": True, "session": _serialize(session)})
 
 
@@ -971,8 +983,11 @@ def toggle_distribution(session_id):
     session = intake.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
-    new_val = not session.get("is_distribution", False)
-    db.execute("UPDATE intake_sessions SET is_distribution = %s WHERE id = %s", (new_val, session_id))
+    new_val = not (session.get("is_distribution") is True)
+    try:
+        db.execute("UPDATE intake_sessions SET is_distribution = %s WHERE id = %s", (new_val, session_id))
+    except Exception as e:
+        return jsonify({"error": f"Failed — run migration to add is_distribution column: {e}"}), 500
     return jsonify({"success": True, "is_distribution": new_val})
 
 

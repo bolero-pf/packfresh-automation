@@ -315,6 +315,11 @@
                                 <label>Offer Percentage (%)</label>
                                 <input type="number" id="csv-offer-pct" value="75" min="1" max="100" step="0.5" required>
                             </div>
+                            <div class="form-group" style="justify-content:flex-end;">
+                                <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                    <input type="checkbox" id="csv-distribution" style="width:auto;"> Distribution
+                                </label>
+                            </div>
                         </div>
                         <div class="form-group" style="margin-bottom:16px;">
                             <label>Collectr CSV Export</label>
@@ -339,6 +344,11 @@
                             <div class="form-group">
                                 <label>Offer Percentage (%)</label>
                                 <input type="number" id="html-offer-pct" value="75" min="1" max="100" step="0.5" required>
+                            </div>
+                            <div class="form-group" style="justify-content:flex-end;">
+                                <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                    <input type="checkbox" id="html-distribution" style="width:auto;"> Distribution
+                                </label>
                             </div>
                         </div>
                         <div class="form-group" style="margin-bottom:16px;">
@@ -365,6 +375,11 @@
                             <div class="form-group">
                                 <label>Offer Percentage (%)</label>
                                 <input type="number" id="sealed-manual-offer-pct" value="75" min="1" max="100" step="0.5">
+                            </div>
+                            <div class="form-group" style="justify-content:flex-end;">
+                                <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                    <input type="checkbox" id="sealed-manual-distribution" style="width:auto;"> Distribution
+                                </label>
                             </div>
                         </div>
                         <button class="btn btn-primary" onclick="createManualSealedSession()">Start Sealed Intake Session</button>
@@ -705,6 +720,7 @@
         form.append('file', document.getElementById('csv-file').files[0]);
         form.append('customer_name', document.getElementById('csv-customer').value);
         form.append('offer_percentage', document.getElementById('csv-offer-pct').value);
+        form.append('is_distribution', document.getElementById('csv-distribution').checked ? '1' : '0');
 
         try {
             const r = await fetch('/api/intake/upload-collectr', { method: 'POST', body: form });
@@ -750,6 +766,7 @@
                     html: htmlContent,
                     customer_name: document.getElementById('html-customer').value,
                     offer_percentage: document.getElementById('html-offer-pct').value,
+                    is_distribution: document.getElementById('html-distribution').checked,
                 }),
             });
             const d = await r.json();
@@ -782,11 +799,12 @@
     async function createManualSealedSession() {
         const customer = document.getElementById('sealed-manual-customer').value || 'Walk-in';
         const offerPct = document.getElementById('sealed-manual-offer-pct').value || '75';
+        const isDist = document.getElementById('sealed-manual-distribution').checked;
         try {
             const r = await fetch('/api/intake/create-session', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ customer_name: customer, session_type: 'sealed', offer_percentage: parseFloat(offerPct) }),
+                body: JSON.stringify({ customer_name: customer, session_type: 'sealed', offer_percentage: parseFloat(offerPct), is_distribution: isDist }),
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
@@ -2808,7 +2826,7 @@
         try {
             const r = await fetch(`/api/intake/session/${sessionId}/toggle-distribution`, { method: 'POST' });
             const d = await r.json();
-            if (!r.ok) { alert(d.error); return; }
+            if (!r.ok) { alert(d.error || 'Failed to toggle distribution'); return; }
             viewSession(sessionId);
         } catch(err) { alert(err.message); }
     }
