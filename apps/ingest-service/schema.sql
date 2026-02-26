@@ -305,6 +305,9 @@ SELECT
     s.total_offer_amount,
     s.created_at,
     s.finalized_at,
+    s.is_distribution,
+    s.fulfillment_method,
+    s.tracking_number,
     COUNT(i.id) as item_count,
     SUM(i.quantity) as total_quantity,
     COUNT(*) FILTER (WHERE i.is_mapped = FALSE) as unmapped_count
