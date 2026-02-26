@@ -988,8 +988,8 @@
                     <div class="stat">
                         <div class="stat-label">Customer</div>
                         <div class="stat-value" style="font-size:1.1rem;">${s.customer_name}
-                            ${s.is_distribution ? '<span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;margin-left:6px;">DISTRIBUTION</span>' : ''}
-                            ${editable ? `<button class="btn btn-sm btn-secondary" style="font-size:0.65rem;padding:1px 6px;margin-left:4px;" onclick="toggleDistribution('${sessionId}')">${s.is_distribution ? '✕ Dist' : '📦 Dist'}</button>` : ''}
+                            ${s.is_distribution === true ? '<span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;margin-left:6px;">DISTRIBUTION</span>' : ''}
+                            ${editable ? `<button class="btn btn-sm btn-secondary" style="font-size:0.65rem;padding:1px 6px;margin-left:4px;" onclick="toggleDistribution('${sessionId}')">${s.is_distribution === true ? '✕ Dist' : '📦 Dist'}</button>` : ''}
                         </div>
                     </div>
                     <div class="stat"><div class="stat-label">Type</div><div class="stat-value" style="font-size:1.1rem;"><span class="badge badge-blue">${s.session_type}</span></div></div>

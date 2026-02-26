@@ -289,8 +289,8 @@ def update_offer_percentage(session_id: str, new_percentage: Decimal) -> dict:
     session = get_session(session_id)
     if not session:
         raise ValueError("Session not found")
-    if session["status"] != "in_progress":
-        raise ValueError("Cannot change offer % on a finalized session")
+    if session["status"] in ("cancelled", "rejected", "received", "ingested", "finalized"):
+        raise ValueError("Cannot change offer % on this session")
 
     # Update session offer_percentage
     execute("""
@@ -596,8 +596,8 @@ def add_sealed_item(session_id: str, product_name: str, tcgplayer_id: int = None
     session = get_session(session_id)
     if not session:
         raise ValueError("Session not found")
-    if session["status"] != "in_progress":
-        raise ValueError("Cannot add items to a finalized/cancelled session")
+    if session["status"] in ("cancelled", "rejected", "received", "ingested", "finalized"):
+        raise ValueError("Cannot add items to this session")
 
     offer_pct = session["offer_percentage"]
     offer_price = market_price * quantity * (offer_pct / Decimal("100"))
