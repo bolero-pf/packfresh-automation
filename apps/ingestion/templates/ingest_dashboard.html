@@ -631,8 +631,9 @@ async function relinkSelect(tcgId, name, price, setName) {
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
+        const sid = _relinkSessionId;
         closeRelink();
-        viewSession(_relinkSessionId);
+        viewSession(sid);
     } catch(err) { alert(err.message); }
 }
 
@@ -648,8 +649,9 @@ async function relinkManual() {
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
+        const sid = _relinkSessionId;
         closeRelink();
-        viewSession(_relinkSessionId);
+        viewSession(sid);
     } catch(err) { alert(err.message); }
 }
 
