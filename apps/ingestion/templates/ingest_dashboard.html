@@ -225,6 +225,14 @@
     </div>
 </div>
 
+<!-- Relink Modal -->
+<div id="relink-modal" class="modal-overlay">
+    <div class="modal" style="max-width:600px;">
+        <button class="modal-close-sticky" onclick="closeRelink()">×</button>
+        <div id="relink-body"></div>
+    </div>
+</div>
+
 <!-- Confirm Dialog -->
 <div id="confirm-overlay">
     <div class="confirm-box">
@@ -536,10 +544,51 @@ async function undoBreakdown(itemId, sessionId) {
     } catch(err) { alert(err.message); }
 }
 
-async function relinkItem(itemId, sessionId) {
-    const query = prompt('Search PPT for the correct product:');
-    if (!query) return;
+let _relinkItemId = null;
+let _relinkSessionId = null;
 
+function relinkItem(itemId, sessionId) {
+    _relinkItemId = itemId;
+    _relinkSessionId = sessionId;
+
+    document.getElementById('relink-body').innerHTML = `
+        <h3 style="margin-bottom:12px;">🔗 Relink Item</h3>
+        <div style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px;">
+            <div style="flex:1;">
+                <label style="font-size:0.85rem; color:var(--text-dim);">Search PPT</label>
+                <input type="text" id="relink-search" placeholder="e.g. Celebrations ETB"
+                       style="width:100%; margin-top:4px;"
+                       onkeydown="if(event.key==='Enter') relinkSearch()">
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="relinkSearch()" style="height:40px;">Search</button>
+        </div>
+        <div id="relink-search-results"></div>
+        <div style="margin-top:16px; padding-top:12px; border-top:1px solid var(--border);">
+            <h4 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Or enter TCGPlayer ID directly:</h4>
+            <div style="display:flex; gap:8px; align-items:flex-end;">
+                <div style="flex:1;">
+                    <input type="number" id="relink-manual-tcgid" placeholder="TCGPlayer Product ID" style="width:100%;">
+                </div>
+                <button class="btn btn-success btn-sm" onclick="relinkManual()" style="height:40px;">Link</button>
+            </div>
+        </div>
+    `;
+    document.getElementById('relink-modal').classList.add('active');
+    setTimeout(() => document.getElementById('relink-search').focus(), 100);
+}
+
+function closeRelink() {
+    document.getElementById('relink-modal').classList.remove('active');
+    _relinkItemId = null;
+    _relinkSessionId = null;
+}
+
+async function relinkSearch() {
+    const query = document.getElementById('relink-search').value.trim();
+    const resultsDiv = document.getElementById('relink-search-results');
+    if (!query) { resultsDiv.innerHTML = '<p style="color:var(--text-dim);">Enter a search term</p>'; return; }
+
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
     try {
         const sr = await fetch('/api/ppt/search-sealed', {
             method: 'POST',
@@ -547,39 +596,62 @@ async function relinkItem(itemId, sessionId) {
             body: JSON.stringify({ query }),
         });
         const sd = await sr.json();
-        if (!sr.ok) { alert(sd.error); return; }
+        if (!sr.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${sd.error}</div>`; return; }
         const results = sd.results || [];
-        if (!results.length) { alert('No results found'); return; }
+        if (!results.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No results found</div>'; return; }
 
-        // Build a simple selection list
-        let msg = 'Select the correct product:\n\n';
-        results.slice(0, 8).forEach((p, i) => {
+        resultsDiv.innerHTML = '<div style="max-height:350px; overflow-y:auto;">' + results.slice(0, 10).map(p => {
             const name = p.name || p.productName || '';
-            const tcgId = p.tcgplayer_id || p.tcgplayerId || 0;
+            const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || 0;
             const price = p.unopenedPrice || p.marketPrice || 0;
-            msg += `${i + 1}. ${name} (TCG#${tcgId}, $${price.toFixed(2)})\n`;
-        });
-        msg += '\nEnter number:';
-        const choice = prompt(msg);
-        if (!choice) return;
-        const idx = parseInt(choice) - 1;
-        if (isNaN(idx) || idx < 0 || idx >= results.length) { alert('Invalid choice'); return; }
+            const setName = p.setName || p.set_name || '';
+            return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
+                         onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
+                         onclick="relinkSelect(${tcgId}, '${name.replace(/'/g,"\\'")}', ${price}, '${setName.replace(/'/g,"\\'")}')">
+                <div style="font-weight:600;">${name}</div>
+                <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
+            </div>`;
+        }).join('') + '</div>';
+    } catch(err) {
+        resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
 
-        const selected = results[idx];
-        const r = await fetch(`/api/ingest/item/${itemId}/relink`, {
+async function relinkSelect(tcgId, name, price, setName) {
+    try {
+        const r = await fetch(`/api/ingest/item/${_relinkItemId}/relink`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                product_name: selected.name || selected.productName,
-                tcgplayer_id: selected.tcgplayer_id || selected.tcgplayerId,
-                market_price: selected.unopenedPrice || selected.marketPrice || 0,
-                set_name: selected.setName || selected.set_name || null,
+                product_name: name,
+                tcgplayer_id: tcgId,
+                market_price: price,
+                set_name: setName || null,
             }),
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
-        viewSession(sessionId);
+        closeRelink();
+        viewSession(_relinkSessionId);
     } catch(err) { alert(err.message); }
+}
+
+async function relinkManual() {
+    const tcgId = document.getElementById('relink-manual-tcgid').value.trim();
+    if (!tcgId) { alert('Enter a TCGPlayer ID'); return; }
+
+    try {
+        const r = await fetch(`/api/ingest/item/${_relinkItemId}/relink`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error); return; }
+        closeRelink();
+        viewSession(_relinkSessionId);
+    } catch(err) { alert(err.message); }
+}
 }
 
 async function editItemQty(itemId, sessionId, currentQty) {
