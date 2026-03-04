@@ -9,9 +9,11 @@ shopify_product_cache) but serves a different audience (warehouse vs buying team
 import os
 import json
 import logging
+import hashlib
+import secrets
 from datetime import datetime, date
 from decimal import Decimal
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, redirect, make_response
 
 import db
 import ingest
@@ -22,6 +24,41 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
+
+# ─── Password gate ───────────────────────────────────────────────
+INGEST_PASSWORD = os.getenv("INGEST_PASSWORD", "")
+
+def _check_auth():
+    """Returns True if auth is disabled or user has valid session cookie."""
+    if not INGEST_PASSWORD:
+        return True
+    token = request.cookies.get("ingest_auth")
+    if not token:
+        return False
+    expected = hashlib.sha256(f"{INGEST_PASSWORD}:{app.secret_key}".encode()).hexdigest()
+    return token == expected
+
+def _make_auth_cookie(response):
+    """Set the auth cookie on a response."""
+    token = hashlib.sha256(f"{INGEST_PASSWORD}:{app.secret_key}".encode()).hexdigest()
+    response.set_cookie("ingest_auth", token, max_age=60*60*24*30, httponly=True, samesite="Lax")
+    return response
+
+@app.before_request
+def require_auth():
+    """Gate all routes behind password if INGEST_PASSWORD is set."""
+    if not INGEST_PASSWORD:
+        return None
+    # Allow login page and health check through
+    if request.path in ("/login", "/health"):
+        return None
+    if request.path.startswith("/static"):
+        return None
+    if not _check_auth():
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Not authenticated"}), 401
+        return redirect("/login")
 
 
 # ─── JSON error handlers ────────────────────────────────────────────
@@ -65,6 +102,58 @@ def _serialize(obj):
     if hasattr(obj, '__str__') and type(obj).__name__ in ('UUID', 'uuid'):
         return str(obj)
     return obj
+
+
+# ═══════════════════════════════════════════════════════════════════
+# AUTH
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not INGEST_PASSWORD:
+        return redirect("/")
+    if _check_auth():
+        return redirect("/")
+
+    error = None
+    if request.method == "POST":
+        pw = request.form.get("password", "")
+        if pw == INGEST_PASSWORD:
+            resp = make_response(redirect("/"))
+            return _make_auth_cookie(resp)
+        error = "Wrong password"
+
+    return f'''<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ingest — Login</title>
+<style>
+    * {{ margin:0; padding:0; box-sizing:border-box; }}
+    body {{ background:#0f1117; color:#e2e8f0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+           display:flex; align-items:center; justify-content:center; min-height:100vh; }}
+    .login-card {{ background:#1a1d2e; border:1px solid #2d3148; border-radius:12px; padding:40px;
+                   width:100%; max-width:380px; text-align:center; }}
+    h1 {{ font-size:1.4rem; margin-bottom:8px; }}
+    p {{ color:#8892b0; font-size:0.9rem; margin-bottom:24px; }}
+    input {{ width:100%; padding:12px 16px; background:#0f1117; border:1px solid #2d3148; border-radius:8px;
+            color:#e2e8f0; font-size:1rem; margin-bottom:16px; outline:none; }}
+    input:focus {{ border-color:#4f7df9; }}
+    button {{ width:100%; padding:12px; background:#4f7df9; color:#fff; border:none; border-radius:8px;
+             font-size:1rem; cursor:pointer; font-weight:600; }}
+    button:hover {{ background:#3d6ae0; }}
+    .error {{ color:#ff6b6b; font-size:0.85rem; margin-bottom:12px; }}
+</style>
+</head><body>
+<div class="login-card">
+    <h1>📦 Pack Fresh Ingest</h1>
+    <p>Enter password to continue</p>
+    {"<div class='error'>" + error + "</div>" if error else ""}
+    <form method="POST">
+        <input type="password" name="password" placeholder="Password" autofocus>
+        <button type="submit">Log In</button>
+    </form>
+</div>
+</body></html>'''
 
 
 # ═══════════════════════════════════════════════════════════════════
