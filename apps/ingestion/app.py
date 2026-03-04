@@ -50,14 +50,21 @@ def require_auth():
     """Gate all routes behind password if INGEST_PASSWORD is set."""
     if not INGEST_PASSWORD:
         return None
-    # Allow login page and health check through
+    # Allow login page, health check, and API through
     if request.path in ("/login", "/health"):
         return None
     if request.path.startswith("/static"):
         return None
+    if request.path.startswith("/api/"):
+        # API calls: check cookie but also check if referer is from our domain
+        if _check_auth():
+            return None
+        # If cookie check fails, still allow if there's a valid referer from same origin
+        referer = request.headers.get("Referer", "")
+        if referer and ("ingest.pack-fresh.com" in referer or "ingest-inventory" in referer):
+            return None
+        return jsonify({"error": "Not authenticated"}), 401
     if not _check_auth():
-        if request.path.startswith("/api/"):
-            return jsonify({"error": "Not authenticated"}), 401
         return redirect("/login")
 
 
