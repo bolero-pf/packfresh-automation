@@ -652,7 +652,6 @@ async function relinkManual() {
         viewSession(_relinkSessionId);
     } catch(err) { alert(err.message); }
 }
-}
 
 async function editItemQty(itemId, sessionId, currentQty) {
     const input = prompt(`New quantity (currently ${currentQty}):`, currentQty);
