@@ -36,6 +36,7 @@ Endpoints:
 """
 
 import os
+import json
 import hashlib
 import logging
 import time
@@ -53,7 +54,6 @@ from generic_csv_parser import parse_generic_csv, detect_csv_columns
 from barcode_gen import generate_barcode_image
 from shopify_client import ShopifyClient, ShopifyError
 import intake
-import json
 
 # ==========================================
 # APP SETUP
@@ -1501,7 +1501,7 @@ def shopify_session_store_check(session_id):
     DAMAGED_DISCOUNT = 0.88  # We sell damaged at 12% off
 
     items = intake.get_session_items(session_id)
-    linked = [i for i in items if i.get("tcgplayer_id")]
+    linked = [i for i in items if i.get("tcgplayer_id") and i.get("item_status") in ("good", "damaged")]
     tcg_ids = list(set(i["tcgplayer_id"] for i in linked))
     if not tcg_ids:
         return jsonify({"items": [], "cache_hit_rate": 0})
