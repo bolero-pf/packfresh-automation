@@ -432,6 +432,34 @@
                                 <input type="number" id="sealed-manual-qty" value="1" min="1">
                             </div>
                             <button class="btn btn-primary btn-sm" onclick="manualSealedSearch()">Search</button>
+                            <button class="btn btn-secondary btn-sm" onclick="toggleManualSealedEntry()">Manual</button>
+                        </div>
+
+                        <div id="sealed-manual-direct" style="display:none; margin-bottom:12px; padding:12px; background:var(--surface-1); border-radius:6px; border:1px solid var(--border);">
+                            <h5 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Manual Add (for items not in PPT)</h5>
+                            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+                                <div class="form-group" style="flex:2; min-width:160px; margin:0;">
+                                    <label style="font-size:0.8rem;">Product Name</label>
+                                    <input type="text" id="manual-direct-name" placeholder="e.g. Terastal Festival ex Box">
+                                </div>
+                                <div class="form-group" style="flex:1; min-width:100px; margin:0;">
+                                    <label style="font-size:0.8rem;">Set Name</label>
+                                    <input type="text" id="manual-direct-set" placeholder="optional">
+                                </div>
+                                <div class="form-group" style="width:100px; margin:0;">
+                                    <label style="font-size:0.8rem;">TCGPlayer ID</label>
+                                    <input type="number" id="manual-direct-tcgid" placeholder="optional">
+                                </div>
+                                <div class="form-group" style="width:90px; margin:0;">
+                                    <label style="font-size:0.8rem;">Price</label>
+                                    <input type="number" id="manual-direct-price" step="0.01" min="0" placeholder="$0.00">
+                                </div>
+                                <div class="form-group" style="width:55px; margin:0;">
+                                    <label style="font-size:0.8rem;">Qty</label>
+                                    <input type="number" id="manual-direct-qty" value="1" min="1">
+                                </div>
+                                <button class="btn btn-success btn-sm" onclick="submitManualDirectSealed()">Add</button>
+                            </div>
                         </div>
 
                         <div id="sealed-manual-results"></div>
@@ -1216,8 +1244,35 @@
                                     <input type="number" id="session-sealed-qty" value="1" min="1">
                                 </div>
                                 <button class="btn btn-primary btn-sm" onclick="searchSealedForSession('${sessionId}', ${s.offer_percentage})">Search</button>
+                                <button class="btn btn-secondary btn-sm" onclick="toggleManualSealedAdd('${sessionId}', ${s.offer_percentage})">Manual</button>
                             </div>
                             <div id="session-sealed-results" style="margin-top:8px;"></div>
+                            <div id="session-sealed-manual" style="display:none; margin-top:12px; padding:12px; background:var(--surface-1); border-radius:6px; border:1px solid var(--border);">
+                                <h5 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Manual Add (for items not in PPT)</h5>
+                                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+                                    <div class="form-group" style="flex:2; min-width:160px; margin:0;">
+                                        <label style="font-size:0.8rem;">Product Name</label>
+                                        <input type="text" id="session-manual-name" placeholder="e.g. Terastal Festival ex Box">
+                                    </div>
+                                    <div class="form-group" style="flex:1; min-width:100px; margin:0;">
+                                        <label style="font-size:0.8rem;">Set Name</label>
+                                        <input type="text" id="session-manual-set" placeholder="optional">
+                                    </div>
+                                    <div class="form-group" style="width:100px; margin:0;">
+                                        <label style="font-size:0.8rem;">TCGPlayer ID</label>
+                                        <input type="number" id="session-manual-tcgid" placeholder="optional">
+                                    </div>
+                                    <div class="form-group" style="width:90px; margin:0;">
+                                        <label style="font-size:0.8rem;">Price</label>
+                                        <input type="number" id="session-manual-price" step="0.01" min="0" placeholder="$0.00">
+                                    </div>
+                                    <div class="form-group" style="width:55px; margin:0;">
+                                        <label style="font-size:0.8rem;">Qty</label>
+                                        <input type="number" id="session-manual-qty" value="1" min="1">
+                                    </div>
+                                    <button class="btn btn-success btn-sm" onclick="submitManualSealedAdd('${sessionId}', ${s.offer_percentage})">Add</button>
+                                </div>
+                            </div>
                         </div>
                     ` : ''}
 
@@ -1779,7 +1834,7 @@
         const pptHigher = fetchedItems.filter(c => c.delta_pct != null && c.delta_pct > 10);
         const pptLower = fetchedItems.filter(c => c.delta_pct != null && c.delta_pct < -10);
         const totalCollectr = fetchedItems.reduce((s, c) => s + (c.collectr_price || 0) * (c.quantity || 1), 0);
-        const totalPpt = fetchedItems.filter(c => c.ppt_market != null).reduce((s, c) => s + c.ppt_market * (c.quantity || 1), 0);
+        const totalPpt = fetchedItems.reduce((s, c) => s + (c.ppt_market != null ? c.ppt_market : (c.collectr_price || 0)) * (c.quantity || 1), 0);
 
         let statusHtml = '';
         if (m.rate_limited && m.retry_after && !m.complete) {
@@ -2547,6 +2602,90 @@
     }
 
     // ═══════════════════════════════ ADD SEALED ITEM TO EXISTING SESSION ═══════════════════════════════
+
+    function toggleManualSealedAdd(sessionId, offerPct) {
+        const el = document.getElementById('session-sealed-manual');
+        el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    }
+
+    function toggleManualSealedEntry() {
+        const el = document.getElementById('sealed-manual-direct');
+        el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    }
+
+    async function submitManualSealedAdd(sessionId, offerPct) {
+        const name = document.getElementById('session-manual-name').value.trim();
+        const setName = document.getElementById('session-manual-set').value.trim();
+        const tcgId = document.getElementById('session-manual-tcgid').value.trim();
+        const price = parseFloat(document.getElementById('session-manual-price').value) || 0;
+        const qty = parseInt(document.getElementById('session-manual-qty').value) || 1;
+
+        if (!name) { alert('Product name is required'); return; }
+        if (price <= 0) { alert('Price is required'); return; }
+
+        try {
+            const r = await fetch('/api/intake/add-sealed-item', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    product_name: name,
+                    set_name: setName,
+                    tcgplayer_id: tcgId ? parseInt(tcgId) : null,
+                    market_price: price,
+                    quantity: qty,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Failed to add'); return; }
+
+            document.getElementById('session-manual-name').value = '';
+            document.getElementById('session-manual-set').value = '';
+            document.getElementById('session-manual-tcgid').value = '';
+            document.getElementById('session-manual-price').value = '';
+            document.getElementById('session-manual-qty').value = '1';
+            document.getElementById('session-sealed-manual').style.display = 'none';
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function submitManualDirectSealed() {
+        const name = document.getElementById('manual-direct-name').value.trim();
+        const setName = document.getElementById('manual-direct-set').value.trim();
+        const tcgId = document.getElementById('manual-direct-tcgid').value.trim();
+        const price = parseFloat(document.getElementById('manual-direct-price').value) || 0;
+        const qty = parseInt(document.getElementById('manual-direct-qty').value) || 1;
+
+        if (!name) { alert('Product name is required'); return; }
+        if (price <= 0) { alert('Price is required'); return; }
+        if (!sealedManualSessionId) { alert('Create a session first'); return; }
+
+        try {
+            const r = await fetch('/api/intake/add-sealed-item', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: sealedManualSessionId,
+                    product_name: name,
+                    set_name: setName,
+                    tcgplayer_id: tcgId ? parseInt(tcgId) : null,
+                    market_price: price,
+                    quantity: qty,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Failed to add'); return; }
+
+            document.getElementById('manual-direct-name').value = '';
+            document.getElementById('manual-direct-set').value = '';
+            document.getElementById('manual-direct-tcgid').value = '';
+            document.getElementById('manual-direct-price').value = '';
+            document.getElementById('manual-direct-qty').value = '1';
+            // Refresh the items table
+            loadManualSealedItems();
+        } catch(err) { alert(err.message); }
+    }
+
     async function searchSealedForSession(sessionId, offerPct) {
         const searchTerm = document.getElementById('session-sealed-search').value.trim();
         const resultsDiv = document.getElementById('session-sealed-results');
