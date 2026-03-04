@@ -510,6 +510,7 @@ def refresh_session_prices(session_id):
             "product_name": item.get("product_name"),
             "ppt_name": ppt_name,
             "tcgplayer_id": tcg_id,
+            "quantity": item.get("quantity", 1),
             "collectr_price": collectr_price,
             "ppt_market": ppt_price_f,
             "ppt_low": float(ppt_low) if ppt_low is not None else None,

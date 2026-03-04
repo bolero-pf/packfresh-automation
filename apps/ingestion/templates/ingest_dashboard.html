@@ -410,12 +410,15 @@ async function viewSession(sessionId) {
                                 Increment inventory for matched items, create damaged listings, and mark session as ingested.
                             </p>
                         </div>
-                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                             <button class="btn btn-secondary" onclick="pushDryRun('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;">
                                 🔍 Debug Dry Run
                             </button>
                             <button class="btn btn-success" id="push-live-btn" onclick="pushLive('${sessionId}')" style="font-size:1.05rem; padding:12px 28px;">
                                 🚀 Push Live to Shopify
+                            </button>
+                            <button class="btn btn-sm" style="font-size:0.75rem; padding:6px 12px; background:var(--surface-2); color:var(--text-dim); border:1px solid var(--border);" onclick="forceIngested('${sessionId}')">
+                                ⚡ Force Mark Ingested
                             </button>
                         </div>
                     </div>
@@ -849,6 +852,21 @@ async function pushDryRun(sessionId) {
 // ═══════════════════════════════════════════════════════════════════
 // PUSH LIVE
 // ═══════════════════════════════════════════════════════════════════
+
+async function forceIngested(sessionId) {
+    const ok = await themedConfirm(
+        '⚡ Force Mark Ingested',
+        'This will mark the session as ingested WITHOUT pushing to Shopify. Use this for stuck sessions where you\'ve already handled things manually.',
+        { confirmText: 'Force Ingested', dangerous: true }
+    );
+    if (!ok) return;
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/force-ingested`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Failed'); return; }
+        viewSession(sessionId);
+    } catch(err) { alert(err.message); }
+}
 
 async function pushLive(sessionId) {
     const ok = await themedConfirm(

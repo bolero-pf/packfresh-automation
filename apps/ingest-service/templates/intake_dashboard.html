@@ -1630,8 +1630,8 @@
         const failItems = fetchedItems.filter(c => c.ppt_market == null && c.error);
         const pptHigher = fetchedItems.filter(c => c.delta_pct != null && c.delta_pct > 10);
         const pptLower = fetchedItems.filter(c => c.delta_pct != null && c.delta_pct < -10);
-        const totalCollectr = fetchedItems.reduce((s, c) => s + (c.collectr_price || 0), 0);
-        const totalPpt = fetchedItems.filter(c => c.ppt_market != null).reduce((s, c) => s + c.ppt_market, 0);
+        const totalCollectr = fetchedItems.reduce((s, c) => s + (c.collectr_price || 0) * (c.quantity || 1), 0);
+        const totalPpt = fetchedItems.filter(c => c.ppt_market != null).reduce((s, c) => s + c.ppt_market * (c.quantity || 1), 0);
 
         let statusHtml = '';
         if (m.rate_limited && m.retry_after && !m.complete) {
@@ -1690,7 +1690,7 @@
             <div style="overflow-x:auto; margin-bottom:16px;">
             <table>
                 <thead><tr>
-                    <th>Product</th><th>Current</th><th>PPT Price</th><th>PPT Low</th><th>Delta</th><th></th>
+                    <th>Product</th><th>Qty</th><th>Current</th><th>PPT Price</th><th>PPT Low</th><th>Delta</th><th></th>
                 </tr></thead>
                 <tbody>${filtered.map(c => {
                     const delta = c.delta_pct;
@@ -1703,6 +1703,7 @@
                             ${c.ppt_name && c.ppt_name !== c.product_name ? '<br><small style="color:var(--amber);">⚠ PPT: ' + c.ppt_name + '</small>' : ''}
                             ${hasError ? '<br><small style="color:var(--red);">✕ ' + c.error + '</small>' : ''}
                         </td>
+                        <td>${c.quantity || 1}</td>
                         <td>$${c.collectr_price.toFixed(2)}</td>
                         <td style="${sig ? 'font-weight:700; color:var(--accent);' : ''}">
                             ${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : hasError ? '<span style="color:var(--red);">Error</span>' : '—'}

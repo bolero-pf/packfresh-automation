@@ -557,6 +557,22 @@ def store_check(session_id):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# MANUAL OVERRIDES
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/ingest/session/<session_id>/force-ingested", methods=["POST"])
+def force_mark_ingested(session_id):
+    """Manually mark a session as ingested (escape hatch for stuck sessions)."""
+    session = ingest.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    if session["status"] == "ingested":
+        return jsonify({"error": "Already ingested"}), 400
+    ingest.mark_session_ingested(session_id)
+    return jsonify({"success": True, "message": "Session manually marked as ingested."})
+
+
+# ═══════════════════════════════════════════════════════════════════
 # HEALTH
 # ═══════════════════════════════════════════════════════════════════
 
