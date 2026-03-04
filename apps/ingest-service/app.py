@@ -53,6 +53,7 @@ from generic_csv_parser import parse_generic_csv, detect_csv_columns
 from barcode_gen import generate_barcode_image
 from shopify_client import ShopifyClient, ShopifyError
 import intake
+import json
 
 # ==========================================
 # APP SETUP
