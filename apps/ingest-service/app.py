@@ -502,9 +502,41 @@ def get_session(session_id):
 
 @app.route("/api/intake/sessions", methods=["GET"])
 def list_sessions():
-    """List sessions by status."""
+    """List sessions by status with optional filters."""
     status = request.args.get("status", "in_progress")
-    sessions = intake.list_sessions(status)
+    limit = int(request.args.get("limit", 50))
+    search = request.args.get("search", "").strip()
+    days = request.args.get("days")  # e.g. 30 for last 30 days
+    fulfillment = request.args.get("fulfillment")  # pickup or mail
+
+    statuses = [s.strip() for s in status.split(",") if s.strip()]
+    placeholders = ",".join(["%s"] * len(statuses))
+    params = list(statuses)
+
+    where_clauses = [f"status IN ({placeholders})"]
+
+    if search:
+        where_clauses.append("LOWER(customer_name) LIKE %s")
+        params.append(f"%{search.lower()}%")
+
+    if days:
+        where_clauses.append("created_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'")
+        params.append(int(days))
+
+    if fulfillment:
+        where_clauses.append("fulfillment_method = %s")
+        params.append(fulfillment)
+
+    where_sql = " AND ".join(where_clauses)
+    params.append(limit)
+
+    sessions = db.query(f"""
+        SELECT * FROM intake_session_summary
+        WHERE {where_sql}
+        ORDER BY created_at DESC
+        LIMIT %s
+    """, tuple(params))
+
     return jsonify({"sessions": [_serialize(s) for s in sessions]})
 
 
@@ -1070,12 +1102,13 @@ def accept_session(session_id):
     data = request.get_json(silent=True) or {}
     fulfillment = data.get("fulfillment_method", "pickup")  # pickup or mail
     tracking = data.get("tracking_number", "").strip() or None
+    pickup_date = data.get("pickup_date", "").strip() or None
     db.execute("""
         UPDATE intake_sessions
         SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP,
-            fulfillment_method = %s, tracking_number = %s
+            fulfillment_method = %s, tracking_number = %s, pickup_date = %s
         WHERE id = %s
-    """, (fulfillment, tracking, session_id))
+    """, (fulfillment, tracking, pickup_date, session_id))
     return jsonify({"success": True, "status": "accepted", "fulfillment_method": fulfillment})
 
 
@@ -1139,6 +1172,18 @@ def update_tracking(session_id):
     tracking = data.get("tracking_number", "").strip() or None
     db.execute("UPDATE intake_sessions SET tracking_number = %s WHERE id = %s", (tracking, session_id))
     return jsonify({"success": True, "tracking_number": tracking})
+
+
+@app.route("/api/intake/session/<session_id>/pickup-date", methods=["POST"])
+def update_pickup_date(session_id):
+    """Update pickup date for an accepted-pickup session."""
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    data = request.get_json(silent=True) or {}
+    pickup_date = data.get("pickup_date", "").strip() or None
+    db.execute("UPDATE intake_sessions SET pickup_date = %s WHERE id = %s", (pickup_date, session_id))
+    return jsonify({"success": True, "pickup_date": pickup_date})
 
 
 

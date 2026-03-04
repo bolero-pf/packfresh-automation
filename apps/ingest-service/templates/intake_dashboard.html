@@ -550,6 +550,31 @@
         <div id="active-sessions" class="tab-content">
             <div class="card">
                 <h2>Active Intake Sessions</h2>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px;">
+                    <div class="form-group" style="margin:0; min-width:140px;">
+                        <label style="font-size:0.75rem;">Status</label>
+                        <select id="active-filter-status" onchange="loadFilteredActive()" style="font-size:0.85rem; padding:4px 8px;">
+                            <option value="in_progress,offered,accepted">All Active</option>
+                            <option value="in_progress">In Progress</option>
+                            <option value="offered">Offered</option>
+                            <option value="accepted">Accepted (All)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin:0; min-width:100px;">
+                        <label style="font-size:0.75rem;">Fulfillment</label>
+                        <select id="active-filter-fulfillment" onchange="loadFilteredActive()" style="font-size:0.85rem; padding:4px 8px;">
+                            <option value="">Any</option>
+                            <option value="pickup">Pickup</option>
+                            <option value="mail">Mail</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin:0; min-width:120px;">
+                        <label style="font-size:0.75rem;">Search</label>
+                        <input type="text" id="active-filter-search" placeholder="Customer..." style="font-size:0.85rem; padding:4px 8px;"
+                               onkeydown="if(event.key==='Enter') loadFilteredActive()">
+                    </div>
+                    <button class="btn btn-sm btn-secondary" onclick="loadFilteredActive()" style="height:32px; font-size:0.8rem;">Filter</button>
+                </div>
                 <div id="active-sessions-list" class="loading"><span class="spinner"></span> Loading...</div>
             </div>
         </div>
@@ -558,6 +583,23 @@
         <div id="completed" class="tab-content">
             <div class="card">
                 <h2>Completed Intakes</h2>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px;">
+                    <div class="form-group" style="margin:0; min-width:120px;">
+                        <label style="font-size:0.75rem;">Time Range</label>
+                        <select id="completed-filter-days" onchange="loadFilteredCompleted()" style="font-size:0.85rem; padding:4px 8px;">
+                            <option value="30">Last 30 days</option>
+                            <option value="90">Last 90 days</option>
+                            <option value="365">Last year</option>
+                            <option value="">All time</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin:0; min-width:120px;">
+                        <label style="font-size:0.75rem;">Search</label>
+                        <input type="text" id="completed-filter-search" placeholder="Customer..." style="font-size:0.85rem; padding:4px 8px;"
+                               onkeydown="if(event.key==='Enter') loadFilteredCompleted()">
+                    </div>
+                    <button class="btn btn-sm btn-secondary" onclick="loadFilteredCompleted()" style="height:32px; font-size:0.8rem;">Filter</button>
+                </div>
                 <div id="completed-sessions-list" class="loading"><span class="spinner"></span> Loading...</div>
             </div>
         </div>
@@ -566,6 +608,22 @@
         <div id="cancelled" class="tab-content">
             <div class="card">
                 <h2>Cancelled Sessions</h2>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px;">
+                    <div class="form-group" style="margin:0; min-width:120px;">
+                        <label style="font-size:0.75rem;">Time Range</label>
+                        <select id="cancelled-filter-days" onchange="loadFilteredCancelled()" style="font-size:0.85rem; padding:4px 8px;">
+                            <option value="30">Last 30 days</option>
+                            <option value="90">Last 90 days</option>
+                            <option value="">All time</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin:0; min-width:120px;">
+                        <label style="font-size:0.75rem;">Search</label>
+                        <input type="text" id="cancelled-filter-search" placeholder="Customer..." style="font-size:0.85rem; padding:4px 8px;"
+                               onkeydown="if(event.key==='Enter') loadFilteredCancelled()">
+                    </div>
+                    <button class="btn btn-sm btn-secondary" onclick="loadFilteredCancelled()" style="height:32px; font-size:0.8rem;">Filter</button>
+                </div>
                 <div id="cancelled-sessions-list" class="loading"><span class="spinner"></span> Loading...</div>
             </div>
         </div>
@@ -743,9 +801,9 @@
             t.classList.toggle('active', t.getAttribute('data-tab') === name);
         });
         window.location.hash = name;
-        if (name === 'active-sessions') loadSessions('in_progress,offered,accepted', 'active-sessions-list');
-        if (name === 'completed') loadSessions('received,ingested,finalized', 'completed-sessions-list');
-        if (name === 'cancelled') loadSessions('cancelled,rejected', 'cancelled-sessions-list');
+        if (name === 'active-sessions') loadFilteredActive();
+        if (name === 'completed') loadFilteredCompleted();
+        if (name === 'cancelled') loadFilteredCancelled();
     }
     // Restore tab from hash on load
     (function() {
@@ -1108,18 +1166,48 @@
     }
 
     // ═══════════════════════════════ SESSION LIST ═══════════════════════════════
-    async function loadSessions(status, containerId) {
+    function loadFilteredActive() {
+        const status = document.getElementById('active-filter-status').value;
+        const fulfillment = document.getElementById('active-filter-fulfillment').value;
+        const search = document.getElementById('active-filter-search').value.trim();
+        let url = `/api/intake/sessions?status=${status}`;
+        if (fulfillment) url += `&fulfillment=${fulfillment}`;
+        if (search) url += `&search=${encodeURIComponent(search)}`;
+        loadSessions(url, 'active-sessions-list');
+    }
+
+    function loadFilteredCompleted() {
+        const days = document.getElementById('completed-filter-days').value;
+        const search = document.getElementById('completed-filter-search').value.trim();
+        let url = `/api/intake/sessions?status=received,ingested,finalized`;
+        if (days) url += `&days=${days}`;
+        if (search) url += `&search=${encodeURIComponent(search)}`;
+        loadSessions(url, 'completed-sessions-list');
+    }
+
+    function loadFilteredCancelled() {
+        const days = document.getElementById('cancelled-filter-days').value;
+        const search = document.getElementById('cancelled-filter-search').value.trim();
+        let url = `/api/intake/sessions?status=cancelled,rejected`;
+        if (days) url += `&days=${days}`;
+        if (search) url += `&search=${encodeURIComponent(search)}`;
+        loadSessions(url, 'cancelled-sessions-list');
+    }
+
+    async function loadSessions(urlOrStatus, containerId) {
         const c = document.getElementById(containerId);
         c.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
         try {
-            const r = await fetch(`/api/intake/sessions?status=${status}`);
+            // Support both old-style (status, containerId) and new-style (full url, containerId)
+            const url = urlOrStatus.startsWith('/') ? urlOrStatus : `/api/intake/sessions?status=${urlOrStatus}`;
+            const r = await fetch(url);
             const d = await r.json();
             if (!d.sessions.length) { c.innerHTML = '<p style="color:var(--text-dim);">No sessions found.</p>'; return; }
 
             c.innerHTML = `<table>
                 <thead><tr>
                     <th>Customer</th><th>Type</th><th>Status</th><th>Items</th><th>Offer</th>
-                    <th>Created</th><th></th>
+                    <th>Accepted Details</th><th>Created</th><th></th>
                 </tr></thead>
                 <tbody>${d.sessions.map(s => {
                     const statusColors = {
@@ -1133,12 +1221,32 @@
                         'cancelled': 'background:#666;color:#fff;',
                     };
                     const statusStyle = statusColors[s.status] || '';
+                    // Show accepted-pickup or accepted-mail
+                    let statusLabel = s.status.replace('_', ' ');
+                    if (s.status === 'accepted' && s.fulfillment_method) {
+                        statusLabel = s.fulfillment_method === 'mail' ? '📬 accepted' : '🚗 accepted';
+                    }
+                    // Accepted details: pickup date or tracking
+                    let details = '—';
+                    if (s.fulfillment_method === 'pickup' && s.pickup_date) {
+                        details = '🚗 ' + new Date(s.pickup_date).toLocaleDateString();
+                    } else if (s.fulfillment_method === 'mail' && s.tracking_number) {
+                        const isUrl = (s.tracking_number || '').startsWith('http');
+                        details = isUrl
+                            ? '📬 <a href="' + s.tracking_number + '" target="_blank" style="color:var(--accent);font-size:0.8rem;">tracking</a>'
+                            : '📬 ' + s.tracking_number;
+                    } else if (s.fulfillment_method === 'pickup') {
+                        details = '🚗 no date set';
+                    } else if (s.fulfillment_method === 'mail') {
+                        details = '📬 no tracking';
+                    }
                     return `<tr>
                     <td>${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''}</td>
                     <td><span class="badge badge-blue">${s.session_type}</span></td>
-                    <td><span class="badge" style="${statusStyle}">${s.status.replace('_', ' ')}</span></td>
+                    <td><span class="badge" style="${statusStyle}">${statusLabel}</span></td>
                     <td>${s.item_count || 0}</td>
                     <td>$${(s.total_offer_amount || 0).toFixed(2)}</td>
+                    <td style="font-size:0.8rem; color:var(--text-dim);">${details}</td>
                     <td>${new Date(s.created_at).toLocaleDateString()}</td>
                     <td><button class="btn btn-secondary btn-sm" onclick="viewSession('${s.id}')">View</button></td>
                 </tr>`;
@@ -1424,7 +1532,15 @@
                             html += " <button class=\"btn btn-sm btn-secondary\" style=\"font-size:0.7rem;padding:2px 6px;\" onclick=\"editTracking('" + sessionId + "', '" + (s.tracking_number || '').replace(/'/g, "\\'") + "')\">Edit</button>";
                             html += '</div>';
                         } else {
-                            html += '<div style="margin-top:8px;"><span class="badge badge-green">🚗 Pickup</span></div>';
+                            html += '<div style="margin-top:8px; display:flex; align-items:center; gap:8px;">';
+                            html += '<span class="badge badge-green">🚗 Pickup</span>';
+                            if (s.pickup_date) {
+                                html += '<span style="font-size:0.85rem;">' + new Date(s.pickup_date).toLocaleDateString() + '</span>';
+                            } else {
+                                html += '<span style="font-size:0.85rem;color:var(--text-dim);">No date set</span>';
+                            }
+                            html += " <button class=\"btn btn-sm btn-secondary\" style=\"font-size:0.7rem;padding:2px 6px;\" onclick=\"editPickupDate('" + sessionId + "', '" + (s.pickup_date || '') + "')\">Edit</button>";
+                            html += '</div>';
                         }
                     } else if (s.status === 'received') {
                         html += '<span style="color:var(--green); font-weight:600;">✅ Ready for Ingest Service</span>';
@@ -3086,23 +3202,30 @@
 
     async function acceptSession(sessionId, method) {
         let tracking = null;
+        let pickupDate = null;
         if (method === 'mail') {
             tracking = prompt('Tracking number or link (optional — you can add it later):');
             if (tracking === null) return; // cancelled
+        } else if (method === 'pickup') {
+            pickupDate = prompt('Pickup date (e.g. 2026-03-15, or leave blank):');
+            if (pickupDate === null) return; // cancelled
         }
         const ok = await themedConfirm(
             method === 'pickup' ? '🚗 Accept — Pickup' : '📬 Accept — Mail',
             method === 'pickup'
-                ? 'Customer accepted. You will pick up the product.'
+                ? 'Customer accepted. You will pick up the product.' + (pickupDate ? '\nPickup date: ' + pickupDate : '')
                 : 'Customer accepted. They will mail the product.' + (tracking ? '\nTracking: ' + tracking : ''),
             { confirmText: 'Confirm Accepted' }
         );
         if (!ok) return;
         try {
+            const body = { fulfillment_method: method };
+            if (tracking) body.tracking_number = tracking;
+            if (pickupDate) body.pickup_date = pickupDate;
             const r = await fetch(`/api/intake/session/${sessionId}/accept`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ fulfillment_method: method, tracking_number: tracking || '' }),
+                body: JSON.stringify(body),
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
@@ -3127,6 +3250,21 @@
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ tracking_number: tracking }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function editPickupDate(sessionId, current) {
+        const dateStr = prompt('Pickup date (YYYY-MM-DD):', current || '');
+        if (dateStr === null) return;
+        try {
+            const r = await fetch(`/api/intake/session/${sessionId}/pickup-date`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ pickup_date: dateStr }),
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
