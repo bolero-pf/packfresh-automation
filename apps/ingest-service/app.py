@@ -49,6 +49,7 @@ import db
 from ppt_client import PPTClient, PPTError
 from collectr_parser import parse_collectr_csv
 from collectr_html_parser import parse_collectr_html
+from generic_csv_parser import parse_generic_csv, detect_csv_columns
 from barcode_gen import generate_barcode_image
 from shopify_client import ShopifyClient, ShopifyError
 import intake
@@ -316,6 +317,141 @@ def upload_collectr_html():
         "total_offer": float(sum(p["offer_price"] for p in processed)),
         "unmapped_count": unmapped_count,
         "auto_mapped_count": auto_mapped,
+        "parse_errors": result.errors[:10] if result.errors else [],
+    })
+
+
+# ==========================================
+# GENERIC CSV IMPORT
+# ==========================================
+
+@app.route("/api/intake/preview-csv", methods=["POST"])
+def preview_csv():
+    """Preview a generic CSV — detect columns and return mapping + sample rows."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files["file"]
+    try:
+        file_content = file.read().decode("utf-8")
+    except UnicodeDecodeError:
+        file.seek(0)
+        file_content = file.read().decode("latin-1")
+
+    result = detect_csv_columns(file_content)
+    return jsonify(result)
+
+
+@app.route("/api/intake/upload-generic-csv", methods=["POST"])
+def upload_generic_csv():
+    """Upload a generic CSV with flexible column mapping."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files["file"]
+    customer_name = request.form.get("customer_name", "").strip() or "Unknown"
+    try:
+        offer_pct = Decimal(request.form.get("offer_percentage", "75"))
+    except InvalidOperation:
+        return jsonify({"error": "Invalid offer_percentage"}), 400
+
+    # Get column overrides from form (JSON string)
+    column_overrides = None
+    overrides_str = request.form.get("column_mapping")
+    if overrides_str:
+        try:
+            column_overrides = json.loads(overrides_str)
+        except json.JSONDecodeError:
+            pass
+
+    # Read file
+    try:
+        file_content = file.read().decode("utf-8")
+    except UnicodeDecodeError:
+        file.seek(0)
+        file_content = file.read().decode("latin-1")
+
+    # Parse
+    result = parse_generic_csv(file_content, column_overrides=column_overrides)
+
+    if result.errors and not result.items:
+        return jsonify({
+            "error": "Failed to parse CSV",
+            "details": result.errors,
+            "column_mapping": result.column_mapping,
+            "unmapped_headers": result.unmapped_headers,
+        }), 400
+
+    # Check for duplicate import
+    dup_session = intake.check_duplicate_import(result.file_hash)
+    if dup_session:
+        return jsonify({
+            "error": "This file has already been imported",
+            "existing_session_id": dup_session,
+        }), 409
+
+    # Determine session type
+    if result.raw_count > 0 and result.sealed_count > 0:
+        session_type = "mixed"
+    elif result.raw_count > 0:
+        session_type = "raw"
+    else:
+        session_type = "sealed"
+
+    # Create session
+    session = intake.create_session(
+        customer_name=customer_name,
+        session_type=session_type,
+        offer_percentage=offer_pct,
+        file_name=file.filename,
+        file_hash=result.file_hash,
+    )
+
+    # Set distribution flag if provided
+    if request.form.get("is_distribution") == "1":
+        db.execute("UPDATE intake_sessions SET is_distribution = TRUE WHERE id = %s", (session["id"],))
+
+    # Process items
+    processed = []
+    for item in result.items:
+        offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
+        unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
+
+        # Check for cached tcgplayer_id mapping (or use the one from CSV)
+        tcgplayer_id = item.tcgplayer_id or intake.get_cached_mapping(item.product_name, item.product_type)
+
+        processed.append({
+            "product_name": item.product_name,
+            "product_type": item.product_type,
+            "set_name": item.set_name,
+            "card_number": item.card_number,
+            "condition": item.condition,
+            "rarity": item.rarity,
+            "quantity": item.quantity,
+            "market_price": item.market_price,
+            "offer_price": offer_price,
+            "unit_cost_basis": unit_cost,
+            "tcgplayer_id": tcgplayer_id,
+        })
+
+    # Add items to session
+    intake.add_items_to_session(session["id"], processed)
+    intake._recalculate_session_totals(session["id"])
+
+    unmapped_count = sum(1 for p in processed if not p["tcgplayer_id"])
+    auto_mapped = sum(1 for p in processed if p["tcgplayer_id"])
+
+    return jsonify({
+        "success": True,
+        "session_id": session["id"],
+        "customer_name": customer_name,
+        "session_type": session_type,
+        "item_count": len(processed),
+        "total_market_value": float(result.total_market_value),
+        "total_offer": float(sum(p["offer_price"] for p in processed)),
+        "unmapped_count": unmapped_count,
+        "auto_mapped_count": auto_mapped,
+        "column_mapping": result.column_mapping,
         "parse_errors": result.errors[:10] if result.errors else [],
     })
 
