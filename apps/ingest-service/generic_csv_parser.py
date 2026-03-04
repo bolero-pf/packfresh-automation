@@ -56,12 +56,14 @@ COLUMN_PATTERNS = {
     ],
     "quantity": [
         r"^qty$", r"^quantity$", r"^count$", r"^amount$", r"^num$",
-        r"^#$", r"^units$",
+        r"^#$", r"^units$", r"^total[_ ]?quantity$",
     ],
     "price": [
         r"^market[_ ]?price", r"^price$", r"^market$", r"^value$",
         r"^cost$", r"^unit[_ ]?price$", r"^each$", r"^msrp$",
         r"^market[_ ]?value$", r"^retail$",
+        r"^tcg[_ ]?market[_ ]?price$", r"^tcg[_ ]?marketplace[_ ]?price$",
+        r"^tcg[_ ]?low[_ ]?price$",
     ],
     "set_name": [
         r"^set$", r"^set[_ ]?name$", r"^expansion$", r"^series$",
@@ -69,7 +71,7 @@ COLUMN_PATTERNS = {
     ],
     "card_number": [
         r"^card[_ ]?number$", r"^number$", r"^card[_ ]?no$",
-        r"^collector[_ ]?number$", r"^card[_ ]?#$", r"^#$",
+        r"^collector[_ ]?number$", r"^card[_ ]?#$",
     ],
     "rarity": [
         r"^rarity$", r"^rare$",
@@ -83,6 +85,11 @@ COLUMN_PATTERNS = {
     ],
     "product_type": [
         r"^type$", r"^product[_ ]?type$", r"^category$",
+        r"^product[_ ]?line$",
+    ],
+    "photo_url": [
+        r"^photo[_ ]?url$", r"^image[_ ]?url$", r"^image$", r"^photo$",
+        r"^picture[_ ]?url$", r"^img$",
     ],
 }
 
@@ -124,6 +131,18 @@ def _parse_decimal(val: str) -> Decimal:
         return Decimal(cleaned)
     except InvalidOperation:
         return Decimal("0")
+
+
+def _extract_product_id_from_url(url: str) -> int | None:
+    """
+    Extract TCGPlayer product ID from a CDN photo URL.
+    e.g. https://tcgplayer-cdn.tcgplayer.com/product/646592_in_200x200.jpg -> 646592
+         https://tcgplayer-cdn.tcgplayer.com/product/646592__in__200x200.jpg -> 646592
+    """
+    m = re.search(r'/product/(\d+)', url)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def _parse_int(val: str) -> int:
@@ -235,6 +254,7 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
     rarity_col = mapping.get("rarity")
     cond_col = mapping.get("condition")
     tcg_col = mapping.get("tcgplayer_id")
+    photo_col = mapping.get("photo_url")
 
     for i, row in enumerate(reader, start=2):
         try:
@@ -247,8 +267,12 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
             market_price = _parse_decimal(row.get(price_col, "0"))
             product_type = _guess_type(row, mapping)
 
+            # Extract tcgplayer product ID — prefer photo URL extraction over the
+            # "TCGplayer Id" column, which is often an internal SKU, not the product ID
             tcgplayer_id = None
-            if tcg_col and row.get(tcg_col):
+            if photo_col and row.get(photo_col):
+                tcgplayer_id = _extract_product_id_from_url(row[photo_col])
+            if tcgplayer_id is None and tcg_col and row.get(tcg_col):
                 try:
                     tcgplayer_id = int(row[tcg_col].strip())
                 except (ValueError, TypeError):
@@ -314,5 +338,5 @@ def detect_csv_columns(file_content: str) -> dict:
         "unmapped": unmapped,
         "preview_rows": preview,
         "required_fields": ["name", "quantity", "price"],
-        "optional_fields": ["set_name", "card_number", "rarity", "condition", "tcgplayer_id", "product_type"],
+        "optional_fields": ["set_name", "card_number", "rarity", "condition", "tcgplayer_id", "product_type", "photo_url"],
     }

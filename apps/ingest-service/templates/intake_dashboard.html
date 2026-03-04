@@ -353,7 +353,7 @@
                         </div>
                         <div class="form-group" style="margin-bottom:16px;">
                             <label>CSV File</label>
-                            <input type="file" id="generic-csv-file" required>
+                            <input type="file" id="generic-csv-file" accept=".csv,.tsv,.txt" required>
                         </div>
                         <button type="submit" class="btn btn-primary">Preview &amp; Map Columns</button>
                     </form>
@@ -851,12 +851,13 @@
             _genericCsvMapping = d.mapping || {};
             const headers = d.headers || [];
             const required = ['name', 'quantity', 'price'];
-            const optional = ['set_name', 'card_number', 'rarity', 'condition', 'tcgplayer_id', 'product_type'];
+            const optional = ['set_name', 'card_number', 'rarity', 'condition', 'tcgplayer_id', 'product_type', 'photo_url'];
             const allFields = [...required, ...optional];
             const fieldLabels = {
                 name: 'Product Name *', quantity: 'Quantity *', price: 'Market Price *',
                 set_name: 'Set Name', card_number: 'Card Number', rarity: 'Rarity',
                 condition: 'Condition', tcgplayer_id: 'TCGPlayer ID', product_type: 'Type',
+                photo_url: 'Photo URL (extracts real TCG ID)',
             };
 
             let html = '<div class="card" style="padding:16px;">';
