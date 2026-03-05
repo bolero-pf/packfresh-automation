@@ -40,6 +40,17 @@ if not cur.fetchone():
 else:
     print("  ✓ ingested_at already exists")
 
+# pushed_at on intake_items (tracks which items were successfully pushed to Shopify)
+cur.execute("""
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'intake_items' AND column_name = 'pushed_at'
+""")
+if not cur.fetchone():
+    cur.execute("ALTER TABLE intake_items ADD COLUMN pushed_at TIMESTAMP")
+    print("  ✓ Added pushed_at to intake_items")
+else:
+    print("  ✓ pushed_at already exists")
+
 conn.commit()
 cur.close()
 conn.close()

@@ -1625,9 +1625,144 @@ def shopify_session_store_check(session_id):
         })
 
     hit = sum(1 for i in result_items if i["in_store"])
+
+    # Enrich with breakdown cache data
+    all_tcg_ids = [i["tcgplayer_id"] for i in result_items if i.get("tcgplayer_id")]
+    breakdown_data = {}
+    if all_tcg_ids:
+        try:
+            placeholders = ",".join(["%s"] * len(all_tcg_ids))
+            bd_rows = db.query(f"""
+                SELECT sbc.tcgplayer_id AS parent_id, sbc.total_component_market,
+                       sbc.component_count, sbc.promo_notes,
+                       sbco.tcgplayer_id AS comp_tcg_id, sbco.product_name AS comp_name,
+                       sbco.quantity_per_parent, sbco.market_price AS comp_price
+                FROM sealed_breakdown_cache sbc
+                LEFT JOIN sealed_breakdown_components sbco ON sbco.breakdown_id = sbc.id
+                WHERE sbc.tcgplayer_id IN ({placeholders})
+                ORDER BY sbc.tcgplayer_id, sbco.display_order
+            """, tuple(all_tcg_ids))
+
+            # Also check component store presence
+            comp_tcg_ids = list(set(r["comp_tcg_id"] for r in bd_rows if r.get("comp_tcg_id")))
+            comp_store_map = {}
+            if comp_tcg_ids:
+                cp = ",".join(["%s"] * len(comp_tcg_ids))
+                comp_rows = db.query(
+                    f"SELECT tcgplayer_id, shopify_qty, shopify_price FROM shopify_product_cache WHERE tcgplayer_id IN ({cp}) AND is_damaged = FALSE",
+                    tuple(comp_tcg_ids)
+                )
+                for cr in comp_rows:
+                    comp_store_map[cr["tcgplayer_id"]] = cr
+
+            for row in bd_rows:
+                pid = row["parent_id"]
+                if pid not in breakdown_data:
+                    breakdown_data[pid] = {
+                        "total_component_market": float(row["total_component_market"] or 0),
+                        "component_count": row["component_count"],
+                        "promo_notes": row["promo_notes"],
+                        "components": [],
+                        "all_components_in_store": True,
+                        "components_in_store_count": 0,
+                    }
+                if row["comp_name"]:
+                    cs = comp_store_map.get(row["comp_tcg_id"])
+                    in_store = cs is not None and (cs.get("shopify_qty") or 0) > 0
+                    breakdown_data[pid]["components"].append({
+                        "tcgplayer_id": row["comp_tcg_id"],
+                        "product_name": row["comp_name"],
+                        "quantity_per_parent": row["quantity_per_parent"],
+                        "market_price": float(row["comp_price"] or 0),
+                        "in_store": in_store,
+                    })
+                    if in_store:
+                        breakdown_data[pid]["components_in_store_count"] += 1
+                    else:
+                        breakdown_data[pid]["all_components_in_store"] = False
+        except Exception as e:
+            app.logger.warning(f"Breakdown cache lookup failed (run migrate_breakdown_cache.py?): {e}")
+
+    for item in result_items:
+        tcg_id = item.get("tcgplayer_id")
+        bd = breakdown_data.get(tcg_id)
+        if bd:
+            item["breakdown"] = {
+                "total_component_market": bd["total_component_market"],
+                "component_count": bd["component_count"],
+                "promo_notes": bd["promo_notes"],
+                "all_components_in_store": bd["all_components_in_store"],
+                "components_in_store_count": bd["components_in_store_count"],
+                "total_components": len(bd["components"]),
+            }
+        else:
+            item["breakdown"] = None
+
     return jsonify({"items": result_items, "total": len(result_items), "in_store": hit,
                     "not_in_store": len(result_items) - hit,
                     "cache_hit_rate": round(hit / len(result_items) * 100, 1) if result_items else 0})
+
+
+
+# ==========================================
+# BREAKDOWN CACHE (read from ingest's cache for intake display)
+# ==========================================
+
+@app.route("/api/breakdown-cache/<int:tcgplayer_id>")
+def get_breakdown_cache_intake(tcgplayer_id):
+    """Get breakdown cache for a sealed product (read-only in intake)."""
+    cache = db.query_one(
+        "SELECT * FROM sealed_breakdown_cache WHERE tcgplayer_id = %s",
+        (tcgplayer_id,)
+    )
+    if not cache:
+        return jsonify({"found": False, "cache": None})
+    components = db.query("""
+        SELECT * FROM sealed_breakdown_components
+        WHERE breakdown_id = %s ORDER BY display_order
+    """, (str(cache["id"]),))
+    return jsonify({"found": True, "cache": _serialize({**cache, "components": list(components)})})
+
+
+@app.route("/api/breakdown-cache/batch", methods=["POST"])
+def get_breakdown_cache_batch():
+    """Get breakdown cache for multiple tcgplayer_ids at once."""
+    data = request.get_json(silent=True) or {}
+    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
+    if not tcg_ids:
+        return jsonify({"caches": {}})
+
+    placeholders = ",".join(["%s"] * len(tcg_ids))
+    caches = db.query(f"""
+        SELECT sbc.tcgplayer_id, sbc.total_component_market, sbc.component_count,
+               sbc.promo_notes, sbco.tcgplayer_id AS comp_tcg_id,
+               sbco.product_name AS comp_name, sbco.quantity_per_parent,
+               sbco.market_price AS comp_price
+        FROM sealed_breakdown_cache sbc
+        LEFT JOIN sealed_breakdown_components sbco ON sbco.breakdown_id = sbc.id
+        WHERE sbc.tcgplayer_id IN ({placeholders})
+        ORDER BY sbc.tcgplayer_id, sbco.display_order
+    """, tuple(tcg_ids))
+
+    result = {}
+    for row in caches:
+        pid = row["tcgplayer_id"]
+        if pid not in result:
+            result[pid] = {
+                "total_component_market": float(row["total_component_market"] or 0),
+                "component_count": row["component_count"],
+                "promo_notes": row["promo_notes"],
+                "components": [],
+            }
+        if row["comp_name"]:
+            result[pid]["components"].append({
+                "tcgplayer_id": row["comp_tcg_id"],
+                "product_name": row["comp_name"],
+                "quantity_per_parent": row["quantity_per_parent"],
+                "market_price": float(row["comp_price"] or 0),
+            })
+
+    return jsonify({"caches": result})
 
 
 # ==========================================

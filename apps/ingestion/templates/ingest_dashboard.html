@@ -200,7 +200,10 @@
     <!-- Session List -->
     <div id="session-list-view">
         <div class="card">
-            <h2>📦 Ingest Queue</h2>
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+                <h2 style="margin-bottom:0;">📦 Ingest Queue</h2>
+                <button class="btn btn-secondary btn-sm" onclick="showBreakdownLibrary()" style="margin-left:auto; font-size:0.8rem;">📚 Breakdown Library</button>
+            </div>
             <p style="color:var(--text-dim); margin-bottom:16px;">Sessions ready for warehouse processing. Click to open.</p>
             <div id="sessions-list">
                 <div class="loading"><span class="spinner"></span> Loading sessions...</div>
@@ -214,6 +217,16 @@
             <button class="btn btn-secondary btn-sm" onclick="showList()">← Back to Queue</button>
         </div>
         <div id="session-detail-content"></div>
+    </div>
+</div>
+
+<!-- Breakdown Library Modal -->
+<div id="library-modal" class="modal-overlay">
+    <div class="modal" style="max-width:800px;">
+        <button class="modal-close-sticky" onclick="closeLibrary()">×</button>
+        <h3 style="margin-bottom:4px;">📚 Breakdown Library</h3>
+        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:16px;">Saved breakdown recipes. Click a product to load it.</p>
+        <div id="library-body"><div class="loading"><span class="spinner"></span></div></div>
     </div>
 </div>
 
@@ -459,7 +472,7 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
 
     let actions = '';
     if (isReceived && !isBroken) {
-        actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="openBreakdown('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1})">🔨 Break Down</button> `;
+        actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="openBreakdown('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button> `;
         actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="relinkItem('${item.id}', '${sessionId}')">🔗 Relink</button> `;
         actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏ Qty</button> `;
         if (!isDamaged) {
@@ -685,42 +698,136 @@ async function deleteItem(itemId, sessionId, name) {
 
 
 // ═══════════════════════════════════════════════════════════════════
-// BREAK DOWN
+// BREAK DOWN  (with persistent cache)
 // ═══════════════════════════════════════════════════════════════════
 
-function openBreakdown(itemId, sessionId, productName, parentQty) {
+// Extra state
+let _breakDownParentTcgId = null;
+let _breakDownParentMarket = 0;
+let _breakDownParentName = '';
+let _bdSaveToCache = true;
+
+async function openBreakdown(itemId, sessionId, productName, parentQty, parentTcgId, parentMarket) {
     _breakDownItemId = itemId;
     _breakDownComponents = [];
     _currentSessionId = sessionId;
+    _breakDownParentTcgId = parentTcgId || null;
+    _breakDownParentMarket = parseFloat(parentMarket) || 0;
+    _breakDownParentName = productName;
+    _bdSaveToCache = true;
 
-    document.getElementById('breakdown-body').innerHTML = `
-        <h3 style="margin-bottom:8px;">🔨 Break Down: ${productName}</h3>
-        <p style="color:var(--text-dim); margin-bottom:16px;">
-            Quantity: <strong>${parentQty}</strong> — Each component's qty will be multiplied by ${parentQty}.
+    const modal = document.getElementById('breakdown-modal');
+    const body = document.getElementById('breakdown-body');
+
+    body.innerHTML = `
+        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:4px;">
+            <h3 style="font-size:1.1rem;">&#x1F528; Break Down</h3>
+            ${parentTcgId ? `<span style="font-size:0.75rem; color:var(--text-dim); background:var(--surface-2); padding:3px 8px; border-radius:4px;">TCG#${parentTcgId}</span>` : ''}
+        </div>
+        <p style="color:var(--text-dim); font-size:0.9rem; margin-bottom:4px;">${productName}</p>
+        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:16px;">
+            Qty: <strong style="color:var(--text);">${parentQty}</strong>
+            ${_breakDownParentMarket > 0 ? ` &middot; Parent market: <strong style="color:var(--text);">$${_breakDownParentMarket.toFixed(2)}</strong>` : ''}
         </p>
 
-        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px;">
+        <div id="bd-cache-banner" style="margin-bottom:12px;"></div>
+
+        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px;">
             <div style="flex:2; min-width:200px;">
-                <label>Search PPT for Component</label>
-                <input type="text" id="bd-search" placeholder="e.g. Mega Evolution Booster Pack"
+                <label style="font-size:0.8rem; color:var(--text-dim);">Add Component (search PPT)</label>
+                <input type="text" id="bd-search" placeholder="e.g. Booster Pack, ETB, Promo..."
                        style="width:100%; margin-top:4px;"
                        onkeydown="if(event.key==='Enter') bdSearch()">
             </div>
             <button class="btn btn-primary btn-sm" onclick="bdSearch()" style="height:40px;">Search</button>
         </div>
+        <div id="bd-search-results" style="max-height:200px; overflow-y:auto; margin-bottom:12px;"></div>
 
-        <div id="bd-search-results" style="max-height:250px; overflow-y:auto; margin-bottom:16px;"></div>
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; gap:8px; flex-wrap:wrap;">
+            <h4 style="font-size:0.9rem;">Components</h4>
+            <div id="bd-value-summary" style="font-size:0.82rem; color:var(--text-dim);"></div>
+        </div>
+        <div id="bd-components-list"><p style="color:var(--text-dim); font-size:0.85rem;">No components added yet. Search above.</p></div>
 
-        <h4 style="margin-bottom:8px;">Components:</h4>
-        <div id="bd-components-list"><p style="color:var(--text-dim);">No components added yet. Search above.</p></div>
+        <div id="bd-promo-row" style="margin-top:14px; display:none;">
+            <label style="font-size:0.8rem; color:var(--text-dim);">Promo / Notes (optional)</label>
+            <input type="text" id="bd-promo-notes" placeholder="e.g. includes 1 alt art promo randomly"
+                   style="width:100%; margin-top:4px; font-size:0.85rem;">
+        </div>
 
-        <div style="margin-top:20px; display:flex; gap:8px;">
-            <button class="btn btn-success" onclick="submitBreakDown()">✅ Confirm Break Down</button>
+        <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <button class="btn btn-success" onclick="submitBreakDown()">&#x2705; Confirm Break Down</button>
             <button class="btn btn-secondary" onclick="closeBreakdown()">Cancel</button>
+            <label style="display:flex; align-items:center; gap:6px; margin-left:auto; font-size:0.82rem; color:var(--text-dim); cursor:pointer;">
+                <input type="checkbox" id="bd-save-cache" checked onchange="_bdSaveToCache=this.checked; bdUpdateValueSummary();">
+                Save recipe to cache
+            </label>
+            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('bd-promo-row').style.display='block'; document.getElementById('bd-promo-notes').focus();" style="font-size:0.75rem; padding:3px 8px;">+ Promo note</button>
         </div>
     `;
-    document.getElementById('breakdown-modal').classList.add('active');
-    setTimeout(() => document.getElementById('bd-search').focus(), 100);
+
+    modal.classList.add('active');
+    setTimeout(() => document.getElementById('bd-search')?.focus(), 100);
+
+    // Load cache if we have a tcgplayer_id
+    if (parentTcgId) {
+        bdLoadCache(parentTcgId, parentQty);
+    }
+}
+
+async function bdLoadCache(tcgId, parentQty) {
+    const banner = document.getElementById('bd-cache-banner');
+    if (!banner) return;
+    try {
+        const r = await fetch(`/api/breakdown-cache/${tcgId}`);
+        const d = await r.json();
+        if (!d.found || !d.cache) return;
+
+        const cache = d.cache;
+        const comps = cache.components || [];
+        const total = cache.total_component_market || 0;
+        const age = cache.last_updated ? new Date(cache.last_updated).toLocaleDateString() : 'unknown';
+
+        banner.innerHTML = `
+            <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px 14px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <div style="flex:1; min-width:200px;">
+                    <div style="font-size:0.78rem; color:var(--green); font-weight:600; margin-bottom:2px;">&#x1F4BE; Cached recipe found</div>
+                    <div style="font-size:0.8rem; color:var(--text-dim);">${comps.length} components &middot; $${total.toFixed(2)} total market &middot; saved ${age}</div>
+                    ${cache.promo_notes ? `<div style="font-size:0.78rem; color:var(--amber); margin-top:2px;">&#x1F4DD; ${cache.promo_notes}</div>` : ''}
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="bdApplyCache()" style="white-space:nowrap;">&#x2B07; Load Recipe</button>
+                <button class="btn btn-secondary btn-sm" onclick="bdDeleteCache(${tcgId})" style="color:var(--red); font-size:0.72rem; padding:3px 8px;">&#x1F5D1; Delete</button>
+            </div>
+        `;
+        banner._cacheData = cache;
+    } catch(e) { /* silent */ }
+}
+
+function bdApplyCache() {
+    const banner = document.getElementById('bd-cache-banner');
+    const cache = banner?._cacheData;
+    if (!cache) return;
+    _breakDownComponents = (cache.components || []).map(c => ({
+        product_name: c.product_name,
+        set_name: c.set_name || '',
+        tcgplayer_id: c.tcgplayer_id,
+        market_price: parseFloat(c.market_price) || 0,
+        quantity: parseInt(c.quantity_per_parent) || 1,
+    }));
+    if (cache.promo_notes) {
+        const pn = document.getElementById('bd-promo-notes');
+        if (pn) { pn.value = cache.promo_notes; document.getElementById('bd-promo-row').style.display = 'block'; }
+    }
+    bdRenderComponents();
+    banner.innerHTML = `<div style="font-size:0.8rem; color:var(--green); padding:6px 0;">&#x2713; Recipe loaded (${_breakDownComponents.length} components). You can still edit below.</div>`;
+}
+
+async function bdDeleteCache(tcgId) {
+    const ok = await themedConfirm('Delete Recipe Cache', 'Remove the saved breakdown recipe for this product?', { dangerous: true });
+    if (!ok) return;
+    await fetch(`/api/breakdown-cache/${tcgId}`, { method: 'DELETE' });
+    const banner = document.getElementById('bd-cache-banner');
+    if (banner) banner.innerHTML = '<div style="font-size:0.8rem; color:var(--text-dim);">Cache deleted.</div>';
 }
 
 function closeBreakdown() {
@@ -728,87 +835,109 @@ function closeBreakdown() {
 }
 
 async function bdSearch() {
-    const q = document.getElementById('bd-search').value.trim();
+    const q = document.getElementById('bd-search')?.value.trim();
     if (!q) return;
     const panel = document.getElementById('bd-search-results');
     panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
-
     try {
         const r = await fetch('/api/ppt/search-sealed', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ query: q }),
         });
         const d = await r.json();
         if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
-
         const results = d.results || [];
-        if (!results.length) { panel.innerHTML = '<p style="color:var(--text-dim);">No results found</p>'; return; }
-
+        if (!results.length) { panel.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No results found</p>'; return; }
         panel.innerHTML = results.slice(0, 15).map(p => {
-            const name = (p.name || p.productName || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-            const setName = (p.setName || p.set_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+            const name = (p.name || p.productName || '').replace(/'/g, "\'").replace(/"/g, '&quot;');
+            const setName = (p.setName || p.set_name || '').replace(/'/g, "\'").replace(/"/g, '&quot;');
             const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || p.id || 0;
             const price = p.unopenedPrice || p.marketPrice || 0;
             return `<div class="search-result" onclick="bdAddComponent(${tcgId}, '${name}', '${setName}', ${price})">
-                <strong>${p.name || p.productName}</strong>
-                <br><small style="color:var(--text-dim);">${p.setName || ''} · TCG#${tcgId} · $${(price||0).toFixed(2)}</small>
+                <strong style="font-size:0.88rem;">${p.name || p.productName}</strong>
+                <br><small style="color:var(--text-dim);">${p.setName || ''} &middot; TCG#${tcgId} &middot; $${(price||0).toFixed(2)}</small>
             </div>`;
         }).join('');
-    } catch(err) {
-        panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
-    }
+    } catch(err) { panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`; }
 }
 
 function bdAddComponent(tcgId, name, setName, price) {
-    _breakDownComponents.push({
-        product_name: name, set_name: setName,
-        tcgplayer_id: tcgId, market_price: price, quantity: 1,
-    });
+    const existing = _breakDownComponents.find(c => c.tcgplayer_id && c.tcgplayer_id === tcgId);
+    if (existing) { existing.quantity += 1; }
+    else { _breakDownComponents.push({ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1 }); }
     bdRenderComponents();
     document.getElementById('bd-search-results').innerHTML = '';
     document.getElementById('bd-search').value = '';
     document.getElementById('bd-search').focus();
 }
 
+function bdUpdateValueSummary() {
+    const el = document.getElementById('bd-value-summary');
+    if (!el) return;
+    const totalMkt = _breakDownComponents.reduce((s, c) => s + (parseFloat(c.market_price)||0) * (parseInt(c.quantity)||1), 0);
+    const parentMkt = _breakDownParentMarket;
+    let html = `<span style="color:var(--text);">Total: <strong>$${totalMkt.toFixed(2)}</strong></span>`;
+    if (parentMkt > 0 && totalMkt > 0) {
+        const diff = totalMkt - parentMkt;
+        const pct = (diff / parentMkt * 100);
+        const col = diff >= 0 ? 'var(--green)' : 'var(--red)';
+        html += `<span style="color:${col}; margin-left:8px;">${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)</span>`;
+    }
+    if (_bdSaveToCache) html += `<span style="color:var(--green); margin-left:8px; font-size:0.75rem;">&#x1F4BE;</span>`;
+    el.innerHTML = html;
+}
+
 function bdRenderComponents() {
     const el = document.getElementById('bd-components-list');
+    if (!el) return;
     if (!_breakDownComponents.length) {
-        el.innerHTML = '<p style="color:var(--text-dim);">No components added yet.</p>';
+        el.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No components added yet.</p>';
+        bdUpdateValueSummary();
         return;
     }
-    el.innerHTML = `<table><thead><tr><th>Component</th><th>Qty Each</th><th>Market Price</th><th></th></tr></thead><tbody>` +
+    el.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:0.85rem;"><thead><tr><th>Component</th><th style="width:70px;">Qty</th><th style="width:90px;">Market</th><th style="width:30px;"></th></tr></thead><tbody>` +
         _breakDownComponents.map((c, idx) =>
             `<tr>
-                <td>${c.product_name}<br><small style="color:${c.tcgplayer_id ? 'var(--text-dim)' : 'var(--red)'};">${c.tcgplayer_id ? 'TCG#' + c.tcgplayer_id : '⚠ NO TCG ID'}</small></td>
-                <td><input type="number" value="${c.quantity}" min="1" style="width:60px;" 
-                    onchange="_breakDownComponents[${idx}].quantity = parseInt(this.value) || 1"></td>
-                <td>$${(c.market_price || 0).toFixed(2)}</td>
-                <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 8px;"
-                    onclick="_breakDownComponents.splice(${idx},1); bdRenderComponents();">✕</button></td>
+                <td>
+                    <span>${c.product_name}</span><br>
+                    <small style="color:${c.tcgplayer_id ? 'var(--text-dim)' : 'var(--red)'};">
+                        ${c.tcgplayer_id ? 'TCG#' + c.tcgplayer_id : '&#x26A0; No TCG ID'}
+                        ${c.set_name ? ' &middot; ' + c.set_name : ''}
+                    </small>
+                </td>
+                <td><input type="number" value="${c.quantity}" min="1" style="width:55px;"
+                    onchange="_breakDownComponents[${idx}].quantity = parseInt(this.value)||1; bdUpdateValueSummary();"></td>
+                <td><input type="number" value="${(c.market_price||0).toFixed(2)}" min="0" step="0.01" style="width:80px;"
+                    onchange="_breakDownComponents[${idx}].market_price = parseFloat(this.value)||0; bdUpdateValueSummary();"></td>
+                <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 6px;"
+                    onclick="_breakDownComponents.splice(${idx},1); bdRenderComponents();">&#x2715;</button></td>
             </tr>`
-        ).join('') + '</tbody></table>';
+        ).join('') + '</tbody></table></div>';
+    bdUpdateValueSummary();
 }
 
 async function submitBreakDown() {
     if (!_breakDownComponents.length) { alert('Add at least one component.'); return; }
-
-    const ok = await themedConfirm(
-        'Confirm Break Down',
-        `Break this item into ${_breakDownComponents.length} component(s)? The original item will be marked as broken down.`,
-    );
+    const totalMkt = _breakDownComponents.reduce((s, c) => s + (parseFloat(c.market_price)||0) * (parseInt(c.quantity)||1), 0);
+    const parentMkt = _breakDownParentMarket;
+    let confirmMsg = `Break into ${_breakDownComponents.length} component(s)?`;
+    if (parentMkt > 0) {
+        const pct = ((totalMkt - parentMkt) / parentMkt * 100);
+        confirmMsg += `\n\nBreakdown total: $${totalMkt.toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% vs parent $${parentMkt.toFixed(2)})`;
+    }
+    if (_bdSaveToCache) confirmMsg += '\n\nRecipe will be saved to cache.';
+    const ok = await themedConfirm('Confirm Break Down', confirmMsg);
     if (!ok) return;
-
+    const promoNotes = document.getElementById('bd-promo-notes')?.value.trim() || null;
     try {
         const r = await fetch(`/api/ingest/item/${_breakDownItemId}/break-down`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ components: _breakDownComponents }),
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ components: _breakDownComponents, save_to_cache: _bdSaveToCache, promo_notes: promoNotes }),
         });
         const text = await r.text();
         let d;
         try { d = JSON.parse(text); } catch(e) {
-            alert('Server error (non-JSON response). Check if migrate_ingest.py has been run. Raw: ' + text.substring(0, 200));
+            alert('Server error. Have you run migrate_breakdown_cache.py? Raw: ' + text.substring(0, 200));
             return;
         }
         if (!r.ok) { alert(d.error || 'Break down failed'); return; }
@@ -816,6 +945,7 @@ async function submitBreakDown() {
         viewSession(_currentSessionId);
     } catch(err) { alert(err.message); }
 }
+
 
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1002,6 +1132,122 @@ async function pushLive(sessionId) {
     } catch(err) {
         panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// BREAKDOWN LIBRARY
+// ═══════════════════════════════════════════════════════════════════
+
+async function showBreakdownLibrary() {
+    document.getElementById('library-modal').classList.add('active');
+    await loadLibrary();
+}
+
+function closeLibrary() {
+    document.getElementById('library-modal').classList.remove('active');
+}
+
+async function loadLibrary() {
+    const body = document.getElementById('library-body');
+    body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
+    try {
+        const r = await fetch('/api/breakdown-cache');
+        const d = await r.json();
+        if (!r.ok) { body.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+        const caches = d.caches || [];
+        if (!caches.length) {
+            body.innerHTML = '<p style="color:var(--text-dim);">No breakdown recipes saved yet. Break down a sealed product and check "Save recipe to cache".</p>';
+            return;
+        }
+        body.innerHTML = `
+            <p style="font-size:0.82rem; color:var(--text-dim); margin-bottom:12px;">${caches.length} saved recipes</p>
+            <div style="overflow-x:auto;">
+            <table style="font-size:0.85rem;">
+                <thead><tr>
+                    <th>Product</th>
+                    <th>TCG ID</th>
+                    <th>Components</th>
+                    <th>Total Market</th>
+                    <th>Used</th>
+                    <th>Updated</th>
+                    <th></th>
+                </tr></thead>
+                <tbody>
+                ${caches.map(c => {
+                    const age = c.last_updated ? new Date(c.last_updated).toLocaleDateString() : '—';
+                    return `<tr>
+                        <td>
+                            <strong>${c.product_name}</strong>
+                            ${c.promo_notes ? `<br><small style="color:var(--amber);">${c.promo_notes}</small>` : ''}
+                        </td>
+                        <td style="color:var(--text-dim);">${c.tcgplayer_id || '—'}</td>
+                        <td>${c.component_count_live ?? c.component_count}</td>
+                        <td>$${(c.total_component_market||0).toFixed(2)}</td>
+                        <td style="color:var(--text-dim);">${c.use_count || 0}x</td>
+                        <td style="color:var(--text-dim);">${age}</td>
+                        <td>
+                            <button class="btn btn-sm btn-secondary" style="font-size:0.72rem; padding:2px 8px;"
+                                onclick="viewLibraryEntry(${c.tcgplayer_id})">View</button>
+                            <button class="btn btn-sm" style="font-size:0.72rem; padding:2px 8px; color:var(--red);"
+                                onclick="deleteLibraryEntry(${c.tcgplayer_id}, '${(c.product_name||'').replace(/'/g,'')}')">&#x1F5D1;</button>
+                        </td>
+                    </tr>`;
+                }).join('')}
+                </tbody>
+            </table>
+            </div>
+        `;
+    } catch(err) {
+        body.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+async function viewLibraryEntry(tcgId) {
+    const body = document.getElementById('library-body');
+    try {
+        const r = await fetch(`/api/breakdown-cache/${tcgId}`);
+        const d = await r.json();
+        if (!d.found) { alert('Not found'); return; }
+        const cache = d.cache;
+        const comps = cache.components || [];
+        const totalMkt = comps.reduce((s, c) => s + (c.market_price||0) * (c.quantity_per_parent||1), 0);
+        body.innerHTML = `
+            <button class="btn btn-secondary btn-sm" onclick="loadLibrary()" style="margin-bottom:12px;">← Back</button>
+            <div style="display:flex; gap:8px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; margin-bottom:4px;">
+                <div>
+                    <strong style="font-size:1rem;">${cache.product_name}</strong>
+                    <span style="font-size:0.78rem; color:var(--text-dim); margin-left:8px;">TCG#${cache.tcgplayer_id}</span>
+                </div>
+                <div style="font-size:0.82rem; color:var(--text-dim);">Used ${cache.use_count||0}x &middot; Updated ${new Date(cache.last_updated).toLocaleDateString()}</div>
+            </div>
+            ${cache.promo_notes ? `<div style="color:var(--amber); font-size:0.85rem; margin-bottom:12px;">&#x1F4DD; ${cache.promo_notes}</div>` : ''}
+            <table style="font-size:0.85rem; margin-bottom:12px;">
+                <thead><tr><th>Component</th><th>TCG ID</th><th>Qty/Parent</th><th>Market Price</th><th>Subtotal</th></tr></thead>
+                <tbody>
+                ${comps.map(c => `<tr>
+                    <td>${c.product_name}${c.set_name ? '<br><small style="color:var(--text-dim);">' + c.set_name + '</small>' : ''}</td>
+                    <td style="color:var(--text-dim);">${c.tcgplayer_id || '—'}</td>
+                    <td>${c.quantity_per_parent}</td>
+                    <td>$${(c.market_price||0).toFixed(2)}</td>
+                    <td>$${((c.market_price||0)*(c.quantity_per_parent||1)).toFixed(2)}</td>
+                </tr>`).join('')}
+                <tr style="font-weight:600; border-top:2px solid var(--border);">
+                    <td colspan="4" style="text-align:right;">Total component market:</td>
+                    <td>$${totalMkt.toFixed(2)}</td>
+                </tr>
+                </tbody>
+            </table>
+            <button class="btn btn-sm" style="color:var(--red); font-size:0.78rem;" onclick="deleteLibraryEntry(${cache.tcgplayer_id}, '${(cache.product_name||'').replace(/'/g,'')}')">&#x1F5D1; Delete this recipe</button>
+        `;
+    } catch(err) { body.innerHTML = `<div class="alert alert-error">${err.message}</div>`; }
+}
+
+async function deleteLibraryEntry(tcgId, name) {
+    const ok = await themedConfirm('Delete Recipe', `Remove the breakdown recipe for "${name}"?`, { dangerous: true });
+    if (!ok) return;
+    await fetch(`/api/breakdown-cache/${tcgId}`, { method: 'DELETE' });
+    await loadLibrary();
 }
 
 

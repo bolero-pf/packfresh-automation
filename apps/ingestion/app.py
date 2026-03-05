@@ -198,26 +198,7 @@ def get_session(session_id):
 # BREAK DOWN
 # ═══════════════════════════════════════════════════════════════════
 
-@app.route("/api/ingest/item/<item_id>/break-down", methods=["POST"])
-def break_down_item(item_id):
-    """Break down a sealed product into component items."""
-    data = request.get_json(silent=True) or {}
-    components = data.get("components", [])
-    if not components:
-        return jsonify({"error": "No components provided"}), 400
-    try:
-        result = ingest.break_down_item(item_id, components)
-        return jsonify({
-            "success": True,
-            "parent_item": _serialize(result["parent_item"]),
-            "child_items": [_serialize(c) for c in result["child_items"]],
-            "session": _serialize(result["session"]),
-        })
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logger.exception(f"Break down failed for item {item_id}")
-        return jsonify({"error": f"Break down failed: {str(e)}"}), 500
+# (break-down route moved to BREAKDOWN CACHE section below)
 
 
 @app.route("/api/ingest/item/<item_id>/undo-breakdown", methods=["POST"])
@@ -666,6 +647,82 @@ def force_mark_ingested(session_id):
         return jsonify({"error": "Already ingested"}), 400
     ingest.mark_session_ingested(session_id)
     return jsonify({"success": True, "message": "Session manually marked as ingested."})
+
+
+# ═══════════════════════════════════════════════════════════════════
+# BREAKDOWN CACHE API
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/breakdown-cache/<int:tcgplayer_id>")
+def get_breakdown_cache(tcgplayer_id):
+    """Get cached breakdown for a sealed product."""
+    result = ingest.get_breakdown_cache(tcgplayer_id)
+    if not result:
+        return jsonify({"found": False, "cache": None})
+    return jsonify({"found": True, "cache": _serialize(result)})
+
+
+@app.route("/api/breakdown-cache/<int:tcgplayer_id>", methods=["POST"])
+def save_breakdown_cache(tcgplayer_id):
+    """Save or update the breakdown recipe for a sealed product."""
+    data = request.get_json(silent=True) or {}
+    product_name = data.get("product_name", "Unknown")
+    components = data.get("components", [])
+    promo_notes = data.get("promo_notes")
+
+    if not components:
+        return jsonify({"error": "components required"}), 400
+
+    try:
+        result = ingest.save_breakdown_cache(
+            tcgplayer_id=tcgplayer_id,
+            product_name=product_name,
+            components=components,
+            promo_notes=promo_notes,
+        )
+        return jsonify({"success": True, "cache": _serialize(result)})
+    except Exception as e:
+        logger.exception(f"Failed to save breakdown cache for {tcgplayer_id}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/breakdown-cache/<int:tcgplayer_id>", methods=["DELETE"])
+def delete_breakdown_cache(tcgplayer_id):
+    """Delete a breakdown cache entry."""
+    deleted = ingest.delete_breakdown_cache(tcgplayer_id)
+    return jsonify({"success": deleted})
+
+
+@app.route("/api/breakdown-cache")
+def list_breakdown_caches():
+    """List all breakdown cache entries."""
+    rows = ingest.list_breakdown_cache()
+    return jsonify({"caches": [_serialize(r) for r in rows], "count": len(rows)})
+
+
+@app.route("/api/ingest/item/<item_id>/break-down", methods=["POST"])
+def break_down_item_v2(item_id):
+    """Break down a sealed product into component items (replaces old route)."""
+    data = request.get_json(silent=True) or {}
+    components = data.get("components", [])
+    save_to_cache = data.get("save_to_cache", True)
+
+    if not components:
+        return jsonify({"error": "No components provided"}), 400
+    try:
+        result = ingest.break_down_item_with_cache(item_id, components, save_to_cache=save_to_cache)
+        return jsonify({
+            "success": True,
+            "parent_item": _serialize(result["parent_item"]),
+            "child_items": [_serialize(c) for c in result["child_items"]],
+            "session": _serialize(result["session"]),
+            "cache_saved": result.get("cache_saved", False),
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Break down failed for item {item_id}")
+        return jsonify({"error": f"Break down failed: {str(e)}\n\nHave you run migrate_breakdown_cache.py?"}), 500
 
 
 # ═══════════════════════════════════════════════════════════════════

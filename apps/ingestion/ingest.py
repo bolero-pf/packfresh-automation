@@ -399,3 +399,246 @@ def _save_mapping(product_name: str, tcgplayer_id: int, product_type: str,
             last_used = CURRENT_TIMESTAMP,
             use_count = product_mappings.use_count + 1
     """, (product_name, tcgplayer_id, product_type, set_name))
+
+
+# ==========================================
+# BREAKDOWN CACHE
+# ==========================================
+
+def get_breakdown_cache(tcgplayer_id: int) -> Optional[dict]:
+    """
+    Fetch the cached breakdown for a sealed product (with components).
+    Returns None if no cache exists.
+    """
+    cache = query_one(
+        "SELECT * FROM sealed_breakdown_cache WHERE tcgplayer_id = %s",
+        (tcgplayer_id,)
+    )
+    if not cache:
+        return None
+
+    components = query("""
+        SELECT * FROM sealed_breakdown_components
+        WHERE breakdown_id = %s
+        ORDER BY display_order, created_at
+    """, (str(cache["id"]),))
+
+    return {
+        **cache,
+        "components": list(components),
+    }
+
+
+def save_breakdown_cache(tcgplayer_id: int, product_name: str,
+                          components: list[dict],
+                          promo_notes: str = None,
+                          updated_by: str = None) -> dict:
+    """
+    Save or update the breakdown cache for a sealed product.
+
+    components: list of {product_name, tcgplayer_id?, set_name?, quantity_per_parent, market_price, notes?}
+    Completely replaces the existing component list.
+    """
+    existing = query_one(
+        "SELECT id FROM sealed_breakdown_cache WHERE tcgplayer_id = %s",
+        (tcgplayer_id,)
+    )
+
+    # Calculate totals
+    total_market = sum(
+        Decimal(str(c.get("market_price", 0))) * int(c.get("quantity_per_parent", 1))
+        for c in components
+    )
+    component_count = len(components)
+
+    if existing:
+        cache_id = str(existing["id"])
+        execute("""
+            UPDATE sealed_breakdown_cache
+            SET product_name = %s, total_component_market = %s,
+                component_count = %s, promo_notes = %s,
+                last_updated = CURRENT_TIMESTAMP, last_updated_by = %s
+            WHERE id = %s
+        """, (product_name, total_market, component_count, promo_notes, updated_by, cache_id))
+        # Delete old components
+        execute("DELETE FROM sealed_breakdown_components WHERE breakdown_id = %s", (cache_id,))
+    else:
+        row = execute_returning("""
+            INSERT INTO sealed_breakdown_cache
+                (tcgplayer_id, product_name, total_component_market,
+                 component_count, promo_notes, last_updated_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (tcgplayer_id, product_name, total_market, component_count, promo_notes, updated_by))
+        cache_id = str(row["id"])
+
+    # Insert fresh components
+    for order, comp in enumerate(components):
+        execute("""
+            INSERT INTO sealed_breakdown_components
+                (breakdown_id, tcgplayer_id, product_name, set_name,
+                 quantity_per_parent, market_price, notes, display_order)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            cache_id,
+            comp.get("tcgplayer_id"),
+            comp["product_name"],
+            comp.get("set_name"),
+            int(comp.get("quantity_per_parent", comp.get("quantity", 1))),
+            Decimal(str(comp.get("market_price", 0))),
+            comp.get("notes"),
+            order,
+        ))
+
+    # Bump use count
+    execute("""
+        UPDATE sealed_breakdown_cache
+        SET use_count = use_count + 1
+        WHERE tcgplayer_id = %s
+    """, (tcgplayer_id,))
+
+    return get_breakdown_cache(tcgplayer_id)
+
+
+def list_breakdown_cache(limit: int = 100) -> list[dict]:
+    """List all cached breakdowns ordered by most-used."""
+    rows = query("""
+        SELECT sbc.*, COUNT(sbco.id) AS component_count_live
+        FROM sealed_breakdown_cache sbc
+        LEFT JOIN sealed_breakdown_components sbco ON sbco.breakdown_id = sbc.id
+        GROUP BY sbc.id
+        ORDER BY sbc.use_count DESC, sbc.last_updated DESC
+        LIMIT %s
+    """, (limit,))
+    return list(rows)
+
+
+def delete_breakdown_cache(tcgplayer_id: int) -> bool:
+    """Delete a breakdown cache entry (and its components via CASCADE)."""
+    rows = execute(
+        "DELETE FROM sealed_breakdown_cache WHERE tcgplayer_id = %s",
+        (tcgplayer_id,)
+    )
+    return rows > 0
+
+
+def break_down_item_with_cache(item_id: str, components: list[dict],
+                                 save_to_cache: bool = True) -> dict:
+    """
+    Break down a sealed product and optionally save the recipe to cache.
+    Wraps break_down_item(), then persists cache if requested.
+    """
+    # First do the actual breakdown
+    result = break_down_item(item_id, components)
+
+    # Optionally save to cache
+    if save_to_cache:
+        parent = result["parent_item"]
+        tcgplayer_id = parent.get("tcgplayer_id")
+        product_name = parent.get("product_name", "Unknown")
+        if tcgplayer_id:
+            # Normalize components to cache format
+            cache_components = []
+            for comp in components:
+                cache_components.append({
+                    "product_name": comp["product_name"],
+                    "tcgplayer_id": comp.get("tcgplayer_id"),
+                    "set_name": comp.get("set_name"),
+                    "quantity_per_parent": int(comp.get("quantity", 1)),
+                    "market_price": comp.get("market_price", 0),
+                    "notes": comp.get("notes"),
+                })
+            save_breakdown_cache(tcgplayer_id, product_name, cache_components)
+            result["cache_saved"] = True
+        else:
+            result["cache_saved"] = False
+
+    return result
+
+
+def get_breakdown_value_for_items(tcg_ids: list[int]) -> dict[int, dict]:
+    """
+    For a list of tcgplayer_ids, return a map of tcg_id -> breakdown info
+    (total component market value, component count) where cache exists.
+    Used by intake store check to show breakdown value.
+    """
+    if not tcg_ids:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(tcg_ids))
+    rows = query(f"""
+        SELECT tcgplayer_id, product_name, total_component_market,
+               component_count, promo_notes
+        FROM sealed_breakdown_cache
+        WHERE tcgplayer_id IN ({placeholders})
+    """, tuple(tcg_ids))
+
+    return {r["tcgplayer_id"]: dict(r) for r in rows}
+
+
+def get_breakdown_store_check(tcg_ids: list[int]) -> dict[int, dict]:
+    """
+    For store check: for each tcg_id that has a breakdown cache,
+    return a map with component-level Shopify presence.
+    Used to determine if 'broken down' counts as in-store.
+    """
+    if not tcg_ids:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(tcg_ids))
+    # Get all caches for these products
+    caches = query(f"""
+        SELECT sbc.id AS cache_id, sbc.tcgplayer_id AS parent_tcg_id,
+               sbc.total_component_market, sbc.component_count,
+               sbco.tcgplayer_id AS comp_tcg_id, sbco.product_name,
+               sbco.quantity_per_parent, sbco.market_price
+        FROM sealed_breakdown_cache sbc
+        JOIN sealed_breakdown_components sbco ON sbco.breakdown_id = sbc.id
+        WHERE sbc.tcgplayer_id IN ({placeholders})
+    """, tuple(tcg_ids))
+
+    if not caches:
+        return {}
+
+    # Get all component tcg_ids to check store presence
+    comp_tcg_ids = list(set(r["comp_tcg_id"] for r in caches if r["comp_tcg_id"]))
+    store_map = {}
+    if comp_tcg_ids:
+        comp_placeholders = ",".join(["%s"] * len(comp_tcg_ids))
+        store_rows = query(f"""
+            SELECT tcgplayer_id, shopify_qty, shopify_price, title
+            FROM shopify_product_cache
+            WHERE tcgplayer_id IN ({comp_placeholders}) AND is_damaged = FALSE
+        """, tuple(comp_tcg_ids))
+        for r in store_rows:
+            store_map[r["tcgplayer_id"]] = r
+
+    # Build result per parent
+    result = {}
+    for row in caches:
+        parent_id = row["parent_tcg_id"]
+        if parent_id not in result:
+            result[parent_id] = {
+                "total_component_market": float(row["total_component_market"] or 0),
+                "component_count": row["component_count"],
+                "components": [],
+                "all_components_in_store": True,
+                "components_in_store": 0,
+            }
+        comp_store = store_map.get(row["comp_tcg_id"])
+        in_store = comp_store is not None and (comp_store.get("shopify_qty") or 0) > 0
+        result[parent_id]["components"].append({
+            "tcgplayer_id": row["comp_tcg_id"],
+            "product_name": row["product_name"],
+            "quantity_per_parent": row["quantity_per_parent"],
+            "market_price": float(row["market_price"] or 0),
+            "in_store": in_store,
+            "store_qty": comp_store.get("shopify_qty", 0) if comp_store else 0,
+            "store_price": float(comp_store["shopify_price"]) if comp_store and comp_store.get("shopify_price") else None,
+        })
+        if in_store:
+            result[parent_id]["components_in_store"] += 1
+        else:
+            result[parent_id]["all_components_in_store"] = False
+
+    return result
