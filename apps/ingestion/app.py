@@ -650,73 +650,125 @@ def force_mark_ingested(session_id):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# BREAKDOWN CACHE API
+# BREAKDOWN CACHE API  (multi-variant)
 # ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/breakdown-cache")
+def list_breakdown_caches():
+    """List all cached products (summary only, no components)."""
+    rows = ingest.list_breakdown_cache()
+    return jsonify({"caches": [_serialize(r) for r in rows], "count": len(rows)})
+
 
 @app.route("/api/breakdown-cache/<int:tcgplayer_id>")
 def get_breakdown_cache(tcgplayer_id):
-    """Get cached breakdown for a sealed product."""
+    """Get full breakdown record (all variants + components) for a product."""
     result = ingest.get_breakdown_cache(tcgplayer_id)
     if not result:
         return jsonify({"found": False, "cache": None})
     return jsonify({"found": True, "cache": _serialize(result)})
 
 
-@app.route("/api/breakdown-cache/<int:tcgplayer_id>", methods=["POST"])
-def save_breakdown_cache(tcgplayer_id):
-    """Save or update the breakdown recipe for a sealed product."""
-    data = request.get_json(silent=True) or {}
-    product_name = data.get("product_name", "Unknown")
-    components = data.get("components", [])
-    promo_notes = data.get("promo_notes")
-
-    if not components:
-        return jsonify({"error": "components required"}), 400
-
-    try:
-        result = ingest.save_breakdown_cache(
-            tcgplayer_id=tcgplayer_id,
-            product_name=product_name,
-            components=components,
-            promo_notes=promo_notes,
-        )
-        return jsonify({"success": True, "cache": _serialize(result)})
-    except Exception as e:
-        logger.exception(f"Failed to save breakdown cache for {tcgplayer_id}")
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/breakdown-cache/<int:tcgplayer_id>", methods=["DELETE"])
 def delete_breakdown_cache(tcgplayer_id):
-    """Delete a breakdown cache entry."""
+    """Delete entire breakdown record (all variants) for a product."""
     deleted = ingest.delete_breakdown_cache(tcgplayer_id)
     return jsonify({"success": deleted})
 
 
-@app.route("/api/breakdown-cache")
-def list_breakdown_caches():
-    """List all breakdown cache entries."""
-    rows = ingest.list_breakdown_cache()
-    return jsonify({"caches": [_serialize(r) for r in rows], "count": len(rows)})
+@app.route("/api/breakdown-cache/<int:tcgplayer_id>/variant", methods=["POST"])
+def save_variant(tcgplayer_id):
+    """
+    Create or update a named variant.
+    Body: {product_name, variant_name, components, notes?, variant_id?}
+      variant_id: omit to create new; supply to update existing variant in-place.
+    """
+    data = request.get_json(silent=True) or {}
+    product_name = data.get("product_name", "Unknown")
+    variant_name = data.get("variant_name", "Standard")
+    components = data.get("components", [])
+    notes = data.get("notes")
+    variant_id = data.get("variant_id")
+
+    if not components:
+        return jsonify({"error": "components required"}), 400
+    try:
+        result = ingest.save_variant(
+            tcgplayer_id=tcgplayer_id,
+            product_name=product_name,
+            variant_name=variant_name,
+            components=components,
+            notes=notes,
+            variant_id=variant_id,
+        )
+        return jsonify({"success": True, "cache": _serialize(result)})
+    except Exception as e:
+        logger.exception(f"Failed to save variant for {tcgplayer_id}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/breakdown-cache/variant/<variant_id>", methods=["DELETE"])
+def delete_variant(variant_id):
+    """Delete a single variant. Deletes parent too if it was the last one."""
+    result = ingest.delete_variant(variant_id)
+    return jsonify({"success": True, "cache": _serialize(result)})
+
+
+@app.route("/api/breakdown-cache/batch", methods=["POST"])
+def breakdown_cache_batch():
+    """Batch-fetch breakdown summaries for multiple tcgplayer_ids (used by intake)."""
+    data = request.get_json(silent=True) or {}
+    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
+    if not tcg_ids:
+        return jsonify({"summaries": {}})
+    summaries = ingest.get_breakdown_summary_for_items(tcg_ids)
+    return jsonify({"summaries": _serialize(summaries)})
 
 
 @app.route("/api/ingest/item/<item_id>/break-down", methods=["POST"])
-def break_down_item_v2(item_id):
-    """Break down a sealed product into component items (replaces old route)."""
+def break_down_item_endpoint(item_id):
+    """
+    Break down a sealed item (or a portion of it) into components.
+
+    Body:
+      components    list  — component objects (required)
+      qty_to_break  int   — how many units to break (default: all)
+      variant_name  str   — config name for cache (default: "Standard")
+      variant_id    str   — update existing variant instead of creating new
+      variant_notes str   — notes for this variant
+      save_to_cache bool  — persist recipe (default: true)
+    """
     data = request.get_json(silent=True) or {}
     components = data.get("components", [])
+    qty_to_break = data.get("qty_to_break")
+    variant_name = data.get("variant_name", "Standard")
+    variant_id = data.get("variant_id")
+    variant_notes = data.get("variant_notes")
     save_to_cache = data.get("save_to_cache", True)
 
     if not components:
         return jsonify({"error": "No components provided"}), 400
     try:
-        result = ingest.break_down_item_with_cache(item_id, components, save_to_cache=save_to_cache)
+        if qty_to_break is not None:
+            result = ingest.split_then_break_down(
+                item_id, int(qty_to_break), components,
+                variant_name=variant_name, variant_notes=variant_notes,
+                variant_id=variant_id, save_to_cache=save_to_cache,
+            )
+        else:
+            result = ingest.break_down_item_with_cache(
+                item_id, components,
+                variant_name=variant_name, variant_notes=variant_notes,
+                variant_id=variant_id, save_to_cache=save_to_cache,
+            )
         return jsonify({
             "success": True,
             "parent_item": _serialize(result["parent_item"]),
+            "remainder_item": _serialize(result.get("remainder_item")),
             "child_items": [_serialize(c) for c in result["child_items"]],
             "session": _serialize(result["session"]),
             "cache_saved": result.get("cache_saved", False),
+            "variant_name": result.get("variant_name", variant_name),
         })
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

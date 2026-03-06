@@ -401,86 +401,98 @@ def _save_mapping(product_name: str, tcgplayer_id: int, product_type: str,
     """, (product_name, tcgplayer_id, product_type, set_name))
 
 
+
 # ==========================================
-# BREAKDOWN CACHE
+# BREAKDOWN CACHE  (multi-variant)
 # ==========================================
 
 def get_breakdown_cache(tcgplayer_id: int) -> Optional[dict]:
     """
-    Fetch the cached breakdown for a sealed product (with components).
-    Returns None if no cache exists.
+    Fetch full breakdown record for a product: all variants + their components.
+    Returns None if not cached.
+    Shape: {id, tcgplayer_id, product_name, variant_count, best_variant_market, use_count,
+            variants: [{id, variant_name, notes, total_component_market, component_count,
+                        components: [{tcgplayer_id, product_name, set_name, quantity_per_parent, market_price}]}]}
     """
-    cache = query_one(
-        "SELECT * FROM sealed_breakdown_cache WHERE tcgplayer_id = %s",
-        (tcgplayer_id,)
-    )
+    cache = query_one("SELECT * FROM sealed_breakdown_cache WHERE tcgplayer_id=%s", (tcgplayer_id,))
     if not cache:
         return None
-
-    components = query("""
-        SELECT * FROM sealed_breakdown_components
-        WHERE breakdown_id = %s
-        ORDER BY display_order, created_at
-    """, (str(cache["id"]),))
-
-    return {
-        **cache,
-        "components": list(components),
-    }
-
-
-def save_breakdown_cache(tcgplayer_id: int, product_name: str,
-                          components: list[dict],
-                          promo_notes: str = None,
-                          updated_by: str = None) -> dict:
-    """
-    Save or update the breakdown cache for a sealed product.
-
-    components: list of {product_name, tcgplayer_id?, set_name?, quantity_per_parent, market_price, notes?}
-    Completely replaces the existing component list.
-    """
-    existing = query_one(
-        "SELECT id FROM sealed_breakdown_cache WHERE tcgplayer_id = %s",
-        (tcgplayer_id,)
+    variants = query(
+        "SELECT * FROM sealed_breakdown_variants WHERE breakdown_id=%s ORDER BY display_order, created_at",
+        (str(cache["id"]),)
     )
+    result = dict(cache)
+    result["variants"] = []
+    for v in variants:
+        comps = query(
+            "SELECT * FROM sealed_breakdown_components WHERE variant_id=%s ORDER BY display_order",
+            (str(v["id"]),)
+        )
+        result["variants"].append({**v, "components": list(comps)})
+    return result
 
-    # Calculate totals
-    total_market = sum(
-        Decimal(str(c.get("market_price", 0))) * int(c.get("quantity_per_parent", 1))
-        for c in components
-    )
-    component_count = len(components)
 
+def save_variant(tcgplayer_id: int, product_name: str,
+                 variant_name: str, components: list[dict],
+                 notes: str = None, variant_id: str = None) -> dict:
+    """
+    Create or replace a named variant for a product.
+    - variant_id=None  → create new variant
+    - variant_id=<id>  → replace components of that existing variant in-place
+
+    components: [{product_name, tcgplayer_id?, set_name?, quantity_per_parent (or quantity), market_price}]
+    Returns full cache record.
+    """
+    # Ensure parent cache row exists
+    existing = query_one("SELECT id FROM sealed_breakdown_cache WHERE tcgplayer_id=%s", (tcgplayer_id,))
     if existing:
         cache_id = str(existing["id"])
-        execute("""
-            UPDATE sealed_breakdown_cache
-            SET product_name = %s, total_component_market = %s,
-                component_count = %s, promo_notes = %s,
-                last_updated = CURRENT_TIMESTAMP, last_updated_by = %s
-            WHERE id = %s
-        """, (product_name, total_market, component_count, promo_notes, updated_by, cache_id))
-        # Delete old components
-        execute("DELETE FROM sealed_breakdown_components WHERE breakdown_id = %s", (cache_id,))
+        execute("UPDATE sealed_breakdown_cache SET product_name=%s, last_updated=CURRENT_TIMESTAMP WHERE id=%s",
+                (product_name, cache_id))
     else:
-        row = execute_returning("""
-            INSERT INTO sealed_breakdown_cache
-                (tcgplayer_id, product_name, total_component_market,
-                 component_count, promo_notes, last_updated_by)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (tcgplayer_id, product_name, total_market, component_count, promo_notes, updated_by))
+        row = execute_returning(
+            "INSERT INTO sealed_breakdown_cache (tcgplayer_id, product_name) VALUES (%s,%s) RETURNING id",
+            (tcgplayer_id, product_name)
+        )
         cache_id = str(row["id"])
 
-    # Insert fresh components
+    # Compute totals
+    total_market = sum(
+        Decimal(str(c.get("market_price", 0))) * int(c.get("quantity_per_parent", c.get("quantity", 1)))
+        for c in components
+    )
+    comp_count = len(components)
+
+    if variant_id:
+        # Update existing variant
+        execute("""
+            UPDATE sealed_breakdown_variants
+            SET variant_name=%s, notes=%s, total_component_market=%s, component_count=%s, last_updated=CURRENT_TIMESTAMP
+            WHERE id=%s
+        """, (variant_name, notes, total_market, comp_count, variant_id))
+        execute("DELETE FROM sealed_breakdown_components WHERE variant_id=%s", (variant_id,))
+        vid = variant_id
+    else:
+        # Count existing for display order
+        order_row = query_one(
+            "SELECT COUNT(*) AS cnt FROM sealed_breakdown_variants WHERE breakdown_id=%s", (cache_id,)
+        )
+        disp = int(order_row["cnt"]) if order_row else 0
+        v_row = execute_returning("""
+            INSERT INTO sealed_breakdown_variants
+                (breakdown_id, variant_name, notes, total_component_market, component_count, display_order)
+            VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
+        """, (cache_id, variant_name, notes, total_market, comp_count, disp))
+        vid = str(v_row["id"])
+
+    # Insert components
     for order, comp in enumerate(components):
         execute("""
             INSERT INTO sealed_breakdown_components
-                (breakdown_id, tcgplayer_id, product_name, set_name,
-                 quantity_per_parent, market_price, notes, display_order)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, notes, display_order)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
-            cache_id,
+            vid,
             comp.get("tcgplayer_id"),
             comp["product_name"],
             comp.get("set_name"),
@@ -490,155 +502,177 @@ def save_breakdown_cache(tcgplayer_id: int, product_name: str,
             order,
         ))
 
+    _refresh_cache_totals(cache_id)
     # Bump use count
-    execute("""
-        UPDATE sealed_breakdown_cache
-        SET use_count = use_count + 1
-        WHERE tcgplayer_id = %s
-    """, (tcgplayer_id,))
-
+    execute("UPDATE sealed_breakdown_cache SET use_count=use_count+1 WHERE id=%s", (cache_id,))
     return get_breakdown_cache(tcgplayer_id)
 
 
-def list_breakdown_cache(limit: int = 100) -> list[dict]:
-    """List all cached breakdowns ordered by most-used."""
-    rows = query("""
-        SELECT sbc.*, COUNT(sbco.id) AS component_count_live
-        FROM sealed_breakdown_cache sbc
-        LEFT JOIN sealed_breakdown_components sbco ON sbco.breakdown_id = sbc.id
-        GROUP BY sbc.id
-        ORDER BY sbc.use_count DESC, sbc.last_updated DESC
-        LIMIT %s
-    """, (limit,))
-    return list(rows)
+def delete_variant(variant_id: str) -> Optional[dict]:
+    """
+    Delete a single variant. If the parent has no remaining variants, deletes the parent too.
+    Returns updated cache dict or None if parent was also deleted.
+    """
+    v = query_one("SELECT breakdown_id FROM sealed_breakdown_variants WHERE id=%s", (variant_id,))
+    if not v:
+        return None
+    cache_id = str(v["breakdown_id"])
+    execute("DELETE FROM sealed_breakdown_variants WHERE id=%s", (variant_id,))
+
+    remaining = query_one(
+        "SELECT COUNT(*) AS cnt FROM sealed_breakdown_variants WHERE breakdown_id=%s", (cache_id,)
+    )
+    if not remaining or int(remaining["cnt"]) == 0:
+        execute("DELETE FROM sealed_breakdown_cache WHERE id=%s", (cache_id,))
+        return None
+
+    _refresh_cache_totals(cache_id)
+    parent = query_one("SELECT tcgplayer_id FROM sealed_breakdown_cache WHERE id=%s", (cache_id,))
+    return get_breakdown_cache(int(parent["tcgplayer_id"])) if parent else None
 
 
 def delete_breakdown_cache(tcgplayer_id: int) -> bool:
-    """Delete a breakdown cache entry (and its components via CASCADE)."""
-    rows = execute(
-        "DELETE FROM sealed_breakdown_cache WHERE tcgplayer_id = %s",
-        (tcgplayer_id,)
-    )
+    """Delete the entire breakdown record (all variants) for a product."""
+    rows = execute("DELETE FROM sealed_breakdown_cache WHERE tcgplayer_id=%s", (tcgplayer_id,))
     return rows > 0
 
 
+def list_breakdown_cache(limit: int = 200) -> list[dict]:
+    """List all cached products with variant names, ordered by most used."""
+    return list(query("""
+        SELECT sbc.id, sbc.tcgplayer_id, sbc.product_name,
+               sbc.variant_count, sbc.best_variant_market,
+               sbc.use_count, sbc.last_updated,
+               COALESCE(
+                   (SELECT STRING_AGG(variant_name, ' / ' ORDER BY display_order)
+                    FROM sealed_breakdown_variants WHERE breakdown_id=sbc.id),
+                   ''
+               ) AS variant_names
+        FROM sealed_breakdown_cache sbc
+        ORDER BY sbc.use_count DESC, sbc.last_updated DESC
+        LIMIT %s
+    """, (limit,)))
+
+
+def _refresh_cache_totals(cache_id: str):
+    """Recompute variant_count + best_variant_market on the parent cache row."""
+    execute("""
+        UPDATE sealed_breakdown_cache SET
+            variant_count=(SELECT COUNT(*) FROM sealed_breakdown_variants WHERE breakdown_id=%s),
+            best_variant_market=COALESCE(
+                (SELECT MAX(total_component_market) FROM sealed_breakdown_variants WHERE breakdown_id=%s), 0
+            ),
+            last_updated=CURRENT_TIMESTAMP
+        WHERE id=%s
+    """, (cache_id, cache_id, cache_id))
+
+
 def break_down_item_with_cache(item_id: str, components: list[dict],
-                                 save_to_cache: bool = True) -> dict:
+                                variant_name: str = "Standard",
+                                variant_notes: str = None,
+                                variant_id: str = None,
+                                save_to_cache: bool = True) -> dict:
     """
-    Break down a sealed product and optionally save the recipe to cache.
-    Wraps break_down_item(), then persists cache if requested.
+    Break down a sealed item and optionally save/update the variant recipe in cache.
+    qty_to_break defaults to the item's full quantity.
     """
-    # First do the actual breakdown
     result = break_down_item(item_id, components)
 
-    # Optionally save to cache
     if save_to_cache:
         parent = result["parent_item"]
         tcgplayer_id = parent.get("tcgplayer_id")
         product_name = parent.get("product_name", "Unknown")
         if tcgplayer_id:
-            # Normalize components to cache format
-            cache_components = []
-            for comp in components:
-                cache_components.append({
-                    "product_name": comp["product_name"],
-                    "tcgplayer_id": comp.get("tcgplayer_id"),
-                    "set_name": comp.get("set_name"),
-                    "quantity_per_parent": int(comp.get("quantity", 1)),
-                    "market_price": comp.get("market_price", 0),
-                    "notes": comp.get("notes"),
-                })
-            save_breakdown_cache(tcgplayer_id, product_name, cache_components)
+            cache_comps = [{
+                "product_name": c["product_name"],
+                "tcgplayer_id": c.get("tcgplayer_id"),
+                "set_name": c.get("set_name"),
+                "quantity_per_parent": int(c.get("quantity", 1)),
+                "market_price": c.get("market_price", 0),
+            } for c in components]
+            save_variant(tcgplayer_id, product_name, variant_name, cache_comps,
+                         notes=variant_notes, variant_id=variant_id)
             result["cache_saved"] = True
+            result["variant_name"] = variant_name
         else:
             result["cache_saved"] = False
 
     return result
 
 
-def get_breakdown_value_for_items(tcg_ids: list[int]) -> dict[int, dict]:
+def split_then_break_down(item_id: str, qty_to_break: int,
+                           components: list[dict],
+                           variant_name: str = "Standard",
+                           variant_notes: str = None,
+                           variant_id: str = None,
+                           save_to_cache: bool = True) -> dict:
     """
-    For a list of tcgplayer_ids, return a map of tcg_id -> breakdown info
-    (total component market value, component count) where cache exists.
-    Used by intake store check to show breakdown value.
+    For items where qty > 1 and you only want to break down some:
+    splits off qty_to_break into a new row, then breaks that down.
+    Returns result + remainder_item.
     """
-    if not tcg_ids:
-        return {}
+    item = query_one("SELECT * FROM intake_items WHERE id=%s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
 
-    placeholders = ",".join(["%s"] * len(tcg_ids))
-    rows = query(f"""
-        SELECT tcgplayer_id, product_name, total_component_market,
-               component_count, promo_notes
-        FROM sealed_breakdown_cache
-        WHERE tcgplayer_id IN ({placeholders})
-    """, tuple(tcg_ids))
+    total_qty = int(item.get("quantity", 1))
+    if qty_to_break < 1 or qty_to_break > total_qty:
+        raise ValueError(f"qty_to_break must be 1–{total_qty}")
 
-    return {r["tcgplayer_id"]: dict(r) for r in rows}
+    remainder_item = None
 
+    if qty_to_break < total_qty:
+        remainder_qty = total_qty - qty_to_break
+        old_offer = Decimal(str(item.get("offer_price", 0)))
+        per_unit = old_offer / total_qty if total_qty else Decimal("0")
+        remainder_offer = (per_unit * remainder_qty).quantize(Decimal("0.01"))
+        break_offer = (per_unit * qty_to_break).quantize(Decimal("0.01"))
 
-def get_breakdown_store_check(tcg_ids: list[int]) -> dict[int, dict]:
-    """
-    For store check: for each tcg_id that has a breakdown cache,
-    return a map with component-level Shopify presence.
-    Used to determine if 'broken down' counts as in-store.
-    """
-    if not tcg_ids:
-        return {}
+        execute("UPDATE intake_items SET quantity=%s, offer_price=%s WHERE id=%s",
+                (remainder_qty, remainder_offer, item_id))
 
-    placeholders = ",".join(["%s"] * len(tcg_ids))
-    # Get all caches for these products
-    caches = query(f"""
-        SELECT sbc.id AS cache_id, sbc.tcgplayer_id AS parent_tcg_id,
-               sbc.total_component_market, sbc.component_count,
-               sbco.tcgplayer_id AS comp_tcg_id, sbco.product_name,
-               sbco.quantity_per_parent, sbco.market_price
-        FROM sealed_breakdown_cache sbc
-        JOIN sealed_breakdown_components sbco ON sbco.breakdown_id = sbc.id
-        WHERE sbc.tcgplayer_id IN ({placeholders})
-    """, tuple(tcg_ids))
+        from uuid import uuid4
+        new_id = str(uuid4())
+        execute("""
+            INSERT INTO intake_items
+                (id, session_id, product_name, tcgplayer_id, product_type, set_name,
+                 quantity, market_price, offer_price, unit_cost_basis, is_mapped, item_status, parent_item_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (new_id, item["session_id"], item["product_name"], item.get("tcgplayer_id"),
+              item.get("product_type", "sealed"), item.get("set_name"),
+              qty_to_break, item["market_price"], break_offer,
+              item.get("unit_cost_basis"), item.get("is_mapped"), "good", item_id))
 
-    if not caches:
-        return {}
+        target_item_id = new_id
+        remainder_item = query_one("SELECT * FROM intake_items WHERE id=%s", (item_id,))
+        _recalculate_session_totals(item["session_id"])
+    else:
+        target_item_id = item_id
 
-    # Get all component tcg_ids to check store presence
-    comp_tcg_ids = list(set(r["comp_tcg_id"] for r in caches if r["comp_tcg_id"]))
-    store_map = {}
-    if comp_tcg_ids:
-        comp_placeholders = ",".join(["%s"] * len(comp_tcg_ids))
-        store_rows = query(f"""
-            SELECT tcgplayer_id, shopify_qty, shopify_price, title
-            FROM shopify_product_cache
-            WHERE tcgplayer_id IN ({comp_placeholders}) AND is_damaged = FALSE
-        """, tuple(comp_tcg_ids))
-        for r in store_rows:
-            store_map[r["tcgplayer_id"]] = r
-
-    # Build result per parent
-    result = {}
-    for row in caches:
-        parent_id = row["parent_tcg_id"]
-        if parent_id not in result:
-            result[parent_id] = {
-                "total_component_market": float(row["total_component_market"] or 0),
-                "component_count": row["component_count"],
-                "components": [],
-                "all_components_in_store": True,
-                "components_in_store": 0,
-            }
-        comp_store = store_map.get(row["comp_tcg_id"])
-        in_store = comp_store is not None and (comp_store.get("shopify_qty") or 0) > 0
-        result[parent_id]["components"].append({
-            "tcgplayer_id": row["comp_tcg_id"],
-            "product_name": row["product_name"],
-            "quantity_per_parent": row["quantity_per_parent"],
-            "market_price": float(row["market_price"] or 0),
-            "in_store": in_store,
-            "store_qty": comp_store.get("shopify_qty", 0) if comp_store else 0,
-            "store_price": float(comp_store["shopify_price"]) if comp_store and comp_store.get("shopify_price") else None,
-        })
-        if in_store:
-            result[parent_id]["components_in_store"] += 1
-        else:
-            result[parent_id]["all_components_in_store"] = False
-
+    result = break_down_item_with_cache(
+        target_item_id, components,
+        variant_name=variant_name, variant_notes=variant_notes,
+        variant_id=variant_id, save_to_cache=save_to_cache,
+    )
+    result["remainder_item"] = remainder_item
     return result
+
+
+def get_breakdown_summary_for_items(tcg_ids: list[int]) -> dict:
+    """
+    Batch lookup: tcg_id -> {variant_count, best_variant_market, variant_names}.
+    Only includes products that have a cache entry.
+    """
+    if not tcg_ids:
+        return {}
+    ph = ",".join(["%s"] * len(tcg_ids))
+    rows = query(f"""
+        SELECT sbc.tcgplayer_id, sbc.variant_count, sbc.best_variant_market,
+               COALESCE(
+                   (SELECT STRING_AGG(variant_name, ' / ' ORDER BY display_order)
+                    FROM sealed_breakdown_variants WHERE breakdown_id=sbc.id), ''
+               ) AS variant_names
+        FROM sealed_breakdown_cache sbc
+        WHERE sbc.tcgplayer_id IN ({ph})
+    """, tuple(tcg_ids))
+    return {r["tcgplayer_id"]: dict(r) for r in rows}

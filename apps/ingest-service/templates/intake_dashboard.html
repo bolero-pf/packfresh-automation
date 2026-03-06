@@ -663,6 +663,18 @@
         </div>
     </div>
 
+    <!-- ═══════════════════════════════════ BREAKDOWN MODAL ═══════════════════════════════════ -->
+    <div id="intake-breakdown-modal" class="modal-overlay">
+        <div class="modal" style="max-width:680px;">
+            <div class="modal-header">
+                <h3>📦 Breakdown Recipe</h3>
+                <button class="modal-close" onclick="closeModal('intake-breakdown-modal')">&times;</button>
+            </div>
+            <div id="intake-breakdown-body" style="padding:16px; max-height:75vh; overflow-y:auto;">
+            </div>
+        </div>
+    </div>
+
     <!-- ═══════════════════════════════════ MAPPING MODAL (must be AFTER session modal in DOM) ═══════════════════════════════════ -->
     <div id="mapping-modal" class="modal-overlay">
         <div class="modal">
@@ -1457,6 +1469,7 @@
                                             btns += `<button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price||0})">Override Price</button>`;
                                             btns += `<button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">Change Qty (${i.quantity})</button>`;
                                             if (i.quantity > 1) btns += `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">Split (Damage Partial)</button>`;
+                                            if (s.session_type !== 'raw' && i.tcgplayer_id) btns += `<hr><button onclick="openIntakeBreakdown(${i.tcgplayer_id}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}')">📦 Breakdown Recipe</button>`;
                                             btns += '</div></div>';
                                         }
                                         return btns;
@@ -2198,7 +2211,7 @@
                         ? (margin > 30 ? 'var(--green)' : margin > 15 ? 'var(--amber)' : 'var(--red)')
                         : 'var(--text-dim)';
                     const bd = i.breakdown;
-                    const bdValue = bd ? bd.total_component_market : null;
+                    const bdValue = bd ? bd.best_variant_market : null;
                     const bdMargin = bd && bdValue > 0 && i.unitOffer > 0
                         ? ((bdValue - i.unitOffer) / bdValue * 100) : null;
                     const bdColor = bdMargin !== null ? (bdMargin > 30 ? 'var(--green)' : bdMargin > 15 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
@@ -2210,7 +2223,7 @@
                             ${found && i.store_title !== i.product_name ? '<br><small style="color:var(--text-dim);">Shopify: ' + i.store_title + '</small>' : ''}
                             ${i.store_note ? '<br><small style="color:var(--amber);">&#x26A0; ' + i.store_note + '</small>' : ''}
                             ${i.item_status === 'damaged' ? '<br><span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>' + (!i.damaged_variant_exists ? ' <span class="badge" style="background:var(--red);color:#fff;font-size:0.65rem;">Needs Listing</span>' : '') : ''}
-                            ${bd ? `<br><small style="color:var(--text-dim);">&#x1F4E6; breakdown: ${bd.component_count} items &middot; $${bdValue.toFixed(2)}${bd.promo_notes ? ' &middot; <em>' + bd.promo_notes + '</em>' : ''}${!bd.all_components_in_store ? ' <span style="color:var(--amber);">(' + bd.components_in_store_count + '/' + bd.total_components + ' in store)</span>' : ' <span style="color:var(--green);">(all in store)</span>'}</small>` : ''}
+                            ${bd ? `<br><small style="color:var(--text-dim);">&#x1F4E6; ${bd.variant_count > 1 ? bd.variant_count + ' configs' : bd.variant_name || 'breakdown'}: ${bd.component_count} items &middot; $${bdValue.toFixed(2)}${bd.variant_notes ? ' &middot; <em>' + bd.variant_notes + '</em>' : ''}${!bd.all_components_in_store ? ' <span style="color:var(--amber);">(' + bd.components_in_store_count + '/' + bd.total_components + ' in store)</span>' : ' <span style="color:var(--green);">(all in store)</span>'}</small>` : ''}
                         </td>
                         <td>$${i.unitOffer.toFixed(2)}${i.quantity > 1 ? ' &times; ' + i.quantity : ''}</td>
                         <td style="${found ? 'font-weight:600;' : ''}">
@@ -2234,6 +2247,10 @@
                             ${found && i.store_handle
                                 ? '<a href="https://' + (window.__shopifyStore || '') + '/products/' + i.store_handle + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px;">View &#x2197;</a>'
                                 : ''}
+                            <button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;"
+                                onclick="openIntakeBreakdown(${i.tcgplayer_id||'null'}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}')">
+                                ${bd ? '&#x1F4E6; Recipe' : '+ Recipe'}
+                            </button>
                         </td>
                     </tr>`;
                 }).join('')}</tbody>
@@ -3384,6 +3401,225 @@
     }
     checkHealth();
     setInterval(checkHealth, 30000);
-    </script>
+
+    // ═══════════════════════════════════════════════════════════════
+    // INTAKE BREAKDOWN RECIPE MODAL
+    // ═══════════════════════════════════════════════════════════════
+
+    let _intakeBdTcgId = null;
+    let _intakeBdProductName = '';
+    let _intakeBdComponents = [];
+    let _intakeBdVariantId = null;
+    let _intakeBdSave = true;
+
+    async function openIntakeBreakdown(tcgId, productName) {
+        _intakeBdTcgId = tcgId;
+        _intakeBdProductName = productName;
+        _intakeBdComponents = [];
+        _intakeBdVariantId = null;
+
+        const body = document.getElementById('intake-breakdown-body');
+        body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
+        openModal('intake-breakdown-modal');
+
+        // Load existing cache
+        let existingCache = null;
+        if (tcgId) {
+            try {
+                const r = await fetch(`/api/breakdown-cache/${tcgId}`);
+                const d = await r.json();
+                if (d.found) existingCache = d.cache;
+            } catch(e) {}
+        }
+
+        renderIntakeBdModal(existingCache);
+    }
+
+    function renderIntakeBdModal(cache) {
+        const body = document.getElementById('intake-breakdown-body');
+        const variants = cache?.variants || [];
+
+        const variantCards = variants.length ? `
+            <div style="margin-bottom:16px;">
+                <div style="font-size:0.8rem; color:var(--green); font-weight:600; margin-bottom:8px;">
+                    &#x1F4BE; ${variants.length} saved config${variants.length>1?'s':''} for this product
+                </div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+                ${variants.map(v => `
+                    <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:8px 12px; min-width:160px;">
+                        <div style="font-size:0.85rem; font-weight:600;">${v.variant_name}</div>
+                        <div style="font-size:0.78rem; color:var(--text-dim);">${v.component_count} components &middot; $${(v.total_component_market||0).toFixed(2)}</div>
+                        ${v.notes ? `<div style="font-size:0.75rem; color:var(--amber);">&#x1F4DD; ${v.notes}</div>` : ''}
+                        <div style="display:flex; gap:6px; margin-top:8px;">
+                            <button class="btn btn-primary btn-sm" style="font-size:0.72rem; padding:2px 8px;"
+                                onclick="intakeBdLoadVariant(${JSON.stringify(v).replace(/"/g,'&quot;')})">&#x2B07; Edit</button>
+                            <button class="btn btn-secondary btn-sm" style="font-size:0.72rem; padding:2px 8px; color:var(--red);"
+                                onclick="intakeBdDeleteVariant('${v.id}', '${v.variant_name.replace(/'/g,'').replace(/"/g,'')}')">&#x1F5D1;</button>
+                        </div>
+                    </div>
+                `).join('')}
+                </div>
+                <div style="font-size:0.82rem; color:var(--text-dim); margin-bottom:4px;">— or add a new config below —</div>
+            </div>` : `
+            <div style="font-size:0.85rem; color:var(--text-dim); margin-bottom:16px;">
+                No configs saved yet for <strong>${_intakeBdProductName}</strong>. Build one below.
+            </div>`;
+
+        body.innerHTML = `
+            <p style="font-size:0.85rem; color:var(--text-dim); margin-bottom:12px;">
+                ${_intakeBdProductName}${_intakeBdTcgId ? ` <span style="font-size:0.75rem; background:var(--surface-2); padding:2px 6px; border-radius:4px;">TCG#${_intakeBdTcgId}</span>` : ''}
+            </p>
+
+            ${variantCards}
+
+            <div style="border-top:1px solid var(--border); padding-top:14px;">
+                <div style="display:flex; gap:8px; margin-bottom:10px; align-items:center; flex-wrap:wrap;">
+                    <label style="font-size:0.8rem; color:var(--text-dim);">Config name:</label>
+                    <input type="text" id="ibd-variant-name" value="Standard" style="width:160px; font-size:0.85rem;"
+                        onchange="_intakeBdVariantId=null;">
+                    <span id="ibd-editing-badge" style="display:none; font-size:0.72rem; color:var(--accent); background:var(--surface-2); padding:2px 8px; border-radius:4px;">editing existing</span>
+                </div>
+
+                <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:10px;">
+                    <div style="flex:2; min-width:180px;">
+                        <label style="font-size:0.8rem; color:var(--text-dim);">Search PPT for component</label>
+                        <input type="text" id="ibd-search" placeholder="e.g. Booster Pack, ETB..."
+                               style="width:100%; margin-top:4px;"
+                               onkeydown="if(event.key==='Enter') ibdSearch()">
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="ibdSearch()" style="height:40px;">Search</button>
+                </div>
+                <div id="ibd-search-results" style="max-height:180px; overflow-y:auto; margin-bottom:10px;"></div>
+
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+                    <h4 style="font-size:0.9rem;">Components</h4>
+                    <div id="ibd-value-summary" style="font-size:0.82rem; color:var(--text-dim);"></div>
+                </div>
+                <div id="ibd-components-list"><p style="color:var(--text-dim); font-size:0.85rem;">No components yet.</p></div>
+
+                <div id="ibd-notes-row" style="margin-top:12px; display:none;">
+                    <label style="font-size:0.8rem; color:var(--text-dim);">Notes for this config</label>
+                    <input type="text" id="ibd-notes" placeholder="e.g. Dark Sylveon variant"
+                           style="width:100%; margin-top:4px; font-size:0.85rem;">
+                </div>
+
+                <div style="margin-top:14px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <button class="btn btn-success" onclick="ibdSaveVariant()">&#x1F4BE; Save Config</button>
+                    <button class="btn btn-secondary" onclick="closeModal('intake-breakdown-modal')">Close</button>
+                    <button class="btn btn-secondary btn-sm" onclick="document.getElementById('ibd-notes-row').style.display='block'; document.getElementById('ibd-notes').focus();" style="font-size:0.75rem; padding:3px 8px;">+ Notes</button>
+                </div>
+            </div>
+        `;
+        setTimeout(() => document.getElementById('ibd-search')?.focus(), 100);
+        ibdRenderComponents();
+    }
+
+    function intakeBdLoadVariant(v) {
+        if (typeof v === 'string') v = JSON.parse(v.replace(/&quot;/g, '"'));
+        _intakeBdVariantId = v.id;
+        _intakeBdComponents = (v.components || []).map(c => ({
+            product_name: c.product_name, set_name: c.set_name || '',
+            tcgplayer_id: c.tcgplayer_id,
+            market_price: parseFloat(c.market_price) || 0,
+            quantity: parseInt(c.quantity_per_parent) || 1,
+        }));
+        const nameEl = document.getElementById('ibd-variant-name');
+        if (nameEl) nameEl.value = v.variant_name;
+        if (v.notes) {
+            const notesEl = document.getElementById('ibd-notes');
+            if (notesEl) { notesEl.value = v.notes; document.getElementById('ibd-notes-row').style.display = 'block'; }
+        }
+        const badge = document.getElementById('ibd-editing-badge');
+        if (badge) badge.style.display = 'inline';
+        ibdRenderComponents();
+    }
+
+    async function intakeBdDeleteVariant(variantId, name) {
+        const ok = await themedConfirm('Delete Config', `Remove the "${name}" config?`, { dangerous: true });
+        if (!ok) return;
+        const r = await fetch(`/api/breakdown-cache/variant/${variantId}`, { method: 'DELETE' });
+        const d = await r.json();
+        renderIntakeBdModal(d.cache);
+    }
+
+    async function ibdSearch() {
+        const q = document.getElementById('ibd-search')?.value.trim();
+        if (!q) return;
+        const panel = document.getElementById('ibd-search-results');
+        panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+        try {
+            const r = await fetch('/api/ppt/search-sealed', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ query: q }),
+            });
+            const d = await r.json();
+            if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+            const results = d.results || [];
+            if (!results.length) { panel.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No results</p>'; return; }
+            panel.innerHTML = results.slice(0, 15).map(p => {
+                const name = (p.name || p.productName || '').replace(/'/g, "\'").replace(/"/g, '&quot;');
+                const setName = (p.setName || p.set_name || '').replace(/'/g, "\'").replace(/"/g, '&quot;');
+                const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || p.id || 0;
+                const price = p.unopenedPrice || p.marketPrice || 0;
+                return `<div class="search-result" onclick="ibdAdd(${tcgId}, '${name}', '${setName}', ${price})">
+                    <strong style="font-size:0.88rem;">${p.name || p.productName}</strong>
+                    <br><small style="color:var(--text-dim);">${p.setName || ''} &middot; TCG#${tcgId} &middot; $${(price||0).toFixed(2)}</small>
+                </div>`;
+            }).join('');
+        } catch(err) { panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`; }
+    }
+
+    function ibdAdd(tcgId, name, setName, price) {
+        const existing = _intakeBdComponents.find(c => c.tcgplayer_id && c.tcgplayer_id === tcgId);
+        if (existing) { existing.quantity += 1; }
+        else { _intakeBdComponents.push({ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1 }); }
+        ibdRenderComponents();
+        document.getElementById('ibd-search-results').innerHTML = '';
+        document.getElementById('ibd-search').value = '';
+        document.getElementById('ibd-search').focus();
+    }
+
+    function ibdRenderComponents() {
+        const el = document.getElementById('ibd-components-list');
+        const summary = document.getElementById('ibd-value-summary');
+        if (!el) return;
+        const total = _intakeBdComponents.reduce((s,c) => s + (parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
+        if (summary) summary.innerHTML = _intakeBdComponents.length ? `Total: <strong>$${total.toFixed(2)}</strong>` : '';
+        if (!_intakeBdComponents.length) {
+            el.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No components yet.</p>';
+            return;
+        }
+        el.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:0.85rem;"><thead><tr><th>Component</th><th style="width:70px;">Qty</th><th style="width:90px;">Market</th><th style="width:30px;"></th></tr></thead><tbody>` +
+            _intakeBdComponents.map((c, idx) => `<tr>
+                <td>${c.product_name}<br><small style="color:${c.tcgplayer_id?'var(--text-dim)':'var(--red)'};">${c.tcgplayer_id?'TCG#'+c.tcgplayer_id:'⚠ No TCG ID'}${c.set_name?' · '+c.set_name:''}</small></td>
+                <td><input type="number" value="${c.quantity}" min="1" style="width:55px;" onchange="_intakeBdComponents[${idx}].quantity=parseInt(this.value)||1; ibdRenderComponents();"></td>
+                <td><input type="number" value="${(c.market_price||0).toFixed(2)}" min="0" step="0.01" style="width:80px;" onchange="_intakeBdComponents[${idx}].market_price=parseFloat(this.value)||0; ibdRenderComponents();"></td>
+                <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 6px;" onclick="_intakeBdComponents.splice(${idx},1); ibdRenderComponents();">✕</button></td>
+            </tr>`).join('') + '</tbody></table></div>';
+    }
+
+    async function ibdSaveVariant() {
+        if (!_intakeBdComponents.length) { alert('Add at least one component.'); return; }
+        if (!_intakeBdTcgId) { alert('This product has no TCGPlayer ID — cannot save to cache.'); return; }
+        const variantName = document.getElementById('ibd-variant-name')?.value.trim() || 'Standard';
+        const notes = document.getElementById('ibd-notes')?.value.trim() || null;
+        try {
+            const r = await fetch(`/api/breakdown-cache/${_intakeBdTcgId}/variant`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    product_name: _intakeBdProductName,
+                    variant_name: variantName,
+                    components: _intakeBdComponents,
+                    notes: notes,
+                    variant_id: _intakeBdVariantId || undefined,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Save failed'); return; }
+            _intakeBdComponents = [];
+            _intakeBdVariantId = null;
+            renderIntakeBdModal(d.cache);
+        } catch(err) { alert(err.message); }
+    }</script>
 </body>
 </html>

@@ -698,14 +698,17 @@ async function deleteItem(itemId, sessionId, name) {
 
 
 // ═══════════════════════════════════════════════════════════════════
-// BREAK DOWN  (with persistent cache)
+// BREAK DOWN  (multi-variant + qty split)
 // ═══════════════════════════════════════════════════════════════════
 
-// Extra state
 let _breakDownParentTcgId = null;
 let _breakDownParentMarket = 0;
 let _breakDownParentName = '';
+let _breakDownParentQty = 1;
 let _bdSaveToCache = true;
+let _bdVariantId = null;      // if editing an existing variant
+let _bdVariantName = 'Standard';
+let _bdQtyToBreak = null;     // null = all
 
 async function openBreakdown(itemId, sessionId, productName, parentQty, parentTcgId, parentMarket) {
     _breakDownItemId = itemId;
@@ -714,10 +717,26 @@ async function openBreakdown(itemId, sessionId, productName, parentQty, parentTc
     _breakDownParentTcgId = parentTcgId || null;
     _breakDownParentMarket = parseFloat(parentMarket) || 0;
     _breakDownParentName = productName;
+    _breakDownParentQty = parseInt(parentQty) || 1;
     _bdSaveToCache = true;
+    _bdVariantId = null;
+    _bdVariantName = 'Standard';
+    _bdQtyToBreak = _breakDownParentQty;
 
     const modal = document.getElementById('breakdown-modal');
     const body = document.getElementById('breakdown-body');
+
+    // Qty selector only shown when qty > 1
+    const qtyRow = _breakDownParentQty > 1 ? `
+        <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:10px 14px; margin-bottom:12px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+            <span style="font-size:0.85rem; color:var(--text-dim);">Breaking down:</span>
+            <div style="display:flex; gap:6px; align-items:center;">
+                <input type="number" id="bd-qty-input" value="${_breakDownParentQty}" min="1" max="${_breakDownParentQty}" style="width:60px;"
+                    onchange="_bdQtyToBreak=Math.min(Math.max(parseInt(this.value)||1,1),${_breakDownParentQty}); this.value=_bdQtyToBreak; bdUpdateValueSummary();">
+                <span style="font-size:0.85rem; color:var(--text-dim);">of ${_breakDownParentQty} unit(s)</span>
+            </div>
+            <span style="font-size:0.78rem; color:var(--amber);">Remaining ${_breakDownParentQty > 1 ? 'units stay as a separate line item' : ''}.</span>
+        </div>` : '';
 
     body.innerHTML = `
         <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:4px;">
@@ -725,12 +744,20 @@ async function openBreakdown(itemId, sessionId, productName, parentQty, parentTc
             ${parentTcgId ? `<span style="font-size:0.75rem; color:var(--text-dim); background:var(--surface-2); padding:3px 8px; border-radius:4px;">TCG#${parentTcgId}</span>` : ''}
         </div>
         <p style="color:var(--text-dim); font-size:0.9rem; margin-bottom:4px;">${productName}</p>
-        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:16px;">
+        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:12px;">
             Qty: <strong style="color:var(--text);">${parentQty}</strong>
             ${_breakDownParentMarket > 0 ? ` &middot; Parent market: <strong style="color:var(--text);">$${_breakDownParentMarket.toFixed(2)}</strong>` : ''}
         </p>
 
-        <div id="bd-cache-banner" style="margin-bottom:12px;"></div>
+        ${qtyRow}
+
+        <div id="bd-variants-banner" style="margin-bottom:12px;"></div>
+
+        <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center; flex-wrap:wrap;">
+            <label style="font-size:0.8rem; color:var(--text-dim);">Config name:</label>
+            <input type="text" id="bd-variant-name" value="Standard" style="width:160px; font-size:0.85rem;"
+                onchange="_bdVariantName=this.value.trim()||'Standard';">
+        </div>
 
         <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px;">
             <div style="flex:2; min-width:200px;">
@@ -750,8 +777,8 @@ async function openBreakdown(itemId, sessionId, productName, parentQty, parentTc
         <div id="bd-components-list"><p style="color:var(--text-dim); font-size:0.85rem;">No components added yet. Search above.</p></div>
 
         <div id="bd-promo-row" style="margin-top:14px; display:none;">
-            <label style="font-size:0.8rem; color:var(--text-dim);">Promo / Notes (optional)</label>
-            <input type="text" id="bd-promo-notes" placeholder="e.g. includes 1 alt art promo randomly"
+            <label style="font-size:0.8rem; color:var(--text-dim);">Notes for this config (optional)</label>
+            <input type="text" id="bd-promo-notes" placeholder="e.g. Dark Sylveon alt art variant"
                    style="width:100%; margin-top:4px; font-size:0.85rem;">
         </div>
 
@@ -762,72 +789,87 @@ async function openBreakdown(itemId, sessionId, productName, parentQty, parentTc
                 <input type="checkbox" id="bd-save-cache" checked onchange="_bdSaveToCache=this.checked; bdUpdateValueSummary();">
                 Save recipe to cache
             </label>
-            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('bd-promo-row').style.display='block'; document.getElementById('bd-promo-notes').focus();" style="font-size:0.75rem; padding:3px 8px;">+ Promo note</button>
+            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('bd-promo-row').style.display='block'; document.getElementById('bd-promo-notes').focus();" style="font-size:0.75rem; padding:3px 8px;">+ Notes</button>
         </div>
     `;
 
     modal.classList.add('active');
     setTimeout(() => document.getElementById('bd-search')?.focus(), 100);
 
-    // Load cache if we have a tcgplayer_id
-    if (parentTcgId) {
-        bdLoadCache(parentTcgId, parentQty);
-    }
+    if (parentTcgId) bdLoadVariants(parentTcgId);
 }
 
-async function bdLoadCache(tcgId, parentQty) {
-    const banner = document.getElementById('bd-cache-banner');
+async function bdLoadVariants(tcgId) {
+    const banner = document.getElementById('bd-variants-banner');
     if (!banner) return;
     try {
         const r = await fetch(`/api/breakdown-cache/${tcgId}`);
         const d = await r.json();
         if (!d.found || !d.cache) return;
-
         const cache = d.cache;
-        const comps = cache.components || [];
-        const total = cache.total_component_market || 0;
-        const age = cache.last_updated ? new Date(cache.last_updated).toLocaleDateString() : 'unknown';
+        const variants = cache.variants || [];
+        if (!variants.length) return;
 
+        const age = cache.last_updated ? new Date(cache.last_updated).toLocaleDateString() : '?';
         banner.innerHTML = `
-            <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px 14px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                <div style="flex:1; min-width:200px;">
-                    <div style="font-size:0.78rem; color:var(--green); font-weight:600; margin-bottom:2px;">&#x1F4BE; Cached recipe found</div>
-                    <div style="font-size:0.8rem; color:var(--text-dim);">${comps.length} components &middot; $${total.toFixed(2)} total market &middot; saved ${age}</div>
-                    ${cache.promo_notes ? `<div style="font-size:0.78rem; color:var(--amber); margin-top:2px;">&#x1F4DD; ${cache.promo_notes}</div>` : ''}
+            <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px 14px;">
+                <div style="font-size:0.78rem; color:var(--green); font-weight:600; margin-bottom:8px;">
+                    &#x1F4BE; ${variants.length} cached config${variants.length>1?'s':''} &middot; last saved ${age}
                 </div>
-                <button class="btn btn-primary btn-sm" onclick="bdApplyCache()" style="white-space:nowrap;">&#x2B07; Load Recipe</button>
-                <button class="btn btn-secondary btn-sm" onclick="bdDeleteCache(${tcgId})" style="color:var(--red); font-size:0.72rem; padding:3px 8px;">&#x1F5D1; Delete</button>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                ${variants.map(v => `
+                    <div style="background:var(--surface-1); border:1px solid var(--border); border-radius:6px; padding:8px 12px; min-width:160px;">
+                        <div style="font-size:0.85rem; font-weight:600; margin-bottom:2px;">${v.variant_name}</div>
+                        <div style="font-size:0.78rem; color:var(--text-dim);">${v.component_count} components &middot; $${(v.total_component_market||0).toFixed(2)}</div>
+                        ${v.notes ? `<div style="font-size:0.75rem; color:var(--amber); margin-top:2px;">&#x1F4DD; ${v.notes}</div>` : ''}
+                        <div style="display:flex; gap:6px; margin-top:8px;">
+                            <button class="btn btn-primary btn-sm" style="font-size:0.72rem; padding:2px 8px;"
+                                onclick="bdApplyVariant(${JSON.stringify(v).replace(/"/g,'&quot;')})">&#x2B07; Load</button>
+                            <button class="btn btn-secondary btn-sm" style="font-size:0.72rem; padding:2px 8px; color:var(--red);"
+                                onclick="bdDeleteVariant('${v.id}', '${v.variant_name.replace(/'/g,'').replace(/"/g,'')}')">&#x1F5D1;</button>
+                        </div>
+                    </div>
+                `).join('')}
+                </div>
             </div>
         `;
         banner._cacheData = cache;
     } catch(e) { /* silent */ }
 }
 
-function bdApplyCache() {
-    const banner = document.getElementById('bd-cache-banner');
-    const cache = banner?._cacheData;
-    if (!cache) return;
-    _breakDownComponents = (cache.components || []).map(c => ({
+function bdApplyVariant(v) {
+    if (typeof v === 'string') v = JSON.parse(v.replace(/&quot;/g, '"'));
+    _bdVariantId = v.id;
+    _bdVariantName = v.variant_name;
+    const nameEl = document.getElementById('bd-variant-name');
+    if (nameEl) nameEl.value = v.variant_name;
+    _breakDownComponents = (v.components || []).map(c => ({
         product_name: c.product_name,
         set_name: c.set_name || '',
         tcgplayer_id: c.tcgplayer_id,
         market_price: parseFloat(c.market_price) || 0,
         quantity: parseInt(c.quantity_per_parent) || 1,
     }));
-    if (cache.promo_notes) {
+    if (v.notes) {
         const pn = document.getElementById('bd-promo-notes');
-        if (pn) { pn.value = cache.promo_notes; document.getElementById('bd-promo-row').style.display = 'block'; }
+        if (pn) { pn.value = v.notes; document.getElementById('bd-promo-row').style.display = 'block'; }
     }
     bdRenderComponents();
-    banner.innerHTML = `<div style="font-size:0.8rem; color:var(--green); padding:6px 0;">&#x2713; Recipe loaded (${_breakDownComponents.length} components). You can still edit below.</div>`;
+    const banner = document.getElementById('bd-variants-banner');
+    if (banner) {
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:0.8rem; color:var(--green); padding:6px 0;';
+        note.innerHTML = `&#x2713; Loaded config: <strong>${v.variant_name}</strong> (${_breakDownComponents.length} components). Edit below or confirm as-is.`;
+        banner.insertAdjacentElement('afterend', note);
+        setTimeout(() => note.remove(), 5000);
+    }
 }
 
-async function bdDeleteCache(tcgId) {
-    const ok = await themedConfirm('Delete Recipe Cache', 'Remove the saved breakdown recipe for this product?', { dangerous: true });
+async function bdDeleteVariant(variantId, name) {
+    const ok = await themedConfirm('Delete Config', `Remove the "${name}" config?`, { dangerous: true });
     if (!ok) return;
-    await fetch(`/api/breakdown-cache/${tcgId}`, { method: 'DELETE' });
-    const banner = document.getElementById('bd-cache-banner');
-    if (banner) banner.innerHTML = '<div style="font-size:0.8rem; color:var(--text-dim);">Cache deleted.</div>';
+    await fetch(`/api/breakdown-cache/variant/${variantId}`, { method: 'DELETE' });
+    if (_breakDownParentTcgId) bdLoadVariants(_breakDownParentTcgId);
 }
 
 function closeBreakdown() {
@@ -874,6 +916,7 @@ function bdAddComponent(tcgId, name, setName, price) {
 function bdUpdateValueSummary() {
     const el = document.getElementById('bd-value-summary');
     if (!el) return;
+    const qty = _bdQtyToBreak || _breakDownParentQty;
     const totalMkt = _breakDownComponents.reduce((s, c) => s + (parseFloat(c.market_price)||0) * (parseInt(c.quantity)||1), 0);
     const parentMkt = _breakDownParentMarket;
     let html = `<span style="color:var(--text);">Total: <strong>$${totalMkt.toFixed(2)}</strong></span>`;
@@ -920,19 +963,35 @@ async function submitBreakDown() {
     if (!_breakDownComponents.length) { alert('Add at least one component.'); return; }
     const totalMkt = _breakDownComponents.reduce((s, c) => s + (parseFloat(c.market_price)||0) * (parseInt(c.quantity)||1), 0);
     const parentMkt = _breakDownParentMarket;
-    let confirmMsg = `Break into ${_breakDownComponents.length} component(s)?`;
+    const qty = _bdQtyToBreak || _breakDownParentQty;
+    const variantName = document.getElementById('bd-variant-name')?.value.trim() || 'Standard';
+    const variantNotes = document.getElementById('bd-promo-notes')?.value.trim() || null;
+
+    let confirmMsg = `Break down ${qty} unit(s) of "${_breakDownParentName}" into ${_breakDownComponents.length} component type(s)?`;
+    if (_breakDownParentQty > 1 && qty < _breakDownParentQty) {
+        confirmMsg += `\n\n${_breakDownParentQty - qty} unit(s) will remain as a separate line item.`;
+    }
     if (parentMkt > 0) {
         const pct = ((totalMkt - parentMkt) / parentMkt * 100);
-        confirmMsg += `\n\nBreakdown total: $${totalMkt.toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% vs parent $${parentMkt.toFixed(2)})`;
+        confirmMsg += `\n\nBreakdown value: $${totalMkt.toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% vs parent $${parentMkt.toFixed(2)})`;
     }
-    if (_bdSaveToCache) confirmMsg += '\n\nRecipe will be saved to cache.';
+    if (_bdSaveToCache) confirmMsg += `\n\nConfig "${variantName}" will be saved to cache.`;
     const ok = await themedConfirm('Confirm Break Down', confirmMsg);
     if (!ok) return;
-    const promoNotes = document.getElementById('bd-promo-notes')?.value.trim() || null;
+
     try {
+        const payload = {
+            components: _breakDownComponents,
+            save_to_cache: _bdSaveToCache,
+            variant_name: variantName,
+            variant_notes: variantNotes,
+        };
+        if (_bdVariantId) payload.variant_id = _bdVariantId;
+        if (qty < _breakDownParentQty) payload.qty_to_break = qty;
+
         const r = await fetch(`/api/ingest/item/${_breakDownItemId}/break-down`, {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ components: _breakDownComponents, save_to_cache: _bdSaveToCache, promo_notes: promoNotes }),
+            body: JSON.stringify(payload),
         });
         const text = await r.text();
         let d;
@@ -1161,17 +1220,11 @@ async function loadLibrary() {
             return;
         }
         body.innerHTML = `
-            <p style="font-size:0.82rem; color:var(--text-dim); margin-bottom:12px;">${caches.length} saved recipes</p>
+            <p style="font-size:0.82rem; color:var(--text-dim); margin-bottom:12px;">${caches.length} products cached</p>
             <div style="overflow-x:auto;">
             <table style="font-size:0.85rem;">
                 <thead><tr>
-                    <th>Product</th>
-                    <th>TCG ID</th>
-                    <th>Components</th>
-                    <th>Total Market</th>
-                    <th>Used</th>
-                    <th>Updated</th>
-                    <th></th>
+                    <th>Product</th><th>TCG ID</th><th>Configs</th><th>Best Value</th><th>Used</th><th>Updated</th><th></th>
                 </tr></thead>
                 <tbody>
                 ${caches.map(c => {
@@ -1179,11 +1232,11 @@ async function loadLibrary() {
                     return `<tr>
                         <td>
                             <strong>${c.product_name}</strong>
-                            ${c.promo_notes ? `<br><small style="color:var(--amber);">${c.promo_notes}</small>` : ''}
+                            ${c.variant_names ? `<br><small style="color:var(--text-dim);">${c.variant_names}</small>` : ''}
                         </td>
                         <td style="color:var(--text-dim);">${c.tcgplayer_id || '—'}</td>
-                        <td>${c.component_count_live ?? c.component_count}</td>
-                        <td>$${(c.total_component_market||0).toFixed(2)}</td>
+                        <td>${c.variant_count || 1}</td>
+                        <td>$${(c.best_variant_market||0).toFixed(2)}</td>
                         <td style="color:var(--text-dim);">${c.use_count || 0}x</td>
                         <td style="color:var(--text-dim);">${age}</td>
                         <td>
@@ -1210,41 +1263,74 @@ async function viewLibraryEntry(tcgId) {
         const d = await r.json();
         if (!d.found) { alert('Not found'); return; }
         const cache = d.cache;
-        const comps = cache.components || [];
-        const totalMkt = comps.reduce((s, c) => s + (c.market_price||0) * (c.quantity_per_parent||1), 0);
+        const variants = cache.variants || [];
+
         body.innerHTML = `
             <button class="btn btn-secondary btn-sm" onclick="loadLibrary()" style="margin-bottom:12px;">← Back</button>
-            <div style="display:flex; gap:8px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; margin-bottom:4px;">
+            <div style="display:flex; gap:8px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; margin-bottom:12px;">
                 <div>
                     <strong style="font-size:1rem;">${cache.product_name}</strong>
                     <span style="font-size:0.78rem; color:var(--text-dim); margin-left:8px;">TCG#${cache.tcgplayer_id}</span>
                 </div>
                 <div style="font-size:0.82rem; color:var(--text-dim);">Used ${cache.use_count||0}x &middot; Updated ${new Date(cache.last_updated).toLocaleDateString()}</div>
             </div>
-            ${cache.promo_notes ? `<div style="color:var(--amber); font-size:0.85rem; margin-bottom:12px;">&#x1F4DD; ${cache.promo_notes}</div>` : ''}
-            <table style="font-size:0.85rem; margin-bottom:12px;">
-                <thead><tr><th>Component</th><th>TCG ID</th><th>Qty/Parent</th><th>Market Price</th><th>Subtotal</th></tr></thead>
-                <tbody>
-                ${comps.map(c => `<tr>
-                    <td>${c.product_name}${c.set_name ? '<br><small style="color:var(--text-dim);">' + c.set_name + '</small>' : ''}</td>
-                    <td style="color:var(--text-dim);">${c.tcgplayer_id || '—'}</td>
-                    <td>${c.quantity_per_parent}</td>
-                    <td>$${(c.market_price||0).toFixed(2)}</td>
-                    <td>$${((c.market_price||0)*(c.quantity_per_parent||1)).toFixed(2)}</td>
-                </tr>`).join('')}
-                <tr style="font-weight:600; border-top:2px solid var(--border);">
-                    <td colspan="4" style="text-align:right;">Total component market:</td>
-                    <td>$${totalMkt.toFixed(2)}</td>
-                </tr>
-                </tbody>
-            </table>
-            <button class="btn btn-sm" style="color:var(--red); font-size:0.78rem;" onclick="deleteLibraryEntry(${cache.tcgplayer_id}, '${(cache.product_name||'').replace(/'/g,'')}')">&#x1F5D1; Delete this recipe</button>
+
+            ${variants.map((v, vi) => {
+                const comps = v.components || [];
+                const totalMkt = comps.reduce((s,c) => s + (c.market_price||0)*(c.quantity_per_parent||1), 0);
+                return `
+                <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:12px 14px; margin-bottom:12px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
+                        <div>
+                            <strong style="font-size:0.95rem;">${v.variant_name}</strong>
+                            ${v.notes ? `<span style="font-size:0.78rem; color:var(--amber); margin-left:8px;">&#x1F4DD; ${v.notes}</span>` : ''}
+                        </div>
+                        <div style="display:flex; gap:6px; align-items:center;">
+                            <span style="font-size:0.82rem; color:var(--text-dim);">$${totalMkt.toFixed(2)} total</span>
+                            <button class="btn btn-sm" style="font-size:0.72rem; padding:2px 8px; color:var(--red);"
+                                onclick="deleteLibraryVariant('${v.id}', '${v.variant_name.replace(/'/g,'')}', ${tcgId})">&#x1F5D1; Delete config</button>
+                        </div>
+                    </div>
+                    <table style="font-size:0.82rem;">
+                        <thead><tr><th>Component</th><th>TCG ID</th><th>Qty/Unit</th><th>Market</th><th>Subtotal</th></tr></thead>
+                        <tbody>
+                        ${comps.map(c => `<tr>
+                            <td>${c.product_name}${c.set_name ? '<br><small style="color:var(--text-dim);">'+c.set_name+'</small>' : ''}</td>
+                            <td style="color:var(--text-dim);">${c.tcgplayer_id || '—'}</td>
+                            <td>${c.quantity_per_parent}</td>
+                            <td>$${(c.market_price||0).toFixed(2)}</td>
+                            <td>$${((c.market_price||0)*(c.quantity_per_parent||1)).toFixed(2)}</td>
+                        </tr>`).join('')}
+                        <tr style="font-weight:600; border-top:2px solid var(--border);">
+                            <td colspan="4" style="text-align:right;">Total:</td>
+                            <td>$${totalMkt.toFixed(2)}</td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>`;
+            }).join('')}
+
+            <button class="btn btn-sm" style="color:var(--red); font-size:0.78rem;" onclick="deleteLibraryEntry(${cache.tcgplayer_id}, '${(cache.product_name||'').replace(/'/g,'')}')">&#x1F5D1; Delete all configs</button>
         `;
     } catch(err) { body.innerHTML = `<div class="alert alert-error">${err.message}</div>`; }
 }
 
+async function deleteLibraryVariant(variantId, name, tcgId) {
+    const ok = await themedConfirm('Delete Config', `Remove the "${name}" config?`, { dangerous: true });
+    if (!ok) return;
+    const r = await fetch(`/api/breakdown-cache/variant/${variantId}`, { method: 'DELETE' });
+    const d = await r.json();
+    if (!d.cache) {
+        // Parent was also deleted, go back to library
+        await loadLibrary();
+    } else {
+        // Reload this entry
+        await viewLibraryEntry(tcgId);
+    }
+}
+
 async function deleteLibraryEntry(tcgId, name) {
-    const ok = await themedConfirm('Delete Recipe', `Remove the breakdown recipe for "${name}"?`, { dangerous: true });
+    const ok = await themedConfirm('Delete Recipe', `Remove all breakdown configs for "${name}"?`, { dangerous: true });
     if (!ok) return;
     await fetch(`/api/breakdown-cache/${tcgId}`, { method: 'DELETE' });
     await loadLibrary();
