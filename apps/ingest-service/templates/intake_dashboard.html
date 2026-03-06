@@ -2211,7 +2211,7 @@
                         ? (margin > 30 ? 'var(--green)' : margin > 15 ? 'var(--amber)' : 'var(--red)')
                         : 'var(--text-dim)';
                     const bd = i.breakdown;
-                    const bdValue = bd ? bd.best_variant_market : null;
+                    const bdValue = bd ? parseFloat(bd.best_variant_market) || 0 : null;
                     const bdMargin = bd && bdValue > 0 && i.unitOffer > 0
                         ? ((bdValue - i.unitOffer) / bdValue * 100) : null;
                     const bdColor = bdMargin !== null ? (bdMargin > 30 ? 'var(--green)' : bdMargin > 15 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
@@ -3448,7 +3448,7 @@
                 ${variants.map(v => `
                     <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:8px 12px; min-width:160px;">
                         <div style="font-size:0.85rem; font-weight:600;">${v.variant_name}</div>
-                        <div style="font-size:0.78rem; color:var(--text-dim);">${v.component_count} components &middot; $${(v.total_component_market||0).toFixed(2)}</div>
+                        <div style="font-size:0.78rem; color:var(--text-dim);">${v.component_count} components &middot; $${parseFloat(v.total_component_market||0).toFixed(2)}</div>
                         ${v.notes ? `<div style="font-size:0.75rem; color:var(--amber);">&#x1F4DD; ${v.notes}</div>` : ''}
                         <div style="display:flex; gap:6px; margin-top:8px;">
                             <button class="btn btn-primary btn-sm" style="font-size:0.72rem; padding:2px 8px;"
