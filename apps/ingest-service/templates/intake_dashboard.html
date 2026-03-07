@@ -3659,17 +3659,25 @@
             if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
             const results = d.results || [];
             if (!results.length) { panel.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No results</p>'; return; }
-            panel.innerHTML = results.slice(0, 15).map(p => {
-                const name = (p.name || p.productName || '').replace(/'/g, "\'").replace(/"/g, '&quot;');
-                const setName = (p.setName || p.set_name || '').replace(/'/g, "\'").replace(/"/g, '&quot;');
+            // Store results in a map to avoid apostrophe-in-onclick issues
+            window._ibdSearchResults = {};
+            panel.innerHTML = results.slice(0, 15).map((p, idx) => {
+                const name = p.name || p.productName || '';
+                const setName = p.setName || p.set_name || '';
                 const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || p.id || 0;
                 const price = p.unopenedPrice || p.marketPrice || 0;
-                return `<div class="search-result" onclick="ibdAdd(${tcgId}, '${name}', '${setName}', ${price})">
-                    <strong style="font-size:0.88rem;">${p.name || p.productName}</strong>
-                    <br><small style="color:var(--text-dim);">${p.setName || ''} &middot; TCG#${tcgId} &middot; $${(price||0).toFixed(2)}</small>
+                window._ibdSearchResults[idx] = { tcgId, name, setName, price };
+                return `<div class="search-result" onclick="ibdAddByIdx(${idx})">
+                    <strong style="font-size:0.88rem;">${name}</strong>
+                    <br><small style="color:var(--text-dim);">${setName} &middot; TCG#${tcgId} &middot; $${(price||0).toFixed(2)}</small>
                 </div>`;
             }).join('');
         } catch(err) { panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`; }
+    }
+
+    function ibdAddByIdx(idx) {
+        const r = (window._ibdSearchResults || {})[idx];
+        if (r) ibdAdd(r.tcgId, r.name, r.setName, r.price);
     }
 
     function ibdAdd(tcgId, name, setName, price) {
