@@ -3472,6 +3472,7 @@
 
     let _intakeBdTcgId = null;
     let _intakeBdProductName = '';
+    let _intakeBdParentMarket = 0;
     let _intakeBdComponents = [];
     let _intakeBdVariantId = null;
     let _intakeBdSave = true;
@@ -3487,6 +3488,9 @@
         const body = document.getElementById('intake-breakdown-body');
         body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
         openModal('intake-breakdown-modal');
+
+        // Fetch parent store price immediately (before components are loaded/added)
+        if (tcgId) ibdFetchStorePrices();
 
         // Load existing cache
         let existingCache = null;
@@ -3648,12 +3652,13 @@
     }
 
     async function ibdFetchStorePrices() {
-        const ids = _intakeBdComponents.map(c => c.tcgplayer_id).filter(Boolean);
-        if (!ids.length) return;
+        const compIds = _intakeBdComponents.map(c => c.tcgplayer_id).filter(Boolean);
+        const allIds = _intakeBdTcgId ? [...new Set([_intakeBdTcgId, ...compIds])] : compIds;
+        if (!allIds.length) return;
         try {
             const r = await fetch('/api/store-prices', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ tcgplayer_ids: ids })
+                body: JSON.stringify({ tcgplayer_ids: allIds })
             });
             const d = await r.json();
             _ibdStorePrices = d.prices || {};
@@ -3670,10 +3675,22 @@
         const totalStore = storeComps.reduce((s,c) => s + (_ibdStorePrices[c.tcgplayer_id].shopify_price||0)*(parseInt(c.quantity)||1), 0);
         const allHaveStore = _intakeBdComponents.length > 0 && storeComps.length === _intakeBdComponents.length;
         if (summary) {
+            // Parent store price (looked up alongside components)
+            const parentStoreEntry = _intakeBdTcgId ? _ibdStorePrices[_intakeBdTcgId] : null;
+            const parentStore = parentStoreEntry ? parseFloat(parentStoreEntry.shopify_price) || 0 : 0;
+            // Best reference for store comparison: store-parent > market-parent > nothing
+            let storeRef = null, storeRefLabel = null;
+            if (totalStore > 0) {
+                if (parentStore > 0) { storeRef = parentStore; storeRefLabel = `store parent ($${parentStore.toFixed(2)})`; }
+                // intake recipe editor has no parent market — store comparison is store-only or unavailable
+            }
             let sh = _intakeBdComponents.length ? `Market total: <strong>$${totalMkt.toFixed(2)}</strong>` : '';
             if (totalStore > 0) {
-                const storeCol = totalStore >= totalMkt ? 'var(--green)' : 'var(--amber)';
-                sh += ` &nbsp;·&nbsp; <span style="color:${storeCol};">Store: <strong>$${totalStore.toFixed(2)}</strong>${!allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComps.length}/${_intakeBdComponents.length})</small>` : ''}</span>`;
+                const diff = storeRef !== null ? totalStore - storeRef : null;
+                const storeCol = diff !== null ? (diff >= 0 ? 'var(--green)' : diff >= -storeRef * 0.1 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
+                const diffStr = diff !== null ? ` <small style="color:${diff >= 0 ? 'var(--green)' : 'var(--red)'};">(${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} vs ${storeRefLabel})</small>` : '';
+                const coverageStr = !allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComps.length}/${_intakeBdComponents.length})</small>` : '';
+                sh += ` &nbsp;·&nbsp; <span style="color:${storeCol};">Store: <strong>$${totalStore.toFixed(2)}</strong>${diffStr}${coverageStr}</span>`;
             }
             summary.innerHTML = sh;
         }

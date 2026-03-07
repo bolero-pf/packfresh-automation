@@ -836,7 +836,10 @@ async function openBreakdown(itemId, sessionId, productName, parentQty, parentTc
     modal.classList.add('active');
     setTimeout(() => document.getElementById('bd-search')?.focus(), 100);
 
-    if (parentTcgId) bdLoadVariants(parentTcgId);
+    if (parentTcgId) {
+        bdLoadVariants(parentTcgId);
+        bdFetchStorePrices(); // fetch parent store price immediately, even if no components yet
+    }
 }
 
 async function bdLoadVariants(tcgId) {
@@ -957,40 +960,56 @@ function bdAddComponent(tcgId, name, setName, price) {
 function bdUpdateValueSummary() {
     const el = document.getElementById('bd-value-summary');
     if (!el) return;
-    const qty = _bdQtyToBreak || _breakDownParentQty;
     const totalMkt = _breakDownComponents.reduce((s, c) => s + (parseFloat(c.market_price)||0) * (parseInt(c.quantity)||1), 0);
     const parentMkt = _breakDownParentMarket;
 
-    // Compute store total if we have prices
-    const storeComponents = _breakDownComponents.filter(c => c.tcgplayer_id && _bdStorePrices[c.tcgplayer_id]);
-    const totalStore = storeComponents.reduce((s, c) => {
-        const sp = _bdStorePrices[c.tcgplayer_id]?.shopify_price || 0;
-        return s + sp * (parseInt(c.quantity)||1);
-    }, 0);
-    const allHaveStore = _breakDownComponents.length > 0 && storeComponents.length === _breakDownComponents.length;
+    // Store totals
+    const storeComps = _breakDownComponents.filter(c => c.tcgplayer_id && _bdStorePrices[c.tcgplayer_id]);
+    const totalStore = storeComps.reduce((s, c) => s + (parseFloat(_bdStorePrices[c.tcgplayer_id].shopify_price)||0) * (parseInt(c.quantity)||1), 0);
+    const allHaveStore = _breakDownComponents.length > 0 && storeComps.length === _breakDownComponents.length;
+    const parentStoreEntry = _breakDownParentTcgId ? _bdStorePrices[_breakDownParentTcgId] : null;
+    const parentStore = parentStoreEntry ? parseFloat(parentStoreEntry.shopify_price) || 0 : 0;
 
-    let html = `<span style="color:var(--text);">Market total: <strong>$${totalMkt.toFixed(2)}</strong></span>`;
+    // Best available parent reference for store comparison:
+    //   1) store-children vs store-parent  (ideal — apples to apples)
+    //   2) store-children vs market-parent (fallback — parent not in store)
+    //   3) no store children — omit store line entirely
+    let storeRef = null, storeRefLabel = null;
+    if (totalStore > 0) {
+        if (parentStore > 0) {
+            storeRef = parentStore;
+            storeRefLabel = \`store parent ($\${parentStore.toFixed(2)})\`;
+        } else if (parentMkt > 0) {
+            storeRef = parentMkt;
+            storeRefLabel = \`mkt parent ($\${parentMkt.toFixed(2)})\`;
+        }
+    }
+
+    let html = \`<span style="color:var(--text);">Market total: <strong>$\${totalMkt.toFixed(2)}</strong></span>\`;
     if (parentMkt > 0 && totalMkt > 0) {
         const diff = totalMkt - parentMkt;
-        const pct = (diff / parentMkt * 100);
         const col = diff >= 0 ? 'var(--green)' : 'var(--red)';
-        html += `<span style="color:${col}; margin-left:8px;">${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} vs parent</span>`;
+        html += \` <span style="color:\${col}; margin-left:8px;">\${diff >= 0 ? '+' : ''}$\${diff.toFixed(2)} vs mkt parent</span>\`;
     }
     if (totalStore > 0) {
-        const storeCol = totalStore >= totalMkt ? 'var(--green)' : 'var(--amber)';
-        html += `<span style="color:${storeCol}; margin-left:12px;">Store total: <strong>$${totalStore.toFixed(2)}</strong>${!allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComponents.length}/${_breakDownComponents.length} in store)</small>` : ''}</span>`;
+        const diff = storeRef !== null ? totalStore - storeRef : null;
+        const storeCol = diff !== null ? (diff >= 0 ? 'var(--green)' : diff >= -storeRef * 0.1 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
+        const diffStr = diff !== null ? \` <small style="color:\${diff >= 0 ? 'var(--green)' : 'var(--red)'};">(\${diff >= 0 ? '+' : ''}$\${diff.toFixed(2)} vs \${storeRefLabel})</small>\` : '';
+        const coverageStr = !allHaveStore ? \` <small style="color:var(--text-dim);">(\${storeComps.length}/\${_breakDownComponents.length} comps in store)</small>\` : '';
+        html += \`<span style="color:\${storeCol}; margin-left:12px;">Store total: <strong>$\${totalStore.toFixed(2)}</strong>\${diffStr}\${coverageStr}</span>\`;
     }
-    if (_bdSaveToCache) html += `<span style="color:var(--green); margin-left:8px; font-size:0.75rem;">&#x1F4BE;</span>`;
+    if (_bdSaveToCache) html += \`<span style="color:var(--green); margin-left:8px; font-size:0.75rem;">&#x1F4BE;</span>\`;
     el.innerHTML = html;
 }
 
 async function bdFetchStorePrices() {
-    const ids = _breakDownComponents.map(c => c.tcgplayer_id).filter(Boolean);
-    if (!ids.length) return;
+    const compIds = _breakDownComponents.map(c => c.tcgplayer_id).filter(Boolean);
+    const allIds = _breakDownParentTcgId ? [...new Set([_breakDownParentTcgId, ...compIds])] : compIds;
+    if (!allIds.length) return;
     try {
         const r = await fetch('/api/store-prices', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ tcgplayer_ids: ids })
+            body: JSON.stringify({ tcgplayer_ids: allIds })
         });
         const d = await r.json();
         _bdStorePrices = d.prices || {};
