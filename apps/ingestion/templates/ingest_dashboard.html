@@ -377,11 +377,12 @@ function showList() {
 // SESSION DETAIL
 // ═══════════════════════════════════════════════════════════════════
 
-async function viewSession(sessionId) {
+async function viewSession(sessionId, _preserveScroll) {
     _currentSessionId = sessionId;
     document.getElementById('session-list-view').style.display = 'none';
     document.getElementById('session-detail-view').style.display = '';
     const el = document.getElementById('session-detail-content');
+    const scrollY = _preserveScroll ? window.scrollY : 0;
     el.innerHTML = '<div class="loading"><span class="spinner"></span> Loading session...</div>';
 
     try {
@@ -424,7 +425,15 @@ async function viewSession(sessionId) {
             </div>
 
             <div class="card">
-                <h2>📦 Items</h2>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+                    <h2 style="margin:0;">📦 Items</h2>
+                    ${isReceived ? `<div style="display:flex; align-items:center; gap:12px; font-size:0.82rem;">
+                        <span id="approve-stats" style="color:var(--text-dim);">0/${activeItems.length} approved</span>
+                        <label style="display:flex; align-items:center; gap:6px; color:var(--text-dim); cursor:pointer;">
+                            <input type="checkbox" onchange="toggleHideApproved(this)"> Hide approved
+                        </label>
+                    </div>` : ''}
+                </div>
                 <div style="overflow-x:auto;">
                 <table>
                     <thead><tr>
@@ -486,9 +495,127 @@ async function viewSession(sessionId) {
         }
 
         el.innerHTML = html;
+        if (scrollY) requestAnimationFrame(() => window.scrollTo(0, scrollY));
+        // Enrich items with breakdown summaries after render
+        _enrichBreakdownSummaries(items, sessionId, isReceived);
     } catch(err) {
         el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
+}
+
+// ── APPROVE SYSTEM ──────────────────────────────────────────────────────────
+let _approvedItems = new Set();
+let _hideApproved = false;
+
+function toggleApproved(itemId) {
+    if (_approvedItems.has(itemId)) {
+        _approvedItems.delete(itemId);
+    } else {
+        _approvedItems.add(itemId);
+    }
+    _refreshApprovedVisibility();
+    _updateApproveStats();
+}
+
+function _refreshApprovedVisibility() {
+    document.querySelectorAll('tr[data-item-id]').forEach(row => {
+        const id = row.dataset.itemId;
+        if (_hideApproved && _approvedItems.has(id)) {
+            row.style.display = 'none';
+        } else {
+            row.style.display = '';
+        }
+    });
+}
+
+function _updateApproveStats() {
+    const el = document.getElementById('approve-stats');
+    if (!el) return;
+    const total = document.querySelectorAll('tr[data-item-id]').length;
+    const done = _approvedItems.size;
+    el.textContent = `${done}/${total} approved`;
+    el.style.color = done === total ? 'var(--green)' : 'var(--text-dim)';
+}
+
+function toggleHideApproved(cb) {
+    _hideApproved = cb.checked;
+    _refreshApprovedVisibility();
+}
+
+// ── BREAKDOWN SUMMARY ENRICHMENT (runs after render) ────────────────────────
+async function _enrichBreakdownSummaries(items, sessionId, isReceived) {
+    if (!isReceived) return;
+    const tcgIds = [...new Set(items
+        .filter(i => i.tcgplayer_id && !i.parent_item_id && i.item_status !== 'broken_down')
+        .map(i => i.tcgplayer_id))];
+    if (!tcgIds.length) return;
+
+    try {
+        const r = await fetch('/api/breakdown-cache/batch', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ tcgplayer_ids: tcgIds }),
+        });
+        const d = await r.json();
+        const summaries = d.summaries || {};
+
+        // Update each item row with breakdown info
+        items.filter(i => i.tcgplayer_id && !i.parent_item_id).forEach(item => {
+            const bd = summaries[item.tcgplayer_id];
+            const cell = document.querySelector(`tr[data-item-id="${item.id}"] td.name-cell`);
+            if (!cell) return;
+            cell.querySelectorAll('.bd-summary-badge').forEach(e => e.remove());
+            if (!bd) return;
+
+            const parentStore  = bd.parent_store_price ? parseFloat(bd.parent_store_price) : null;
+            const childStore   = bd.best_variant_store  ? parseFloat(bd.best_variant_store)  : null;
+            const childMkt     = parseFloat(bd.best_variant_market) || 0;
+            const itemMkt      = parseFloat(item.market_price) || 0;
+
+            // Four cases — determine reference sell price vs breakdown sell price
+            let sellSealed, sellBroken, caseLabel;
+
+            if (parentStore !== null && childStore !== null) {
+                // Case 1: both in store — pure store comparison
+                sellSealed = parentStore;
+                sellBroken = childStore;
+                caseLabel  = `store $${childStore.toFixed(2)} vs sealed $${parentStore.toFixed(2)}`;
+            } else if (parentStore !== null && childStore === null) {
+                // Case 2: parent in store, children not — children market vs parent store
+                sellSealed = parentStore;
+                sellBroken = childMkt;
+                caseLabel  = `mkt $${childMkt.toFixed(2)} vs sealed store $${parentStore.toFixed(2)} ⚠ children not listed`;
+            } else if (parentStore === null && childStore !== null) {
+                // Case 3: children in store, parent not — children store vs parent market
+                sellSealed = itemMkt || childMkt;  // use item market as best proxy for parent
+                sellBroken = childStore;
+                caseLabel  = `store $${childStore.toFixed(2)} vs sealed mkt $${(itemMkt||childMkt).toFixed(2)} ⚠ parent not listed`;
+            } else {
+                // Case 4: neither in store — full market comparison
+                sellSealed = itemMkt;
+                sellBroken = childMkt;
+                caseLabel  = `mkt $${childMkt.toFixed(2)} vs sealed mkt $${itemMkt.toFixed(2)} (no store data)`;
+            }
+
+            if (sellBroken <= 0) return; // no useful data
+
+            const diff = sellBroken - sellSealed;
+            const pct  = sellSealed > 0 ? (diff / sellSealed * 100) : 0;
+            const color = diff > 0 ? 'var(--green)' : diff >= -sellSealed * 0.05 ? 'var(--amber)' : 'var(--red)';
+            const arrow = diff > 0 ? '▲' : diff < 0 ? '▼' : '=';
+            const sign  = diff >= 0 ? '+' : '';
+
+            const configLabel = bd.variant_count > 1
+                ? `${bd.variant_count} configs`
+                : (bd.variant_names || 'Standard');
+
+            const badge = document.createElement('small');
+            badge.className = 'bd-summary-badge';
+            badge.style.cssText = `display:block; color:${color}; font-size:0.75rem; margin-top:2px; cursor:default;`;
+            badge.title = caseLabel;
+            badge.innerHTML = `📦 ${configLabel}: ${arrow} ${sign}$${Math.abs(diff).toFixed(2)} (${sign}${pct.toFixed(1)}%)`;
+            cell.appendChild(badge);
+        });
+    } catch(e) { /* silently ignore */ }
 }
 
 function renderItemRow(item, isReceived, sessionId, isChild = false) {
@@ -524,13 +651,17 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
         actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;border-color:var(--amber);" onclick="undoBreakdown('${item.id}', '${sessionId}')">↩ Undo Breakdown</button> `;
     }
 
-    return `<tr style="${rowStyle}">
-        <td>${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
+    const approvedStyle = _approvedItems.has(item.id) ? 'opacity:0.5;' : '';
+    const approveBtn = isReceived && !isBroken && !isChild
+        ? `<button class="btn btn-sm" style="font-size:0.7rem;padding:2px 7px;${_approvedItems.has(item.id) ? 'background:var(--green);color:#000;border-color:var(--green);' : 'color:var(--text-dim);'}" onclick="toggleApproved('${item.id}')">✓</button> `
+        : '';
+    return `<tr style="${rowStyle}${approvedStyle}" data-item-id="${item.id}">
+        <td class="name-cell">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
         <td>${item.quantity || 1}</td>
         <td><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
         <td>$${(item.market_price || 0).toFixed(2)}</td>
         <td>$${(item.offer_price || 0).toFixed(2)}${(item.quantity || 1) > 1 ? '<br><small style="color:var(--text-dim);">$' + ((item.offer_price || 0) / (item.quantity || 1)).toFixed(2) + '/ea</small>' : ''}</td>
-        ${isReceived ? '<td>' + actions + '</td>' : ''}
+        ${isReceived ? '<td>' + approveBtn + actions + '</td>' : ''}
     </tr>`;
 }
 
@@ -567,14 +698,14 @@ async function markDamaged(itemId, sessionId, totalQty) {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body),
         });
-        viewSession(sessionId);
+        viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
 
 async function markGood(itemId, sessionId) {
     try {
         await fetch(`/api/ingest/item/${itemId}/mark-good`, { method: 'POST' });
-        viewSession(sessionId);
+        viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
 
@@ -591,7 +722,7 @@ async function undoBreakdown(itemId, sessionId) {
         let d;
         try { d = JSON.parse(text); } catch(e) { alert('Server error: ' + text.substring(0, 200)); return; }
         if (!r.ok) { alert(d.error || 'Undo failed'); return; }
-        viewSession(sessionId);
+        viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
 
@@ -684,7 +815,7 @@ async function relinkSelect(tcgId, name, price, setName) {
         if (!r.ok) { alert(d.error); return; }
         const sid = _relinkSessionId;
         closeRelink();
-        viewSession(sid);
+        viewSession(sid, true);
     } catch(err) { alert(err.message); }
 }
 
@@ -702,7 +833,7 @@ async function relinkManual() {
         if (!r.ok) { alert(d.error); return; }
         const sid = _relinkSessionId;
         closeRelink();
-        viewSession(sid);
+        viewSession(sid, true);
     } catch(err) { alert(err.message); }
 }
 
@@ -719,7 +850,7 @@ async function editItemQty(itemId, sessionId, currentQty) {
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
-        viewSession(sessionId);
+        viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
 
@@ -730,7 +861,7 @@ async function deleteItem(itemId, sessionId, name) {
         const r = await fetch(`/api/ingest/item/${itemId}/delete`, { method: 'POST' });
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
-        viewSession(sessionId);
+        viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
 
@@ -824,12 +955,9 @@ async function openBreakdown(itemId, sessionId, productName, parentQty, parentTc
 
         <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <button class="btn btn-success" onclick="submitBreakDown()">&#x2705; Confirm Break Down</button>
+            <button class="btn btn-secondary" onclick="saveRecipeOnly()" title="Save this config to the recipe cache without breaking down the item">&#x1F4BE; Save Recipe Only</button>
             <button class="btn btn-secondary" onclick="closeBreakdown()">Cancel</button>
-            <label style="display:flex; align-items:center; gap:6px; margin-left:auto; font-size:0.82rem; color:var(--text-dim); cursor:pointer;">
-                <input type="checkbox" id="bd-save-cache" checked onchange="_bdSaveToCache=this.checked; bdUpdateValueSummary();">
-                Save recipe to cache
-            </label>
-            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('bd-promo-row').style.display='block'; document.getElementById('bd-promo-notes').focus();" style="font-size:0.75rem; padding:3px 8px;">+ Notes</button>
+            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('bd-promo-row').style.display='block'; document.getElementById('bd-promo-notes').focus();" style="font-size:0.75rem; padding:3px 8px; margin-left:auto;">+ Notes</button>
         </div>
     `;
 
@@ -915,8 +1043,15 @@ async function bdDeleteVariant(variantId, name) {
     if (_breakDownParentTcgId) bdLoadVariants(_breakDownParentTcgId);
 }
 
-function closeBreakdown() {
+function closeBreakdown(_didSave) {
     document.getElementById('breakdown-modal').classList.remove('active');
+    // If a recipe was saved, refresh breakdown badges without full reload
+    if (_didSave && _currentSessionId) {
+        fetch(`/api/ingest/session/${_currentSessionId}`)
+            .then(r => r.json())
+            .then(d => _enrichBreakdownSummaries(d.items || [], _currentSessionId, true))
+            .catch(() => {});
+    }
 }
 
 async function bdSearch() {
@@ -1065,6 +1200,38 @@ function bdRenderComponents() {
     bdUpdateValueSummary();
 }
 
+async function saveRecipeOnly() {
+    if (!_breakDownComponents.length) { alert('Add at least one component before saving the recipe.'); return; }
+    const variantName = document.getElementById('bd-variant-name')?.value.trim() || 'Standard';
+    const variantNotes = document.getElementById('bd-promo-notes')?.value.trim() || null;
+
+    const ok = await themedConfirm('Save Recipe', `Save config "${variantName}" to cache without breaking down the item?`);
+    if (!ok) return;
+
+    try {
+        const payload = {
+            tcgplayer_id: _breakDownParentTcgId,
+            product_name: _breakDownParentName,
+            variant_name: variantName,
+            notes: variantNotes || '',
+            components: _breakDownComponents.map(c => ({
+                tcgplayer_id: c.tcgplayer_id,
+                product_name: c.name,
+                set_name: c.setName || '',
+                quantity_per_parent: c.qty,
+                market_price: c.price,
+            })),
+        };
+        const r = await fetch(`/api/breakdown-cache/${_breakDownParentTcgId}/variant`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Save failed'); return; }
+        closeBreakdown(true);
+    } catch(err) { alert(err.message); }
+}
+
 async function submitBreakDown() {
     if (!_breakDownComponents.length) { alert('Add at least one component.'); return; }
     const totalMkt = _breakDownComponents.reduce((s, c) => s + (parseFloat(c.market_price)||0) * (parseInt(c.quantity)||1), 0);
@@ -1106,8 +1273,8 @@ async function submitBreakDown() {
             return;
         }
         if (!r.ok) { alert(d.error || 'Break down failed'); return; }
-        closeBreakdown();
-        viewSession(_currentSessionId);
+        closeBreakdown(true);
+        viewSession(_currentSessionId, true);
     } catch(err) { alert(err.message); }
 }
 
@@ -1232,7 +1399,7 @@ async function forceIngested(sessionId) {
         const r = await fetch(`/api/ingest/session/${sessionId}/force-ingested`, { method: 'POST' });
         const d = await r.json();
         if (!r.ok) { alert(d.error || 'Failed'); return; }
-        viewSession(sessionId);
+        viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
 

@@ -660,19 +660,106 @@ def split_then_break_down(item_id: str, qty_to_break: int,
 
 def get_breakdown_summary_for_items(tcg_ids: list[int]) -> dict:
     """
-    Batch lookup: tcg_id -> {variant_count, best_variant_market, variant_names}.
-    Only includes products that have a cache entry.
+    Batch lookup: tcg_id -> {variant_count, best_variant_market, variant_names,
+                              best_variant_store, parent_store_price,
+                              components_in_store, total_components}.
+    Joins shopify_product_cache to compute store-aware totals for the best variant.
+    Four cases handled by frontend:
+      parent+children in store  -> compare children store total vs parent store
+      parent in store, no child store -> compare children market vs parent store
+      children in store, no parent -> compare children store vs parent market
+      neither in store -> compare market totals
     """
     if not tcg_ids:
         return {}
     ph = ",".join(["%s"] * len(tcg_ids))
-    rows = query(f"""
-        SELECT sbc.tcgplayer_id, sbc.variant_count, sbc.best_variant_market,
+
+    # Step 1: get best variant per parent (highest total_component_market)
+    variant_rows = query(f"""
+        SELECT sbc.tcgplayer_id AS parent_id,
+               sbc.variant_count, sbc.best_variant_market,
                COALESCE(
-                   (SELECT STRING_AGG(variant_name, ' / ' ORDER BY display_order)
-                    FROM sealed_breakdown_variants WHERE breakdown_id=sbc.id), ''
-               ) AS variant_names
+                   (SELECT STRING_AGG(sbv2.variant_name, ' / ' ORDER BY sbv2.display_order)
+                    FROM sealed_breakdown_variants sbv2 WHERE sbv2.breakdown_id=sbc.id), ''
+               ) AS variant_names,
+               sbv.id AS variant_id
         FROM sealed_breakdown_cache sbc
+        JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
+            AND sbv.total_component_market = sbc.best_variant_market
         WHERE sbc.tcgplayer_id IN ({ph})
     """, tuple(tcg_ids))
-    return {r["tcgplayer_id"]: dict(r) for r in rows}
+
+    if not variant_rows:
+        return {}
+
+    # Step 2: get components for those variants
+    variant_ids = [r["variant_id"] for r in variant_rows]
+    parent_ids  = [r["parent_id"]  for r in variant_rows]
+    vph = ",".join(["%s"] * len(variant_ids))
+
+    comp_rows = query(f"""
+        SELECT sbco.variant_id, sbco.tcgplayer_id AS comp_tcg_id,
+               sbco.quantity_per_parent, sbco.market_price AS comp_market
+        FROM sealed_breakdown_components sbco
+        WHERE sbco.variant_id IN ({vph})
+    """, tuple(variant_ids))
+
+    # Step 3: batch store lookup for parents + all component tcg_ids
+    comp_tcg_ids = list(set(r["comp_tcg_id"] for r in comp_rows if r.get("comp_tcg_id")))
+    all_store_ids = list(set(parent_ids + comp_tcg_ids))
+    if all_store_ids:
+        sph = ",".join(["%s"] * len(all_store_ids))
+        store_rows = query(
+            f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM shopify_product_cache "
+            f"WHERE tcgplayer_id IN ({sph}) AND is_damaged = FALSE",
+            tuple(all_store_ids)
+        )
+        store_map = {r["tcgplayer_id"]: r for r in store_rows}
+    else:
+        store_map = {}
+
+    # Step 4: assemble results
+    # Index comp_rows by variant_id
+    comps_by_variant = {}
+    for c in comp_rows:
+        comps_by_variant.setdefault(c["variant_id"], []).append(c)
+
+    result = {}
+    for vrow in variant_rows:
+        pid = vrow["parent_id"]
+        vid = vrow["variant_id"]
+        comps = comps_by_variant.get(vid, [])
+
+        parent_store = store_map.get(pid)
+        parent_store_price = float(parent_store["shopify_price"]) if parent_store and parent_store.get("shopify_price") else None
+
+        total_comp_market = 0.0
+        total_comp_store  = 0.0
+        comps_with_store  = 0
+
+        for c in comps:
+            qty = c["quantity_per_parent"] or 1
+            mkt = float(c["comp_market"] or 0)
+            total_comp_market += mkt * qty
+            cs = store_map.get(c["comp_tcg_id"])
+            if cs and cs.get("shopify_price"):
+                total_comp_store += float(cs["shopify_price"]) * qty
+                comps_with_store += 1
+
+        total_components = len(comps)
+        all_comps_in_store = (comps_with_store == total_components and total_components > 0)
+        any_comps_in_store = comps_with_store > 0
+
+        result[pid] = {
+            "variant_count":        vrow["variant_count"],
+            "best_variant_market":  float(vrow["best_variant_market"] or 0),
+            "variant_names":        vrow["variant_names"],
+            # Store data
+            "parent_store_price":   parent_store_price,
+            "best_variant_store":   round(total_comp_store, 2) if any_comps_in_store else None,
+            "best_variant_store_partial": any_comps_in_store and not all_comps_in_store,
+            "components_in_store":  comps_with_store,
+            "total_components":     total_components,
+        }
+
+    return result
