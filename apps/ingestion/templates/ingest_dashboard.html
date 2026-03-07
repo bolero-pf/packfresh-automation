@@ -1216,10 +1216,10 @@ async function saveRecipeOnly() {
             notes: variantNotes || '',
             components: _breakDownComponents.map(c => ({
                 tcgplayer_id: c.tcgplayer_id,
-                product_name: c.name,
-                set_name: c.setName || '',
-                quantity_per_parent: c.qty,
-                market_price: c.price,
+                product_name: c.product_name,
+                set_name: c.set_name || '',
+                quantity_per_parent: c.quantity || 1,
+                market_price: c.market_price,
             })),
         };
         const r = await fetch(`/api/breakdown-cache/${_breakDownParentTcgId}/variant`, {
