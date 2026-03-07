@@ -1751,11 +1751,13 @@ def shopify_session_store_check(session_id):
                 if row["comp_name"]:
                     cs = comp_store_map.get(row["comp_tcg_id"])
                     in_store = cs is not None and (cs.get("shopify_qty") or 0) > 0
+                    store_price = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else None
                     breakdown_data[pid]["components"].append({
                         "tcgplayer_id": row["comp_tcg_id"],
                         "product_name": row["comp_name"],
                         "quantity_per_parent": row["quantity_per_parent"],
                         "market_price": float(row["comp_price"] or 0),
+                        "store_price": store_price,
                         "in_store": in_store,
                     })
                     if in_store:
@@ -1769,8 +1771,23 @@ def shopify_session_store_check(session_id):
         tcg_id = item.get("tcgplayer_id")
         bd = breakdown_data.get(tcg_id)
         if bd:
+            # Compute store total for best variant (sum comp store_price * qty, only if all have store prices)
+            comps = bd["components"]
+            store_total = None
+            if comps:
+                comp_store_vals = [
+                    (c["store_price"] or 0) * (c["quantity_per_parent"] or 1)
+                    for c in comps if c.get("store_price") is not None
+                ]
+                if comp_store_vals:
+                    store_total = sum(comp_store_vals)
+                    # If not all components have store prices, mark as partial
+                    if len(comp_store_vals) < len(comps):
+                        store_total = None  # partial — don't use for margin math
+
             item["breakdown"] = {
                 "best_variant_market": bd["best_variant_market"],
+                "best_variant_store": store_total,
                 "variant_count": bd["variant_count"],
                 "variant_name": bd["variant_name"],
                 "variant_notes": bd["variant_notes"],
