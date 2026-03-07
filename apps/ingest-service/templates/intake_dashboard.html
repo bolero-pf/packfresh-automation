@@ -2189,10 +2189,14 @@
         const grossMarginPct = combinedStoreValue > 0 ? ((combinedStoreValue - totalOfferValue) / combinedStoreValue * 100) : 0;
         const avgMargin = withMargin.length > 0 ? withMargin.reduce((s, i) => s + i.margin, 0) / withMargin.length : 0;
 
-        // Max margin: use best of (store price, breakdown value) per item
-        const totalEffectiveSellValue = enriched.reduce((s, i) => s + i.effectiveSellPrice * (i.quantity || 1), 0);
+        // Max margin: best of (sell sealed, break down) per item — for items with no store price or bd, estimate same as grossMarginPct
+        const totalEffectiveSellValue = enriched.reduce((s, i) => {
+            if (i.effectiveSellPrice > 0) return s + i.effectiveSellPrice * (i.quantity || 1);
+            // No store price and no breakdown — fall back to same offer/0.78 estimate used in grossMarginPct
+            return s + (i.offer_price || 0) / 0.78;
+        }, 0);
         const maxGrossMarginPct = totalEffectiveSellValue > 0 ? ((totalEffectiveSellValue - totalOfferValue) / totalEffectiveSellValue * 100) : 0;
-        const itemsWithBdBoost = enriched.filter(i => i.bdVal > (i.store_price || 0)).length;
+        const itemsWithBdBoost = enriched.filter(i => i.bdVal > 0 && i.bdVal > (i.store_price || 0)).length;
 
         // Filter
         let filtered = enriched;
@@ -2242,18 +2246,18 @@
                     // Fall back to market-children vs store-price if no store bd, then market vs offer
                     const bdStoreVal = i.bdStoreVal || 0;
                     const bdMktVal = i.bdMktVal || 0;
+                    // BD Margin = (bd sell value - what we paid) / bd sell value
+                    // Mirrors Store Margin = (store_price - unitOffer) / store_price
+                    // Priority: store bd value > market bd value; always vs unitOffer
                     let bdMargin = null;
                     let bdMarginLabel = '';
-                    if (bd) {
-                        if (bdStoreVal > 0 && found && i.store_price > 0) {
-                            bdMargin = (bdStoreVal - i.store_price) / i.store_price * 100;
-                            bdMarginLabel = 'store bd vs store parent';
-                        } else if (bdMktVal > 0 && found && i.store_price > 0) {
-                            bdMargin = (bdMktVal - i.store_price) / i.store_price * 100;
-                            bdMarginLabel = 'mkt bd vs store parent';
-                        } else if (bdMktVal > 0 && i.unitOffer > 0) {
+                    if (bd && i.unitOffer > 0) {
+                        if (bdStoreVal > 0) {
+                            bdMargin = (bdStoreVal - i.unitOffer) / bdStoreVal * 100;
+                            bdMarginLabel = 'store bd margin (store components vs offer)';
+                        } else if (bdMktVal > 0) {
                             bdMargin = (bdMktVal - i.unitOffer) / bdMktVal * 100;
-                            bdMarginLabel = 'mkt bd vs offer';
+                            bdMarginLabel = 'mkt bd margin (mkt components vs offer)';
                         }
                     }
                     const bdColor = bdMargin !== null ? (bdMargin > 30 ? 'var(--green)' : bdMargin > 15 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
