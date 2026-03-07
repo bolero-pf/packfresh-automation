@@ -488,15 +488,42 @@ def create_session():
 
 @app.route("/api/intake/session/<session_id>", methods=["GET"])
 def get_session(session_id):
-    """Get session details and items."""
+    """Get session details, items, and breakdown summaries for sealed items."""
     session = intake.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
     items = intake.get_session_items(session_id)
+
+    # Attach breakdown summaries to sealed items that have a tcgplayer_id
+    tcg_ids = list({int(i["tcgplayer_id"]) for i in items if i.get("tcgplayer_id")})
+    bd_map = {}
+    if tcg_ids:
+        try:
+            ph = ",".join(["%s"] * len(tcg_ids))
+            rows = db.query(f"""
+                SELECT sbc.tcgplayer_id, sbc.variant_count, sbc.best_variant_market,
+                       COALESCE(
+                           (SELECT STRING_AGG(variant_name, ' / ' ORDER BY display_order)
+                            FROM sealed_breakdown_variants WHERE breakdown_id=sbc.id), ''
+                       ) AS variant_names
+                FROM sealed_breakdown_cache sbc
+                WHERE sbc.tcgplayer_id IN ({ph})
+            """, tuple(tcg_ids))
+            bd_map = {r["tcgplayer_id"]: dict(r) for r in rows}
+        except Exception:
+            pass  # breakdown table may not exist yet
+
+    serialized = []
+    for i in items:
+        item_dict = _serialize(i)
+        tcg = i.get("tcgplayer_id")
+        item_dict["breakdown_summary"] = _serialize(bd_map.get(int(tcg))) if tcg and int(tcg) in bd_map else None
+        serialized.append(item_dict)
+
     return jsonify({
         "session": _serialize(session),
-        "items": [_serialize(i) for i in items],
+        "items": serialized,
     })
 
 
@@ -959,6 +986,32 @@ def override_price(item_id):
 
     try:
         item = intake.override_item_price(item_id, Decimal(str(new_price)), note, session_id)
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/intake/item/<item_id>/apply-breakdown-price", methods=["POST"])
+def apply_breakdown_price(item_id):
+    """
+    Reprice an item using its breakdown value instead of whole-unit market price.
+    Uses the specified variant's total_component_market as the new market price,
+    with a note indicating it was priced as a breakdown.
+    Body: {session_id, variant_id, variant_name, breakdown_total}
+    """
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id")
+    variant_name = data.get("variant_name", "breakdown")
+    breakdown_total = data.get("breakdown_total")
+
+    if not session_id or breakdown_total is None:
+        return jsonify({"error": "session_id and breakdown_total required"}), 400
+
+    try:
+        note = f"Priced as breakdown ({variant_name})"
+        item = intake.override_item_price(
+            item_id, Decimal(str(breakdown_total)), note, session_id
+        )
         return jsonify({"success": True, "item": _serialize(item)})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -1478,47 +1531,69 @@ def _serialize(obj):
 
 @app.route("/api/shopify/sync", methods=["POST"])
 def shopify_sync():
-    """Sync all Shopify products with tcgplayer_id metafield into local cache."""
+    """Sync Shopify products into local cache, streaming progress page-by-page."""
     if not shopify:
         return jsonify({"error": "Shopify not configured (set SHOPIFY_TOKEN + SHOPIFY_STORE)"}), 503
-    try:
-        app.logger.info("Starting Shopify sync...")
-        products = shopify.get_all_products()
-        app.logger.info(f"Shopify returned {len(products)} total variants")
-        with_tcg = [p for p in products if p.get("tcgplayer_id")]
-        app.logger.info(f"  {len(with_tcg)} have tcgplayer_id")
-        if products and not with_tcg:
-            # Log a sample to debug metafield issue
-            sample = products[:3]
-            for s in sample:
-                app.logger.info(f"  Sample product: {s.get('title')} tcg_id={s.get('tcgplayer_id')}")
-            return jsonify({"synced": 0, "total_variants": len(products), "message": "No products with tcgplayer_id metafield found"})
-        upserted = 0
-        for p in with_tcg:
+
+    def generate():
+        import json
+        try:
+            yield json.dumps({"status": "starting"}) + "\n"
+            app.logger.info("Starting Shopify sync...")
+
+            total_variants = 0
+            upserted = 0
+            page_num = 0
+
+            # Use the page generator so we yield heartbeats between each Shopify page
+            # (avoids Railway 60s idle timeout that killed the old buffered approach)
+            for page_products, has_more in shopify.iter_products_pages(batch_size=100):
+                page_num += 1
+                total_variants += len(page_products)
+                with_tcg = [p for p in page_products if p.get("tcgplayer_id")]
+
+                for p in with_tcg:
+                    db.execute("""
+                        INSERT INTO shopify_product_cache
+                            (tcgplayer_id, shopify_product_id, shopify_variant_id,
+                             title, handle, sku, shopify_price, shopify_qty, status, is_damaged, last_synced)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (tcgplayer_id, shopify_variant_id)
+                        DO UPDATE SET title = EXCLUDED.title, handle = EXCLUDED.handle, sku = EXCLUDED.sku,
+                            shopify_price = EXCLUDED.shopify_price, shopify_qty = EXCLUDED.shopify_qty,
+                            status = EXCLUDED.status, is_damaged = EXCLUDED.is_damaged,
+                            last_synced = CURRENT_TIMESTAMP
+                    """, (p["tcgplayer_id"], p["shopify_product_id"], p["variant_id"],
+                          p["title"], p["handle"], p.get("sku"), p["shopify_price"], p["shopify_qty"],
+                          p.get("status", "ACTIVE"), p.get("is_damaged", False)))
+                    upserted += 1
+
+                # Heartbeat after every page — keeps Railway connection alive
+                yield json.dumps({
+                    "status": "progress",
+                    "page": page_num,
+                    "synced": upserted,
+                    "total_variants": total_variants,
+                    "more": has_more,
+                }) + "\n"
+
+            # Backfill sealed_cogs linkage
             db.execute("""
-                INSERT INTO shopify_product_cache
-                    (tcgplayer_id, shopify_product_id, shopify_variant_id,
-                     title, handle, sku, shopify_price, shopify_qty, status, is_damaged, last_synced)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (tcgplayer_id, shopify_variant_id)
-                DO UPDATE SET title = EXCLUDED.title, handle = EXCLUDED.handle, sku = EXCLUDED.sku,
-                    shopify_price = EXCLUDED.shopify_price, shopify_qty = EXCLUDED.shopify_qty,
-                    status = EXCLUDED.status, is_damaged = EXCLUDED.is_damaged, last_synced = CURRENT_TIMESTAMP
-            """, (p["tcgplayer_id"], p["shopify_product_id"], p["variant_id"],
-                  p["title"], p["handle"], p.get("sku"), p["shopify_price"], p["shopify_qty"],
-                  p.get("status", "ACTIVE"), p.get("is_damaged", False)))
-            upserted += 1
-        # Backfill sealed_cogs linkage
-        db.execute("""
-            UPDATE sealed_cogs sc SET shopify_product_id = spc.shopify_product_id
-            FROM shopify_product_cache spc
-            WHERE sc.tcgplayer_id = spc.tcgplayer_id AND sc.shopify_product_id IS NULL
-        """)
-        app.logger.info(f"Shopify sync complete: {upserted} upserted")
-        return jsonify({"synced": upserted, "total_variants": len(products), "with_tcg_id": len(with_tcg)})
-    except (ShopifyError, Exception) as e:
-        app.logger.error(f"Shopify sync failed: {e}")
-        return jsonify({"error": str(e)}), 502
+                UPDATE sealed_cogs sc SET shopify_product_id = spc.shopify_product_id
+                FROM shopify_product_cache spc
+                WHERE sc.tcgplayer_id = spc.tcgplayer_id AND sc.shopify_product_id IS NULL
+            """)
+            app.logger.info(f"Shopify sync complete: {upserted} upserted from {total_variants} variants")
+            yield json.dumps({
+                "status": "done",
+                "synced": upserted,
+                "total_variants": total_variants,
+            }) + "\n"
+        except Exception as e:
+            app.logger.error(f"Shopify sync failed: {e}")
+            yield json.dumps({"status": "error", "error": str(e)}) + "\n"
+
+    return app.response_class(generate(), mimetype="application/x-ndjson")
 
 
 @app.route("/api/shopify/status")

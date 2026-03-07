@@ -45,6 +45,75 @@ class ShopifyClient:
 
     # ─── Fetch all products with TCG metafields ─────────────────────
 
+    def iter_products_pages(self, batch_size: int = 100):
+        """
+        Generator that yields (page_products, has_more) tuples one page at a time.
+        Lets callers stream/yield heartbeats between pages without buffering everything.
+        """
+        query = """
+        query getProducts($first: Int!, $cursor: String) {
+          products(first: $first, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
+                id title handle status tags
+                variants(first: 10) {
+                  edges { node { id price sku inventoryQuantity inventoryItem { id } } }
+                }
+                metafields(namespace: "tcg", first: 5) {
+                  edges { node { key value } }
+                }
+              }
+            }
+          }
+        }
+        """
+        cursor = None
+        has_next = True
+        while has_next:
+            data = self._gql(query, {"first": batch_size, "cursor": cursor})
+            edges = data["products"]["edges"]
+            page_products = []
+            for edge in edges:
+                node = edge["node"]
+                tcg_id = None
+                for mf in (node.get("metafields") or {}).get("edges", []):
+                    if mf["node"]["key"] == "tcgplayer_id":
+                        val = mf["node"]["value"]
+                        if isinstance(val, str) and val.startswith("["):
+                            val = val.strip("[]").replace('"', "").replace("'", "")
+                        try:
+                            tcg_id = int(val) if val else None
+                        except (ValueError, TypeError):
+                            tcg_id = None
+                        break
+                tags = node.get("tags", [])
+                is_damaged = ("damaged" in [t.lower() for t in tags]) or "[DAMAGED]" in node.get("title", "").upper()
+                for var_edge in node["variants"]["edges"]:
+                    variant = var_edge["node"]
+                    inv_item_id = None
+                    if variant.get("inventoryItem"):
+                        inv_item_id = variant["inventoryItem"]["id"].split("/")[-1]
+                    page_products.append({
+                        "product_gid": node["id"],
+                        "shopify_product_id": int(node["id"].split("/")[-1]),
+                        "title": node["title"],
+                        "handle": node["handle"],
+                        "status": node.get("status", "ACTIVE"),
+                        "variant_id": int(variant["id"].split("/")[-1]),
+                        "shopify_price": float(variant["price"]),
+                        "shopify_qty": variant["inventoryQuantity"],
+                        "sku": variant.get("sku"),
+                        "inventory_item_id": inv_item_id,
+                        "tcgplayer_id": tcg_id,
+                        "is_damaged": is_damaged,
+                    })
+            has_next = data["products"]["pageInfo"]["hasNextPage"]
+            cursor = data["products"]["pageInfo"].get("endCursor") if has_next else None
+            yield page_products, has_next
+            if has_next:
+                time.sleep(0.3)
+
     def get_all_products(self, batch_size: int = 100) -> list[dict]:
         """
         Paginate through all store products, returning a flat list with:

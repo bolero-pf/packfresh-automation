@@ -1442,8 +1442,11 @@
                                 : '<span class="badge" style="background:#666;color:#fff;">Rejected</span>';
                             const overrideNote = i.price_override_note ? `<br><small style="color:var(--accent);" title="${(i.price_override_note||'').replace(/"/g,'&quot;')}">⚡ ${i.price_override_note}</small>` : '';
                             const parentNote = i.parent_item_id ? '<br><small style="color:var(--text-dim);">↳ split from above</small>' : '';
+                            const bd = i.breakdown_summary;
+                            const bdVal = bd ? parseFloat(bd.best_variant_market) || 0 : 0;
+                            const bdNote = bd && bdVal > 0 ? `<br><small style="color:var(--text-dim);">📦 breakdown: $${bdVal.toFixed(2)}${bd.variant_count > 1 ? ' (' + bd.variant_count + ' configs)' : bd.variant_names ? ' · ' + bd.variant_names : ''}</small>` : '';
                             return `<tr style="${rowStyle}">
-                                <td>${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}</td>
+                                <td>${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}</td>
                                 ${s.session_type === 'raw' ? `<td><span class="badge badge-blue">${i.condition || i.listing_condition || '—'}</span></td>` : ''}
                                 <td>${i.quantity}</td>
                                 <td>$${(i.market_price || 0).toFixed(2)}</td>
@@ -1469,7 +1472,12 @@
                                             btns += `<button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price||0})">Override Price</button>`;
                                             btns += `<button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">Change Qty (${i.quantity})</button>`;
                                             if (i.quantity > 1) btns += `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">Split (Damage Partial)</button>`;
-                                            if (s.session_type !== 'raw' && i.tcgplayer_id) btns += `<hr><button onclick="openIntakeBreakdown(${i.tcgplayer_id}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}')">📦 Breakdown Recipe</button>`;
+                                            if (s.session_type !== 'raw' && i.tcgplayer_id) {
+                                                btns += `<hr><button onclick="openIntakeBreakdown(${i.tcgplayer_id}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}')">📦 Breakdown Recipe</button>`;
+                                                if (bd && bdVal > 0) {
+                                                    btns += `<button onclick="applyBreakdownPrice('${i.id}','${sessionId}',${bdVal},'${(bd.variant_names||'breakdown').replace(/'/g,'')}')">💲 Price as Breakdown ($${bdVal.toFixed(2)})</button>`;
+                                                }
+                                            }
                                             btns += '</div></div>';
                                         }
                                         return btns;
@@ -2151,7 +2159,13 @@
             const margin = i.in_store && i.store_price && unitOffer > 0
                 ? ((i.store_price - unitOffer) / i.store_price * 100)
                 : null;
-            return { ...i, unitOffer, margin };
+            const bd = i.breakdown;
+            const bdVal = bd ? parseFloat(bd.best_variant_market) || 0 : 0;
+            // Best effective sell price: higher of store price or breakdown value
+            const effectiveSellPrice = Math.max(i.store_price || 0, bdVal);
+            const maxMargin = effectiveSellPrice > 0 && unitOffer > 0
+                ? ((effectiveSellPrice - unitOffer) / effectiveSellPrice * 100) : null;
+            return { ...i, unitOffer, margin, bdVal, effectiveSellPrice, maxMargin };
         });
 
         // Stats
@@ -2159,13 +2173,19 @@
         const notInStore = enriched.filter(i => !i.in_store);
         const zeroQty = inStore.filter(i => i.store_qty === 0);
         const withMargin = inStore.filter(i => i.margin !== null);
+        const withMaxMargin = enriched.filter(i => i.maxMargin !== null);
 
         const totalOfferValue = enriched.reduce((s, i) => s + (i.offer_price || 0), 0);
         const totalStoreValue = inStore.reduce((s, i) => s + (i.store_price || 0) * (i.quantity || 1), 0);
-        const notInStoreMarketValue = notInStore.reduce((s, i) => s + (i.offer_price || 0) / 0.78, 0); // estimate retail from offer
+        const notInStoreMarketValue = notInStore.reduce((s, i) => s + (i.offer_price || 0) / 0.78, 0);
         const combinedStoreValue = totalStoreValue + notInStoreMarketValue;
         const grossMarginPct = combinedStoreValue > 0 ? ((combinedStoreValue - totalOfferValue) / combinedStoreValue * 100) : 0;
         const avgMargin = withMargin.length > 0 ? withMargin.reduce((s, i) => s + i.margin, 0) / withMargin.length : 0;
+
+        // Max margin: use best of (store price, breakdown value) per item
+        const totalEffectiveSellValue = enriched.reduce((s, i) => s + i.effectiveSellPrice * (i.quantity || 1), 0);
+        const maxGrossMarginPct = totalEffectiveSellValue > 0 ? ((totalEffectiveSellValue - totalOfferValue) / totalEffectiveSellValue * 100) : 0;
+        const itemsWithBdBoost = enriched.filter(i => i.bdVal > (i.store_price || 0)).length;
 
         // Filter
         let filtered = enriched;
@@ -2185,8 +2205,8 @@
                 <div class="stat"><div class="stat-label">In Store</div><div class="stat-value" style="color:var(--green);">${inStore.length}</div></div>
                 <div class="stat"><div class="stat-label">Not Found</div><div class="stat-value" style="color:${notInStore.length > 0 ? 'var(--red)' : 'var(--text-dim)'};">${notInStore.length}</div></div>
                 <div class="stat"><div class="stat-label">Restock (qty=0)</div><div class="stat-value">${zeroQty.length}</div></div>
-                <div class="stat"><div class="stat-label">Est. Store Value</div><div class="stat-value">$${combinedStoreValue.toFixed(0)}</div></div>
                 <div class="stat"><div class="stat-label">Est. Gross Margin</div><div class="stat-value" style="color:${grossMarginPct > 20 ? 'var(--green)' : grossMarginPct > 10 ? 'var(--amber)' : 'var(--red)'};">${grossMarginPct.toFixed(1)}%</div></div>
+                ${maxGrossMarginPct > grossMarginPct + 0.5 ? `<div class="stat" title="Best-case if items with breakdown value > store price are broken down"><div class="stat-label">Max Margin ✦</div><div class="stat-value" style="color:var(--green);">${maxGrossMarginPct.toFixed(1)}%<br><small style="font-size:0.65rem; font-weight:400; color:var(--text-dim);">${itemsWithBdBoost} item${itemsWithBdBoost!==1?'s':''} better as bd</small></div></div>` : ''}
             </div>
 
             <div style="display:flex; gap:4px; flex-wrap:wrap; margin-bottom:12px;">
@@ -2211,7 +2231,7 @@
                         ? (margin > 30 ? 'var(--green)' : margin > 15 ? 'var(--amber)' : 'var(--red)')
                         : 'var(--text-dim)';
                     const bd = i.breakdown;
-                    const bdValue = bd ? parseFloat(bd.best_variant_market) || 0 : null;
+                    const bdValue = i.bdVal || 0;  // already computed in enriched
                     const bdMargin = bd && bdValue > 0 && i.unitOffer > 0
                         ? ((bdValue - i.unitOffer) / bdValue * 100) : null;
                     const bdColor = bdMargin !== null ? (bdMargin > 30 ? 'var(--green)' : bdMargin > 15 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
@@ -2261,18 +2281,43 @@
 
     async function shopifySync() {
         const panel = document.getElementById('store-check-results');
-        if (panel) panel.innerHTML = '<div class="loading"><span class="spinner"></span> Syncing from Shopify (this may take a minute)...</div>';
+        if (panel) panel.innerHTML = '<div class="loading"><span class="spinner"></span> Syncing from Shopify — fetching products...</div>';
         try {
             const r = await fetch('/api/shopify/sync', { method: 'POST' });
-            const d = await r.json();
             if (!r.ok) {
+                const d = await r.json();
                 if (panel) panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`;
                 return;
             }
-            if (panel) panel.innerHTML = `<div class="alert alert-success">
-                Synced ${d.synced} products from Shopify (${d.with_tcg_id} with TCGPlayer ID out of ${d.total_variants} total variants).
-                Click <strong>🏪 Store Check</strong> again to refresh the table.
-            </div>`;
+            const reader = r.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let lastStatus = null;
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop(); // keep incomplete last line
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                        const msg = JSON.parse(line);
+                        lastStatus = msg;
+                        if (msg.status === 'progress' && panel) {
+                            panel.innerHTML = `<div class="loading"><span class="spinner"></span> Syncing from Shopify — page ${msg.page}, saved ${msg.synced} products so far (${msg.total_variants} variants fetched)...</div>`;
+                        }
+                    } catch(e) {}
+                }
+            }
+            if (lastStatus?.status === 'done') {
+                if (panel) panel.innerHTML = `<div class="alert alert-success">
+                    Synced <strong>${lastStatus.synced}</strong> products with TCGPlayer IDs from ${lastStatus.total_variants} total Shopify variants.
+                    Click <strong>🏪 Store</strong> tab again to refresh the table.
+                </div>`;
+            } else if (lastStatus?.status === 'error') {
+                if (panel) panel.innerHTML = `<div class="alert alert-error">${lastStatus.error}</div>`;
+            }
         } catch(err) {
             if (panel) panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
@@ -2483,6 +2528,25 @@
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ new_price: parsed, note: note, session_id: sessionId }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            viewSession(sessionId);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function applyBreakdownPrice(itemId, sessionId, bdValue, variantLabel) {
+        const ok = await themedConfirm(
+            '📦 Price as Breakdown',
+            `Set market price to $${parseFloat(bdValue).toFixed(2)} (breakdown value: ${variantLabel})?\n\nThe offer will be recalculated at the session's offer % based on this new price. Use this when you're buying to break open, not to sell as a sealed unit.`,
+            { confirmText: 'Use Breakdown Price' }
+        );
+        if (!ok) return;
+        try {
+            const r = await fetch(`/api/intake/item/${itemId}/apply-breakdown-price`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ session_id: sessionId, breakdown_total: bdValue, variant_name: variantLabel }),
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
