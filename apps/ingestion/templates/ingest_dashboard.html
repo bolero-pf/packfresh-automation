@@ -258,6 +258,18 @@
     </div>
 </div>
 
+<div id="prompt-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9000; align-items:center; justify-content:center;">
+    <div class="confirm-box" style="min-width:280px;">
+        <h3 id="prompt-title"></h3>
+        <p id="prompt-msg" style="color:var(--text-dim); font-size:0.9rem; margin-bottom:12px;"></p>
+        <div id="prompt-input-area"></div>
+        <div class="btn-row" style="margin-top:12px;">
+            <button class="btn btn-secondary btn-sm" id="prompt-cancel">Cancel</button>
+            <button class="btn btn-primary btn-sm" id="prompt-ok">OK</button>
+        </div>
+    </div>
+</div>
+
 <script>
 
 // ═══════════════════════════════════════════════════════════════════
@@ -289,6 +301,32 @@ function themedConfirm(title, msg, opts = {}) {
         };
         okBtn.onclick = () => cleanup(true);
         document.getElementById('confirm-cancel').onclick = () => cleanup(false);
+    });
+}
+
+function themedPrompt(title, msg, defaultVal = '', inputType = 'number') {
+    return new Promise(resolve => {
+        const overlay = document.getElementById('prompt-overlay');
+        document.getElementById('prompt-title').textContent = title;
+        document.getElementById('prompt-msg').textContent = msg;
+        const area = document.getElementById('prompt-input-area');
+        area.innerHTML = `<input id="prompt-input" type="${inputType}" value="${defaultVal}" style="width:100%;">`;
+        overlay.style.display = 'flex';
+        const input = document.getElementById('prompt-input');
+        setTimeout(() => { input.focus(); input.select(); }, 50);
+
+        const cleanup = (val) => {
+            overlay.style.display = 'none';
+            document.getElementById('prompt-ok').onclick = null;
+            document.getElementById('prompt-cancel').onclick = null;
+            resolve(val);
+        };
+        document.getElementById('prompt-ok').onclick = () => cleanup(input.value);
+        document.getElementById('prompt-cancel').onclick = () => cleanup(null);
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') cleanup(input.value);
+            if (e.key === 'Escape') cleanup(null);
+        };
     });
 }
 
@@ -505,7 +543,7 @@ async function markDamaged(itemId, sessionId, totalQty) {
     let damagedQty = totalQty;
 
     if (totalQty > 1) {
-        const input = prompt(`How many are damaged? (1-${totalQty})`, totalQty);
+        const input = await themedPrompt(`Mark as Damaged`, `How many are damaged? (1–${totalQty})`, totalQty);
         if (input === null) return;
         damagedQty = parseInt(input);
         if (isNaN(damagedQty) || damagedQty < 1 || damagedQty > totalQty) {
@@ -669,7 +707,7 @@ async function relinkManual() {
 }
 
 async function editItemQty(itemId, sessionId, currentQty) {
-    const input = prompt(`New quantity (currently ${currentQty}):`, currentQty);
+    const input = await themedPrompt('Change Quantity', `Current quantity: ${currentQty}`, currentQty);
     if (input === null) return;
     const qty = parseInt(input);
     if (isNaN(qty) || qty < 1) { alert('Must be at least 1'); return; }
@@ -709,10 +747,12 @@ let _bdSaveToCache = true;
 let _bdVariantId = null;      // if editing an existing variant
 let _bdVariantName = 'Standard';
 let _bdQtyToBreak = null;     // null = all
+let _bdStorePrices = {};      // tcgplayer_id -> {shopify_price, shopify_qty, handle}
 
 async function openBreakdown(itemId, sessionId, productName, parentQty, parentTcgId, parentMarket) {
     _breakDownItemId = itemId;
     _breakDownComponents = [];
+    _bdStorePrices = {};
     _currentSessionId = sessionId;
     _breakDownParentTcgId = parentTcgId || null;
     _breakDownParentMarket = parseFloat(parentMarket) || 0;
@@ -855,7 +895,7 @@ function bdApplyVariant(v) {
         if (pn) { pn.value = v.notes; document.getElementById('bd-promo-row').style.display = 'block'; }
     }
     bdRenderComponents();
-    const banner = document.getElementById('bd-variants-banner');
+    bdFetchStorePrices();
     if (banner) {
         const note = document.createElement('div');
         note.style.cssText = 'font-size:0.8rem; color:var(--green); padding:6px 0;';
@@ -908,6 +948,7 @@ function bdAddComponent(tcgId, name, setName, price) {
     if (existing) { existing.quantity += 1; }
     else { _breakDownComponents.push({ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1 }); }
     bdRenderComponents();
+    bdFetchStorePrices();
     document.getElementById('bd-search-results').innerHTML = '';
     document.getElementById('bd-search').value = '';
     document.getElementById('bd-search').focus();
@@ -919,15 +960,42 @@ function bdUpdateValueSummary() {
     const qty = _bdQtyToBreak || _breakDownParentQty;
     const totalMkt = _breakDownComponents.reduce((s, c) => s + (parseFloat(c.market_price)||0) * (parseInt(c.quantity)||1), 0);
     const parentMkt = _breakDownParentMarket;
-    let html = `<span style="color:var(--text);">Total: <strong>$${totalMkt.toFixed(2)}</strong></span>`;
+
+    // Compute store total if we have prices
+    const storeComponents = _breakDownComponents.filter(c => c.tcgplayer_id && _bdStorePrices[c.tcgplayer_id]);
+    const totalStore = storeComponents.reduce((s, c) => {
+        const sp = _bdStorePrices[c.tcgplayer_id]?.shopify_price || 0;
+        return s + sp * (parseInt(c.quantity)||1);
+    }, 0);
+    const allHaveStore = _breakDownComponents.length > 0 && storeComponents.length === _breakDownComponents.length;
+
+    let html = `<span style="color:var(--text);">Market total: <strong>$${totalMkt.toFixed(2)}</strong></span>`;
     if (parentMkt > 0 && totalMkt > 0) {
         const diff = totalMkt - parentMkt;
         const pct = (diff / parentMkt * 100);
         const col = diff >= 0 ? 'var(--green)' : 'var(--red)';
-        html += `<span style="color:${col}; margin-left:8px;">${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)</span>`;
+        html += `<span style="color:${col}; margin-left:8px;">${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} vs parent</span>`;
+    }
+    if (totalStore > 0) {
+        const storeCol = totalStore >= totalMkt ? 'var(--green)' : 'var(--amber)';
+        html += `<span style="color:${storeCol}; margin-left:12px;">Store total: <strong>$${totalStore.toFixed(2)}</strong>${!allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComponents.length}/${_breakDownComponents.length} in store)</small>` : ''}</span>`;
     }
     if (_bdSaveToCache) html += `<span style="color:var(--green); margin-left:8px; font-size:0.75rem;">&#x1F4BE;</span>`;
     el.innerHTML = html;
+}
+
+async function bdFetchStorePrices() {
+    const ids = _breakDownComponents.map(c => c.tcgplayer_id).filter(Boolean);
+    if (!ids.length) return;
+    try {
+        const r = await fetch('/api/store-prices', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ tcgplayer_ids: ids })
+        });
+        const d = await r.json();
+        _bdStorePrices = d.prices || {};
+    } catch(e) { _bdStorePrices = {}; }
+    bdRenderComponents();
 }
 
 function bdRenderComponents() {
@@ -938,9 +1006,20 @@ function bdRenderComponents() {
         bdUpdateValueSummary();
         return;
     }
-    el.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:0.85rem;"><thead><tr><th>Component</th><th style="width:70px;">Qty</th><th style="width:90px;">Market</th><th style="width:30px;"></th></tr></thead><tbody>` +
-        _breakDownComponents.map((c, idx) =>
-            `<tr>
+    const hasStore = Object.keys(_bdStorePrices).length > 0;
+    el.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:0.85rem;"><thead><tr>
+        <th>Component</th>
+        <th style="width:70px;">Qty</th>
+        <th style="width:90px;">Market</th>
+        ${hasStore ? '<th style="width:90px; color:var(--accent);">Store ↗</th>' : ''}
+        <th style="width:30px;"></th>
+    </tr></thead><tbody>` +
+        _breakDownComponents.map((c, idx) => {
+            const sp = c.tcgplayer_id ? _bdStorePrices[c.tcgplayer_id] : null;
+            const storeCell = hasStore
+                ? `<td style="color:${sp ? 'var(--green)' : 'var(--text-dim)'}; font-size:0.8rem;">${sp ? '$' + parseFloat(sp.shopify_price).toFixed(2) + (sp.shopify_qty === 0 ? '<br><small style="color:var(--red);">qty 0</small>' : '') : '—'}</td>`
+                : '';
+            return `<tr>
                 <td>
                     <span>${c.product_name}</span><br>
                     <small style="color:${c.tcgplayer_id ? 'var(--text-dim)' : 'var(--red)'};">
@@ -952,10 +1031,11 @@ function bdRenderComponents() {
                     onchange="_breakDownComponents[${idx}].quantity = parseInt(this.value)||1; bdUpdateValueSummary();"></td>
                 <td><input type="number" value="${(c.market_price||0).toFixed(2)}" min="0" step="0.01" style="width:80px;"
                     onchange="_breakDownComponents[${idx}].market_price = parseFloat(this.value)||0; bdUpdateValueSummary();"></td>
+                ${storeCell}
                 <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 6px;"
-                    onclick="_breakDownComponents.splice(${idx},1); bdRenderComponents();">&#x2715;</button></td>
-            </tr>`
-        ).join('') + '</tbody></table></div>';
+                    onclick="_breakDownComponents.splice(${idx},1); _bdStorePrices={}; bdRenderComponents();">&#x2715;</button></td>
+            </tr>`;
+        }).join('') + '</tbody></table></div>';
     bdUpdateValueSummary();
 }
 

@@ -180,7 +180,7 @@
         .action-dropdown {
             display: none; position: fixed;
             z-index: 1050; background: var(--surface-2); border: 1px solid var(--border);
-            border-radius: 6px; padding: 4px; width: 160px;
+            border-radius: 6px; padding: 4px; min-width: 200px; width: auto; max-width: 260px;
             box-shadow: 0 4px 16px rgba(0,0,0,0.4);
         }
         .action-dropdown.show { display: block !important; }
@@ -2243,7 +2243,7 @@
                             ${found && i.store_title !== i.product_name ? '<br><small style="color:var(--text-dim);">Shopify: ' + i.store_title + '</small>' : ''}
                             ${i.store_note ? '<br><small style="color:var(--amber);">&#x26A0; ' + i.store_note + '</small>' : ''}
                             ${i.item_status === 'damaged' ? '<br><span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>' + (!i.damaged_variant_exists ? ' <span class="badge" style="background:var(--red);color:#fff;font-size:0.65rem;">Needs Listing</span>' : '') : ''}
-                            ${bd ? `<br><small style="color:var(--text-dim);">&#x1F4E6; ${bd.variant_count > 1 ? bd.variant_count + ' configs' : bd.variant_name || 'breakdown'}: ${bd.component_count} items &middot; $${bdValue.toFixed(2)}${bd.variant_notes ? ' &middot; <em>' + bd.variant_notes + '</em>' : ''}${!bd.all_components_in_store ? ' <span style="color:var(--amber);">(' + bd.components_in_store_count + '/' + bd.total_components + ' in store)</span>' : ' <span style="color:var(--green);">(all in store)</span>'}</small>` : ''}
+                            ${bd ? `<br><small style="color:var(--text-dim);">&#x1F4E6; ${bd.variant_count > 1 ? bd.variant_count + ' configs' : bd.variant_name || 'breakdown'}: ${bd.component_count} items &middot; <span title="Component market value">mkt $${bdValue.toFixed(2)}</span>${bd.variant_notes ? ' &middot; <em>' + bd.variant_notes + '</em>' : ''}</small>` : ''}
                         </td>
                         <td>$${i.unitOffer.toFixed(2)}${i.quantity > 1 ? ' &times; ' + i.quantity : ''}</td>
                         <td style="${found ? 'font-weight:600;' : ''}">
@@ -3475,12 +3475,14 @@
     let _intakeBdComponents = [];
     let _intakeBdVariantId = null;
     let _intakeBdSave = true;
+    let _ibdStorePrices = {};
 
     async function openIntakeBreakdown(tcgId, productName) {
         _intakeBdTcgId = tcgId;
         _intakeBdProductName = productName;
         _intakeBdComponents = [];
         _intakeBdVariantId = null;
+        _ibdStorePrices = {};
 
         const body = document.getElementById('intake-breakdown-body');
         body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
@@ -3596,6 +3598,7 @@
         const badge = document.getElementById('ibd-editing-badge');
         if (badge) badge.style.display = 'inline';
         ibdRenderComponents();
+        ibdFetchStorePrices();
     }
 
     async function intakeBdDeleteVariant(variantId, name) {
@@ -3638,28 +3641,65 @@
         if (existing) { existing.quantity += 1; }
         else { _intakeBdComponents.push({ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1 }); }
         ibdRenderComponents();
+        ibdFetchStorePrices();
         document.getElementById('ibd-search-results').innerHTML = '';
         document.getElementById('ibd-search').value = '';
         document.getElementById('ibd-search').focus();
+    }
+
+    async function ibdFetchStorePrices() {
+        const ids = _intakeBdComponents.map(c => c.tcgplayer_id).filter(Boolean);
+        if (!ids.length) return;
+        try {
+            const r = await fetch('/api/store-prices', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ tcgplayer_ids: ids })
+            });
+            const d = await r.json();
+            _ibdStorePrices = d.prices || {};
+        } catch(e) { _ibdStorePrices = {}; }
+        ibdRenderComponents();
     }
 
     function ibdRenderComponents() {
         const el = document.getElementById('ibd-components-list');
         const summary = document.getElementById('ibd-value-summary');
         if (!el) return;
-        const total = _intakeBdComponents.reduce((s,c) => s + (parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
-        if (summary) summary.innerHTML = _intakeBdComponents.length ? `Total: <strong>$${total.toFixed(2)}</strong>` : '';
+        const totalMkt = _intakeBdComponents.reduce((s,c) => s + (parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
+        const storeComps = _intakeBdComponents.filter(c => c.tcgplayer_id && _ibdStorePrices[c.tcgplayer_id]);
+        const totalStore = storeComps.reduce((s,c) => s + (_ibdStorePrices[c.tcgplayer_id].shopify_price||0)*(parseInt(c.quantity)||1), 0);
+        const allHaveStore = _intakeBdComponents.length > 0 && storeComps.length === _intakeBdComponents.length;
+        if (summary) {
+            let sh = _intakeBdComponents.length ? `Market total: <strong>$${totalMkt.toFixed(2)}</strong>` : '';
+            if (totalStore > 0) {
+                const storeCol = totalStore >= totalMkt ? 'var(--green)' : 'var(--amber)';
+                sh += ` &nbsp;·&nbsp; <span style="color:${storeCol};">Store: <strong>$${totalStore.toFixed(2)}</strong>${!allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComps.length}/${_intakeBdComponents.length})</small>` : ''}</span>`;
+            }
+            summary.innerHTML = sh;
+        }
         if (!_intakeBdComponents.length) {
             el.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No components yet.</p>';
             return;
         }
-        el.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:0.85rem;"><thead><tr><th>Component</th><th style="width:70px;">Qty</th><th style="width:90px;">Market</th><th style="width:30px;"></th></tr></thead><tbody>` +
-            _intakeBdComponents.map((c, idx) => `<tr>
-                <td>${c.product_name}<br><small style="color:${c.tcgplayer_id?'var(--text-dim)':'var(--red)'};">${c.tcgplayer_id?'TCG#'+c.tcgplayer_id:'⚠ No TCG ID'}${c.set_name?' · '+c.set_name:''}</small></td>
-                <td><input type="number" value="${c.quantity}" min="1" style="width:55px;" onchange="_intakeBdComponents[${idx}].quantity=parseInt(this.value)||1; ibdRenderComponents();"></td>
-                <td><input type="number" value="${(c.market_price||0).toFixed(2)}" min="0" step="0.01" style="width:80px;" onchange="_intakeBdComponents[${idx}].market_price=parseFloat(this.value)||0; ibdRenderComponents();"></td>
-                <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 6px;" onclick="_intakeBdComponents.splice(${idx},1); ibdRenderComponents();">✕</button></td>
-            </tr>`).join('') + '</tbody></table></div>';
+        const hasStore = Object.keys(_ibdStorePrices).length > 0;
+        el.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:0.85rem;"><thead><tr>
+            <th>Component</th><th style="width:70px;">Qty</th><th style="width:90px;">Market</th>
+            ${hasStore ? '<th style="width:90px; color:var(--accent);">Store ↗</th>' : ''}
+            <th style="width:30px;"></th>
+        </tr></thead><tbody>` +
+            _intakeBdComponents.map((c, idx) => {
+                const sp = c.tcgplayer_id ? _ibdStorePrices[c.tcgplayer_id] : null;
+                const storeCell = hasStore
+                    ? `<td style="color:${sp ? 'var(--green)' : 'var(--text-dim)'}; font-size:0.8rem;">${sp ? '$' + parseFloat(sp.shopify_price).toFixed(2) + (sp.shopify_qty === 0 ? '<br><small style="color:var(--red);">qty 0</small>' : '') : '—'}</td>`
+                    : '';
+                return `<tr>
+                    <td>${c.product_name}<br><small style="color:${c.tcgplayer_id?'var(--text-dim)':'var(--red)'};">${c.tcgplayer_id?'TCG#'+c.tcgplayer_id:'⚠ No TCG ID'}${c.set_name?' · '+c.set_name:''}</small></td>
+                    <td><input type="number" value="${c.quantity}" min="1" style="width:55px;" onchange="_intakeBdComponents[${idx}].quantity=parseInt(this.value)||1; ibdRenderComponents();"></td>
+                    <td><input type="number" value="${(c.market_price||0).toFixed(2)}" min="0" step="0.01" style="width:80px;" onchange="_intakeBdComponents[${idx}].market_price=parseFloat(this.value)||0; ibdRenderComponents();"></td>
+                    ${storeCell}
+                    <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 6px;" onclick="_intakeBdComponents.splice(${idx},1); _ibdStorePrices={}; ibdRenderComponents();">✕</button></td>
+                </tr>`;
+            }).join('') + '</tbody></table></div>';
     }
 
     async function ibdSaveVariant() {

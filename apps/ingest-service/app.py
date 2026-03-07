@@ -1962,6 +1962,22 @@ def get_breakdown_cache_batch():
     return jsonify({"summaries": _serialize(summaries)})
 
 
+@app.route("/api/store-prices", methods=["POST"])
+def get_store_prices():
+    """Look up shopify_product_cache prices for component tcgplayer_ids."""
+    data = request.get_json(silent=True) or {}
+    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
+    if not tcg_ids:
+        return jsonify({"prices": {}})
+    ph = ",".join(["%s"] * len(tcg_ids))
+    rows = db.query(
+        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title FROM shopify_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+        tuple(tcg_ids)
+    )
+    prices = {r["tcgplayer_id"]: dict(r) for r in rows}
+    return jsonify({"prices": _serialize(prices)})
+
+
 # ==========================================
 # MAIN
 # ==========================================

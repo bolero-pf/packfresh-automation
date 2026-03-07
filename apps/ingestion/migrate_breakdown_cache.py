@@ -18,7 +18,17 @@ from psycopg2.extras import RealDictCursor
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL not set")
+    # Auto-load from .env in this dir or nearby
+    for _p in [".env", "../.env", "../intake/ingest-service/.env", "../../intake/ingest-service/.env"]:
+        if os.path.exists(_p):
+            for _line in open(_p):
+                if _line.strip().startswith("DATABASE_URL="):
+                    DATABASE_URL = _line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+        if DATABASE_URL:
+            break
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL not set — set it as an env var or place a .env file here")
 
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -152,6 +162,19 @@ else:
         print(f"  + Migrated {migrated} cache entries to variant structure")
     else:
         print("  = sealed_breakdown_components exists (new schema)")
+
+# ── Fix breakdown_id NOT NULL if it still exists ─────────────────────────────
+if column_exists("sealed_breakdown_components", "breakdown_id") and column_exists("sealed_breakdown_components", "variant_id"):
+    cur.execute("""
+        SELECT is_nullable FROM information_schema.columns
+        WHERE table_name='sealed_breakdown_components' AND column_name='breakdown_id'
+    """)
+    row = cur.fetchone()
+    if row and row["is_nullable"] == "NO":
+        cur.execute("ALTER TABLE sealed_breakdown_components ALTER COLUMN breakdown_id DROP NOT NULL")
+        print("  + Dropped NOT NULL constraint from breakdown_id")
+    else:
+        print("  = breakdown_id already nullable")
 
 # ── Refresh denorm totals ─────────────────────────────────────────────────
 cur.execute("""

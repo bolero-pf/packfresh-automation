@@ -725,6 +725,26 @@ def breakdown_cache_batch():
     return jsonify({"summaries": _serialize(summaries)})
 
 
+@app.route("/api/store-prices", methods=["POST"])
+def get_store_prices():
+    """
+    Look up shopify_product_cache prices for a list of tcgplayer_ids.
+    Body: {tcgplayer_ids: [int, ...]}
+    Returns: {tcgplayer_id: {shopify_price, shopify_qty, handle, title}}
+    """
+    data = request.get_json(silent=True) or {}
+    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
+    if not tcg_ids:
+        return jsonify({"prices": {}})
+    ph = ",".join(["%s"] * len(tcg_ids))
+    rows = db.query(
+        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title FROM shopify_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+        tuple(tcg_ids)
+    )
+    prices = {r["tcgplayer_id"]: dict(r) for r in rows}
+    return jsonify({"prices": _serialize(prices)})
+
+
 @app.route("/api/ingest/item/<item_id>/break-down", methods=["POST"])
 def break_down_item_endpoint(item_id):
     """
