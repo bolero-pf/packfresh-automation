@@ -81,6 +81,22 @@
         .badge-red { background: var(--red-bg); color: var(--red); }
         .badge-dim { background: var(--surface-2); color: var(--text-dim); }
 
+        .action-dropdown {
+            display: none; position: fixed;
+            z-index: 1050; background: var(--surface-2); border: 1px solid var(--border);
+            border-radius: 6px; padding: 4px; min-width: 180px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        }
+        .action-dropdown.show { display: block !important; }
+        .action-dropdown button {
+            display: block; width: 100%; text-align: left; font-size: 0.8rem;
+            background: none; color: var(--text); padding: 8px 10px;
+            border: none; border-radius: 4px; cursor: pointer; white-space: nowrap;
+        }
+        .action-dropdown button:hover { background: var(--surface); }
+        .action-dropdown button.danger { color: var(--red); }
+        .action-dropdown hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+
         /* ─── ALERTS ─── */
         .alert {
             padding: 12px 16px; border-radius: 8px; margin-bottom: 16px;
@@ -329,6 +345,28 @@ function themedPrompt(title, msg, defaultVal = '', inputType = 'number') {
         };
     });
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// ACTION DROPDOWN
+// ═══════════════════════════════════════════════════════════════════
+
+function toggleActionMenu(event, dd) {
+    if (event) event.stopPropagation();
+    document.querySelectorAll('.action-dropdown.show').forEach(d => { if (d !== dd) d.classList.remove('show'); });
+    const btn = dd.previousElementSibling;
+    const rect = btn.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const dropH = 200;
+    dd.style.left = Math.max(8, rect.right - 180) + 'px';
+    dd.style.top = spaceBelow > dropH ? (rect.bottom + 4) + 'px' : Math.max(4, rect.top - dropH) + 'px';
+    dd.classList.toggle('show');
+}
+
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.action-dropdown') && !e.target.closest('.action-trigger')) {
+        document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
+    }
+});
 
 // ═══════════════════════════════════════════════════════════════════
 // SESSION LIST
@@ -635,33 +673,47 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     if (isChild) badges += ' <span class="badge badge-blue" style="font-size:0.65rem;">FROM BREAKDOWN</span>';
     if (!item.is_mapped) badges += ' <span class="badge badge-amber" style="font-size:0.65rem;">UNMAPPED</span>';
 
-    let actions = '';
-    if (isReceived && !isBroken) {
-        actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="openBreakdown('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button> `;
-        actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="relinkItem('${item.id}', '${sessionId}')">🔗 Relink</button> `;
-        actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏ Qty</button> `;
-        if (!isDamaged) {
-            actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠ Damage</button> `;
-        } else {
-            actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="markGood('${item.id}', '${sessionId}')">✅ Good</button> `;
-        }
-        actions += `<button class="btn btn-sm" style="font-size:0.72rem;padding:3px 8px;color:var(--red);" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕</button> `;
-    }
-    if (isReceived && isBroken) {
-        actions += `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;border-color:var(--amber);" onclick="undoBreakdown('${item.id}', '${sessionId}')">↩ Undo Breakdown</button> `;
+    let actionCell = '';
+    if (isReceived && !isBroken && !isChild) {
+        const isApproved = _approvedItems.has(item.id);
+        const approveStyle = isApproved
+            ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;'
+            : 'color:var(--text-dim);border-color:var(--border);width:32px;';
+        const damageToggle = isDamaged
+            ? `<button onclick="markGood('${item.id}', '${sessionId}')">✅ Mark Good</button>`
+            : `<button onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠️ Mark Damaged</button>`;
+        actionCell = `
+            <div style="display:flex; align-items:center; gap:6px;">
+                <button class="btn btn-sm" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>
+                <button class="btn btn-sm btn-primary" style="font-size:0.78rem;padding:3px 10px;" onclick="openBreakdown('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button>
+                <div class="action-dropdown-container" style="position:relative;display:inline-block;">
+                    <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.78rem;padding:3px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                    <div class="action-dropdown">
+                        <button onclick="relinkItem('${item.id}', '${sessionId}')">🔗 Relink</button>
+                        <button onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Edit Qty</button>
+                        ${damageToggle}
+                        <hr>
+                        <button class="danger" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕ Delete</button>
+                    </div>
+                </div>
+            </div>`;
+    } else if (isReceived && isBroken) {
+        actionCell = `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;border-color:var(--amber);" onclick="undoBreakdown('${item.id}', '${sessionId}')">↩ Undo</button>`;
+    } else if (isReceived && isChild) {
+        actionCell = `<div style="display:flex;gap:6px;">
+            <button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Qty</button>
+            <button class="btn btn-sm" style="font-size:0.72rem;padding:3px 8px;color:var(--red);" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕</button>
+        </div>`;
     }
 
     const approvedStyle = _approvedItems.has(item.id) ? 'opacity:0.5;' : '';
-    const approveBtn = isReceived && !isBroken && !isChild
-        ? `<button class="btn btn-sm" style="font-size:0.7rem;padding:2px 7px;${_approvedItems.has(item.id) ? 'background:var(--green);color:#000;border-color:var(--green);' : 'color:var(--text-dim);'}" onclick="toggleApproved('${item.id}')">✓</button> `
-        : '';
     return `<tr style="${rowStyle}${approvedStyle}" data-item-id="${item.id}">
         <td class="name-cell">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
         <td>${item.quantity || 1}</td>
         <td><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
         <td>$${(item.market_price || 0).toFixed(2)}</td>
         <td>$${(item.offer_price || 0).toFixed(2)}${(item.quantity || 1) > 1 ? '<br><small style="color:var(--text-dim);">$' + ((item.offer_price || 0) / (item.quantity || 1)).toFixed(2) + '/ea</small>' : ''}</td>
-        ${isReceived ? '<td>' + approveBtn + actions + '</td>' : ''}
+        ${isReceived ? '<td>' + actionCell + '</td>' : ''}
     </tr>`;
 }
 
