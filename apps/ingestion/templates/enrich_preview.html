@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Listing Preview · Pack Fresh</title>
+<style>
+    :root {
+        --bg: #0f1117;
+        --surface: #1a1d27;
+        --surface-2: #22263a;
+        --border: #2d3148;
+        --text: #e8eaf0;
+        --text-dim: #8b90a5;
+        --accent: #4f7df9;
+        --accent-hover: #3b6ae8;
+        --green: #2dd4a0;
+        --green-bg: rgba(45,212,160,0.12);
+        --amber: #f5a623;
+        --amber-bg: rgba(245,166,35,0.12);
+        --red: #f05252;
+        --red-bg: rgba(240,82,82,0.1);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+           background: var(--bg); color: var(--text); min-height: 100vh; }
+
+    header {
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        padding: 0 24px;
+        height: 52px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    header .logo { font-weight: 700; font-size: 1rem; letter-spacing: -0.3px; }
+    header .logo span { color: var(--green); }
+    header .subtitle { color: var(--text-dim); font-size: 0.85rem; }
+    header a { margin-left: auto; color: var(--text-dim); font-size: 0.8rem; text-decoration: none; }
+    header a:hover { color: var(--text); }
+
+    .container { max-width: 900px; margin: 0 auto; padding: 32px 24px; }
+
+    /* Input card */
+    .lookup-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 28px;
+        margin-bottom: 28px;
+    }
+    .lookup-card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 6px; }
+    .lookup-card p { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 20px; }
+
+    .input-row { display: flex; gap: 10px; align-items: flex-end; }
+    .input-row input {
+        flex: 1;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        padding: 10px 14px;
+        font-size: 1rem;
+        font-family: inherit;
+        transition: border-color 0.15s;
+    }
+    .input-row input:focus { outline: none; border-color: var(--accent); }
+    .input-row input::placeholder { color: var(--text-dim); }
+    .btn {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 20px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        cursor: pointer;
+        font-family: inherit;
+        transition: background 0.15s;
+        white-space: nowrap;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-success { background: var(--green); color: #000; }
+    .btn-success:hover { background: #25bD8e; }
+
+    /* Loading */
+    .spinner { display: inline-block; width: 16px; height: 16px;
+               border: 2px solid rgba(255,255,255,0.2);
+               border-top-color: #fff; border-radius: 50%;
+               animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Result card */
+    #result { display: none; }
+    .result-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    .result-header {
+        padding: 20px 24px 16px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+    }
+    .result-header h2 { font-size: 1.15rem; font-weight: 700; line-height: 1.3; }
+    .result-header .set { color: var(--text-dim); font-size: 0.85rem; margin-top: 3px; }
+
+    .result-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0;
+    }
+    .result-section {
+        padding: 20px 24px;
+        border-bottom: 1px solid var(--border);
+    }
+    .result-section:nth-child(odd) { border-right: 1px solid var(--border); }
+    .result-section h3 {
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-dim);
+        margin-bottom: 10px;
+    }
+
+    /* Image preview */
+    .image-section {
+        grid-column: 1 / -1;
+        padding: 20px 24px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        gap: 16px;
+        align-items: flex-start;
+    }
+    .image-orig, .image-processed {
+        flex: 1;
+        text-align: center;
+    }
+    .image-orig h3, .image-processed h3 {
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-dim);
+        margin-bottom: 10px;
+    }
+    .image-frame {
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-height: 140px;
+    }
+    .image-frame img { max-width: 100%; max-height: 240px; border-radius: 4px; }
+    .image-placeholder {
+        color: var(--text-dim);
+        font-size: 0.8rem;
+        padding: 20px;
+    }
+
+    /* Tags */
+    .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag {
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        padding: 3px 10px;
+        font-size: 0.78rem;
+        color: var(--text-dim);
+    }
+    .tag.highlight { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+    .tag.era { background: rgba(79,125,249,0.1); border-color: var(--accent); color: var(--accent); }
+
+    /* Stats row */
+    .stat-row { display: flex; gap: 8px; align-items: baseline; }
+    .stat-value { font-size: 1.1rem; font-weight: 700; }
+    .stat-unit { font-size: 0.8rem; color: var(--text-dim); }
+
+    /* Metafields table */
+    .meta-table { width: 100%; font-size: 0.85rem; border-collapse: collapse; }
+    .meta-table tr td:first-child { color: var(--text-dim); padding-right: 16px; padding-bottom: 6px; white-space: nowrap; }
+    .meta-table tr td:last-child { color: var(--text); font-weight: 500; }
+
+    /* Errors */
+    .errors-section {
+        padding: 16px 24px;
+        background: var(--red-bg);
+        border-top: 1px solid var(--red);
+    }
+    .errors-section h3 { font-size: 0.75rem; font-weight: 600; color: var(--red); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .errors-section ul { list-style: none; }
+    .errors-section li { font-size: 0.82rem; color: var(--red); padding: 2px 0; }
+    .errors-section li::before { content: "· "; }
+
+    /* Action bar */
+    .action-bar {
+        padding: 20px 24px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        background: var(--surface-2);
+    }
+    .action-bar .note { color: var(--text-dim); font-size: 0.8rem; margin-left: auto; }
+
+    /* Alert */
+    .alert {
+        background: var(--red-bg);
+        border: 1px solid var(--red);
+        border-radius: 8px;
+        padding: 14px 18px;
+        color: var(--red);
+        font-size: 0.9rem;
+    }
+
+    /* Channel badges */
+    .channels { display: flex; flex-wrap: wrap; gap: 6px; }
+    .channel {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        background: var(--green-bg);
+        border: 1px solid var(--green);
+        border-radius: 6px;
+        padding: 3px 9px;
+        font-size: 0.78rem;
+        color: var(--green);
+    }
+    .channel::before { content: "✓"; font-size: 0.7rem; }
+
+    @media (max-width: 600px) {
+        .result-grid { grid-template-columns: 1fr; }
+        .result-section:nth-child(odd) { border-right: none; }
+        .image-section { flex-direction: column; }
+        .input-row { flex-direction: column; }
+    }
+</style>
+</head>
+<body>
+
+<header>
+    <div class="logo">Pack<span>Fresh</span></div>
+    <div class="subtitle">Listing Preview</div>
+    <a href="/">← Ingest</a>
+</header>
+
+<div class="container">
+
+    <div class="lookup-card">
+        <h2>Preview Listing from TCGPlayer ID</h2>
+        <p>Fetches product data from PPT and shows exactly what will be created in Shopify — no listing is made until you confirm.</p>
+        <div class="input-row">
+            <input type="number" id="tcg-input" placeholder="TCGPlayer ID e.g. 593457"
+                   onkeydown="if(event.key==='Enter') doPreview()">
+            <button class="btn" onclick="doPreview()" id="preview-btn">Preview</button>
+        </div>
+    </div>
+
+    <div id="error-box" style="margin-bottom:20px; display:none;"></div>
+    <div id="result"></div>
+
+</div>
+
+<script>
+    let _currentPptItem = null;
+
+    async function doPreview() {
+        const input = document.getElementById('tcg-input');
+        const tcgId = input.value.trim();
+        if (!tcgId) { input.focus(); return; }
+
+        const btn = document.getElementById('preview-btn');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>Loading…';
+        document.getElementById('error-box').style.display = 'none';
+        document.getElementById('result').style.display = 'none';
+
+        try {
+            // 1) Fetch PPT item data
+            const pptResp = await fetch(`/api/ppt/sealed/${encodeURIComponent(tcgId)}`);
+            if (!pptResp.ok) {
+                const d = await pptResp.json();
+                throw new Error(d.error || `PPT lookup failed (${pptResp.status})`);
+            }
+            const ppt = await pptResp.json();
+            _currentPptItem = ppt;
+
+            // 2) Fetch inference preview
+            const previewResp = await fetch('/api/enrich/preview', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    product_name: ppt.name,
+                    set_name: ppt.setName || '',
+                    tcgplayer_id: tcgId,
+                }),
+            });
+            const preview = await previewResp.json();
+
+            renderResult(ppt, preview);
+
+        } catch (err) {
+            showError(err.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = 'Preview';
+        }
+    }
+
+    function renderResult(ppt, preview) {
+        const marketPrice = ppt.prices?.market || 0;
+        const imageUrl = ppt.imageCdnUrl800 || ppt.imageCdnUrl400 || ppt.imageCdnUrl || '';
+
+        const era = preview.era || 'vintage';
+        const weight = preview.weight_oz || '—';
+        const tags = preview.tags || [];
+
+        // Separate type/era/set tags from general ones for display
+        const typeTagSet = new Set(['booster box','booster pack','etb','pcetb','blister',
+                                    'sleeved','tin','collection box','buildbattle',
+                                    'ultra premium collection','sealed','pokemon']);
+        const highlightTags = tags.filter(t => typeTagSet.has(t));
+        const eraTags = [era];
+        const otherTags = tags.filter(t => !typeTagSet.has(t) && t !== era);
+
+        const channels = ['Online Store', 'Shop', 'Point of Sale', 'Inbox', 'Facebook & Instagram'];
+
+        document.getElementById('result').innerHTML = `
+            <div class="result-card">
+                <div class="result-header">
+                    <div>
+                        <h2>${escHtml(ppt.name)}</h2>
+                        <div class="set">${escHtml(ppt.setName || '—')}</div>
+                    </div>
+                    <div style="text-align:right; flex-shrink:0;">
+                        <div style="font-size:0.7rem; color:var(--text-dim); margin-bottom:4px; text-transform:uppercase; letter-spacing:0.06em;">Market Price</div>
+                        <div style="font-size:1.4rem; font-weight:700; color:var(--green);">$${(+marketPrice).toFixed(2)}</div>
+                    </div>
+                </div>
+
+                <!-- Image preview -->
+                <div class="image-section">
+                    <div class="image-orig">
+                        <h3>Source Image (TCGPlayer)</h3>
+                        <div class="image-frame">
+                            ${imageUrl
+                                ? `<img src="${escHtml(imageUrl)}" alt="${escHtml(ppt.name)}">`
+                                : '<div class="image-placeholder">No image available</div>'}
+                        </div>
+                    </div>
+                    <div class="image-processed">
+                        <h3>After Processing (remove.bg + matte)</h3>
+                        <div class="image-frame">
+                            <div class="image-placeholder" style="text-align:center;">
+                                <div style="font-size:1.5rem; margin-bottom:6px;">🖼</div>
+                                2000×2000 transparent PNG<br>
+                                <span style="font-size:0.75rem;">Generated on listing creation</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tags + Weight -->
+                <div class="result-grid">
+                    <div class="result-section">
+                        <h3>Tags</h3>
+                        <div class="tags">
+                            ${highlightTags.map(t => `<span class="tag highlight">${escHtml(t)}</span>`).join('')}
+                            <span class="tag era">${escHtml(era)}</span>
+                            ${otherTags.map(t => `<span class="tag">${escHtml(t)}</span>`).join('')}
+                        </div>
+                    </div>
+                    <div class="result-section">
+                        <h3>Weight</h3>
+                        <div class="stat-row">
+                            <div class="stat-value">${weight}</div>
+                            <div class="stat-unit">oz</div>
+                        </div>
+                        <div style="margin-top:10px; font-size:0.8rem; color:var(--text-dim);">${((+weight) / 16).toFixed(2)} lb</div>
+                    </div>
+
+                    <div class="result-section">
+                        <h3>Product Details</h3>
+                        <table class="meta-table">
+                            <tr><td>Status</td><td><span style="color:var(--amber);">DRAFT</span></td></tr>
+                            <tr><td>Type</td><td>Pokemon</td></tr>
+                            <tr><td>Vendor</td><td>Pack Fresh</td></tr>
+                            <tr><td>Template</td><td>product.cro-alt</td></tr>
+                            <tr><td>Category</td><td>Gaming Cards</td></tr>
+                        </table>
+                    </div>
+                    <div class="result-section">
+                        <h3>Metafields</h3>
+                        <table class="meta-table">
+                            <tr><td>era</td><td>${escHtml(era)}</td></tr>
+                            <tr><td>TCGPlayer ID</td><td>${escHtml(String(ppt.tcgPlayerId || tcgIdFromInput()))}</td></tr>
+                        </table>
+                    </div>
+
+                    <div class="result-section" style="grid-column: 1 / -1; border-right: none;">
+                        <h3>Published Channels</h3>
+                        <div class="channels">
+                            ${channels.map(c => `<span class="channel">${escHtml(c)}</span>`).join('')}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action bar -->
+                <div class="action-bar">
+                    <button class="btn btn-success" onclick="createListing()">
+                        ✦ Create Draft Listing
+                    </button>
+                    <button class="btn" style="background:var(--surface-2); color:var(--text); border:1px solid var(--border);"
+                            onclick="doPreview()">
+                        ↺ Refresh
+                    </button>
+                    <div class="note">Creates as DRAFT · will not appear in store until published</div>
+                </div>
+            </div>
+        `;
+        document.getElementById('result').style.display = 'block';
+    }
+
+    async function createListing() {
+        if (!_currentPptItem) return;
+        const tcgId = document.getElementById('tcg-input').value.trim();
+        const marketPrice = _currentPptItem.prices?.market || 0;
+
+        const btn = event.target;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>Creating…';
+
+        try {
+            const resp = await fetch('/api/enrich/create-listing', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    tcgplayer_id: parseInt(tcgId),
+                    price: parseFloat(marketPrice) || 0,
+                }),
+            });
+            const data = await resp.json();
+
+            if (!resp.ok) throw new Error(data.error || 'Create failed');
+
+            // Show success state
+            const actionBar = btn.closest('.action-bar');
+            const productId = data.product_id;
+            const shopifyStore = window.__shopifyStore || '';
+            const shopifyUrl = `https://${shopifyStore || 'your-store.myshopify.com'}/admin/products/${productId}`;
+
+            actionBar.innerHTML = `
+                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                    <span style="color:var(--green); font-weight:600;">✓ Draft created!</span>
+                    <a href="${escHtml(shopifyUrl)}" target="_blank"
+                       style="color:var(--accent); font-size:0.85rem; text-decoration:none;">
+                       Open in Shopify ↗
+                    </a>
+                    ${data.errors && data.errors.length
+                        ? `<span style="color:var(--amber); font-size:0.8rem;">⚠ ${data.errors.length} enrichment step(s) had errors</span>`
+                        : '<span style="color:var(--text-dim); font-size:0.8rem;">All enrichment steps succeeded</span>'}
+                </div>
+            `;
+
+            if (data.errors && data.errors.length) {
+                const errDiv = document.createElement('div');
+                errDiv.className = 'errors-section';
+                errDiv.innerHTML = `<h3>Enrichment Errors</h3><ul>${
+                    data.errors.map(e => `<li>${escHtml(e)}</li>`).join('')
+                }</ul>`;
+                btn.closest('.result-card').appendChild(errDiv);
+            }
+
+        } catch (err) {
+            btn.disabled = false;
+            btn.innerHTML = '✦ Create Draft Listing';
+            showError(err.message);
+        }
+    }
+
+    function showError(msg) {
+        const box = document.getElementById('error-box');
+        box.innerHTML = `<div class="alert">⚠ ${escHtml(msg)}</div>`;
+        box.style.display = 'block';
+    }
+
+    function escHtml(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function tcgIdFromInput() {
+        return document.getElementById('tcg-input').value.trim();
+    }
+</script>
+</body>
+</html>

@@ -830,6 +830,20 @@ def break_down_item_endpoint(item_id):
 # PRODUCT ENRICHMENT
 # ═══════════════════════════════════════════════════════════════════
 
+@app.route("/enrich")
+def enrich_page():
+    return render_template("enrich_preview.html")
+
+
+@app.route("/api/ppt/sealed/<int:tcgplayer_id>")
+def ppt_sealed_lookup(tcgplayer_id):
+    """Fetch a sealed product from PPT by TCGPlayer ID — used by the preview page."""
+    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    if not item:
+        return jsonify({"error": f"No PPT product found for TCGPlayer ID {tcgplayer_id}"}), 404
+    return jsonify(item)
+
+
 @app.route("/api/enrich/preview", methods=["POST"])
 def enrich_preview():
     """
