@@ -844,6 +844,15 @@ def ppt_sealed_lookup(tcgplayer_id):
     return jsonify(item)
 
 
+@app.route("/api/ppt/sealed/<int:tcgplayer_id>/raw")
+def ppt_sealed_raw(tcgplayer_id):
+    """Return the raw PPT response for debugging — shows all available fields."""
+    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    if not item:
+        return jsonify({"error": f"No PPT product found for TCGPlayer ID {tcgplayer_id}"}), 404
+    return jsonify({"keys": list(item.keys()), "data": item})
+
+
 @app.route("/api/enrich/preview", methods=["POST"])
 def enrich_preview():
     """
