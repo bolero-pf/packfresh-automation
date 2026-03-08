@@ -2,10 +2,11 @@
 """
 Order screening service:
   1) FIRSTTIME5 discount code abuse detection
-  2) High-value first-time order fraud flagging
-  3) Shopify fraud risk handling (medium → verify, high → auto-cancel)
-  4) Order cancelled → Klaviyo abuse notification
-  5) Order fulfilled → cleanup tags/holds
+  2) Tiered high-value first-time order verification ($700/$1000)
+  3) Spend spike detection ($1000+ with small prior history)
+  4) Shopify fraud risk handling (medium → verify, high → auto-cancel)
+  5) Order cancelled → Klaviyo abuse notification
+  6) Order fulfilled → cleanup tags/holds
 """
 from __future__ import annotations
 from datetime import datetime, timezone
@@ -15,8 +16,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-HIGH_VALUE_THRESHOLD = float(os.environ.get("HIGH_VALUE_THRESHOLD", "150.00"))
-FIRSTTIME5_CODE     = os.environ.get("FIRSTTIME5_CODE", "FIRSTTIME5")
+# ── CONFIG ──────────────────────────────────────────────────────────────
+TIER1_THRESHOLD   = float(os.environ.get("TIER1_THRESHOLD", "700.00"))   # photo ID + confirm address
+TIER2_THRESHOLD   = float(os.environ.get("TIER2_THRESHOLD", "1000.00"))  # photo ID + selfie + confirm address
+SPIKE_THRESHOLD   = float(os.environ.get("SPIKE_THRESHOLD", "1000.00"))  # spend spike minimum order
+SPIKE_RATIO       = float(os.environ.get("SPIKE_RATIO", "0.20"))        # prev max < 20% of current
+FIRSTTIME5_CODE   = os.environ.get("FIRSTTIME5_CODE", "FIRSTTIME5")
 
 import sys, os as _os
 _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
@@ -78,6 +83,25 @@ query OrdersWithDiscount($first: Int!, $after: String, $query: String!) {
       }
     }
     pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+# Get a customer's recent orders with totals (for spend spike detection)
+CUSTOMER_ORDERS_Q = """
+query CustomerOrders($customerId: ID!, $first: Int!) {
+  customer(id: $customerId) {
+    id
+    orders(first: $first, sortKey: CREATED_AT, reverse: true) {
+      edges {
+        node {
+          id
+          name
+          createdAt
+          currentTotalPriceSet { shopMoney { amount } }
+        }
+      }
+    }
   }
 }
 """
@@ -280,6 +304,22 @@ def _cancel_order(order_gid: str, staff_note: str, notify_customer: bool = False
         "staffNote": staff_note,
     })
 
+def _get_customer_max_previous_order(customer_gid: str, current_order_gid: str) -> float:
+    """Fetch the customer's previous orders and return the max total, excluding current order."""
+    data = shopify_gql(CUSTOMER_ORDERS_Q, {"customerId": customer_gid, "first": 50})
+    customer = data.get("data", {}).get("customer") or {}
+    edges = customer.get("orders", {}).get("edges", [])
+
+    max_total = 0.0
+    for edge in edges:
+        node = edge["node"]
+        if node["id"] == current_order_gid:
+            continue
+        total = float(node.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+        if total > max_total:
+            max_total = total
+    return max_total
+
 # ═══════════════════════════════════════════════════════════════════════
 #  CHECK 1: FIRSTTIME5 ABUSE DETECTION
 # ═══════════════════════════════════════════════════════════════════════
@@ -401,10 +441,15 @@ def check_firsttime5_abuse(order_gid: str) -> dict:
     return {"flagged": True, "reason": "firsttime5_reuse", "matches": matches[:5], "note": note_text}
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CHECK 2: HIGH-VALUE FIRST-TIME ORDER
+#  CHECK 2: HIGH-VALUE FIRST-TIME ORDER (tiered)
 # ═══════════════════════════════════════════════════════════════════════
 
 def check_high_value_first_order(order_gid: str) -> dict:
+    """
+    Tiered verification for first-time orders:
+      $700–$999:  photo ID + confirm shipping address     → id_verification_required
+      $1000+:     photo ID + selfie + confirm address      → id_selfie_required
+    """
     data = shopify_gql(ORDER_DETAIL_Q, {"id": order_gid})
     order = data["data"]["order"]
     customer = order.get("customer") or {}
@@ -414,22 +459,35 @@ def check_high_value_first_order(order_gid: str) -> dict:
         return {"flagged": False, "reason": "repeat_customer", "order_count": order_count}
 
     total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
-    if total < HIGH_VALUE_THRESHOLD:
+    if total < TIER1_THRESHOLD:
         return {"flagged": False, "reason": "below_threshold", "total": total}
 
     customer_gid = customer.get("id")
     order_name = order.get("name", "?")
     email = (customer.get("email") or "").strip()
 
+    # Determine tier
+    if total >= TIER2_THRESHOLD:
+        tier = 2
+        klaviyo_prop = "id_selfie_required"
+        verification_desc = "photo ID + selfie + shipping address confirmation"
+        tag = "high-value-tier2"
+        hold_reason = f"First order ${total:.2f} — photo ID + selfie required before fulfilling"
+    else:
+        tier = 1
+        klaviyo_prop = "id_verification_required"
+        verification_desc = "photo ID + shipping address confirmation"
+        tag = "high-value-tier1"
+        hold_reason = f"First order ${total:.2f} — photo ID required before fulfilling"
+
     note_text = (
-        f"⚠️ HIGH-VALUE FIRST ORDER — ${total:.2f}\n"
-        f"Order {order_name} requires ID verification before fulfilling.\n"
-        f"Customer: {customer.get('firstName', '')} {customer.get('lastName', '')} ({email})\n"
-        f"Threshold: ${HIGH_VALUE_THRESHOLD:.2f}"
+        f"⚠️ HIGH-VALUE FIRST ORDER (Tier {tier}) — ${total:.2f}\n"
+        f"Order {order_name} requires {verification_desc} before fulfilling.\n"
+        f"Customer: {customer.get('firstName', '')} {customer.get('lastName', '')} ({email})"
     )
 
     try:
-        shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["high-value-review", "hold-for-review"]})
+        shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": [tag, "hold-for-review"]})
     except Exception as e:
         print(f"[screening] Failed to tag order {order_gid}: {e}", flush=True)
 
@@ -439,7 +497,7 @@ def check_high_value_first_order(order_gid: str) -> dict:
         print(f"[screening] Failed to add note to {order_gid}: {e}", flush=True)
 
     try:
-        _hold_fulfillment(order_gid, "High-value first order — ID verification required before fulfilling")
+        _hold_fulfillment(order_gid, hold_reason)
     except Exception as e:
         print(f"[screening] Failed to hold fulfillment for {order_gid}: {e}", flush=True)
 
@@ -447,25 +505,109 @@ def check_high_value_first_order(order_gid: str) -> dict:
         try:
             external_id = customer_gid.split("/")[-1]
             upsert_profile(email=email, external_id=external_id, properties={
-                "id_verification_required": True,
-                "id_verification_order": order_name,
-                "id_verification_amount": total,
-                "id_verification_requested_at": datetime.now(timezone.utc).isoformat(),
+                klaviyo_prop: True,
+                f"{klaviyo_prop}_order": order_name,
+                f"{klaviyo_prop}_amount": total,
+                f"{klaviyo_prop}_requested_at": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e:
-            print(f"[screening] Klaviyo ID verification flag failed for {customer_gid}: {e}", flush=True)
+            print(f"[screening] Klaviyo verification flag failed for {customer_gid}: {e}", flush=True)
 
     if customer_gid:
         try:
-            shopify_gql(CUSTOMER_TAGS_ADD, {"id": customer_gid, "tags": ["high-value-review"]})
+            shopify_gql(CUSTOMER_TAGS_ADD, {"id": customer_gid, "tags": [tag]})
         except Exception as e:
             print(f"[screening] Failed to tag customer {customer_gid}: {e}", flush=True)
 
-    return {"flagged": True, "reason": "high_value_first_order", "total": total,
-            "order_name": order_name, "customer_gid": customer_gid, "note": note_text}
+    return {"flagged": True, "reason": f"high_value_tier{tier}", "tier": tier,
+            "total": total, "order_name": order_name, "customer_gid": customer_gid, "note": note_text}
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CHECK 3: SHOPIFY FRAUD RISK
+#  CHECK 3: SPEND SPIKE ($1000+ with small prior history)
+# ═══════════════════════════════════════════════════════════════════════
+
+def check_spend_spike(order_gid: str) -> dict:
+    """
+    For returning customers (ordersCount > 1):
+    Flag if order >= SPIKE_THRESHOLD and their max previous order < SPIKE_RATIO of current.
+    e.g. $1200 order flags if biggest prior order was < $240 (20%).
+    → spend_spike_verification_required on Klaviyo
+    """
+    data = shopify_gql(ORDER_DETAIL_Q, {"id": order_gid})
+    order = data["data"]["order"]
+    customer = order.get("customer") or {}
+
+    order_count = int(customer.get("numberOfOrders", 0) or 0)
+    if order_count <= 1:
+        return {"flagged": False, "reason": "first_time_customer"}
+
+    total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+    if total < SPIKE_THRESHOLD:
+        return {"flagged": False, "reason": "below_spike_threshold", "total": total}
+
+    customer_gid = customer.get("id")
+    if not customer_gid:
+        return {"flagged": False, "reason": "no_customer_gid"}
+
+    order_name = order.get("name", "?")
+    email = (customer.get("email") or "").strip()
+
+    # Fetch their previous orders
+    max_prev = _get_customer_max_previous_order(customer_gid, order_gid)
+    spike_ceiling = total * SPIKE_RATIO
+
+    if max_prev >= spike_ceiling:
+        return {"flagged": False, "reason": "no_spike", "total": total,
+                "max_previous": max_prev, "spike_ceiling": spike_ceiling}
+
+    note_text = (
+        f"⚠️ SPEND SPIKE DETECTED — ${total:.2f}\n"
+        f"Order {order_name} is significantly larger than this customer's history.\n"
+        f"Largest previous order: ${max_prev:.2f} (threshold: ${spike_ceiling:.2f})\n"
+        f"Customer: {customer.get('firstName', '')} {customer.get('lastName', '')} ({email})\n"
+        f"Requires photo ID + selfie + shipping address confirmation before fulfilling."
+    )
+
+    try:
+        shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["spend-spike-review", "hold-for-review"]})
+    except Exception as e:
+        print(f"[screening] Failed to tag order {order_gid}: {e}", flush=True)
+
+    try:
+        _add_order_note(order_gid, note_text)
+    except Exception as e:
+        print(f"[screening] Failed to add note to {order_gid}: {e}", flush=True)
+
+    try:
+        _hold_fulfillment(order_gid, f"Spend spike — ${total:.2f} vs max prev ${max_prev:.2f}. Verify before fulfilling.")
+    except Exception as e:
+        print(f"[screening] Failed to hold fulfillment for {order_gid}: {e}", flush=True)
+
+    if customer_gid and email:
+        try:
+            external_id = customer_gid.split("/")[-1]
+            upsert_profile(email=email, external_id=external_id, properties={
+                "spend_spike_verification_required": True,
+                "spend_spike_verification_order": order_name,
+                "spend_spike_verification_amount": total,
+                "spend_spike_verification_max_previous": max_prev,
+                "spend_spike_verification_requested_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            print(f"[screening] Klaviyo spend spike flag failed for {customer_gid}: {e}", flush=True)
+
+    if customer_gid:
+        try:
+            shopify_gql(CUSTOMER_TAGS_ADD, {"id": customer_gid, "tags": ["spend-spike-review"]})
+        except Exception as e:
+            print(f"[screening] Failed to tag customer {customer_gid}: {e}", flush=True)
+
+    return {"flagged": True, "reason": "spend_spike", "total": total,
+            "max_previous": max_prev, "spike_ceiling": spike_ceiling,
+            "order_name": order_name, "note": note_text}
+
+# ═══════════════════════════════════════════════════════════════════════
+#  CHECK 4: SHOPIFY FRAUD RISK
 # ═══════════════════════════════════════════════════════════════════════
 
 def check_fraud_risk(order_gid: str) -> dict:
@@ -479,16 +621,12 @@ def check_fraud_risk(order_gid: str) -> dict:
 
     risk = order.get("risk") or {}
     risk_level = None
-
-    # OrderRiskSummary uses 'recommendation' (ACCEPT/INVESTIGATE/CANCEL)
-    # and 'assessments' array with 'riskLevel' (HIGH/MEDIUM/LOW)
     recommendation = (risk.get("recommendation") or "").upper()
     if recommendation == "CANCEL":
         risk_level = "HIGH"
     elif recommendation == "INVESTIGATE":
         risk_level = "MEDIUM"
     else:
-        # Fall back to checking individual assessments
         for a in (risk.get("assessments") or []):
             level = (a.get("riskLevel") or "").upper()
             if level == "HIGH":
@@ -623,14 +761,12 @@ def on_order_cancelled(order_gid: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════════
 
 SCREENING_ORDER_TAGS = [
-    "hold-for-review", "FIRSTTIME5-review", "high-value-review", "fraud-medium",
+    "hold-for-review", "FIRSTTIME5-review",
+    "high-value-tier1", "high-value-tier2",
+    "spend-spike-review", "fraud-medium",
 ]
 
 def on_order_fulfilled(order_gid: str) -> dict:
-    """
-    Cleans up screening tags from the order when fulfilled.
-    Customer-level tags are kept as historical signal.
-    """
     data = shopify_gql(ORDER_DETAIL_Q, {"id": order_gid})
     order = data["data"]["order"]
     order_tags = set(order.get("tags") or [])
@@ -653,7 +789,7 @@ def on_order_fulfilled(order_gid: str) -> dict:
     except Exception as e:
         print(f"[screening] Failed to release holds for {order_gid}: {e}", flush=True)
 
-    # Clear Klaviyo id_verification_required
+    # Clear ALL Klaviyo verification flags
     customer = order.get("customer") or {}
     customer_gid = customer.get("id")
     email = (customer.get("email") or "").strip()
@@ -662,8 +798,10 @@ def on_order_fulfilled(order_gid: str) -> dict:
             external_id = customer_gid.split("/")[-1]
             upsert_profile(email=email, external_id=external_id, properties={
                 "id_verification_required": False,
+                "id_selfie_required": False,
+                "spend_spike_verification_required": False,
                 "fraud_verification_required": False,
-                "id_verification_cleared_at": datetime.now(timezone.utc).isoformat(),
+                "verification_cleared_at": datetime.now(timezone.utc).isoformat(),
             })
             result["klaviyo_cleared"] = True
         except Exception as e:
@@ -672,10 +810,14 @@ def on_order_fulfilled(order_gid: str) -> dict:
     return result
 
 # ═══════════════════════════════════════════════════════════════════════
-#  COMBINED SCREENER (for order_created)
+#  COMBINED SCREENERS
 # ═══════════════════════════════════════════════════════════════════════
 
 def screen_order(order_gid: str) -> dict:
+    """
+    First-time order screening (ordersCount == 1).
+    Runs FIRSTTIME5 abuse + tiered high-value checks.
+    """
     results = {"order_gid": order_gid, "firsttime5": None, "high_value": None}
 
     try:
@@ -694,4 +836,20 @@ def screen_order(order_gid: str) -> dict:
         (results["firsttime5"] or {}).get("flagged", False)
         or (results["high_value"] or {}).get("flagged", False)
     )
+    return results
+
+def screen_order_spike(order_gid: str) -> dict:
+    """
+    Returning customer screening (ordersCount > 1).
+    Runs spend spike check only.
+    """
+    results = {"order_gid": order_gid, "spend_spike": None}
+
+    try:
+        results["spend_spike"] = check_spend_spike(order_gid)
+    except Exception as e:
+        print(f"[screening] Spend spike check failed for {order_gid}: {e}", flush=True)
+        results["spend_spike"] = {"flagged": False, "error": str(e)}
+
+    results["any_flagged"] = (results["spend_spike"] or {}).get("flagged", False)
     return results

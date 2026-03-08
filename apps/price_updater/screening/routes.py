@@ -3,7 +3,8 @@
 Flask routes for order screening.
 
 Endpoints:
-  POST /screening/order_created   — first-time order checks (FIRSTTIME5 + high-value)
+  POST /screening/order_created   — first-time order checks (FIRSTTIME5 + tiered high-value)
+  POST /screening/order_check     — returning customer checks (spend spike)
   POST /screening/fraud_risk      — Shopify fraud risk (medium → verify, high → cancel)
   POST /screening/order_cancelled — FIRSTTIME5 abuse → Klaviyo notification
   POST /screening/order_fulfilled — cleanup tags & holds
@@ -11,6 +12,7 @@ Endpoints:
 from flask import Blueprint, jsonify, request, current_app
 from .service import (
     screen_order,
+    screen_order_spike,
     check_fraud_risk,
     on_order_cancelled,
     on_order_fulfilled,
@@ -39,7 +41,7 @@ def ping():
 def order_created():
     """
     Flow trigger: Order created → condition: ordersCount == 1
-    Runs FIRSTTIME5 abuse check + high-value first order check.
+    Runs FIRSTTIME5 abuse check + tiered high-value first order check.
     """
     payload = request.get_json(force=True)
     order_id = payload.get("order_id")
@@ -61,6 +63,30 @@ def order_created():
         return jsonify({"ok": True, **result})
     except Exception as e:
         current_app.logger.exception(f"[screening] Error processing {order_id}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.post("/order_check")
+def order_check():
+    """
+    Flow trigger: Order created → condition: ordersCount > 1 AND total >= $1000
+    Runs spend spike detection for returning customers.
+    """
+    payload = request.get_json(force=True)
+    order_id = payload.get("order_id")
+
+    if not order_id or not order_id.startswith("gid://shopify/Order/"):
+        return jsonify({"ok": False, "error": "Missing or invalid order_id"}), 400
+
+    current_app.logger.info(f"[screening] order_check (spend spike) order={order_id}")
+
+    try:
+        result = screen_order_spike(order_id)
+        if result.get("any_flagged"):
+            current_app.logger.warning(f"[screening] SPEND SPIKE order={order_id}")
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        current_app.logger.exception(f"[screening] Spend spike error for {order_id}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
