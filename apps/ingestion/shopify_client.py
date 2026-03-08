@@ -69,6 +69,53 @@ class ShopifyClient:
         inv = data.get("productVariant", {}).get("inventoryItem", {})
         return inv.get("id", "").split("/")[-1] or None
 
+    def get_inventory_item_cost_and_qty(self, inventory_item_id: str) -> tuple[float | None, int]:
+        """Fetch current unitCost and total available qty for an inventory item.
+        Returns (unit_cost_or_None, current_qty).
+        """
+        inv_gid = f"gid://shopify/InventoryItem/{inventory_item_id}"
+        data = self._gql("""
+            query($id: ID!) {
+                inventoryItem(id: $id) {
+                    unitCost { amount }
+                    inventoryLevels(first: 10) {
+                        edges { node { quantities(names: ["available"]) { name quantity } } }
+                    }
+                }
+            }
+        """, {"id": inv_gid})
+        item = data.get("inventoryItem") or {}
+        cost_data = item.get("unitCost")
+        unit_cost = float(cost_data["amount"]) if cost_data and cost_data.get("amount") else None
+        levels = item.get("inventoryLevels", {}).get("edges", [])
+        current_qty = 0
+        for edge in levels:
+            for q in edge.get("node", {}).get("quantities", []):
+                if q.get("name") == "available":
+                    current_qty += q.get("quantity", 0)
+        return unit_cost, current_qty
+
+    def set_unit_cost(self, inventory_item_id: str, unit_cost: float) -> dict:
+        """Set the unit cost (COGS) on an inventory item."""
+        inv_gid = f"gid://shopify/InventoryItem/{inventory_item_id}"
+        mutation = """
+        mutation inventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
+            inventoryItemUpdate(id: $id, input: $input) {
+                inventoryItem { id unitCost { amount } }
+                userErrors { field message }
+            }
+        }
+        """
+        data = self._gql(mutation, {
+            "id": inv_gid,
+            "input": {"cost": str(round(unit_cost, 2))}
+        })
+        errors = data.get("inventoryItemUpdate", {}).get("userErrors", [])
+        if errors:
+            raise ShopifyError(f"Set unit cost failed: {errors}")
+        logger.info(f"Set unit cost for {inventory_item_id} to {unit_cost:.2f}")
+        return data
+
     def adjust_inventory(self, inventory_item_id: str, qty_delta: int, reason: str = "correction") -> dict:
         """Adjust inventory quantity by a delta amount."""
         location_id = self.get_location_id()

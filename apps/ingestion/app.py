@@ -499,12 +499,28 @@ def push_session_live(session_id):
     })
 
 
+def _compute_weighted_cost(current_cost, current_qty, our_unit_cost, adding_qty):
+    """Weighted average COGS. If no current cost set, just use ours."""
+    if not current_cost or current_qty <= 0:
+        return our_unit_cost
+    return (current_cost * current_qty + our_unit_cost * adding_qty) / (current_qty + adding_qty)
+
+
 def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cache: dict) -> dict:
     """Push a normal (non-damaged) item: find variant and increment, or create new listing."""
     cache_row = normal_cache.get(tcg_id)
     if cache_row and cache_row.get("shopify_variant_id"):
         inv_item_id = shopify.get_inventory_item_id(cache_row["shopify_variant_id"])
         if inv_item_id:
+            # Weighted average COGS before adjusting inventory
+            our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
+            try:
+                current_cost, current_qty = shopify.get_inventory_item_cost_and_qty(inv_item_id)
+                new_cost = _compute_weighted_cost(current_cost, current_qty, our_unit_cost, qty)
+                shopify.set_unit_cost(inv_item_id, new_cost)
+                entry["new_unit_cost"] = round(new_cost, 2)
+            except Exception as e:
+                logger.warning(f"Could not update COGS for {inv_item_id}: {e}")
             shopify.adjust_inventory(inv_item_id, qty, reason="received")
             entry["action"] = "inventory_incremented"
             entry["shopify_variant_id"] = cache_row["shopify_variant_id"]
@@ -537,6 +553,14 @@ def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
         # Damaged listing exists — increment inventory
         inv_item_id = shopify.get_inventory_item_id(cache_row["shopify_variant_id"])
         if inv_item_id:
+            our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
+            try:
+                current_cost, current_qty = shopify.get_inventory_item_cost_and_qty(inv_item_id)
+                new_cost = _compute_weighted_cost(current_cost, current_qty, our_unit_cost, qty)
+                shopify.set_unit_cost(inv_item_id, new_cost)
+                entry["new_unit_cost"] = round(new_cost, 2)
+            except Exception as e:
+                logger.warning(f"Could not update COGS for damaged {inv_item_id}: {e}")
             shopify.adjust_inventory(inv_item_id, qty, reason="received")
             entry["action"] = "inventory_incremented"
             entry["shopify_variant_id"] = cache_row["shopify_variant_id"]
