@@ -14,6 +14,7 @@ from .service import (
     screen_order,
     screen_order_spike,
     check_fraud_risk,
+    check_combine_orders,
     on_order_cancelled,
     on_order_fulfilled,
 )
@@ -87,6 +88,32 @@ def order_check():
         return jsonify({"ok": True, **result})
     except Exception as e:
         current_app.logger.exception(f"[screening] Spend spike error for {order_id}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.post("/order_combine")
+def order_combine():
+    """
+    Flow trigger: Order created → no conditions (fires on every order)
+    Checks if the same customer has other unfulfilled orders to combine shipping.
+    """
+    payload = request.get_json(force=True)
+    order_id = payload.get("order_id")
+
+    if not order_id or not order_id.startswith("gid://shopify/Order/"):
+        return jsonify({"ok": False, "error": "Missing or invalid order_id"}), 400
+
+    current_app.logger.info(f"[screening] order_combine order={order_id}")
+
+    try:
+        result = check_combine_orders(order_id)
+        if result.get("flagged"):
+            siblings = result.get("siblings", [])
+            sib_names = ", ".join(s["order_name"] for s in siblings)
+            current_app.logger.info(f"[screening] COMBINE order={order_id} with={sib_names}")
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        current_app.logger.exception(f"[screening] Combine check error for {order_id}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 

@@ -106,6 +106,27 @@ query CustomerOrders($customerId: ID!, $first: Int!) {
 }
 """
 
+# Get a customer's unfulfilled orders (for combine check)
+CUSTOMER_UNFULFILLED_ORDERS_Q = """
+query CustomerUnfulfilledOrders($customerId: ID!, $first: Int!) {
+  customer(id: $customerId) {
+    id
+    orders(first: $first, sortKey: CREATED_AT, reverse: true, query: "fulfillment_status:unfulfilled") {
+      edges {
+        node {
+          id
+          name
+          createdAt
+          tags
+          displayFulfillmentStatus
+          currentTotalPriceSet { shopMoney { amount } }
+        }
+      }
+    }
+  }
+}
+"""
+
 ORDER_FULFILLMENT_ORDERS_Q = """
 query OrderFulfillmentOrders($id: ID!) {
   order(id: $id) {
@@ -853,3 +874,107 @@ def screen_order_spike(order_gid: str) -> dict:
 
     results["any_flagged"] = (results["spend_spike"] or {}).get("flagged", False)
     return results
+
+# ═══════════════════════════════════════════════════════════════════════
+#  CHECK 5: COMBINE ORDERS (same customer, unfulfilled)
+# ═══════════════════════════════════════════════════════════════════════
+
+# Tags that indicate an order should be skipped in the combine check
+COMBINE_SKIP_TAGS = {"pre-order", "preorder", "pre_order", "hold-for-review"}
+
+def check_combine_orders(order_gid: str) -> dict:
+    """
+    When a new order comes in, check if the same customer has other
+    unfulfilled orders that aren't pre-orders or already on hold.
+    If so, hold the new order with a note to combine shipping.
+    """
+    data = shopify_gql(ORDER_DETAIL_Q, {"id": order_gid})
+    order = data["data"]["order"]
+    customer = order.get("customer") or {}
+    customer_gid = customer.get("id")
+
+    if not customer_gid:
+        return {"flagged": False, "reason": "no_customer"}
+
+    # Fetch this customer's unfulfilled orders
+    cust_data = shopify_gql(CUSTOMER_UNFULFILLED_ORDERS_Q, {
+        "customerId": customer_gid, "first": 20,
+    })
+    cust = cust_data.get("data", {}).get("customer") or {}
+    edges = cust.get("orders", {}).get("edges", [])
+
+    # Find sibling unfulfilled orders (not this order, not pre-orders, not on hold)
+    siblings = []
+    for edge in edges:
+        node = edge["node"]
+        # Skip the current order
+        if node["id"] == order_gid:
+            continue
+
+        # Skip if not truly unfulfilled
+        status = (node.get("displayFulfillmentStatus") or "").upper()
+        if status not in ("UNFULFILLED",):
+            continue
+
+        # Skip pre-orders and already-held orders
+        order_tags = set(t.lower() for t in (node.get("tags") or []))
+        if order_tags & COMBINE_SKIP_TAGS:
+            continue
+
+        total = float(node.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+        siblings.append({
+            "order_gid": node["id"],
+            "order_name": node.get("name", "?"),
+            "total": total,
+            "created_at": node.get("createdAt"),
+        })
+
+    if not siblings:
+        return {"flagged": False, "reason": "no_siblings"}
+
+    # Build the note
+    order_name = order.get("name", "?")
+    sibling_names = ", ".join(s["order_name"] for s in siblings)
+    sibling_details = "; ".join(
+        f"{s['order_name']} (${s['total']:.2f})" for s in siblings
+    )
+
+    note_text = (
+        f"📦 COMBINE SHIPPING — {len(siblings)} other unfulfilled order(s):\n"
+        f"  {sibling_details}\n"
+        f"Ship this order together with the above."
+    )
+
+    hold_reason = f"Combine with {sibling_names} — same customer has unfulfilled orders"
+
+    # Hold the new order
+    try:
+        _hold_fulfillment(order_gid, hold_reason)
+    except Exception as e:
+        print(f"[screening] Failed to hold fulfillment for combine {order_gid}: {e}", flush=True)
+
+    # Add note to the new order
+    try:
+        _add_order_note(order_gid, note_text)
+    except Exception as e:
+        print(f"[screening] Failed to add combine note to {order_gid}: {e}", flush=True)
+
+    # Also add a note to each sibling so fulfillment staff see it from either side
+    for s in siblings:
+        try:
+            sib_note = (
+                f"📦 NEW ORDER FROM SAME CUSTOMER — {order_name}\n"
+                f"Combine shipping with {order_name}."
+            )
+            _add_order_note(s["order_gid"], sib_note)
+        except Exception as e:
+            print(f"[screening] Failed to add combine note to sibling {s['order_gid']}: {e}", flush=True)
+
+    return {
+        "flagged": True,
+        "reason": "combine_orders",
+        "order_name": order_name,
+        "siblings": siblings,
+        "note": note_text,
+    }
+
