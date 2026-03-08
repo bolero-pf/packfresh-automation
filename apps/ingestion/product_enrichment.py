@@ -96,6 +96,8 @@ TYPE_RULES = [
     # blister before generic booster pack
     (r"blister", ["booster pack", "blister"]),
     (r"booster pack", ["booster pack"]),
+    # display cases (mini tin display, tin display) — heavier than a single tin
+    (r"\bdisplay\b", ["display"]),
     # tin / chest — before collection rules so "Radiant Collection Tin" → tin
     (r"\btin\b|\bchest\b", ["tin"]),
     # collection variants
@@ -114,6 +116,7 @@ WEIGHT_MAP = {
     "booster box": 32,
     "etb": 40,
     "tin": 16,
+    "display": 72,
     "collection box": 32,
     "ultra premium collection": 64,
     "buildbattle": 16,
@@ -149,9 +152,8 @@ def infer_tags(product_name: str, set_name: str) -> list[str]:
         tags.add(set_name.lower())
 
     # Era — check set name first, then product name
+    # NOTE: era goes into the Shopify metafield only, NOT as a tag
     era = _detect_era(set_lower) or _detect_era(name_lower)
-    if era:
-        tags.add(era)
 
     # Featured Pokémon
     combined = f"{name_lower} {set_lower}"

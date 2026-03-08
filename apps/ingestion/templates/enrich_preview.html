@@ -318,7 +318,8 @@
     }
 
     function renderResult(ppt, preview) {
-        const marketPrice = ppt.prices?.market || 0;
+        // Sealed products use unopenedPrice; cards use prices.market
+        const marketPrice = ppt.unopenedPrice || ppt.prices?.market || ppt.marketPrice || 0;
         const imageUrl = ppt.imageCdnUrl800 || ppt.imageCdnUrl400 || ppt.imageCdnUrl || '';
 
         const era = preview.era || 'vintage';
@@ -441,6 +442,10 @@
         btn.innerHTML = '<span class="spinner"></span>Creating…';
 
         try {
+            const marketPrice = _currentPptItem.unopenedPrice
+                || _currentPptItem.prices?.market
+                || _currentPptItem.marketPrice
+                || 0;
             const resp = await fetch('/api/enrich/create-listing', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
