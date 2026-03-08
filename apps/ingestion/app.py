@@ -19,6 +19,7 @@ import db
 import ingest
 from shopify_client import ShopifyClient, ShopifyError
 from ppt_client import PPTClient
+import product_enrichment as enrichment
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -824,6 +825,86 @@ def break_down_item_endpoint(item_id):
 # ═══════════════════════════════════════════════════════════════════
 # HEALTH
 # ═══════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════
+# PRODUCT ENRICHMENT
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/enrich/preview", methods=["POST"])
+def enrich_preview():
+    """
+    Preview what tags/era/weight would be inferred for a product.
+    Does NOT call Shopify. Safe to call at any time.
+
+    Body: { "product_name": "...", "set_name": "...", "tcgplayer_id": "..." }
+    """
+    data = request.get_json() or {}
+    name = data.get("product_name", "")
+    set_name = data.get("set_name", "")
+    return jsonify({
+        "product_name": name,
+        "set_name": set_name,
+        "tags": enrichment.infer_tags(name, set_name),
+        "era": enrichment.infer_era(name, set_name),
+        "weight_oz": enrichment.infer_weight_oz(name),
+    })
+
+
+@app.route("/api/enrich/product", methods=["POST"])
+def enrich_existing_product():
+    """
+    Enrich an existing Shopify product using a PPT item.
+    Useful for enriching products already in Shopify that are missing tags/images/etc.
+
+    Body: {
+        "product_gid": "gid://shopify/Product/...",
+        "tcgplayer_id": 12345,         (used to fetch PPT item)
+        "offer_price": 9.99            (optional, sets COGS)
+    }
+    """
+    data = request.get_json() or {}
+    product_gid = data.get("product_gid")
+    tcgplayer_id = data.get("tcgplayer_id")
+    offer_price = data.get("offer_price")
+
+    if not product_gid or not tcgplayer_id:
+        return jsonify({"error": "product_gid and tcgplayer_id required"}), 400
+
+    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    if not ppt_item:
+        return jsonify({"error": f"PPT item not found for tcgplayer_id {tcgplayer_id}"}), 404
+
+    summary = enrichment.enrich_product(product_gid, ppt_item, offer_price=offer_price)
+    return jsonify(summary)
+
+
+@app.route("/api/enrich/create-listing", methods=["POST"])
+def create_listing():
+    """
+    Create a new DRAFT Shopify listing from a PPT item and fully enrich it.
+
+    Body: {
+        "tcgplayer_id": 12345,
+        "price": 29.99,           (Shopify listing price)
+        "offer_price": 18.00      (optional, sets COGS)
+    }
+    """
+    data = request.get_json() or {}
+    tcgplayer_id = data.get("tcgplayer_id")
+    price = data.get("price")
+    offer_price = data.get("offer_price")
+
+    if not tcgplayer_id or not price:
+        return jsonify({"error": "tcgplayer_id and price required"}), 400
+
+    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    if not ppt_item:
+        return jsonify({"error": f"PPT item not found for tcgplayer_id {tcgplayer_id}"}), 404
+
+    summary = enrichment.create_draft_listing(ppt_item, price=float(price),
+                                              offer_price=offer_price)
+    return jsonify(summary)
+
 
 @app.route("/health")
 def health():
