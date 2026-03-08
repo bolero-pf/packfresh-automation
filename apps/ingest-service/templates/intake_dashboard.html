@@ -1281,12 +1281,13 @@
         if (target) target.style.display = '';
     }
 
-    async function viewSession(sessionId) {
+    async function viewSession(sessionId, _preserveScroll) {
         currentSessionId = sessionId;
         if (rawSessionId && sessionId === rawSessionId) {
             loadRawSessionItems();
         }
         const body = document.getElementById('session-modal-body');
+        const scrollTop = _preserveScroll ? body.scrollTop : 0;
         body.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
         openModal('session-modal');
 
@@ -1449,8 +1450,8 @@
                                 ? (bdVal >= mkt ? 'var(--green)' : bdVal >= mkt * 0.85 ? 'var(--amber)' : 'var(--red)')
                                 : 'var(--text-dim)';
                             const bdNote = bd && bdVal > 0 ? `<br><small style="color:${bdColor};">📦 breakdown: $${bdVal.toFixed(2)}${bd.variant_count > 1 ? ' (' + bd.variant_count + ' configs)' : bd.variant_names ? ' · ' + bd.variant_names : ''}</small>` : '';
-                            return `<tr style="${rowStyle}">
-                                <td>${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}</td>
+                            return `<tr style="${rowStyle}" data-item-id="${i.id}">
+                                <td class="name-cell">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}</td>
                                 ${s.session_type === 'raw' ? `<td><span class="badge badge-blue">${i.condition || i.listing_condition || '—'}</span></td>` : ''}
                                 <td>${i.quantity}</td>
                                 <td>$${(i.market_price || 0).toFixed(2)}</td>
@@ -1577,6 +1578,10 @@
                     return html;
                 })()}
             `;
+            // Restore scroll position after render
+            if (scrollTop) requestAnimationFrame(() => { body.scrollTop = scrollTop; });
+            // Enrich breakdown summaries inline without full reload
+            _enrichIntakeBreakdowns(items, sessionId);
         } catch(err) {
             body.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
@@ -1771,7 +1776,7 @@
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
             closeModal('mapping-modal');
-            viewSession(currentSessionId);
+            viewSession(currentSessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -1849,7 +1854,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -1880,7 +1885,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2424,7 +2429,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2460,7 +2465,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2495,7 +2500,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2510,7 +2515,7 @@
             const r = await fetch(`/api/intake/item/${itemId}/missing`, { method: 'POST' });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2525,7 +2530,7 @@
             const r = await fetch(`/api/intake/item/${itemId}/rejected`, { method: 'POST' });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2540,7 +2545,7 @@
             const r = await fetch(`/api/intake/item/${itemId}/restore`, { method: 'POST' });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2567,7 +2572,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2586,7 +2591,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2610,7 +2615,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2643,7 +2648,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2830,7 +2835,7 @@
                     body: JSON.stringify({ condition: selectedCond, session_id: rs.sessionId }),
                 });
                 closeModal('relink-modal');
-                viewSession(rs.sessionId);
+                viewSession(rs.sessionId, true);
             } catch(err) { body.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
         });
     }
@@ -2846,7 +2851,7 @@
             const r = await fetch(`/api/intake/item/${itemId}/delete`, { method: 'POST' });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -2894,7 +2899,7 @@
             document.getElementById('session-manual-price').value = '';
             document.getElementById('session-manual-qty').value = '1';
             document.getElementById('session-sealed-manual').style.display = 'none';
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -3001,7 +3006,7 @@
             document.getElementById('session-sealed-search').value = '';
             document.getElementById('session-sealed-qty').value = '1';
             resultsDiv.innerHTML = '<div class="alert alert-success">Added! ✓</div>';
-            setTimeout(() => viewSession(sessionId), 500);
+            setTimeout(() => viewSession(sessionId, true), 500);
         } catch(err) {
             resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
@@ -3311,7 +3316,7 @@
                 document.getElementById('session-raw-search').value = '';
                 document.getElementById('session-raw-qty').value = '1';
                 resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
-                setTimeout(function() { viewSession(sessionId); }, 500);
+                setTimeout(function() { viewSession(sessionId, true); }, 500);
             } else {
                 document.getElementById('raw-card-search').value = '';
                 document.getElementById('raw-card-set').value = '';
@@ -3362,7 +3367,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -3371,7 +3376,7 @@
             const r = await fetch(`/api/intake/session/${sessionId}/toggle-distribution`, { method: 'POST' });
             const d = await r.json();
             if (!r.ok) { alert(d.error || 'Failed to toggle distribution'); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -3386,7 +3391,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -3401,7 +3406,7 @@
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
         } catch(err) { alert(err.message); }
     }
 
@@ -3413,7 +3418,7 @@
             const r = await fetch(`/api/intake/session/${sessionId}/${action}`, { method: 'POST' });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId);
+            viewSession(sessionId, true);
             loadSessions();
         } catch(err) { alert(err.message); }
     }
@@ -3784,7 +3789,72 @@
             _intakeBdComponents = [];
             _intakeBdVariantId = null;
             renderIntakeBdModal(d.cache);
+            // Refresh breakdown badges in offer tab without full reload
+            _enrichIntakeBreakdowns();
         } catch(err) { alert(err.message); }
+    }
+
+    // Enrich offer tab rows with live breakdown summary badges
+    async function _enrichIntakeBreakdowns(items, sessionId) {
+        // items/sessionId optional — if not passed, use current session
+        const sid = sessionId || currentSessionId;
+        if (!sid) return;
+
+        // If items not passed, fetch them
+        let allItems = items;
+        if (!allItems) {
+            try {
+                const r = await fetch(`/api/intake/session/${sid}`);
+                const d = await r.json();
+                allItems = d.items || [];
+            } catch(e) { return; }
+        }
+
+        const tcgIds = [...new Set(allItems
+            .filter(i => i.tcgplayer_id && i.is_mapped)
+            .map(i => i.tcgplayer_id))];
+        if (!tcgIds.length) return;
+
+        try {
+            const r = await fetch('/api/breakdown-cache/batch', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ tcgplayer_ids: tcgIds }),
+            });
+            const d = await r.json();
+            const summaries = d.summaries || {};
+
+            allItems.forEach(item => {
+                const bd = summaries[item.tcgplayer_id];
+                const cell = document.querySelector(`tr[data-item-id="${item.id}"] td.name-cell`);
+                if (!cell) return;
+
+                cell.querySelectorAll('.bd-live-badge').forEach(e => e.remove());
+                if (!bd || !bd.best_variant_market) return;
+
+                const bdVal = parseFloat(bd.best_variant_market) || 0;
+                const mkt = parseFloat(item.market_price) || 0;
+                const color = bdVal > 0 && mkt > 0
+                    ? (bdVal >= mkt ? 'var(--green)' : bdVal >= mkt * 0.85 ? 'var(--amber)' : 'var(--red)')
+                    : 'var(--text-dim)';
+                const label = bd.variant_count > 1
+                    ? `${bd.variant_count} configs · best $${bdVal.toFixed(2)}`
+                    : `${bd.variant_names || 'Standard'} · $${bdVal.toFixed(2)}`;
+
+                // Only inject if the baked-in bdNote is absent (avoid duplicate)
+                const existing = cell.querySelector('small');
+                const hasBdNote = existing && existing.textContent.includes('📦');
+                if (!hasBdNote) {
+                    const badge = document.createElement('small');
+                    badge.className = 'bd-live-badge';
+                    badge.style.cssText = `display:block; color:${color}; font-size:0.75rem; margin-top:2px;`;
+                    badge.innerHTML = `📦 ${label}`;
+                    cell.appendChild(badge);
+                } else {
+                    // Update existing note color/value live
+                    existing.style.color = color;
+                }
+            });
+        } catch(e) { /* silent */ }
     }</script>
 </body>
 </html>
