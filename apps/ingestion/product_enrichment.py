@@ -314,21 +314,51 @@ def _download_image(url: str) -> Image.Image:
     return Image.open(io.BytesIO(r.content)).convert("RGBA")
 
 
-def _remove_background(image_bytes: bytes) -> bytes:
-    """Send image to remove.bg API, return PNG bytes with transparent background."""
-    api_key = os.environ.get("REMOVE_BG_API_KEY")
-    if not api_key:
-        raise RuntimeError("REMOVE_BG_API_KEY not set")
-    resp = requests.post(
-        "https://api.remove.bg/v1.0/removebg",
-        files={"image_file": ("image.png", image_bytes, "image/png")},
-        data={"size": "auto"},
-        headers={"X-Api-Key": api_key},
-        timeout=60,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"remove.bg error {resp.status_code}: {resp.text[:200]}")
-    return resp.content  # PNG bytes
+def _make_white_transparent(im: Image.Image, threshold: int = 240, edge_only: bool = True) -> Image.Image:
+    """
+    Convert near-white pixels to transparent using flood-fill from all four corners.
+    This removes the white background from TCGPlayer product images without touching
+    white pixels that are part of the actual product (packaging, card faces, etc.).
+
+    Strategy:
+    - Flood-fill from each corner, marking connected near-white pixels as transparent
+    - Pixels inside the product boundary are NOT touched even if they're white
+    - threshold: how close to white (255,255,255) a pixel must be to qualify
+    """
+    im = im.convert("RGBA")
+    w, h = im.size
+    pixels = im.load()
+
+    def is_near_white(px):
+        r, g, b, a = px
+        return a > 10 and r >= threshold and g >= threshold and b >= threshold
+
+    visited = [[False] * h for _ in range(w)]
+    queue = []
+
+    # Seed from all four edges
+    for x in range(w):
+        queue.append((x, 0))
+        queue.append((x, h - 1))
+    for y in range(h):
+        queue.append((0, y))
+        queue.append((w - 1, y))
+
+    while queue:
+        x, y = queue.pop()
+        if x < 0 or x >= w or y < 0 or y >= h:
+            continue
+        if visited[x][y]:
+            continue
+        visited[x][y] = True
+        px = pixels[x, y]
+        if not is_near_white(px):
+            continue
+        # Make transparent
+        pixels[x, y] = (px[0], px[1], px[2], 0)
+        queue.extend([(x+1, y), (x-1, y), (x, y+1), (x, y-1)])
+
+    return im
 
 
 def _matte_product(src_im: Image.Image) -> Image.Image:
@@ -358,16 +388,17 @@ def _png_bytes(im: Image.Image) -> bytes:
 
 def process_product_image(image_url: str, product_name: str) -> bytes:
     """
-    Download image from URL, remove background, apply matte.
+    Download image from URL, remove white background via flood-fill, apply matte.
     Returns PNG bytes ready for Shopify upload.
+
+    TCGPlayer images have clean white/light backgrounds — flood-fill from corners
+    is more reliable than remove.bg for product packaging (which is often white itself).
     """
     logger.info(f"Downloading image: {image_url}")
     src = _download_image(image_url)
-    raw_png = _png_bytes(src)
 
-    logger.info("Removing background via remove.bg")
-    no_bg_bytes = _remove_background(raw_png)
-    no_bg = Image.open(io.BytesIO(no_bg_bytes)).convert("RGBA")
+    logger.info("Removing white background via flood-fill")
+    no_bg = _make_white_transparent(src)
 
     logger.info("Applying matte")
     matted = _matte_product(no_bg)
@@ -494,91 +525,75 @@ def set_product_image(product_gid: str, image_url: str, alt: str = "") -> None:
 
 
 def publish_to_all_channels(product_gid: str) -> None:
-    """Publish product to every available sales channel using publicationCreate / REST."""
-    # Fetch all publication IDs
+    """Publish product to every available sales channel."""
     data = _gql("query { publications(first: 50) { nodes { id name } } }")
     pubs = data.get("publications", {}).get("nodes", [])
     logger.info(f"Publishing to {len(pubs)} channels: {[p['name'] for p in pubs]}")
 
     if not pubs:
-        logger.warning("No publications found — product will not be published to any channel")
+        logger.warning("No publications found")
         return
 
-    product_id = product_gid.split("/")[-1]
-    # Use REST to set collects / publications in bulk via product update
-    # publishablePublish is deprecated in 2025-10; use publishablePublish on older API or
-    # productUpdate with publications input on newer API
-    pub_ids = [p["id"] for p in pubs]
-    result = _gql("""
-        mutation PublishProduct($id: ID!, $input: [PublicationInput!]!) {
-          productUpdate(input: {
-            id: $id,
-            publications: $input
-          }) {
-            product { id }
-            userErrors { field message }
-          }
-        }
-    """, {
-        "id": product_gid,
-        "input": [{"publicationId": pid} for pid in pub_ids],
-    })
-    errs = result.get("productUpdate", {}).get("userErrors", [])
-    if errs:
-        # Fall back to per-publication publishablePublish (older API versions)
-        logger.warning(f"Bulk publish failed ({errs}), trying per-channel fallback")
-        for pub in pubs:
-            try:
-                r2 = _gql("""
-                    mutation Publish($id: ID!, $pub: ID!) {
-                      publishablePublish(id: $id, input: { publicationId: $pub }) {
-                        publishable { id }
-                        userErrors { field message }
-                      }
-                    }
-                """, {"id": product_gid, "pub": pub["id"]})
-                e2 = r2.get("publishablePublish", {}).get("userErrors", [])
-                if e2:
-                    msg = "; ".join(x.get("message","") for x in e2)
-                    if "already published" not in msg.lower():
-                        logger.warning(f"Publish to {pub['name']} failed: {msg}")
-            except Exception as ex:
-                logger.warning(f"Publish to {pub['name']} exception: {ex}")
+    # Use publishablePublish per channel — most reliable across API versions
+    published = []
+    failed = []
+    for pub in pubs:
+        try:
+            r = _gql("""
+                mutation Publish($id: ID!, $pub: ID!) {
+                  publishablePublish(id: $id, input: { publicationId: $pub }) {
+                    publishable { ... on Product { id } }
+                    userErrors { field message }
+                  }
+                }
+            """, {"id": product_gid, "pub": pub["id"]})
+            errs = r.get("publishablePublish", {}).get("userErrors", [])
+            if errs:
+                msg = "; ".join(e.get("message","") for e in errs)
+                if "already published" not in msg.lower():
+                    failed.append(f"{pub['name']}: {msg}")
+            else:
+                published.append(pub["name"])
+        except Exception as ex:
+            failed.append(f"{pub['name']}: {ex}")
+
+    logger.info(f"Published to: {published}")
+    if failed:
+        logger.warning(f"Publish failures: {failed}")
 
 
 def set_product_category(product_gid: str) -> None:
-    """Set the Shopify taxonomy category to Gaming Cards > Collectible Trading Cards."""
+    """Set the Shopify taxonomy category via REST (most reliable across API versions)."""
     product_id = product_gid.split("/")[-1]
-    # Use REST — more reliable for category assignment than GraphQL productUpdate
+    # REST product update accepts standardized_product_type as a path string
+    # which maps to the Shopify taxonomy — this is the most reliable method
     try:
-        _rest("PUT", f"/products/{product_id}.json", json={"product": {
+        result = _rest("PUT", f"/products/{product_id}.json", json={"product": {
             "id": int(product_id),
-            "product_type": "Pokemon",
+            "standardized_product_type": {
+                "product_taxonomy_node_id": 1511,  # Gaming Cards in Collectible Trading Cards
+            },
         }})
-    except Exception:
-        pass  # non-fatal if product_type already set
-
-    # Set category via GraphQL with correct field name for 2025-10 API
-    result = _gql("""
-        mutation UpdateProductCategory($id: ID!, $categoryId: ID!) {
-          productUpdate(input: {
-            id: $id,
-            productCategory: { productTaxonomyNodeId: $categoryId }
-          }) {
-            product { id productCategory { productTaxonomyNode { fullName } } }
-            userErrors { field message }
-          }
-        }
-    """, {"id": product_gid, "categoryId": TAXONOMY_CATEGORY_GID})
-    errs = result.get("productUpdate", {}).get("userErrors", [])
-    if errs:
-        logger.warning(f"set_product_category errors: {errs}")
-    else:
-        node = (result.get("productUpdate", {})
-                      .get("product", {})
-                      .get("productCategory", {})
-                      .get("productTaxonomyNode", {}))
-        logger.info(f"Category set to: {node.get('fullName', 'unknown')}")
+        logger.info(f"Category set via REST for product {product_id}")
+    except Exception as e:
+        # Fallback: try GraphQL productChangeCategory mutation (2024-07+)
+        logger.warning(f"REST category failed ({e}), trying productChangeCategory GQL")
+        try:
+            result = _gql("""
+                mutation ChangeCategory($id: ID!, $catId: ID!) {
+                  productChangeCategory(productId: $id, categoryId: $catId) {
+                    product { id }
+                    userErrors { field message }
+                  }
+                }
+            """, {"id": product_gid, "catId": TAXONOMY_CATEGORY_GID})
+            errs = result.get("productChangeCategory", {}).get("userErrors", [])
+            if errs:
+                logger.warning(f"productChangeCategory errors: {errs}")
+            else:
+                logger.info(f"Category set via productChangeCategory for {product_id}")
+        except Exception as e2:
+            logger.warning(f"productChangeCategory also failed: {e2}")
 
 
 def set_product_metafields(product_gid: str, tcgplayer_id: str, era: str | None) -> None:
