@@ -323,7 +323,7 @@
         const marketPrice = ppt.unopenedPrice || ppt.prices?.market || ppt.marketPrice || 0;
         const imageUrl = ppt.imageCdnUrl800 || ppt.imageCdnUrl400 || ppt.imageCdnUrl || '';
 
-        const era = preview.era || 'vintage';
+        const era = preview.era || null;  // null = unknown, will be flagged as NEEDS
         const weight = preview.weight_oz || '—';
         const tags = preview.tags || [];
 
