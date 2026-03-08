@@ -272,6 +272,7 @@
 </div>
 
 <script>
+    const SHOPIFY_STORE_HANDLE = "{{ shopify_store_handle }}";
     let _currentPptItem = null;
 
     async function doPreview() {
@@ -472,8 +473,9 @@
             // Show success state
             const actionBar = btn.closest('.action-bar');
             const productId = data.product_id;
-            const shopifyStore = window.__shopifyStore || '';
-            const shopifyUrl = `https://${shopifyStore || 'your-store.myshopify.com'}/admin/products/${productId}`;
+            const shopifyUrl = SHOPIFY_STORE_HANDLE
+                ? `https://admin.shopify.com/store/${SHOPIFY_STORE_HANDLE}/products/${productId}`
+                : `https://admin.shopify.com/products/${productId}`;
 
             actionBar.innerHTML = `
                 <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
@@ -489,12 +491,15 @@
             `;
 
             if (data.errors && data.errors.length) {
-                const errDiv = document.createElement('div');
-                errDiv.className = 'errors-section';
-                errDiv.innerHTML = `<h3>Enrichment Errors</h3><ul>${
-                    data.errors.map(e => `<li>${escHtml(e)}</li>`).join('')
-                }</ul>`;
-                btn.closest('.result-card').appendChild(errDiv);
+                const card = document.querySelector('.result-card');
+                if (card) {
+                    const errDiv = document.createElement('div');
+                    errDiv.className = 'errors-section';
+                    errDiv.innerHTML = `<h3>Enrichment Errors</h3><ul>${
+                        data.errors.map(e => `<li>${escHtml(e)}</li>`).join('')
+                    }</ul>`;
+                    card.appendChild(errDiv);
+                }
             }
 
         } catch (err) {

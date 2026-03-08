@@ -832,7 +832,11 @@ def break_down_item_endpoint(item_id):
 
 @app.route("/enrich")
 def enrich_page():
-    return render_template("enrich_preview.html")
+    store = os.getenv("SHOPIFY_STORE", "")
+    # Extract store handle from myshopify.com domain for admin URL construction
+    # e.g. "d1m1a4-1i.myshopify.com" -> "d1m1a4-1i"
+    store_handle = store.replace(".myshopify.com", "").split(".")[0] if store else ""
+    return render_template("enrich_preview.html", shopify_store_handle=store_handle)
 
 
 @app.route("/api/ppt/sealed/<int:tcgplayer_id>")

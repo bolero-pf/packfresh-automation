@@ -172,6 +172,11 @@ def infer_tags(product_name: str, set_name: str) -> list[str]:
     # Set name as tag — skip generic catch-all categories
     if set_name and set_name.lower() not in SKIP_SET_TAGS:
         tags.add(set_name.lower())
+    elif set_lower in SKIP_SET_TAGS:
+        # For MCAP items, try to find the real set from the product name
+        detected_set = _detect_set_from_name(name_lower)
+        if detected_set:
+            tags.add(detected_set)
 
     # Era goes into metafield only — not a tag
 
@@ -203,6 +208,14 @@ def _safe_set_match(set_key: str, text: str) -> bool:
     # Escape and use word boundaries
     pattern = r'\b' + re.escape(set_key) + r'\b'
     return bool(re.search(pattern, text, re.IGNORECASE))
+
+
+def _detect_set_from_name(name_lower: str) -> str | None:
+    """Scan a product name for a known set name and return it (lowercase) if found."""
+    for set_key in SET_TO_ERA:
+        if _safe_set_match(set_key, name_lower):
+            return set_key
+    return None
 
 
 def _detect_era_from_card_mechanic(name: str) -> str | None:
@@ -481,55 +494,105 @@ def set_product_image(product_gid: str, image_url: str, alt: str = "") -> None:
 
 
 def publish_to_all_channels(product_gid: str) -> None:
-    """Publish product to every available sales channel."""
+    """Publish product to every available sales channel using publicationCreate / REST."""
+    # Fetch all publication IDs
     data = _gql("query { publications(first: 50) { nodes { id name } } }")
     pubs = data.get("publications", {}).get("nodes", [])
-    logger.info(f"Publishing to {len(pubs)} channels")
+    logger.info(f"Publishing to {len(pubs)} channels: {[p['name'] for p in pubs]}")
 
-    for pub in pubs:
-        result = _gql("""
-            mutation Publish($id: ID!, $pub: ID!) {
-              publishablePublish(id: $id, input: { publicationId: $pub }) {
-                publishable { id }
-                userErrors { field message }
-              }
-            }
-        """, {"id": product_gid, "pub": pub["id"]})
-        errs = result.get("publishablePublish", {}).get("userErrors", [])
-        if errs:
-            msg = "; ".join(e.get("message", "") for e in errs)
-            if "already published" not in msg.lower():
-                logger.warning(f"Publish to {pub['name']} failed: {msg}")
+    if not pubs:
+        logger.warning("No publications found — product will not be published to any channel")
+        return
 
-
-def set_product_category(product_gid: str) -> None:
-    """Set the Shopify taxonomy category to Gaming Cards > Collectible Trading Cards."""
+    product_id = product_gid.split("/")[-1]
+    # Use REST to set collects / publications in bulk via product update
+    # publishablePublish is deprecated in 2025-10; use publishablePublish on older API or
+    # productUpdate with publications input on newer API
+    pub_ids = [p["id"] for p in pubs]
     result = _gql("""
-        mutation UpdateProductCategory($input: ProductInput!) {
-          productUpdate(input: $input) {
+        mutation PublishProduct($id: ID!, $input: [PublicationInput!]!) {
+          productUpdate(input: {
+            id: $id,
+            publications: $input
+          }) {
             product { id }
             userErrors { field message }
           }
         }
-    """, {"input": {
+    """, {
         "id": product_gid,
-        "productCategory": {"productTaxonomyNodeId": TAXONOMY_CATEGORY_GID},
-    }})
+        "input": [{"publicationId": pid} for pid in pub_ids],
+    })
+    errs = result.get("productUpdate", {}).get("userErrors", [])
+    if errs:
+        # Fall back to per-publication publishablePublish (older API versions)
+        logger.warning(f"Bulk publish failed ({errs}), trying per-channel fallback")
+        for pub in pubs:
+            try:
+                r2 = _gql("""
+                    mutation Publish($id: ID!, $pub: ID!) {
+                      publishablePublish(id: $id, input: { publicationId: $pub }) {
+                        publishable { id }
+                        userErrors { field message }
+                      }
+                    }
+                """, {"id": product_gid, "pub": pub["id"]})
+                e2 = r2.get("publishablePublish", {}).get("userErrors", [])
+                if e2:
+                    msg = "; ".join(x.get("message","") for x in e2)
+                    if "already published" not in msg.lower():
+                        logger.warning(f"Publish to {pub['name']} failed: {msg}")
+            except Exception as ex:
+                logger.warning(f"Publish to {pub['name']} exception: {ex}")
+
+
+def set_product_category(product_gid: str) -> None:
+    """Set the Shopify taxonomy category to Gaming Cards > Collectible Trading Cards."""
+    product_id = product_gid.split("/")[-1]
+    # Use REST — more reliable for category assignment than GraphQL productUpdate
+    try:
+        _rest("PUT", f"/products/{product_id}.json", json={"product": {
+            "id": int(product_id),
+            "product_type": "Pokemon",
+        }})
+    except Exception:
+        pass  # non-fatal if product_type already set
+
+    # Set category via GraphQL with correct field name for 2025-10 API
+    result = _gql("""
+        mutation UpdateProductCategory($id: ID!, $categoryId: ID!) {
+          productUpdate(input: {
+            id: $id,
+            productCategory: { productTaxonomyNodeId: $categoryId }
+          }) {
+            product { id productCategory { productTaxonomyNode { fullName } } }
+            userErrors { field message }
+          }
+        }
+    """, {"id": product_gid, "categoryId": TAXONOMY_CATEGORY_GID})
     errs = result.get("productUpdate", {}).get("userErrors", [])
     if errs:
         logger.warning(f"set_product_category errors: {errs}")
+    else:
+        node = (result.get("productUpdate", {})
+                      .get("product", {})
+                      .get("productCategory", {})
+                      .get("productTaxonomyNode", {}))
+        logger.info(f"Category set to: {node.get('fullName', 'unknown')}")
 
 
 def set_product_metafields(product_gid: str, tcgplayer_id: str, era: str | None) -> None:
     """Set era and TCGPlayer ID metafields on a product."""
     metafields = []
+    import json as _json
     if tcgplayer_id:
         metafields.append({
             "ownerId": product_gid,
-            "namespace": "custom",
+            "namespace": "tcg",
             "key": "tcgplayer_id",
-            "value": str(tcgplayer_id),
-            "type": "single_line_text_field",
+            # Store definition shows type = List of single_line_text_field
+            "value": _json.dumps([str(tcgplayer_id)]),
+            "type": "list.single_line_text_field",
         })
     if era:
         metafields.append({
