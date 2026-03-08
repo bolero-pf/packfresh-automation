@@ -2160,43 +2160,47 @@
         // Compute per-item unit offer and margin
         const enriched = items.map(i => {
             const unitOffer = i.quantity > 0 ? (i.offer_price || 0) / i.quantity : 0;
-            const margin = i.in_store && i.store_price && unitOffer > 0
+            const hasStorePrice = i.in_store && i.store_price != null && i.store_price > 0;
+            const margin = hasStorePrice && unitOffer > 0
                 ? ((i.store_price - unitOffer) / i.store_price * 100)
                 : null;
             const bd = i.breakdown;
             const bdMktVal = bd ? parseFloat(bd.best_variant_market) || 0 : 0;
-            // Use store BD value when all components have store prices; fall back to market
             const bdStoreVal = bd && bd.best_variant_store ? parseFloat(bd.best_variant_store) || 0 : 0;
-            const bdVal = bdStoreVal || bdMktVal;  // best available for display
-            // Best effective sell price: higher of store price or store bd value (or market bd if no store)
-            const effectiveSellPrice = Math.max(i.store_price || 0, bdStoreVal || bdMktVal);
+            const bdVal = bdStoreVal || bdMktVal;
+            // effectiveSellPrice: best available sell price for this item
+            // If no store price (null/0), treat same as not-in-store — use bd or estimate
+            const sealedPrice = hasStorePrice ? i.store_price : 0;
+            const effectiveSellPrice = Math.max(sealedPrice, bdStoreVal || bdMktVal);
             const maxMargin = effectiveSellPrice > 0 && unitOffer > 0
                 ? ((effectiveSellPrice - unitOffer) / effectiveSellPrice * 100) : null;
-            return { ...i, unitOffer, margin, bdVal, bdMktVal, bdStoreVal, effectiveSellPrice, maxMargin };
+            return { ...i, unitOffer, margin, bdVal, bdMktVal, bdStoreVal, effectiveSellPrice, hasStorePrice, maxMargin };
         });
 
         // Stats
         const inStore = enriched.filter(i => i.in_store);
+        const inStoreWithPrice = enriched.filter(i => i.hasStorePrice);
         const notInStore = enriched.filter(i => !i.in_store);
+        const noPrice = enriched.filter(i => i.in_store && !i.hasStorePrice);
         const zeroQty = inStore.filter(i => i.store_qty === 0);
-        const withMargin = inStore.filter(i => i.margin !== null);
+        const withMargin = inStoreWithPrice.filter(i => i.margin !== null);
         const withMaxMargin = enriched.filter(i => i.maxMargin !== null);
 
         const totalOfferValue = enriched.reduce((s, i) => s + (i.offer_price || 0), 0);
-        const totalStoreValue = inStore.reduce((s, i) => s + (i.store_price || 0) * (i.quantity || 1), 0);
-        const notInStoreMarketValue = notInStore.reduce((s, i) => s + (i.offer_price || 0) / 0.78, 0);
-        const combinedStoreValue = totalStoreValue + notInStoreMarketValue;
+        // Gross margin: use actual store price where available; estimate offer/0.78 for no-price and not-in-store items
+        const totalStoreValue = inStoreWithPrice.reduce((s, i) => s + i.store_price * (i.quantity || 1), 0);
+        const estimatedValue = [...notInStore, ...noPrice].reduce((s, i) => s + (i.market_price || 0) * (i.quantity || 1), 0);
+        const combinedStoreValue = totalStoreValue + estimatedValue;
         const grossMarginPct = combinedStoreValue > 0 ? ((combinedStoreValue - totalOfferValue) / combinedStoreValue * 100) : 0;
         const avgMargin = withMargin.length > 0 ? withMargin.reduce((s, i) => s + i.margin, 0) / withMargin.length : 0;
 
-        // Max margin: best of (sell sealed, break down) per item — for items with no store price or bd, estimate same as grossMarginPct
+        // Max margin: best of (sell sealed, break down) per item
         const totalEffectiveSellValue = enriched.reduce((s, i) => {
             if (i.effectiveSellPrice > 0) return s + i.effectiveSellPrice * (i.quantity || 1);
-            // No store price and no breakdown — fall back to same offer/0.78 estimate used in grossMarginPct
-            return s + (i.offer_price || 0) / 0.78;
+            return s + (i.market_price || 0) * (i.quantity || 1);
         }, 0);
         const maxGrossMarginPct = totalEffectiveSellValue > 0 ? ((totalEffectiveSellValue - totalOfferValue) / totalEffectiveSellValue * 100) : 0;
-        const itemsWithBdBoost = enriched.filter(i => i.bdVal > 0 && i.bdVal > (i.store_price || 0)).length;
+        const itemsWithBdBoost = enriched.filter(i => i.bdVal > 0 && i.bdVal > (i.hasStorePrice ? i.store_price : 0)).length;
 
         // Filter
         let filtered = enriched;
