@@ -66,11 +66,30 @@ ERA_SETS = {
         "celestial storm", "dragon majesty", "lost thunder", "team up",
         "detective pikachu", "unbroken bonds", "unified minds", "hidden fates",
         "cosmic eclipse",
+        # NOTE: Japanese/Korean exclusive sets (Eevee Heroes, Shiny Star V, etc.)
+        # are intentionally omitted — they will fall through to NEEDS for manual review
     ],
     "xy": [
         "xy", "flashfire", "furious fists", "phantom forces", "primal clash",
         "double crisis", "roaring skies", "ancient origins", "breakthrough",
         "breakpoint", "generations", "fates collide", "steam siege", "evolutions",
+    ],
+    "vintage": [
+        "base set", "jungle", "fossil", "team rocket", "gym heroes", "gym challenge",
+        "neo genesis", "neo discovery", "neo revelation", "neo destiny",
+        "legendary collection", "expedition", "aquapolis", "skyridge",
+        "ruby & sapphire", "ruby and sapphire", "sandstorm", "dragon", "team magma",
+        "team aqua", "hidden legends", "firered & leafgreen", "team rocket returns",
+        "deoxys", "emerald", "unseen forces", "delta species", "legend maker",
+        "holon phantoms", "crystal guardians", "dragon frontiers", "power keepers",
+        "diamond & pearl", "diamond and pearl", "mysterious treasures", "secret wonders",
+        "great encounters", "majestic dawn", "legends awakened", "stormfront",
+        "platinum", "rising rivals", "supreme victors", "arceus",
+        "heartgold soulsilver", "unleashed", "undaunted", "triumphant",
+        "call of legends", "black & white", "black and white", "emerging powers",
+        "noble victories", "next destinies", "dark explorers", "dragons exalted",
+        "boundaries crossed", "plasma storm", "plasma freeze", "plasma blast",
+        "legendary treasures",
     ],
 }
 
@@ -79,6 +98,9 @@ SET_TO_ERA: dict[str, str] = {}
 for _era, _sets in ERA_SETS.items():
     for _s in _sets:
         SET_TO_ERA[_s.lower()] = _era
+
+MCAP_SET = "miscellaneous cards & products"
+SKIP_SET_TAGS = {MCAP_SET, "miscellaneous", ""}
 
 # ─── Type / taxonomy tag inference ───────────────────────────────────────────
 
@@ -147,13 +169,11 @@ def infer_tags(product_name: str, set_name: str) -> list[str]:
                 type_tags_found.append(t)
             break  # first match wins for type
 
-    # Set name as tag
-    if set_name:
+    # Set name as tag — skip generic catch-all categories
+    if set_name and set_name.lower() not in SKIP_SET_TAGS:
         tags.add(set_name.lower())
 
-    # Era — check set name first, then product name
-    # NOTE: era goes into the Shopify metafield only, NOT as a tag
-    era = _detect_era(set_lower) or _detect_era(name_lower)
+    # Era goes into metafield only — not a tag
 
     # Featured Pokémon
     combined = f"{name_lower} {set_lower}"
@@ -185,6 +205,50 @@ def _safe_set_match(set_key: str, text: str) -> bool:
     return bool(re.search(pattern, text, re.IGNORECASE))
 
 
+def _detect_era_from_card_mechanic(name: str) -> str | None:
+    """
+    Infer era from card mechanic keywords present in the product name.
+    These are high-confidence signals that don't require a set name.
+
+    Rules (applied to original-case name to preserve V vs v distinction):
+      - "VMAX", "VSTAR", "V-UNION", or standalone " V " / " V)" etc → swsh
+        (but not if it's part of "EX" or "GX" context — check swsh markers first)
+      - lowercase " ex" (not followed by capital letter) → sv
+      - "GX" → sm
+      - "EX" (all-caps, not part of a longer word) → xy  (could also be vintage EX era,
+        but we group those as xy since vintage EX sets are in the xy list)
+      - "Mega" alone without "ex"/"EX" context → unknown, return None
+    """
+    # VMAX / VSTAR / V-UNION → swsh (check before V to avoid substring issues)
+    if re.search(r'\bVMAX\b|\bVSTAR\b|\bV-UNION\b', name):
+        return "swsh"
+
+    # Standalone V (uppercase, word boundary, not part of VMAX etc) → swsh
+    # Match " V " or " V)" or "(V)" but not "EV" or "UV" etc
+    if re.search(r'(?<![A-Z])\bV\b(?![A-Z])', name):
+        return "swsh"
+
+    # lowercase "ex" as suffix (e.g. "Charizard ex", "Miraidon ex") → sv
+    # Must be preceded by space/letter, not be "EX", not followed by capital
+    if re.search(r'\s[a-z]+\s+ex\b', name, re.IGNORECASE) or re.search(r'\w ex\b(?![A-Z])', name):
+        # Double-check it's actually lowercase ex, not EX
+        if re.search(r'\b(?<!\bE)ex\b', name) and not re.search(r'\bEX\b', name):
+            return "sv"
+
+    # GX → sm
+    if re.search(r'\bGX\b', name):
+        return "sm"
+
+    # EX (all caps) → xy era
+    if re.search(r'\bEX\b', name):
+        return "xy"
+
+    # Mega without other markers → could be XY or Mega era, can't be confident
+    # Don't guess — return None
+
+    return None
+
+
 def infer_weight_oz(product_name: str) -> float:
     """Return estimated product weight in oz based on product name."""
     name_lower = product_name.lower()
@@ -197,11 +261,37 @@ def infer_weight_oz(product_name: str) -> float:
 
 
 def infer_era(product_name: str, set_name: str) -> str | None:
-    """Return era string (sv/swsh/sm/xy/mega/vintage) for metafield."""
-    era = _detect_era((set_name or "").lower()) or _detect_era(product_name.lower())
-    if not era:
-        return "vintage"
-    return era
+    """
+    Return era string or None if it cannot be confidently determined.
+
+    Priority:
+    1. Known set name match (most reliable)
+    2. Product name contains a known set keyword
+    3. Card mechanic keyword in product name (V, VMAX, ex, GX, EX)
+    4. None — caller should treat as unknown and flag for manual review
+    """
+    set_lower = (set_name or "").lower()
+    name_lower = product_name.lower()
+    is_mcap = set_lower in SKIP_SET_TAGS
+
+    # 1. Set name lookup (skip for MCAP since it's a catch-all)
+    if not is_mcap:
+        era = _detect_era(set_lower)
+        if era:
+            return era
+
+    # 2. Product name contains a known set keyword
+    era = _detect_era(name_lower)
+    if era:
+        return era
+
+    # 3. Card mechanic signal in product name
+    era = _detect_era_from_card_mechanic(product_name)  # pass original case for V vs v
+    if era:
+        return era
+
+    # 4. Unknown — don't guess
+    return None
 
 # ─── Image processing ─────────────────────────────────────────────────────────
 
@@ -551,26 +641,41 @@ def enrich_product(product_gid: str, ppt_item: dict, offer_price: float | None =
     unit_cost = (offer_price / max(1, ppt_item.get("quantity", 1))
                  if offer_price else None)
 
+    # Build "NEEDS" note for anything we couldn't determine
+    needs = []
+    if era is None:
+        needs.append("ERA (set metafield — could not be determined from name or set)")
+    # Could add more signals here in future (e.g. GTIN, description)
+
+    needs_html = ""
+    if needs:
+        items_html = "".join(f"<li>{n}</li>" for n in needs)
+        needs_html = f"<p><strong>⚠ NEEDS MANUAL REVIEW:</strong></p><ul>{items_html}</ul>"
+
     summary = {
         "product_gid": product_gid,
         "tags": tags,
         "era": era,
         "weight_oz": weight_oz,
         "unit_cost": unit_cost,
+        "needs": needs,
         "image_processed": False,
         "errors": [],
     }
 
-    # 1) Tags + core fields via productUpdate
+    # 1) Tags + core fields via productUpdate (include NEEDS note in body_html if present)
     product_id = product_gid.split("/")[-1]
     try:
-        _rest("PUT", f"/products/{product_id}.json", json={"product": {
+        update_payload = {
             "id": int(product_id),
             "tags": ", ".join(tags),
             "product_type": "Pokemon",
             "vendor": "Pack Fresh",
             "template_suffix": "cro-alt",
-        }})
+        }
+        if needs_html:
+            update_payload["body_html"] = needs_html
+        _rest("PUT", f"/products/{product_id}.json", json={"product": update_payload})
     except Exception as e:
         summary["errors"].append(f"product update: {e}")
 

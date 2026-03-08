@@ -21,7 +21,7 @@ CASES = [
     ("Paradox Rift Build & Battle Box",         "Paradox Rift",          "buildbattle",    "sv"),
     ("Pikachu V Box",                           "Sword & Shield",        "collection box", "swsh"),
     ("Charizard Premium Collection",            "Brilliant Stars",       "collection box", "swsh"),
-    ("Eevee Heroes Special Collection",         "Eevee Heroes",          "collection box", "vintage"),
+    ("Eevee Heroes Special Collection",         "Eevee Heroes",          "collection box", None),
     ("Ultra-Premium Collection Charizard",      "Scarlet & Violet",      "ultra premium collection", "sv"),
     ("Phantasmal Flames Booster Box",           "Phantasmal Flames",     "booster box",    "mega"),
     ("Base Set Booster Pack",                   "Base Set",              "booster pack",   "vintage"),

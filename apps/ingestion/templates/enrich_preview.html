@@ -326,13 +326,13 @@
         const weight = preview.weight_oz || '—';
         const tags = preview.tags || [];
 
-        // Separate type/era/set tags from general ones for display
+        // Separate type tags (highlighted) from set/other tags
+        // Era is shown in metafields only — never in tag list
         const typeTagSet = new Set(['booster box','booster pack','etb','pcetb','blister',
-                                    'sleeved','tin','collection box','buildbattle',
+                                    'sleeved','tin','display','collection box','buildbattle',
                                     'ultra premium collection','sealed','pokemon']);
         const highlightTags = tags.filter(t => typeTagSet.has(t));
-        const eraTags = [era];
-        const otherTags = tags.filter(t => !typeTagSet.has(t) && t !== era);
+        const otherTags = tags.filter(t => !typeTagSet.has(t));
 
         const channels = ['Online Store', 'Shop', 'Point of Sale', 'Inbox', 'Facebook & Instagram'];
 
@@ -348,6 +348,15 @@
                         <div style="font-size:1.4rem; font-weight:700; color:var(--green);">$${(+marketPrice).toFixed(2)}</div>
                     </div>
                 </div>
+
+                ${!era ? `
+                <div style="padding:12px 24px; background:var(--amber-bg); border-bottom:1px solid var(--amber);
+                            display:flex; align-items:center; gap:10px;">
+                    <span style="color:var(--amber); font-size:0.85rem;">
+                        ⚠ <strong>Era could not be determined.</strong>
+                        The listing description will include a NEEDS note for manual review.
+                    </span>
+                </div>` : ''}
 
                 <!-- Image preview -->
                 <div class="image-section">
@@ -377,7 +386,6 @@
                         <h3>Tags</h3>
                         <div class="tags">
                             ${highlightTags.map(t => `<span class="tag highlight">${escHtml(t)}</span>`).join('')}
-                            <span class="tag era">${escHtml(era)}</span>
                             ${otherTags.map(t => `<span class="tag">${escHtml(t)}</span>`).join('')}
                         </div>
                     </div>
@@ -403,7 +411,10 @@
                     <div class="result-section">
                         <h3>Metafields</h3>
                         <table class="meta-table">
-                            <tr><td>era</td><td>${escHtml(era)}</td></tr>
+                            <tr><td>era</td><td>${era
+                                ? escHtml(era)
+                                : '<span style="color:var(--amber);">⚠ unknown — needs review</span>'
+                            }</td></tr>
                             <tr><td>TCGPlayer ID</td><td>${escHtml(String(ppt.tcgPlayerId || tcgIdFromInput()))}</td></tr>
                         </table>
                     </div>
