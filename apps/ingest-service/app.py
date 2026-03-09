@@ -1654,7 +1654,7 @@ def proxy_create_listing():
     except _requests.Timeout:
         return jsonify({"error": "Listing creation timed out — it may still be processing"}), 504
     except Exception as e:
-        logger.exception("proxy_create_listing failed")
+        app.logger.exception("proxy_create_listing failed")
         return jsonify({"error": str(e)}), 500
 
 
