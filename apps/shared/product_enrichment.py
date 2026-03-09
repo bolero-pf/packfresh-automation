@@ -357,7 +357,8 @@ def infer_era(product_name: str, set_name: str) -> str | None:
 # ─── Image processing ─────────────────────────────────────────────────────────
 
 def _download_image(url: str) -> Image.Image:
-    r = requests.get(url, timeout=30)
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    r = requests.get(url, timeout=30, headers=headers)
     r.raise_for_status()
     return Image.open(io.BytesIO(r.content)).convert("RGBA")
 
