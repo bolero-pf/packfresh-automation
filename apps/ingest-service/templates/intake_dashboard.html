@@ -1342,7 +1342,7 @@
                 <div style="display:flex; gap:2px; margin-bottom:16px; border-bottom:1px solid var(--border);">
                     <button class="tab active" data-stab="offer" onclick="switchSessionTab(this,'offer')">📋 Offer</button>
                     <button class="tab" data-stab="ppt" onclick="switchSessionTab(this,'ppt'); if(!document.getElementById('stab-ppt').dataset.loaded){ refreshPrices('${sessionId}'); document.getElementById('stab-ppt').dataset.loaded='1'; }">💰 PPT Prices</button>
-                    <button class="tab" data-stab="store" onclick="switchSessionTab(this,'store'); loadCacheStatus(); if(!document.getElementById('stab-store').dataset.loaded){ storeCheck('${sessionId}'); document.getElementById('stab-store').dataset.loaded='1'; }">🏪 Store</button>
+                    <button class="tab" data-stab="store" onclick="switchSessionTab(this,'store'); if(!document.getElementById('stab-store').dataset.loaded){ storeCheck('${sessionId}'); document.getElementById('stab-store').dataset.loaded='1'; }">🏪 Store</button>
                 </div>
 
                 <!-- ═══ OFFER TAB ═══ -->
@@ -2352,6 +2352,7 @@
             </table>
             </div>
         `;
+        loadCacheStatus();
     }
 
     async function loadCacheStatus() {
