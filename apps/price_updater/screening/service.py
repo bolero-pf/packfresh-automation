@@ -119,6 +119,7 @@ query CustomerUnfulfilledOrders($customerId: ID!, $first: Int!) {
           createdAt
           tags
           displayFulfillmentStatus
+          displayFinancialStatus
           currentTotalPriceSet { shopMoney { amount } }
         }
       }
@@ -914,6 +915,11 @@ def check_combine_orders(order_gid: str) -> dict:
         # Skip if not truly unfulfilled
         status = (node.get("displayFulfillmentStatus") or "").upper()
         if status not in ("UNFULFILLED",):
+            continue
+
+        # Skip cancelled/voided/refunded orders (they show as "unfulfilled" too)
+        financial = (node.get("displayFinancialStatus") or "").upper()
+        if financial in ("VOIDED", "REFUNDED", "EXPIRED"):
             continue
 
         # Skip pre-orders and already-held orders
