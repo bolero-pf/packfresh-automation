@@ -1641,6 +1641,8 @@ def proxy_create_listing():
         return jsonify({"error": "tcgplayer_id required"}), 400
 
     try:
+        ingest_api_key = os.getenv("INGEST_API_KEY", "")
+        headers = {"X-Ingest-Api-Key": ingest_api_key} if ingest_api_key else {}
         resp = _requests.post(
             f"{INGEST_INTERNAL_URL}/api/enrich/create-listing",
             json={
@@ -1648,6 +1650,7 @@ def proxy_create_listing():
                 "quantity": int(data.get("quantity", 0)),
                 "offer_price": data.get("offer_price"),
             },
+            headers=headers,
             timeout=120,  # enrichment can take ~30-60s (image processing)
         )
         return jsonify(resp.json()), resp.status_code

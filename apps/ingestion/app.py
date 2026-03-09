@@ -30,9 +30,14 @@ app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
 # ─── Password gate ───────────────────────────────────────────────
 INGEST_PASSWORD = os.getenv("INGEST_PASSWORD", "")
 
+INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")  # shared secret for server-to-server calls
+
 def _check_auth():
-    """Returns True if auth is disabled or user has valid session cookie."""
+    """Returns True if auth is disabled, valid API key header, or valid session cookie."""
     if not INGEST_PASSWORD:
+        return True
+    # Allow server-to-server calls with API key header
+    if INGEST_API_KEY and request.headers.get("X-Ingest-Api-Key") == INGEST_API_KEY:
         return True
     token = request.cookies.get("ingest_auth")
     if not token:
