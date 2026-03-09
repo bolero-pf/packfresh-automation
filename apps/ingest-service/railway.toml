@@ -1,8 +1,8 @@
 [build]
-dockerfilePath = "intake/Dockerfile"
+dockerfilePath = "apps/ingest-service/Dockerfile"
 
 [deploy]
 watchPatterns = [
-  "intake/**",
-  "shared/**"
+  "apps/ingest-service/**",
+  "apps/shared/**"
 ]

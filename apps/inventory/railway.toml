@@ -1,8 +1,8 @@
 [build]
-dockerfilePath = "inventory/Dockerfile"
+dockerfilePath = "apps/inventory/Dockerfile"
 
 [deploy]
 watchPatterns = [
-  "inventory/**",
-  "shared/**"
+  "apps/inventory/**",
+  "apps/shared/**"
 ]
