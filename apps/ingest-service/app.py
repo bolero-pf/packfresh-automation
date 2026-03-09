@@ -40,6 +40,7 @@ import json
 import hashlib
 import logging
 import time
+import requests as _requests
 from decimal import Decimal, InvalidOperation
 
 from flask import Flask, request, jsonify, render_template, send_file, Response
@@ -88,6 +89,9 @@ else:
     app.logger.warning("SHOPIFY_TOKEN/SHOPIFY_STORE not set — store lookups unavailable")
 
 cache_mgr = CacheManager(db, shopify)
+
+# Ingest service URL — used to proxy listing creation requests
+INGEST_INTERNAL_URL = os.getenv("INGEST_INTERNAL_URL", "").rstrip("/")
 
 # ── Auth ──────────────────────────────────────────────────────────
 DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
@@ -1610,6 +1614,48 @@ def shopify_sync():
             yield json.dumps({"status": "error", "error": str(e)}) + "\n"
 
     return app.response_class(generate(), mimetype="application/x-ndjson")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LISTING CREATION (proxy to ingest enrichment pipeline)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/create-listing", methods=["POST"])
+def proxy_create_listing():
+    """
+    Proxy to ingest service /api/enrich/create-listing.
+    Creates a fully enriched DRAFT Shopify listing for a TCGPlayer product.
+
+    Body: {
+        "tcgplayer_id": 12345,
+        "quantity": 0,        (default 0 — shell listing for price tracking)
+        "offer_price": null   (optional COGS)
+    }
+    """
+    if not INGEST_INTERNAL_URL:
+        return jsonify({"error": "INGEST_INTERNAL_URL not configured — cannot create listings from intake"}), 503
+
+    data = request.get_json() or {}
+    tcgplayer_id = data.get("tcgplayer_id")
+    if not tcgplayer_id:
+        return jsonify({"error": "tcgplayer_id required"}), 400
+
+    try:
+        resp = _requests.post(
+            f"{INGEST_INTERNAL_URL}/api/enrich/create-listing",
+            json={
+                "tcgplayer_id": tcgplayer_id,
+                "quantity": int(data.get("quantity", 0)),
+                "offer_price": data.get("offer_price"),
+            },
+            timeout=120,  # enrichment can take ~30-60s (image processing)
+        )
+        return jsonify(resp.json()), resp.status_code
+    except _requests.Timeout:
+        return jsonify({"error": "Listing creation timed out — it may still be processing"}), 504
+    except Exception as e:
+        logger.exception("proxy_create_listing failed")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/cache/status")

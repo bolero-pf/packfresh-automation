@@ -850,14 +850,53 @@ def enrich_product(product_gid: str, ppt_item: dict, offer_price: float | None =
     return summary
 
 
-def create_draft_listing(ppt_item: dict, price: float, offer_price: float | None = None) -> dict:
+
+def _set_new_product_inventory(variant_id: int, quantity: int) -> int:
+    """Set inventory for a newly created product variant. Returns qty actually set."""
+    # Get inventory item ID from variant
+    variant_gid = f"gid://shopify/ProductVariant/{variant_id}"
+    data = _gql("""
+        query($id: ID!) { productVariant(id: $id) { inventoryItem { id } } }
+    """, {"id": variant_gid})
+    inv_gid = data.get("productVariant", {}).get("inventoryItem", {}).get("id", "")
+    inv_item_id = inv_gid.split("/")[-1]
+    if not inv_item_id:
+        raise RuntimeError(f"No inventory item found for variant {variant_id}")
+
+    # Get location
+    loc_data = _gql("{ locations(first: 1) { edges { node { id } } } }")
+    location_id = loc_data["locations"]["edges"][0]["node"]["id"]
+
+    # Set quantity
+    _gql("""
+        mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+          inventorySetQuantities(input: $input) {
+            inventoryAdjustmentGroup { reason }
+            userErrors { field message }
+          }
+        }
+    """, {"input": {
+        "reason": "correction",
+        "name": "available",
+        "ignoreCompareQuantity": True,
+        "quantities": [{
+            "inventoryItemId": f"gid://shopify/InventoryItem/{inv_item_id}",
+            "locationId": location_id,
+            "quantity": quantity,
+        }]
+    }})
+    return quantity
+
+
+def create_draft_listing(ppt_item: dict, price: float, offer_price: float | None = None,
+                         quantity: int = 0) -> dict:
     """
-    Create a new DRAFT Shopify product from a PPT item, then enrich it.
-    Returns enrichment summary with added 'product_gid' and 'product_id'.
+    Create a new DRAFT Shopify product from a PPT item, then fully enrich it.
+    quantity=0 creates a shell listing (no stock) for price-tracking drafts.
+    quantity>0 sets inventory — used when pushing from ingest.
+    Returns enrichment summary with product_gid, product_id, quantity_set.
     """
     product_name = ppt_item.get("name", "Unknown Product")
-    set_name = ppt_item.get("setName", "")
-    tcgplayer_id = str(ppt_item.get("tcgPlayerId", ""))
 
     payload = {
         "product": {
@@ -879,12 +918,23 @@ def create_draft_listing(ppt_item: dict, price: float, offer_price: float | None
     product_id = product["id"]
     product_gid = product["admin_graphql_api_id"]
 
-    logger.info(f"Created draft product {product_id} — {product_name}")
+    logger.info(f"Created draft product {product_id} — {product_name} (qty={quantity})")
+
+    # Set inventory quantity if provided
+    quantity_set = 0
+    if quantity > 0:
+        try:
+            variant_id = product["variants"][0]["id"]
+            quantity_set = _set_new_product_inventory(variant_id, quantity)
+            logger.info(f"Set inventory to {quantity_set} for product {product_id}")
+        except Exception as e:
+            logger.warning(f"Could not set inventory for {product_id}: {e}")
 
     summary = enrich_product(product_gid, ppt_item, offer_price=offer_price)
     summary["product_id"] = product_id
     summary["product_gid"] = product_gid
     summary["title"] = product_name
+    summary["quantity_set"] = quantity_set
     return summary
 
 

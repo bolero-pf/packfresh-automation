@@ -541,20 +541,59 @@ def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cac
         else:
             entry.update(action="error", error="Could not find inventory item ID")
     else:
-        # No Shopify match — create a new product
+        # No Shopify match — create fully enriched draft listing via enrichment pipeline
         product_name = item.get("product_name", "Unknown Product")
-        market_price = float(item.get("market_price", 0))
-        new_product = shopify.create_product(
-            title=product_name,
-            price=market_price,
-            tags=["auto-created", "ingest"],
-            tcgplayer_id=tcg_id if tcg_id else None,
-            quantity=qty,
-        )
-        entry["action"] = "created_listing"
-        entry["new_product_id"] = new_product["id"]
-        entry["new_title"] = product_name
-        entry["listing_price"] = market_price
+        our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
+
+        ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id else None
+        if not ppt_item:
+            # Fallback: skeleton listing if PPT lookup fails
+            logger.warning(f"PPT lookup failed for {tcg_id} ({product_name}) — creating skeleton")
+            market_price = float(item.get("market_price", 0))
+            new_product = shopify.create_product(
+                title=product_name,
+                price=market_price,
+                tags=["auto-created", "ingest", "needs-enrichment"],
+                tcgplayer_id=tcg_id if tcg_id else None,
+                quantity=qty,
+            )
+            entry["action"] = "created_listing"
+            entry["new_product_id"] = new_product["id"]
+            entry["new_title"] = product_name
+            entry["listing_price"] = market_price
+            entry["enriched"] = False
+            return entry
+
+        market_price = float(ppt_item.get("marketPrice") or ppt_item.get("unopenedPrice") or item.get("market_price") or 0)
+        try:
+            summary = enrichment.create_draft_listing(
+                ppt_item,
+                price=market_price,
+                offer_price=our_unit_cost if our_unit_cost > 0 else None,
+                quantity=qty,
+            )
+            entry["action"] = "created_listing"
+            entry["new_product_id"] = summary.get("product_id")
+            entry["new_title"] = product_name
+            entry["listing_price"] = market_price
+            entry["enriched"] = True
+            entry["quantity_set"] = summary.get("quantity_set", 0)
+        except Exception as e:
+            logger.exception(f"Enriched listing creation failed for {tcg_id} — falling back to skeleton")
+            market_price = float(item.get("market_price", 0))
+            new_product = shopify.create_product(
+                title=product_name,
+                price=market_price,
+                tags=["auto-created", "ingest", "needs-enrichment"],
+                tcgplayer_id=tcg_id if tcg_id else None,
+                quantity=qty,
+            )
+            entry["action"] = "created_listing"
+            entry["new_product_id"] = new_product["id"]
+            entry["new_title"] = product_name
+            entry["listing_price"] = market_price
+            entry["enriched"] = False
+            entry["enrich_error"] = str(e)
     return entry
 
 
@@ -925,24 +964,31 @@ def create_listing():
 
     Body: {
         "tcgplayer_id": 12345,
-        "price": 29.99,           (Shopify listing price)
-        "offer_price": 18.00      (optional, sets COGS)
+        "price": 29.99,           (Shopify listing price — defaults to PPT market price)
+        "offer_price": 18.00,     (optional, sets COGS)
+        "quantity": 0             (optional, default 0 — set >0 to stock the listing)
     }
     """
     data = request.get_json() or {}
     tcgplayer_id = data.get("tcgplayer_id")
-    price = data.get("price")
     offer_price = data.get("offer_price")
+    quantity = int(data.get("quantity", 0))
 
-    if not tcgplayer_id or not price:
-        return jsonify({"error": "tcgplayer_id and price required"}), 400
+    if not tcgplayer_id:
+        return jsonify({"error": "tcgplayer_id required"}), 400
 
     ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not ppt_item:
         return jsonify({"error": f"PPT item not found for tcgplayer_id {tcgplayer_id}"}), 404
 
+    # Default price to PPT market price if not provided
+    price = data.get("price") or ppt_item.get("marketPrice") or ppt_item.get("unopenedPrice") or 0
+    if not price:
+        return jsonify({"error": "No price available — provide price or ensure PPT has market data"}), 400
+
     summary = enrichment.create_draft_listing(ppt_item, price=float(price),
-                                              offer_price=offer_price)
+                                              offer_price=offer_price,
+                                              quantity=quantity)
     return jsonify(summary)
 
 
