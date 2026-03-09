@@ -353,6 +353,25 @@ def cancel_session(session_id: str, reason: str = None) -> dict:
     return get_session(session_id)
 
 
+def rejuvenate_session(session_id: str) -> dict:
+    """Restore a cancelled/rejected session back to 'in_progress' status."""
+    session = get_session(session_id)
+    if not session:
+        raise ValueError("Session not found")
+    if session["status"] not in ("cancelled", "rejected"):
+        raise ValueError(f"Only cancelled or rejected sessions can be rejuvenated (current: {session['status']})")
+
+    execute("""
+        UPDATE intake_sessions
+        SET status = 'in_progress',
+            cancelled_at = NULL,
+            cancel_reason = NULL
+        WHERE id = %s
+    """, (session_id,))
+
+    return get_session(session_id)
+
+
 # ==========================================
 # ITEM STATUS CHANGES (damage, missing, rejected)
 # ==========================================

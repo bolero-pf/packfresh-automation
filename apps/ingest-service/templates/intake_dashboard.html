@@ -1260,7 +1260,12 @@
                     <td>$${(s.total_offer_amount || 0).toFixed(2)}</td>
                     <td style="font-size:0.8rem; color:var(--text-dim);">${details}</td>
                     <td>${new Date(s.created_at).toLocaleDateString()}</td>
-                    <td><button class="btn btn-secondary btn-sm" onclick="viewSession('${s.id}')">View</button></td>
+                    <td style="display:flex;gap:6px;align-items:center;">
+                        <button class="btn btn-secondary btn-sm" onclick="viewSession('${s.id}')">View</button>
+                        ${['cancelled','rejected'].includes(s.status) ? `
+                        <button class="btn btn-sm" style="background:#059669;color:#fff;border:none;"
+                            onclick="rejuvenateSession('${s.id}', event)">↺ Rejuvenate</button>` : ''}
+                    </td>
                 </tr>`;
                 }).join('')}</tbody>
             </table>`;
@@ -1297,6 +1302,7 @@
             const s = d.session;
             const items = d.items;
             const editable = !['received','ingested','cancelled','rejected'].includes(s.status);
+            const rejuvenatable = ['cancelled','rejected'].includes(s.status);
 
             body.innerHTML = `
                 <div class="stats">
@@ -1343,6 +1349,13 @@
                     ${editable ? `
                         <div style="margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap;">
                             <button class="btn btn-sm" style="background:var(--red); color:#fff;" onclick="cancelSession('${sessionId}')">✕ Cancel Session</button>
+                        </div>
+                    ` : ''}
+                    ${rejuvenatable ? `
+                        <div style="margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                            <button class="btn btn-sm" style="background:#059669;color:#fff;border:none;"
+                                onclick="rejuvenateSession('${sessionId}')">↺ Rejuvenate Session</button>
+                            <span style="font-size:0.8rem;color:var(--text-dim);">Restore this session to In Progress</span>
                         </div>
                     ` : ''}
 
@@ -2447,6 +2460,25 @@
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
             viewSession(sessionId, true);
+        } catch(err) { alert(err.message); }
+    }
+
+    async function rejuvenateSession(sessionId, evt) {
+        if (evt) evt.stopPropagation();
+        const confirmed = await themedPrompt({
+            title: '↺ Rejuvenate Session',
+            message: 'This will restore the session to In Progress. You can continue editing and making offers.',
+            confirmText: 'Rejuvenate',
+            dangerous: false,
+        });
+        if (confirmed === null) return;
+        try {
+            const r = await fetch(`/api/intake/rejuvenate-session/${sessionId}`, { method: 'POST' });
+            const d = await r.json();
+            if (!r.ok || !d.success) { alert(d.error || 'Failed to rejuvenate'); return; }
+            // Reload the session modal and refresh the cancelled list
+            viewSession(sessionId, true);
+            loadFilteredCancelled();
         } catch(err) { alert(err.message); }
     }
 

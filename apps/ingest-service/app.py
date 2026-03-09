@@ -895,6 +895,19 @@ def add_raw_card():
 # ITEM STATUS MANAGEMENT
 # ==========================================
 
+@app.route("/api/intake/rejuvenate-session/<session_id>", methods=["POST"])
+def rejuvenate_session(session_id):
+    """Restore a cancelled/rejected session back to in_progress."""
+    try:
+        result = intake.rejuvenate_session(session_id)
+        return jsonify({"success": True, "session": result})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("rejuvenate_session error")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/intake/cancel-session/<session_id>", methods=["POST"])
 def cancel_session(session_id):
     """Cancel an intake session."""
