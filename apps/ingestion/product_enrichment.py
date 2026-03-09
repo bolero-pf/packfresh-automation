@@ -610,69 +610,32 @@ def publish_to_all_channels(product_gid: str) -> None:
 
 def set_product_category(product_gid: str) -> None:
     """
-    Set the Shopify taxonomy category.
-
-    Tries three approaches in order:
-    1. GraphQL productUpdate with category GID (works on some API versions)
-    2. GraphQL productChangeCategory mutation (added ~2024-04)
-    3. REST standardized_product_type (fallback, uses numeric node id from GID suffix)
+    Set the Shopify taxonomy category using productUpdate with the category GID.
+    Requires API version 2024-07+. The category field takes the GID string directly.
     """
-    product_id = product_gid.split("/")[-1]
-
-    # Approach 1: productUpdate with nested category input
-    try:
-        result = _gql("""
-            mutation SetCategory($id: ID!) {
-              productUpdate(input: {
-                id: $id
-                customProductType: "Pokemon"
-              }) {
-                product { id }
-                userErrors { field message }
-              }
+    result = _gql("""
+        mutation SetCategory($id: ID!, $categoryId: ID!) {
+          productUpdate(input: {
+            id: $id
+            category: $categoryId
+          }) {
+            product {
+              id
+              category { fullName }
             }
-        """, {"id": product_gid})
-        # This just sets custom type — use approach 2 for actual taxonomy
-    except Exception:
-        pass
-
-    # Approach 2: productChangeCategory (preferred for 2025-10)
-    try:
-        result = _gql("""
-            mutation SetCategory($productId: ID!, $categoryId: ID!) {
-              productChangeCategory(productId: $productId, categoryId: $categoryId) {
-                product {
-                  id
-                  category { fullName }
-                }
-                userErrors { field message code }
-              }
-            }
-        """, {"productId": product_gid, "categoryId": TAXONOMY_CATEGORY_GID})
-        errs = result.get("productChangeCategory", {}).get("userErrors", [])
-        if not errs:
-            cat = (result.get("productChangeCategory", {})
-                         .get("product", {})
-                         .get("category", {})
-                         .get("fullName", ""))
-            logger.info(f"Category set to: {cat or TAXONOMY_CATEGORY_GID}")
-            return
-        logger.warning(f"productChangeCategory errors: {errs}")
-    except Exception as e:
-        logger.warning(f"productChangeCategory failed: {e}")
-
-    # Approach 3: REST fallback — numeric node id extracted from GID slug
-    # GID "gid://shopify/TaxonomyCategory/ae-2-2-3-2" — REST uses the same GID string
-    try:
-        result = _rest("PUT", f"/products/{product_id}.json", json={"product": {
-            "id": int(product_id),
-            "standardized_product_type": {
-                "product_taxonomy_node_id": TAXONOMY_CATEGORY_GID,
-            },
-        }})
-        logger.info(f"Category set via REST fallback for {product_id}")
-    except Exception as e2:
-        logger.warning(f"REST category fallback also failed: {e2}")
+            userErrors { field message }
+          }
+        }
+    """, {"id": product_gid, "categoryId": TAXONOMY_CATEGORY_GID})
+    errs = result.get("productUpdate", {}).get("userErrors", [])
+    if errs:
+        logger.warning(f"set_product_category errors: {errs}")
+    else:
+        cat = (result.get("productUpdate", {})
+                     .get("product", {})
+                     .get("category", {})
+                     .get("fullName", ""))
+        logger.info(f"Category set to: {cat or TAXONOMY_CATEGORY_GID}")
 
 
 def set_product_metafields(product_gid: str, tcgplayer_id: str, era: str | None) -> None:
