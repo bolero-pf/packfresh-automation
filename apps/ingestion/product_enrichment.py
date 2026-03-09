@@ -50,8 +50,8 @@ ERA_SETS = {
     "sv": [
         "scarlet & violet", "scarlet and violet", "paldea evolved", "obsidian flames",
         "151", "paradox rift", "paldean fates", "temporal forces", "stellar crown",
-        "shrouded fable", "surging sparks", "twilight masquerade", "prismatic evolution",
-        "journey together", "destined rivals", "black bolt", "white flare",
+        "shrouded fable", "surging sparks", "twilight masquerade", "prismatic evolutions",
+        "prismatic evolution", "journey together", "destined rivals", "black bolt", "white flare",
     ],
     "swsh": [
         "sword & shield", "sword and shield", "rebel clash", "darkness ablaze",
@@ -134,6 +134,9 @@ TYPE_RULES = [
     (r"\bdisplay\b", ["display"]),
     # tin / chest — before collection rules so "Radiant Collection Tin" → tin
     (r"\btin\b|\bchest\b", ["tin"]),
+    # tech sticker = blister. "Tech Sticker Collection" has "collection" in name
+    # but is a BLISTER, not a collection box. Must come before ALL collection rules.
+    (r"tech\s+sticker", ["booster pack", "blister"]),
     # collection variants
     (r"premium collection|special collection|collection box", ["collection box"]),
     # plain "collection" without box — still collection box
@@ -208,24 +211,37 @@ def infer_tags(product_name: str, set_name: str) -> list[str]:
 
 
 def _detect_era(text: str) -> str | None:
-    """Return era tag by matching text against known set names. Most specific first."""
-    # Try exact set name matches first
-    for set_key, era in SET_TO_ERA.items():
-        # Use word-boundary-aware matching; "evolutions" needs to not match "mega evolution"
-        if _safe_set_match(set_key, text):
-            return era
-    return None
+    """
+    Return era tag by matching text against known set names.
+    Prefers the longest (most specific) match to avoid shorter keys
+    winning over more specific ones (e.g. "evolutions" vs "prismatic evolutions").
+    """
+    matches = [(key, era) for key, era in SET_TO_ERA.items() if _safe_set_match(key, text)]
+    if not matches:
+        return None
+    # Longest key = most specific set name wins
+    best_key, best_era = max(matches, key=lambda x: len(x[0]))
+    return best_era
 
 
 def _safe_set_match(set_key: str, text: str) -> bool:
     """
     Match a set name key against text, with special handling for ambiguous names.
-    'evolutions' only matches SWSH era — but must not match 'mega evolution' (different key).
+    'evolutions' must not match inside 'prismatic evolutions' (different set, different era).
     'xy' must not fire on 'xy' that's part of another era's set name.
     """
     # Escape and use word boundaries
     pattern = r'\b' + re.escape(set_key) + r'\b'
-    return bool(re.search(pattern, text, re.IGNORECASE))
+    if not re.search(pattern, text, re.IGNORECASE):
+        return False
+    # Extra guard: if a longer key that CONTAINS this key also matches, defer to it.
+    # e.g. "evolutions" should not match if "prismatic evolutions" also matches.
+    for longer_key in SET_TO_ERA:
+        if longer_key != set_key and set_key in longer_key and len(longer_key) > len(set_key):
+            longer_pattern = r'\b' + re.escape(longer_key) + r'\b'
+            if re.search(longer_pattern, text, re.IGNORECASE):
+                return False  # the more specific key matches — let it win
+    return True
 
 
 def _detect_set_from_name(name_lower: str) -> str | None:
