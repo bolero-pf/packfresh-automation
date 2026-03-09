@@ -861,6 +861,7 @@ def enrich_product(product_gid: str, ppt_item: dict, offer_price: float | None =
             summary["image_processed"] = True
             summary["image_url"] = hosted_url
         except Exception as e:
+            logger.error(f"Image processing failed: {e}", exc_info=True)
             summary["errors"].append(f"image: {e}")
 
     return summary
