@@ -5,9 +5,13 @@ Run once: python migrate_pickup_date.py
 import os
 import psycopg2
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = (
+    os.getenv("DATABASE_URL") or
+    os.getenv("POSTGRES_URL") or
+    os.getenv("POSTGRESQL_URL")
+)
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL not set")
+    raise RuntimeError("No database URL found. Run via: railway run python migrate_*.py")
 
 conn = psycopg2.connect(DATABASE_URL)
 conn.autocommit = True

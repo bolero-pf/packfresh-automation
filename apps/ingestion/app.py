@@ -486,6 +486,19 @@ def push_session_live(session_id):
     if not errors:
         ingest.mark_session_ingested(session_id)
 
+    # Notify intake cache that inventory has changed
+    # Uses a fire-and-forget POST so ingest doesn't depend on intake being up
+    if not errors:
+        try:
+            import requests as _req
+            intake_url = os.getenv("INTAKE_INTERNAL_URL", "")
+            if intake_url:
+                _req.post(f"{intake_url}/api/cache/invalidate",
+                          json={"reason": "ingest"},
+                          timeout=3)
+        except Exception:
+            pass  # non-fatal — cache will self-heal on next staleness check
+
     return jsonify({
         "success": len(errors) == 0,
         "results": results,
@@ -941,6 +954,10 @@ def health():
         "shopify": shopify is not None,
     })
 
+
+# Pre-warm rembg model in background thread so it's ready before first listing creation
+import threading
+threading.Thread(target=enrichment._prewarm_rembg, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=True)

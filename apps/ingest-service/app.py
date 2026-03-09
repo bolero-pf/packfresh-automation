@@ -52,7 +52,8 @@ from collectr_parser import parse_collectr_csv
 from collectr_html_parser import parse_collectr_html
 from generic_csv_parser import parse_generic_csv, detect_csv_columns
 from barcode_gen import generate_barcode_image
-from shopify_client import ShopifyClient, ShopifyError
+from shopify_client import ShopifyClient
+from cache_manager import CacheManager, ShopifyError
 import intake
 
 # ==========================================
@@ -85,6 +86,8 @@ if SHOPIFY_TOKEN and SHOPIFY_STORE:
     app.logger.info(f"Shopify client initialized for {SHOPIFY_STORE}")
 else:
     app.logger.warning("SHOPIFY_TOKEN/SHOPIFY_STORE not set — store lookups unavailable")
+
+cache_mgr = CacheManager(db, shopify)
 
 # ── Auth ──────────────────────────────────────────────────────────
 DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
@@ -1609,6 +1612,28 @@ def shopify_sync():
     return app.response_class(generate(), mimetype="application/x-ndjson")
 
 
+@app.route("/api/cache/status")
+def cache_status():
+    """Return cache health and staleness info."""
+    return jsonify(cache_mgr.get_status())
+
+
+@app.route("/api/cache/invalidate", methods=["POST"])
+def cache_invalidate():
+    """Explicitly invalidate and trigger cache refresh. Called by ingest after push-live."""
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason", "manual")
+    cache_mgr.invalidate(reason)
+    return jsonify({"success": True, "reason": reason})
+
+
+@app.route("/api/cache/refresh", methods=["POST"])
+def cache_refresh():
+    """Manual full cache refresh trigger from UI."""
+    cache_mgr.invalidate("manual")
+    return jsonify({"success": True, "message": "Refresh triggered in background"})
+
+
 @app.route("/api/shopify/status")
 def shopify_status():
     """Check Shopify integration status and cache stats."""
@@ -1632,6 +1657,9 @@ def shopify_session_store_check(session_id):
     """Check Shopify cache for inventory/price of all mapped items in a session.
     Damaged items look for damaged variants first, then fall back to 88% of normal price."""
     DAMAGED_DISCOUNT = 0.88  # We sell damaged at 12% off
+
+    # Self-aware cache: check staleness and trigger background refresh if needed
+    cache_mgr.check_and_refresh_if_stale()
 
     items = intake.get_session_items(session_id)
     linked = [i for i in items if i.get("tcgplayer_id") and i.get("item_status") in ("good", "damaged")]

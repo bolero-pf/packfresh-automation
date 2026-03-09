@@ -7,9 +7,15 @@ Or locally: DATABASE_URL=... python migrate_shopify_cache.py
 import os
 import psycopg2
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = (
+    os.getenv("DATABASE_URL") or
+    os.getenv("POSTGRES_URL") or
+    os.getenv("POSTGRESQL_URL")
+)
 if not DATABASE_URL:
-    print("ERROR: DATABASE_URL not set")
+    print("ERROR: No database URL found.")
+    print("Run via Railway:  railway run python __file__")
+    print("Run locally:      DATABASE_URL=<your-url> python __file__")
     exit(1)
 
 conn = psycopg2.connect(DATABASE_URL)

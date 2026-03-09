@@ -816,6 +816,7 @@
         if (name === 'active-sessions') loadFilteredActive();
         if (name === 'completed') loadFilteredCompleted();
         if (name === 'cancelled') loadFilteredCancelled();
+        if (name === 'store') loadCacheStatus();
     }
     // Restore tab from hash on load
     (function() {
@@ -2249,7 +2250,10 @@
                 ${filterBtn('negative_margin', 'Negative Margin', enriched.filter(i => i.margin !== null && i.margin < 0).length)}
                 ${filterBtn('needs_listing', 'Needs Listing', enriched.filter(i => i.item_status === 'damaged' && !i.damaged_variant_exists).length)}
                 ${filterBtn('has_breakdown', 'Has Breakdown', enriched.filter(i => i.breakdown).length)}
-                <button class="btn btn-secondary btn-sm" onclick="shopifySync()" style="font-size:0.75rem; margin-left:auto;">↻ Refresh Cache</button>
+                <span id="cache-freshness-badge" style="font-size:0.75rem; color:var(--text-dim); margin-left:auto; display:flex; align-items:center; gap:8px;">
+                    <span id="cache-age-label">checking cache...</span>
+                    <button class="btn btn-secondary btn-sm" onclick="shopifySync()" style="font-size:0.75rem;">↻ Refresh</button>
+                </span>
             </div>
 
             <div style="overflow-x:auto;">
@@ -2350,7 +2354,36 @@
         `;
     }
 
+    async function loadCacheStatus() {
+        try {
+            const r = await fetch('/api/cache/status');
+            const d = await r.json();
+            const label = document.getElementById('cache-age-label');
+            if (!label) return;
+            if (d.status === 'never_synced') {
+                label.innerHTML = '<span style="color:var(--amber);">⚠ never synced</span>';
+                return;
+            }
+            const age = d.age_minutes;
+            const inProgress = d.refresh_in_progress;
+            if (inProgress) {
+                label.innerHTML = '<span style="color:var(--accent);">⟳ refreshing...</span>';
+                setTimeout(loadCacheStatus, 3000); // poll until done
+            } else if (age < 10) {
+                label.innerHTML = `<span style="color:#22c55e;">✓ fresh</span> <span style="color:var(--text-dim);">${Math.round(age)}m ago</span>`;
+            } else if (age < 60) {
+                label.innerHTML = `<span style="color:var(--amber);">~ ${Math.round(age)}m ago</span>`;
+            } else {
+                const hrs = (age / 60).toFixed(1);
+                label.innerHTML = `<span style="color:var(--red);">⚠ ${hrs}h ago</span>`;
+            }
+        } catch(e) { /* non-fatal */ }
+    }
+
     async function shopifySync() {
+        document.getElementById('cache-age-label').innerHTML = '<span style="color:var(--accent);">⟳ refreshing...</span>';
+        await fetch('/api/cache/refresh', { method: 'POST' });
+        setTimeout(loadCacheStatus, 2000);
         const panel = document.getElementById('store-check-results');
         if (panel) panel.innerHTML = '<div class="loading"><span class="spinner"></span> Syncing from Shopify — fetching products...</div>';
         try {

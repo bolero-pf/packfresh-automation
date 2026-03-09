@@ -114,6 +114,44 @@ class ShopifyClient:
             if has_next:
                 time.sleep(0.3)
 
+    def get_cache_staleness_signals(self) -> dict:
+        """
+        Cheap single-request check for cache staleness signals.
+        Returns latest order number and latest product updated_at.
+        One REST call each — fast enough to run on every cache read.
+        """
+        import requests as _req
+        base = f"https://{self.store}/admin/api/2025-10"
+        headers = {"X-Shopify-Access-Token": self.token}
+
+        signals = {}
+
+        # Latest order number
+        try:
+            r = _req.get(f"{base}/orders.json",
+                         params={"limit": 1, "status": "any", "fields": "order_number"},
+                         headers=headers, timeout=10)
+            r.raise_for_status()
+            orders = r.json().get("orders", [])
+            if orders:
+                signals["latest_order_number"] = orders[0]["order_number"]
+        except Exception as e:
+            logger.warning(f"Order number fetch failed: {e}")
+
+        # Latest product updated_at
+        try:
+            r = _req.get(f"{base}/products.json",
+                         params={"limit": 1, "order": "updated_at desc", "fields": "updated_at"},
+                         headers=headers, timeout=10)
+            r.raise_for_status()
+            products = r.json().get("products", [])
+            if products:
+                signals["latest_product_updated_at"] = products[0]["updated_at"]
+        except Exception as e:
+            logger.warning(f"Product updated_at fetch failed: {e}")
+
+        return signals
+
     def get_all_products(self, batch_size: int = 100) -> list[dict]:
         """
         Paginate through all store products, returning a flat list with:

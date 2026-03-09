@@ -18,7 +18,7 @@ Entry points:
     create_draft_listing(ppt_item, offer_price=None)              — create new draft + enrich
 
 Env vars required:
-    SHOPIFY_TOKEN, SHOPIFY_STORE, REMOVE_BG_API_KEY
+    SHOPIFY_TOKEN, SHOPIFY_STORE
 """
 
 import io
@@ -346,65 +346,60 @@ def _download_image(url: str) -> Image.Image:
     return Image.open(io.BytesIO(r.content)).convert("RGBA")
 
 
-def _remove_background_floodfill(im: Image.Image, tolerance: int = 30) -> Image.Image:
+def _remove_background_rembg(im: Image.Image) -> Image.Image:
     """
-    Remove the background from a product image using flood-fill from all four corners.
-
-    Auto-detects background color by sampling the four corners and averaging them.
-    Fills connected pixels within `tolerance` of that color with transparency.
-    Pixels inside the product boundary are protected — even if they match the
-    background color — because the flood fill cannot reach them through the product edge.
-
-    Works on both white (TCGPlayer) and black (pre-processed) backgrounds.
+    Remove background using rembg (U2Net ML model) — local inference, no API key needed.
+    Model (~170MB) is downloaded on first call and cached in ~/.u2net/.
+    Pre-warmed at startup so this never stalls mid-request.
     """
-    im = im.convert("RGBA")
-    w, h = im.size
-    pixels = im.load()
+    try:
+        from rembg import remove as rembg_remove
+    except ImportError:
+        raise RuntimeError("rembg not installed — add 'rembg' to requirements.txt")
 
-    # Sample corners to detect background color
-    corners = [
-        pixels[0, 0], pixels[w-1, 0],
-        pixels[0, h-1], pixels[w-1, h-1],
-    ]
-    # Use the most common corner color (majority vote on R,G,B)
-    bg_r = sum(c[0] for c in corners) // 4
-    bg_g = sum(c[1] for c in corners) // 4
-    bg_b = sum(c[2] for c in corners) // 4
-    logger.info(f"Detected background color: rgb({bg_r},{bg_g},{bg_b})")
+    buf_in = io.BytesIO()
+    im.save(buf_in, format="PNG")
+    result_bytes = rembg_remove(buf_in.getvalue())
+    return Image.open(io.BytesIO(result_bytes)).convert("RGBA")
 
-    def matches_bg(px):
-        r, g, b, a = px
-        if a < 10:
-            return True  # already transparent
-        return (abs(r - bg_r) <= tolerance and
-                abs(g - bg_g) <= tolerance and
-                abs(b - bg_b) <= tolerance)
 
-    visited = [[False] * h for _ in range(w)]
-    queue = []
+def _remove_background_removebg(im: Image.Image) -> Image.Image:
+    """
+    Remove background via remove.bg API (high quality, 50 free credits/month).
+    Raises RuntimeError if API key not set or request fails.
+    """
+    api_key = os.environ.get("REMOVE_BG_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("REMOVE_BG_API_KEY not set")
 
-    # Seed from all four edges
-    for x in range(w):
-        queue.append((x, 0))
-        queue.append((x, h - 1))
-    for y in range(h):
-        queue.append((0, y))
-        queue.append((w - 1, y))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    resp = requests.post(
+        "https://api.remove.bg/v1.0/removebg",
+        files={"image_file": ("image.png", buf.getvalue(), "image/png")},
+        data={"size": "auto"},
+        headers={"X-Api-Key": api_key},
+        timeout=60,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"remove.bg error {resp.status_code}: {resp.text[:200]}")
+    return Image.open(io.BytesIO(resp.content)).convert("RGBA")
 
-    while queue:
-        x, y = queue.pop()
-        if x < 0 or x >= w or y < 0 or y >= h:
-            continue
-        if visited[x][y]:
-            continue
-        visited[x][y] = True
-        px = pixels[x, y]
-        if not matches_bg(px):
-            continue
-        pixels[x, y] = (px[0], px[1], px[2], 0)
-        queue.extend([(x+1, y), (x-1, y), (x, y+1), (x, y-1)])
 
-    return im
+def _prewarm_rembg() -> None:
+    """
+    Pre-warm the rembg model at startup so the first listing creation isn't slow.
+    Runs in a background thread — doesn't block Flask startup.
+    """
+    try:
+        from rembg import remove as rembg_remove
+        dummy = Image.new("RGB", (64, 64), (255, 255, 255))
+        buf = io.BytesIO()
+        dummy.save(buf, format="PNG")
+        rembg_remove(buf.getvalue())
+        logger.info("rembg model pre-warmed successfully")
+    except Exception as e:
+        logger.warning(f"rembg pre-warm failed (will retry on first use): {e}")
 
 
 def _matte_product(src_im: Image.Image) -> Image.Image:
@@ -434,17 +429,28 @@ def _png_bytes(im: Image.Image) -> bytes:
 
 def process_product_image(image_url: str, product_name: str) -> bytes:
     """
-    Download image from URL, remove white background via flood-fill, apply matte.
+    Download image from URL, remove background, apply matte.
     Returns PNG bytes ready for Shopify upload.
 
-    TCGPlayer images have clean white/light backgrounds — flood-fill from corners
-    is more reliable than remove.bg for product packaging (which is often white itself).
+    Strategy: try remove.bg first (best quality), fall back to rembg (local ML).
+    rembg is pre-warmed at startup so fallback is always fast.
     """
     logger.info(f"Downloading image: {image_url}")
     src = _download_image(image_url)
 
-    logger.info("Removing background via flood-fill (auto-detects bg color)")
-    no_bg = _remove_background_floodfill(src)
+    # Try remove.bg first
+    api_key = os.environ.get("REMOVE_BG_API_KEY", "")
+    if api_key:
+        try:
+            logger.info("Removing background via remove.bg")
+            no_bg = _remove_background_removebg(src)
+            logger.info("remove.bg succeeded")
+        except RuntimeError as e:
+            logger.warning(f"remove.bg failed ({e}), falling back to rembg")
+            no_bg = _remove_background_rembg(src)
+    else:
+        logger.info("REMOVE_BG_API_KEY not set — using rembg (local ML)")
+        no_bg = _remove_background_rembg(src)
 
     logger.info("Applying matte")
     matted = _matte_product(no_bg)
