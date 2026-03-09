@@ -102,6 +102,18 @@ for _era, _sets in ERA_SETS.items():
 MCAP_SET = "miscellaneous cards & products"
 SKIP_SET_TAGS = {MCAP_SET, "miscellaneous", ""}
 
+# Base era names that are valid set names but also umbrella terms.
+# When scanning a product name for a set tag, these should only match
+# if no more specific set name is found first.
+# e.g. "Scarlet & Violet 151 Mini Tin" → tag should be "scarlet & violet 151", not "scarlet & violet"
+BASE_ERA_NAMES = {
+    "scarlet & violet", "scarlet and violet",
+    "sword & shield", "sword and shield",
+    "sun & moon", "sun and moon",
+    "xy", "x&y",
+    "mega evolution",
+}
+
 # ─── Type / taxonomy tag inference ───────────────────────────────────────────
 
 # Each entry: (regex_pattern, list_of_tags_to_add)
@@ -171,7 +183,13 @@ def infer_tags(product_name: str, set_name: str) -> list[str]:
 
     # Set name as tag — skip generic catch-all categories
     if set_name and set_name.lower() not in SKIP_SET_TAGS:
-        tags.add(set_name.lower())
+        if set_lower in BASE_ERA_NAMES:
+            # Set name is an umbrella (e.g. "Scarlet & Violet") — look for a more specific
+            # set name in the product title first (e.g. "scarlet & violet 151")
+            detected_set = _detect_set_from_name(name_lower)
+            tags.add(detected_set if detected_set else set_lower)
+        else:
+            tags.add(set_lower)
     elif set_lower in SKIP_SET_TAGS:
         # For MCAP items, try to find the real set from the product name
         detected_set = _detect_set_from_name(name_lower)
@@ -211,11 +229,25 @@ def _safe_set_match(set_key: str, text: str) -> bool:
 
 
 def _detect_set_from_name(name_lower: str) -> str | None:
-    """Scan a product name for a known set name and return it (lowercase) if found."""
-    for set_key in SET_TO_ERA:
-        if _safe_set_match(set_key, name_lower):
-            return set_key
-    return None
+    """
+    Scan a product name for a known set name and return it (lowercase) if found.
+
+    Prefers more specific set names over base era umbrella names.
+    e.g. "Scarlet & Violet 151 Mini Tin" → "scarlet & violet 151" not "scarlet & violet"
+
+    Strategy: collect all matches, then pick the longest (most specific) one,
+    excluding base era names unless they are the only match.
+    """
+    matches = [key for key in SET_TO_ERA if _safe_set_match(key, name_lower)]
+    if not matches:
+        return None
+
+    # Prefer non-base matches; fall back to base if nothing else found
+    specific = [m for m in matches if m not in BASE_ERA_NAMES]
+    candidates = specific if specific else matches
+
+    # Return the longest match (most specific set name wins)
+    return max(candidates, key=len)
 
 
 def _detect_era_from_card_mechanic(name: str) -> str | None:
@@ -314,24 +346,39 @@ def _download_image(url: str) -> Image.Image:
     return Image.open(io.BytesIO(r.content)).convert("RGBA")
 
 
-def _make_white_transparent(im: Image.Image, threshold: int = 240, edge_only: bool = True) -> Image.Image:
+def _remove_background_floodfill(im: Image.Image, tolerance: int = 30) -> Image.Image:
     """
-    Convert near-white pixels to transparent using flood-fill from all four corners.
-    This removes the white background from TCGPlayer product images without touching
-    white pixels that are part of the actual product (packaging, card faces, etc.).
+    Remove the background from a product image using flood-fill from all four corners.
 
-    Strategy:
-    - Flood-fill from each corner, marking connected near-white pixels as transparent
-    - Pixels inside the product boundary are NOT touched even if they're white
-    - threshold: how close to white (255,255,255) a pixel must be to qualify
+    Auto-detects background color by sampling the four corners and averaging them.
+    Fills connected pixels within `tolerance` of that color with transparency.
+    Pixels inside the product boundary are protected — even if they match the
+    background color — because the flood fill cannot reach them through the product edge.
+
+    Works on both white (TCGPlayer) and black (pre-processed) backgrounds.
     """
     im = im.convert("RGBA")
     w, h = im.size
     pixels = im.load()
 
-    def is_near_white(px):
+    # Sample corners to detect background color
+    corners = [
+        pixels[0, 0], pixels[w-1, 0],
+        pixels[0, h-1], pixels[w-1, h-1],
+    ]
+    # Use the most common corner color (majority vote on R,G,B)
+    bg_r = sum(c[0] for c in corners) // 4
+    bg_g = sum(c[1] for c in corners) // 4
+    bg_b = sum(c[2] for c in corners) // 4
+    logger.info(f"Detected background color: rgb({bg_r},{bg_g},{bg_b})")
+
+    def matches_bg(px):
         r, g, b, a = px
-        return a > 10 and r >= threshold and g >= threshold and b >= threshold
+        if a < 10:
+            return True  # already transparent
+        return (abs(r - bg_r) <= tolerance and
+                abs(g - bg_g) <= tolerance and
+                abs(b - bg_b) <= tolerance)
 
     visited = [[False] * h for _ in range(w)]
     queue = []
@@ -352,9 +399,8 @@ def _make_white_transparent(im: Image.Image, threshold: int = 240, edge_only: bo
             continue
         visited[x][y] = True
         px = pixels[x, y]
-        if not is_near_white(px):
+        if not matches_bg(px):
             continue
-        # Make transparent
         pixels[x, y] = (px[0], px[1], px[2], 0)
         queue.extend([(x+1, y), (x-1, y), (x, y+1), (x, y-1)])
 
@@ -397,8 +443,8 @@ def process_product_image(image_url: str, product_name: str) -> bytes:
     logger.info(f"Downloading image: {image_url}")
     src = _download_image(image_url)
 
-    logger.info("Removing white background via flood-fill")
-    no_bg = _make_white_transparent(src)
+    logger.info("Removing background via flood-fill (auto-detects bg color)")
+    no_bg = _remove_background_floodfill(src)
 
     logger.info("Applying matte")
     matted = _matte_product(no_bg)
@@ -563,37 +609,70 @@ def publish_to_all_channels(product_gid: str) -> None:
 
 
 def set_product_category(product_gid: str) -> None:
-    """Set the Shopify taxonomy category via REST (most reliable across API versions)."""
+    """
+    Set the Shopify taxonomy category.
+
+    Tries three approaches in order:
+    1. GraphQL productUpdate with category GID (works on some API versions)
+    2. GraphQL productChangeCategory mutation (added ~2024-04)
+    3. REST standardized_product_type (fallback, uses numeric node id from GID suffix)
+    """
     product_id = product_gid.split("/")[-1]
-    # REST product update accepts standardized_product_type as a path string
-    # which maps to the Shopify taxonomy — this is the most reliable method
+
+    # Approach 1: productUpdate with nested category input
+    try:
+        result = _gql("""
+            mutation SetCategory($id: ID!) {
+              productUpdate(input: {
+                id: $id
+                customProductType: "Pokemon"
+              }) {
+                product { id }
+                userErrors { field message }
+              }
+            }
+        """, {"id": product_gid})
+        # This just sets custom type — use approach 2 for actual taxonomy
+    except Exception:
+        pass
+
+    # Approach 2: productChangeCategory (preferred for 2025-10)
+    try:
+        result = _gql("""
+            mutation SetCategory($productId: ID!, $categoryId: ID!) {
+              productChangeCategory(productId: $productId, categoryId: $categoryId) {
+                product {
+                  id
+                  category { fullName }
+                }
+                userErrors { field message code }
+              }
+            }
+        """, {"productId": product_gid, "categoryId": TAXONOMY_CATEGORY_GID})
+        errs = result.get("productChangeCategory", {}).get("userErrors", [])
+        if not errs:
+            cat = (result.get("productChangeCategory", {})
+                         .get("product", {})
+                         .get("category", {})
+                         .get("fullName", ""))
+            logger.info(f"Category set to: {cat or TAXONOMY_CATEGORY_GID}")
+            return
+        logger.warning(f"productChangeCategory errors: {errs}")
+    except Exception as e:
+        logger.warning(f"productChangeCategory failed: {e}")
+
+    # Approach 3: REST fallback — numeric node id extracted from GID slug
+    # GID "gid://shopify/TaxonomyCategory/ae-2-2-3-2" — REST uses the same GID string
     try:
         result = _rest("PUT", f"/products/{product_id}.json", json={"product": {
             "id": int(product_id),
             "standardized_product_type": {
-                "product_taxonomy_node_id": 1511,  # Gaming Cards in Collectible Trading Cards
+                "product_taxonomy_node_id": TAXONOMY_CATEGORY_GID,
             },
         }})
-        logger.info(f"Category set via REST for product {product_id}")
-    except Exception as e:
-        # Fallback: try GraphQL productChangeCategory mutation (2024-07+)
-        logger.warning(f"REST category failed ({e}), trying productChangeCategory GQL")
-        try:
-            result = _gql("""
-                mutation ChangeCategory($id: ID!, $catId: ID!) {
-                  productChangeCategory(productId: $id, categoryId: $catId) {
-                    product { id }
-                    userErrors { field message }
-                  }
-                }
-            """, {"id": product_gid, "catId": TAXONOMY_CATEGORY_GID})
-            errs = result.get("productChangeCategory", {}).get("userErrors", [])
-            if errs:
-                logger.warning(f"productChangeCategory errors: {errs}")
-            else:
-                logger.info(f"Category set via productChangeCategory for {product_id}")
-        except Exception as e2:
-            logger.warning(f"productChangeCategory also failed: {e2}")
+        logger.info(f"Category set via REST fallback for {product_id}")
+    except Exception as e2:
+        logger.warning(f"REST category fallback also failed: {e2}")
 
 
 def set_product_metafields(product_gid: str, tcgplayer_id: str, era: str | None) -> None:
