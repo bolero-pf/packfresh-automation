@@ -1,0 +1,8 @@
+[build]
+dockerfilePath = "ingestion/Dockerfile"
+
+[deploy]
+watchPatterns = [
+  "ingestion/**",
+  "shared/**"
+]

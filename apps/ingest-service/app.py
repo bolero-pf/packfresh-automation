@@ -88,7 +88,7 @@ if SHOPIFY_TOKEN and SHOPIFY_STORE:
 else:
     app.logger.warning("SHOPIFY_TOKEN/SHOPIFY_STORE not set — store lookups unavailable")
 
-cache_mgr = CacheManager(db, shopify)
+cache_mgr = CacheManager(db, shopify, table_prefix="", cache_all_products=False)
 
 # Ingest service URL — used to proxy listing creation requests
 INGEST_INTERNAL_URL = os.getenv("INGEST_INTERNAL_URL", "").rstrip("/")

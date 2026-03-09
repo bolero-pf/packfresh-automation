@@ -1,0 +1,8 @@
+[build]
+dockerfilePath = "intake/Dockerfile"
+
+[deploy]
+watchPatterns = [
+  "intake/**",
+  "shared/**"
+]
