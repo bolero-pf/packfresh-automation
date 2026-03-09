@@ -53,7 +53,7 @@ from collectr_html_parser import parse_collectr_html
 from generic_csv_parser import parse_generic_csv, detect_csv_columns
 from barcode_gen import generate_barcode_image
 from shopify_client import ShopifyClient
-from cache_manager import CacheManager, ShopifyError
+from cache_manager import CacheManager
 import intake
 
 # ==========================================
