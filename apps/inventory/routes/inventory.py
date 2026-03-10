@@ -149,7 +149,7 @@ CURATED_TAGS = [
 def sync_now():
     cm = _get_cache_manager()
     if cm:
-        cm._ensure_tables()
+        cm.ensure_tables()
         cm.invalidate("manual_sync")
         flash("🔁 Sync triggered — cache is refreshing in the background.", "success")
     else:
@@ -212,7 +212,7 @@ def _apply_filters(rows, *, q=None, in_stock=False, tag_any=None, status="all", 
 def index():
     cm = _get_cache_manager()
     if cm:
-        cm._ensure_tables()
+        cm.ensure_tables()
         cm.check_and_refresh_if_stale()
 
     # ── SAVE (POST) ─────────────────────────────────────────────────────────
