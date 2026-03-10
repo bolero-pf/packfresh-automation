@@ -878,32 +878,25 @@ def screen_order_spike(order_gid: str) -> dict:
     return results
 
 # ═══════════════════════════════════════════════════════════════════════
-#  CHECK 5: COMBINE ORDERS (same customer, unfulfilled)
+#  CHECK 5: COMBINE ORDERS + SIGNATURE
 # ═══════════════════════════════════════════════════════════════════════
 
-# Tags that indicate an order should be skipped in the combine check
 COMBINE_SKIP_TAGS = {"pre-order", "preorder", "pre_order", "hold-for-review"}
 
 def check_combine_orders(order_gid: str) -> dict:
     """
-    When a new order comes in, check if the same customer has other
-    unfulfilled orders that aren't pre-orders or already on hold.
-    If so, hold the new order with a note to combine shipping.
-    Also checks if the order needs signature ($500+).
+    When a new order comes in:
+    1. Check if the same customer has other unfulfilled orders to combine.
+    2. Check if signature is needed ($500+ individually OR combined).
     """
     data = shopify_gql(ORDER_DETAIL_Q, {"id": order_gid})
     order = data["data"]["order"]
     customer = order.get("customer") or {}
     customer_gid = customer.get("id")
-
-    # Signature check (piggybacks on the order we already fetched)
-    sig_result = None
-    try:
-        sig_result = check_signature_required(order_gid, order=order)
-    except Exception as e:
-        print(f"[screening] Signature check failed for {order_gid}: {e}", flush=True)
+    order_total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
 
     if not customer_gid:
+        sig_result = _check_signature(order_gid, order_total)
         return {"flagged": False, "reason": "no_customer", "signature": sig_result}
 
     # Fetch this customer's unfulfilled orders
@@ -913,25 +906,21 @@ def check_combine_orders(order_gid: str) -> dict:
     cust = cust_data.get("data", {}).get("customer") or {}
     edges = cust.get("orders", {}).get("edges", [])
 
-    # Find sibling unfulfilled orders (not this order, not pre-orders, not on hold)
+    # Find sibling unfulfilled orders
     siblings = []
     for edge in edges:
         node = edge["node"]
-        # Skip the current order
         if node["id"] == order_gid:
             continue
 
-        # Skip if not truly unfulfilled
         status = (node.get("displayFulfillmentStatus") or "").upper()
         if status not in ("UNFULFILLED",):
             continue
 
-        # Skip cancelled/voided/refunded orders (they show as "unfulfilled" too)
         financial = (node.get("displayFinancialStatus") or "").upper()
         if financial in ("VOIDED", "REFUNDED", "EXPIRED"):
             continue
 
-        # Skip pre-orders and already-held orders
         order_tags = set(t.lower() for t in (node.get("tags") or []))
         if order_tags & COMBINE_SKIP_TAGS:
             continue
@@ -944,10 +933,18 @@ def check_combine_orders(order_gid: str) -> dict:
             "created_at": node.get("createdAt"),
         })
 
+    # Signature: check this order alone OR combined with siblings
+    combined_total = order_total + sum(s["total"] for s in siblings)
+    sig_result = _check_signature(
+        order_gid, order_total,
+        combined_total=combined_total if siblings else None,
+        siblings=siblings if siblings else None,
+    )
+
     if not siblings:
         return {"flagged": False, "reason": "no_siblings", "signature": sig_result}
 
-    # Build the note
+    # Build the combine note
     order_name = order.get("name", "?")
     sibling_names = ", ".join(s["order_name"] for s in siblings)
     sibling_details = "; ".join(
@@ -962,19 +959,16 @@ def check_combine_orders(order_gid: str) -> dict:
 
     hold_reason = f"Combine with {sibling_names} — same customer has unfulfilled orders"
 
-    # Hold the new order
     try:
         _hold_fulfillment(order_gid, hold_reason)
     except Exception as e:
         print(f"[screening] Failed to hold fulfillment for combine {order_gid}: {e}", flush=True)
 
-    # Add note to the new order
     try:
         _add_order_note(order_gid, note_text)
     except Exception as e:
         print(f"[screening] Failed to add combine note to {order_gid}: {e}", flush=True)
 
-    # Also add a note to each sibling so fulfillment staff see it from either side
     for s in siblings:
         try:
             sib_note = (
@@ -994,28 +988,55 @@ def check_combine_orders(order_gid: str) -> dict:
         "signature": sig_result,
     }
 
+
 # ═══════════════════════════════════════════════════════════════════════
-#  CHECK 6: SIGNATURE REQUIRED ($500+)
+#  CHECK 6: SIGNATURE REQUIRED ($500+, individual or combined)
 # ═══════════════════════════════════════════════════════════════════════
 
-def check_signature_required(order_gid: str, order: dict = None) -> dict:
+def _check_signature(order_gid: str, order_total: float,
+                     combined_total: float = None,
+                     siblings: list = None) -> dict:
     """
-    Any order $500+ gets a note saying 'needs signature'.
-    If order dict is passed, reuses it to avoid an extra API call.
+    Add 'needs signature' note if:
+      - This order alone is >= $500, OR
+      - This order + unfulfilled siblings combined >= $500
     """
-    if order is None:
-        data = shopify_gql(ORDER_DETAIL_Q, {"id": order_gid})
-        order = data["data"]["order"]
+    needs_sig = order_total >= SIGNATURE_THRESHOLD
+    combined_sig = False
 
-    total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+    if not needs_sig and combined_total is not None:
+        combined_sig = combined_total >= SIGNATURE_THRESHOLD
 
-    if total < SIGNATURE_THRESHOLD:
-        return {"flagged": False, "reason": "below_signature_threshold", "total": total}
+    if not needs_sig and not combined_sig:
+        return {"flagged": False, "reason": "below_signature_threshold",
+                "order_total": order_total, "combined_total": combined_total}
+
+    if needs_sig:
+        note = f"✍️ NEEDS SIGNATURE — order is ${order_total:.2f}"
+    else:
+        sib_names = ", ".join(s["order_name"] for s in (siblings or []))
+        note = (
+            f"✍️ NEEDS SIGNATURE — combined shipment is ${combined_total:.2f}\n"
+            f"This order (${order_total:.2f}) + {sib_names}"
+        )
 
     try:
-        _add_order_note(order_gid, "✍️ NEEDS SIGNATURE — order is $500+")
+        _add_order_note(order_gid, note)
     except Exception as e:
         print(f"[screening] Failed to add signature note to {order_gid}: {e}", flush=True)
 
-    return {"flagged": True, "reason": "signature_required", "total": total}
+    # If combined signature, also note the siblings
+    if combined_sig and siblings:
+        for s in siblings:
+            try:
+                _add_order_note(s["order_gid"],
+                    f"✍️ NEEDS SIGNATURE — combined shipment with new order is ${combined_total:.2f}")
+            except Exception as e:
+                print(f"[screening] Failed to add signature note to sibling {s['order_gid']}: {e}", flush=True)
 
+    return {
+        "flagged": True,
+        "reason": "signature_combined" if combined_sig else "signature_required",
+        "order_total": order_total,
+        "combined_total": combined_total,
+    }
