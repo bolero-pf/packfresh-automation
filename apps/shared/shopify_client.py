@@ -130,7 +130,7 @@ class ShopifyClient:
         """
         query = """
         query getProducts($first: Int!, $cursor: String) {
-          products(first: $first, after: $cursor) {
+          products(first: $first, after: $cursor, query: "status:active OR status:draft") {
             pageInfo { hasNextPage endCursor }
             edges {
               node {
