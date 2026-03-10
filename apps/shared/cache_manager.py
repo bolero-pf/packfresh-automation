@@ -17,9 +17,16 @@ that have a tcgplayer_id metafield — that behaviour is controlled by the
 
 Staleness triggers (any one is sufficient):
   1. Price updater window: cache last refreshed between 03:30–08:30 today
-  2. New orders:   latest Shopify order number has advanced
+  2. New orders:   latest Shopify order number has advanced — ALWAYS fires
   3. Products updated: latest product updated_at has advanced
+     → suppressed for TOOL_PUSH_COOLDOWN_MINUTES after any tool push
+       (prevents tool-originated Shopify edits from immediately re-syncing)
   4. Explicit invalidation: call .invalidate(reason)
+
+Tool push cooldown: when your own tools push price/qty to Shopify, they call
+  cm.record_tool_push() which sets last_tool_push_at in the meta table.
+  The product_updated staleness signal is suppressed for 10 minutes after that,
+  so your own edits don't thrash the cache. New orders are NEVER suppressed.
 """
 
 import logging
@@ -30,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 PRICE_UPDATER_START = (3, 30)
 PRICE_UPDATER_DONE  = (8, 30)
+TOOL_PUSH_COOLDOWN_MINUTES = 10   # suppress product_updated signal after a tool push
 
 
 class CacheManager:
@@ -82,6 +90,23 @@ class CacheManager:
 
         return {"stale": False, "last_refreshed_at": meta["last_refreshed_at"].isoformat()}
 
+    def record_tool_push(self) -> None:
+        """
+        Call this whenever your tools push a price or qty change to Shopify.
+        Suppresses the product_updated staleness signal for TOOL_PUSH_COOLDOWN_MINUTES
+        so your own edits don't immediately trigger a full re-sync.
+        New orders are never suppressed.
+        """
+        try:
+            self.db.execute(f"""
+                INSERT INTO {self._meta_table} (id, last_refreshed_at, last_tool_push_at)
+                VALUES (1, '1970-01-01', CURRENT_TIMESTAMP)
+                ON CONFLICT (id) DO UPDATE SET last_tool_push_at = CURRENT_TIMESTAMP
+            """)
+            logger.debug(f"[{self._meta_table}] tool push recorded")
+        except Exception as e:
+            logger.warning(f"record_tool_push failed: {e}")
+
     def invalidate(self, reason: str = "explicit") -> None:
         """Mark cache as needing a refresh and fire one immediately."""
         logger.info(f"[{self._cache_table}] invalidated (reason: {reason})")
@@ -123,6 +148,7 @@ class CacheManager:
                         inventory_item_id   BIGINT,
                         tcgplayer_id        BIGINT,
                         is_damaged          BOOLEAN DEFAULT FALSE,
+                        committed           INTEGER DEFAULT 0,
                         last_synced         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         PRIMARY KEY (shopify_product_id, shopify_variant_id)
                     )
@@ -160,11 +186,30 @@ class CacheManager:
                     last_refreshed_at       TIMESTAMP NOT NULL DEFAULT '1970-01-01',
                     last_refreshed_reason   VARCHAR(200),
                     last_order_number       INTEGER,
-                    last_product_updated_at TIMESTAMP
+                    last_product_updated_at TIMESTAMP,
+                    last_tool_push_at       TIMESTAMP
                 )
             """)
+            # Migrate existing tables — safe to run repeatedly
+            self._migrate_columns()
         except Exception as e:
             logger.warning(f"ensure_tables warning: {e}")
+
+    def _migrate_columns(self):
+        """Add columns introduced in later versions — idempotent."""
+        migrations = []
+        if self.table_prefix == "inventory_":
+            migrations += [
+                f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS committed INTEGER DEFAULT 0",
+            ]
+        migrations += [
+            f"ALTER TABLE {self._meta_table} ADD COLUMN IF NOT EXISTS last_tool_push_at TIMESTAMP",
+        ]
+        for sql in migrations:
+            try:
+                self.db.execute(sql)
+            except Exception as e:
+                logger.debug(f"Migration skipped ({e}): {sql[:60]}")
 
     # ─── Staleness checks ─────────────────────────────────────────────────────
 
@@ -183,7 +228,11 @@ class CacheManager:
                 shopify_ts = _parse_ts(latest_updated)
                 cache_ts   = meta["last_product_updated_at"].replace(tzinfo=timezone.utc)
                 if shopify_ts > cache_ts:
-                    reasons.append("product_updated")
+                    # Suppress if a tool push happened within the cooldown window
+                    if self._in_tool_push_cooldown(meta):
+                        logger.debug(f"[{self._cache_table}] product_updated suppressed — tool push cooldown active")
+                    else:
+                        reasons.append("product_updated")
         except Exception as e:
             logger.warning(f"Staleness signal fetch failed: {e} — treating cache as fresh")
         return reasons
@@ -202,6 +251,20 @@ class CacheManager:
         window_end   = datetime(today.year, today.month, today.day,
                                 *PRICE_UPDATER_DONE)
         return window_start <= lr <= window_end
+
+    def _in_tool_push_cooldown(self, meta: dict) -> bool:
+        """Return True if a tool push happened within TOOL_PUSH_COOLDOWN_MINUTES."""
+        last_push = meta.get("last_tool_push_at")
+        if not last_push:
+            return False
+        try:
+            now = datetime.now(timezone.utc)
+            if last_push.tzinfo is None:
+                last_push = last_push.replace(tzinfo=timezone.utc)
+            age_minutes = (now - last_push).total_seconds() / 60
+            return age_minutes < TOOL_PUSH_COOLDOWN_MINUTES
+        except Exception:
+            return False
 
     # ─── Background refresh ───────────────────────────────────────────────────
 
@@ -267,8 +330,8 @@ class CacheManager:
                 INSERT INTO {self._cache_table}
                     (shopify_product_id, shopify_variant_id, title, handle, status,
                      tags, shopify_price, shopify_qty, inventory_item_id,
-                     tcgplayer_id, is_damaged, last_synced)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                     tcgplayer_id, is_damaged, committed, last_synced)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (shopify_product_id, shopify_variant_id) DO UPDATE SET
                     title             = EXCLUDED.title,
                     handle            = EXCLUDED.handle,
@@ -279,6 +342,7 @@ class CacheManager:
                     inventory_item_id = EXCLUDED.inventory_item_id,
                     tcgplayer_id      = EXCLUDED.tcgplayer_id,
                     is_damaged        = EXCLUDED.is_damaged,
+                    committed         = EXCLUDED.committed,
                     last_synced       = CURRENT_TIMESTAMP
             """, (
                 p["shopify_product_id"], p["variant_id"],
@@ -288,6 +352,7 @@ class CacheManager:
                 p.get("inventory_item_id"),
                 p.get("tcgplayer_id"),
                 p.get("is_damaged", False),
+                p.get("committed", 0),
             ))
         else:
             # Intake/ingestion schema (keyed by tcgplayer_id)

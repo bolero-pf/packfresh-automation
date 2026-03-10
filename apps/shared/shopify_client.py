@@ -19,6 +19,11 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+class ShopifyError(Exception):
+    """Raised when Shopify API returns errors."""
+    pass
+
+
 class ShopifyClient:
     """Lightweight Shopify Admin GraphQL + REST client."""
 
@@ -26,6 +31,7 @@ class ShopifyClient:
         self.token = token
         self.store = store
         self.api_version = api_version
+        self._location_id: str | None = None
         self.endpoint = f"https://{store}/admin/api/{api_version}/graphql.json"
         self.headers = {
             "Content-Type": "application/json",
@@ -190,7 +196,256 @@ class ShopifyClient:
         logger.info(f"Fetched {len(products)} variants from Shopify")
         return products
 
-    # ─── Inventory REST helpers ─────────────────────────────────────────────
+
+    # ─── Location ───────────────────────────────────────────────────────────────
+
+    def get_location_id(self) -> str:
+        """Get the primary location ID for inventory operations (cached)."""
+        if self._location_id:
+            return self._location_id
+        data = self._gql("{ locations(first: 1) { edges { node { id } } } }")
+        edges = data.get("locations", {}).get("edges", [])
+        if not edges:
+            raise ShopifyError("No locations found in store")
+        self._location_id = edges[0]["node"]["id"]
+        return self._location_id
+
+    # ─── Inventory item lookups ──────────────────────────────────────────────────
+
+    def get_inventory_item_id(self, variant_id: int) -> str | None:
+        """Look up the inventory item GID for a variant."""
+        variant_gid = f"gid://shopify/ProductVariant/{variant_id}"
+        data = self._gql("""
+            query($id: ID!) {
+                productVariant(id: $id) { inventoryItem { id } }
+            }
+        """, {"id": variant_gid})
+        inv = data.get("productVariant", {}).get("inventoryItem", {})
+        return inv.get("id", "").split("/")[-1] or None
+
+    def get_inventory_item_cost_and_qty(self, inventory_item_id: str) -> tuple[float | None, int]:
+        """Fetch current unitCost and total available qty for an inventory item."""
+        inv_gid = f"gid://shopify/InventoryItem/{inventory_item_id}"
+        data = self._gql("""
+            query($id: ID!) {
+                inventoryItem(id: $id) {
+                    unitCost { amount }
+                    inventoryLevels(first: 10) {
+                        edges { node { quantities(names: ["available"]) { name quantity } } }
+                    }
+                }
+            }
+        """, {"id": inv_gid})
+        item = data.get("inventoryItem") or {}
+        cost_data = item.get("unitCost")
+        unit_cost = float(cost_data["amount"]) if cost_data and cost_data.get("amount") else None
+        levels = item.get("inventoryLevels", {}).get("edges", [])
+        current_qty = 0
+        for edge in levels:
+            for q in edge.get("node", {}).get("quantities", []):
+                if q.get("name") == "available":
+                    current_qty += q.get("quantity", 0)
+        return unit_cost, current_qty
+
+    def set_unit_cost(self, inventory_item_id: str, unit_cost: float) -> dict:
+        """Set the unit cost (COGS) on an inventory item."""
+        inv_gid = f"gid://shopify/InventoryItem/{inventory_item_id}"
+        mutation = """
+        mutation inventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
+            inventoryItemUpdate(id: $id, input: $input) {
+                inventoryItem { id unitCost { amount } }
+                userErrors { field message }
+            }
+        }
+        """
+        data = self._gql(mutation, {"id": inv_gid, "input": {"cost": str(round(unit_cost, 2))}})
+        errors = data.get("inventoryItemUpdate", {}).get("userErrors", [])
+        if errors:
+            raise ShopifyError(f"Set unit cost failed: {errors}")
+        logger.info(f"Set unit cost for {inventory_item_id} to {unit_cost:.2f}")
+        return data
+
+    def adjust_inventory(self, inventory_item_id: str, qty_delta: int, reason: str = "correction") -> dict:
+        """Adjust inventory quantity by a delta amount."""
+        location_id = self.get_location_id()
+        mutation = """
+        mutation inventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
+          inventoryAdjustQuantities(input: $input) {
+            inventoryAdjustmentGroup { reason }
+            userErrors { field message }
+          }
+        }
+        """
+        variables = {
+            "input": {
+                "reason": reason,
+                "name": "available",
+                "changes": [{
+                    "delta": qty_delta,
+                    "inventoryItemId": f"gid://shopify/InventoryItem/{inventory_item_id}",
+                    "locationId": location_id,
+                }]
+            }
+        }
+        data = self._gql(mutation, variables)
+        errors = data.get("inventoryAdjustQuantities", {}).get("userErrors", [])
+        if errors:
+            raise ShopifyError(f"Inventory adjust failed: {errors}")
+        logger.info(f"Adjusted inventory {inventory_item_id} by {qty_delta}")
+        return data
+
+    def set_inventory_quantity(self, inventory_item_id: str, quantity: int) -> dict:
+        """Set inventory to an exact quantity."""
+        location_id = self.get_location_id()
+        mutation = """
+        mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+          inventorySetQuantities(input: $input) {
+            inventoryAdjustmentGroup { reason }
+            userErrors { field message }
+          }
+        }
+        """
+        variables = {
+            "input": {
+                "reason": "correction",
+                "name": "available",
+                "ignoreCompareQuantity": True,
+                "quantities": [{
+                    "inventoryItemId": f"gid://shopify/InventoryItem/{inventory_item_id}",
+                    "locationId": location_id,
+                    "quantity": quantity,
+                }]
+            }
+        }
+        data = self._gql(mutation, variables)
+        errors = data.get("inventorySetQuantities", {}).get("userErrors", [])
+        if errors:
+            raise ShopifyError(f"Set inventory failed: {errors}")
+        logger.info(f"Set inventory {inventory_item_id} to {quantity}")
+        return data
+
+    # ─── Product management ──────────────────────────────────────────────────────
+
+    def duplicate_product_as_damaged(self, product_gid: str, new_title: str) -> dict:
+        """Duplicate a product for damaged sales."""
+        mutation = """
+        mutation productDuplicate($productId: ID!, $newTitle: String!) {
+          productDuplicate(productId: $productId, newTitle: $newTitle, includeImages: true) {
+            newProduct {
+              id title handle
+              variants(first: 5) {
+                edges { node { id price inventoryQuantity inventoryItem { id } } }
+              }
+            }
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._gql(mutation, {"productId": product_gid, "newTitle": new_title})
+        errors = data.get("productDuplicate", {}).get("userErrors", [])
+        if errors:
+            raise ShopifyError(f"Product duplicate failed: {errors}")
+        new_product = data["productDuplicate"]["newProduct"]
+        logger.info(f"Duplicated product as '{new_title}' -> {new_product['id']}")
+        return new_product
+
+    def add_tags(self, product_gid: str, tags: list[str]) -> dict:
+        """Add tags to a product."""
+        mutation = """
+        mutation tagsAdd($id: ID!, $tags: [String!]!) {
+          tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
+        }
+        """
+        data = self._gql(mutation, {"id": product_gid, "tags": tags})
+        errors = data.get("tagsAdd", {}).get("userErrors", [])
+        if errors:
+            raise ShopifyError(f"Tags add failed: {errors}")
+        return data
+
+    def update_variant_price_gql(self, product_gid: str, variant_gid: str, new_price: float) -> dict:
+        """Update a variant price via GraphQL bulk mutation (used by ingestion)."""
+        mutation = """
+        mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+          productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+            productVariants { id price }
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._gql(mutation, {
+            "productId": product_gid,
+            "variants": [{"id": variant_gid, "price": str(new_price)}]
+        })
+        errors = data.get("productVariantsBulkUpdate", {}).get("userErrors", [])
+        if errors:
+            raise ShopifyError(f"Price update failed: {errors}")
+        return data
+
+    def create_product(self, title: str, price: float, sku: str = None,
+                       tags: list[str] = None, tcgplayer_id: int = None,
+                       quantity: int = 0) -> dict:
+        """Create a new product with a single variant using productSet (2025+ API)."""
+        mutation = """
+        mutation productSet($input: ProductSetInput!) {
+          productSet(input: $input) {
+            product {
+              id title handle
+              variants(first: 1) {
+                edges { node { id price inventoryQuantity inventoryItem { id } } }
+              }
+            }
+            userErrors { field message }
+          }
+        }
+        """
+        product_input = {
+            "title": title,
+            "productOptions": [{"name": "Title", "position": 1, "values": [{"name": "Default Title"}]}],
+            "variants": [{"optionValues": [{"optionName": "Title", "name": "Default Title"}], "price": str(price)}],
+        }
+        if tags:
+            product_input["tags"] = tags
+        if sku:
+            product_input["variants"][0]["sku"] = sku
+
+        data = self._gql(mutation, {"input": product_input})
+        errors = data.get("productSet", {}).get("userErrors", [])
+        if errors:
+            raise ShopifyError(f"Product create failed: {errors}")
+
+        product = data["productSet"]["product"]
+
+        if tcgplayer_id:
+            self._set_metafield(product["id"], "tcg", "tcgplayer_id", str(tcgplayer_id))
+
+        if quantity > 0:
+            var_node = product["variants"]["edges"][0]["node"]
+            inv_id = var_node.get("inventoryItem", {}).get("id", "").split("/")[-1]
+            if inv_id:
+                self.set_inventory_quantity(inv_id, quantity)
+
+        logger.info(f"Created product '{title}' -> {product['id']}")
+        return product
+
+    def _set_metafield(self, owner_id: str, namespace: str, key: str, value: str):
+        """Set a metafield on a resource."""
+        mutation = """
+        mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id }
+            userErrors { field message }
+          }
+        }
+        """
+        self._gql(mutation, {"metafields": [{
+            "ownerId": owner_id,
+            "namespace": namespace,
+            "key": key,
+            "value": value,
+            "type": "single_line_text_field",
+        }]})
+
+    # ─── Inventory REST helpers (used by inventory app) ──────────────────────────
 
     def update_variant_price(self, variant_id: int, price: float) -> None:
         """Update a single variant's price."""

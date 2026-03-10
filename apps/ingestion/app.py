@@ -504,6 +504,16 @@ def push_session_live(session_id):
         except Exception:
             pass  # non-fatal — cache will self-heal on next staleness check
 
+    # Notify inventory cache that Shopify products have changed
+    if results:  # only if something was actually pushed
+        try:
+            inventory_url = os.getenv("INVENTORY_INTERNAL_URL", "")
+            if inventory_url:
+                _req.post(f"{inventory_url}/inventory/api/cache/record-push",
+                          timeout=3)
+        except Exception:
+            pass  # non-fatal
+
     return jsonify({
         "success": len(errors) == 0,
         "results": results,

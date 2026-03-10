@@ -110,6 +110,7 @@ def _load_inventory() -> list[dict]:
             LOWER(c.status)                                 AS shopify_status,
             c.inventory_item_id                             AS shopify_inventory_id,
             c.tcgplayer_id,
+            COALESCE(c.committed, 0)                        AS committed,
             COALESCE(o.physical_count, 0)                   AS physical_count,
             COALESCE(o.notes, '')                           AS notes
         FROM inventory_product_cache c
@@ -141,6 +142,7 @@ def _update_shopify_price(variant_id: int, price: float) -> bool:
         sc.update_variant_price(variant_id, price)
         db.execute("UPDATE inventory_product_cache SET shopify_price=%s WHERE shopify_variant_id=%s",
                    (price, variant_id))
+        _get_cache_manager().record_tool_push()
         return True
     except Exception as e:
         logger.error(f"Price update failed variant {variant_id}: {e}")
@@ -157,6 +159,7 @@ def _update_shopify_qty(inventory_item_id: int, variant_id: int, new_qty: int) -
         sc.set_inventory_level(inventory_item_id, int(LOCATION_ID), new_qty)
         db.execute("UPDATE inventory_product_cache SET shopify_qty=%s WHERE shopify_variant_id=%s",
                    (new_qty, variant_id))
+        _get_cache_manager().record_tool_push()
         return True
     except Exception as e:
         logger.error(f"Qty update failed inv_item {inventory_item_id}: {e}")
@@ -221,6 +224,20 @@ def sync_now():
 def api_status():
     """Polled every 30s to update sync timestamp without page reload."""
     return jsonify({"last_sync": _get_last_sync_str()})
+
+
+@bp.route("/api/cache/record-push", methods=["POST"])
+def api_record_push():
+    """
+    Called by ingestion (and any other tool) after pushing changes to Shopify.
+    Records a tool push timestamp to suppress the product_updated staleness
+    signal for TOOL_PUSH_COOLDOWN_MINUTES, preventing thrashing.
+    No auth required — internal service-to-service call only.
+    """
+    cm = _get_cache_manager()
+    if cm:
+        cm.record_tool_push()
+    return jsonify({"ok": True})
 
 
 @bp.route("/api/push", methods=["POST"])
@@ -520,9 +537,9 @@ def _render_inventory(rows, total_rows, filters, meta, limit):
     def disp(col):
         return {"name": "Name", "shopify_qty": "Shopify Qty", "shopify_price": "Price",
                 "shopify_value": "Value", "physical_count": "Physical",
-                "adjust_delta": "Adjust Δ", "notes": "Notes"}.get(col, col)
+                "adjust_delta": "Adjust Δ", "committed": "Committed", "notes": "Notes"}.get(col, col)
 
-    SHOW_COLS = ["physical_count", "name", "shopify_qty", "adjust_delta",
+    SHOW_COLS = ["physical_count", "name", "shopify_qty", "committed", "adjust_delta",
                  "shopify_price", "shopify_value", "notes"]
     EDITABLE  = {"shopify_qty", "shopify_price", "physical_count", "notes", "adjust_delta"}
 
