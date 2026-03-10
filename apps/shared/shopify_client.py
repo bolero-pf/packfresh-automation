@@ -19,6 +19,20 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def _extract_committed(variant: dict) -> int:
+    """Pull committed quantity from inventoryItem.inventoryLevels quantities."""
+    try:
+        levels = (variant.get("inventoryItem") or {}).get("inventoryLevels", {}).get("edges", [])
+        if not levels:
+            return 0
+        for q in levels[0]["node"].get("quantities", []):
+            if q.get("name") == "committed":
+                return int(q.get("quantity", 0))
+    except Exception:
+        pass
+    return 0
+
+
 class ShopifyError(Exception):
     """Raised when Shopify API returns errors."""
     pass
@@ -122,7 +136,13 @@ class ShopifyClient:
               node {
                 id title handle status tags
                 variants(first: 10) {
-                  edges { node { id price sku inventoryQuantity inventoryItem { id } } }
+                  edges { node { id price sku inventoryQuantity
+                    inventoryItem { id
+                      inventoryLevels(first: 1) {
+                        edges { node { quantities(names: ["committed"]) { name quantity } } }
+                      }
+                    }
+                  } }
                 }
                 metafields(namespace: "tcg", first: 5) {
                   edges { node { key value } }
@@ -177,6 +197,7 @@ class ShopifyClient:
                         "shopify_qty":        variant["inventoryQuantity"],
                         "sku":                variant.get("sku"),
                         "inventory_item_id":  inv_item_id,
+                        "committed":          _extract_committed(variant),
                         "tcgplayer_id":       tcg_id,
                         "is_damaged":         is_damaged,
                         "tags_csv":           tags_csv,
@@ -483,5 +504,3 @@ class ShopifyClient:
         }
 
 
-class ShopifyError(Exception):
-    pass
