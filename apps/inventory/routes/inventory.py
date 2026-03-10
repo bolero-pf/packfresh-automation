@@ -984,7 +984,7 @@ async function runSearch(q){{
     dd.innerHTML = items.map(it=>{{
       const id  = it.tcgPlayerId || it.tcgplayer_id || '';
       const p   = it.unopenedPrice || it.prices?.market || 0;
-      return `<div class="dd-item" onclick="selectItem(${{JSON.stringify(String(id))}})">
+      return `<div class="dd-item" onmousedown="event.preventDefault();selectItem(${{JSON.stringify(String(id))}})">
         ${{esc(it.name)}}
         <span class="price">$${{(+p).toFixed(2)}}</span>
         <span class="set">${{esc(it.setName||'')}}</span>
