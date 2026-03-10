@@ -333,7 +333,7 @@ def delete_item(item_id: str) -> dict:
 
 def build_cache_maps(tcg_ids: list[int]) -> tuple[dict, dict]:
     """
-    Build normal_cache and damaged_cache maps from shopify_product_cache.
+    Build normal_cache and damaged_cache maps from inventory_product_cache.
     Returns (normal_cache, damaged_cache) keyed by tcgplayer_id.
     """
     if not tcg_ids:
@@ -341,7 +341,7 @@ def build_cache_maps(tcg_ids: list[int]) -> tuple[dict, dict]:
 
     placeholders = ",".join(["%s"] * len(tcg_ids))
     rows = query(
-        f"SELECT * FROM shopify_product_cache WHERE tcgplayer_id IN ({placeholders})",
+        f"SELECT * FROM inventory_product_cache WHERE tcgplayer_id IN ({placeholders})",
         tuple(tcg_ids)
     )
 
@@ -663,7 +663,7 @@ def get_breakdown_summary_for_items(tcg_ids: list[int]) -> dict:
     Batch lookup: tcg_id -> {variant_count, best_variant_market, variant_names,
                               best_variant_store, parent_store_price,
                               components_in_store, total_components}.
-    Joins shopify_product_cache to compute store-aware totals for the best variant.
+    Joins inventory_product_cache to compute store-aware totals for the best variant.
     Four cases handled by frontend:
       parent+children in store  -> compare children store total vs parent store
       parent in store, no child store -> compare children market vs parent store
@@ -710,7 +710,7 @@ def get_breakdown_summary_for_items(tcg_ids: list[int]) -> dict:
     if all_store_ids:
         sph = ",".join(["%s"] * len(all_store_ids))
         store_rows = query(
-            f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM shopify_product_cache "
+            f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM inventory_product_cache "
             f"WHERE tcgplayer_id IN ({sph}) AND is_damaged = FALSE",
             tuple(all_store_ids)
         )

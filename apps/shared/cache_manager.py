@@ -27,7 +27,6 @@ Tool push cooldown: when your own tools push price/qty to Shopify, they call
   cm.record_tool_push() which sets last_tool_push_at in the meta table.
   The product_updated staleness signal is suppressed for 10 minutes after that,
   so your own edits don't thrash the cache. New orders are NEVER suppressed.
-  Small bump
 """
 
 import logging

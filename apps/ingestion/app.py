@@ -3,7 +3,7 @@ Ingest Service — ingest.pack-fresh.com
 Warehouse team dashboard for breaking down sealed products and pushing inventory to Shopify.
 
 Separate from offers.pack-fresh.com — reads the same DB (intake_sessions, intake_items,
-shopify_product_cache) but serves a different audience (warehouse vs buying team).
+inventory_product_cache) but serves a different audience (warehouse vs buying team).
 """
 
 import os
@@ -20,6 +20,7 @@ import ingest
 from shopify_client import ShopifyClient, ShopifyError
 from ppt_client import PPTClient
 import product_enrichment as enrichment
+from cache_manager import CacheManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ if os.getenv("SHOPIFY_TOKEN") and os.getenv("SHOPIFY_STORE"):
     logger.info("Shopify client initialized")
 else:
     logger.warning("SHOPIFY_TOKEN / SHOPIFY_STORE not set — push-live disabled")
+cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_products=True)
 
 ppt = PPTClient(os.getenv("PPT_API_KEY", ""))
 
@@ -319,6 +321,8 @@ def ppt_search_sealed():
 
 @app.route("/api/ingest/session/<session_id>/push-dry-run", methods=["POST"])
 def push_dry_run(session_id):
+    if cache_mgr:
+        cache_mgr.check_and_refresh_if_stale()
     """Dry run — shows exactly what push-live would do without calling Shopify."""
     session = ingest.get_session(session_id)
     if not session:
@@ -406,6 +410,8 @@ def push_dry_run(session_id):
 
 @app.route("/api/ingest/session/<session_id>/push-live", methods=["POST"])
 def push_session_live(session_id):
+    if cache_mgr:
+        cache_mgr.check_and_refresh_if_stale()
     """Push a received session to Shopify."""
     if not shopify:
         return jsonify({"error": "Shopify not configured"}), 503
@@ -503,16 +509,6 @@ def push_session_live(session_id):
                           timeout=3)
         except Exception:
             pass  # non-fatal — cache will self-heal on next staleness check
-
-    # Notify inventory cache that Shopify products have changed
-    if results:  # only if something was actually pushed
-        try:
-            inventory_url = os.getenv("INVENTORY_INTERNAL_URL", "")
-            if inventory_url:
-                _req.post(f"{inventory_url}/inventory/api/cache/record-push",
-                          timeout=3)
-        except Exception:
-            pass  # non-fatal
 
     return jsonify({
         "success": len(errors) == 0,
@@ -820,7 +816,7 @@ def breakdown_cache_batch():
 @app.route("/api/store-prices", methods=["POST"])
 def get_store_prices():
     """
-    Look up shopify_product_cache prices for a list of tcgplayer_ids.
+    Look up inventory_product_cache prices for a list of tcgplayer_ids.
     Body: {tcgplayer_ids: [int, ...]}
     Returns: {tcgplayer_id: {shopify_price, shopify_qty, handle, title}}
     """
@@ -830,7 +826,7 @@ def get_store_prices():
         return jsonify({"prices": {}})
     ph = ",".join(["%s"] * len(tcg_ids))
     rows = db.query(
-        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title FROM shopify_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
         tuple(tcg_ids)
     )
     prices = {r["tcgplayer_id"]: dict(r) for r in rows}

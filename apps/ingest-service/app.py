@@ -88,7 +88,7 @@ if SHOPIFY_TOKEN and SHOPIFY_STORE:
 else:
     app.logger.warning("SHOPIFY_TOKEN/SHOPIFY_STORE not set — store lookups unavailable")
 
-cache_mgr = CacheManager(db, shopify, table_prefix="", cache_all_products=False)
+cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_products=True)
 
 # Ingest service URL — used to proxy listing creation requests
 INGEST_INTERNAL_URL = os.getenv("INGEST_INTERNAL_URL", "").rstrip("/")
@@ -1574,9 +1574,9 @@ def shopify_sync():
 
                 for p in with_tcg:
                     db.execute("""
-                        INSERT INTO shopify_product_cache
-                            (tcgplayer_id, shopify_product_id, shopify_variant_id,
-                             title, handle, sku, shopify_price, shopify_qty, status, is_damaged, last_synced)
+                        INSERT INTO inventory_product_cache
+                            (shopify_product_id, shopify_variant_id, tcgplayer_id,
+                             title, handle, shopify_price, shopify_qty, status, is_damaged, last_synced)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                         ON CONFLICT (tcgplayer_id, shopify_variant_id)
                         DO UPDATE SET title = EXCLUDED.title, handle = EXCLUDED.handle, sku = EXCLUDED.sku,
@@ -1600,7 +1600,7 @@ def shopify_sync():
             # Backfill sealed_cogs linkage
             db.execute("""
                 UPDATE sealed_cogs sc SET shopify_product_id = spc.shopify_product_id
-                FROM shopify_product_cache spc
+                FROM inventory_product_cache spc
                 WHERE sc.tcgplayer_id = spc.tcgplayer_id AND sc.shopify_product_id IS NULL
             """)
             app.logger.info(f"Shopify sync complete: {upserted} upserted from {total_variants} variants")
@@ -1691,7 +1691,7 @@ def shopify_status():
     last_sync = None
     if configured:
         try:
-            row = db.query_one("SELECT COUNT(*) as cnt, MAX(last_synced) as last_sync FROM shopify_product_cache")
+            row = db.query_one("SELECT COUNT(*) as cnt, MAX(last_synced) as last_sync FROM inventory_product_cache")
             if row:
                 cache_count = row["cnt"]
                 last_sync = row["last_sync"].isoformat() if row["last_sync"] else None
@@ -1720,7 +1720,7 @@ def shopify_session_store_check(session_id):
     try:
         # Fetch ALL variants (both damaged and non-damaged) for these tcgplayer_ids
         all_rows = db.query(
-            f"SELECT * FROM shopify_product_cache WHERE tcgplayer_id IN ({placeholders})",
+            f"SELECT * FROM inventory_product_cache WHERE tcgplayer_id IN ({placeholders})",
             tuple(tcg_ids)
         )
     except Exception:
@@ -1819,7 +1819,7 @@ def shopify_session_store_check(session_id):
             if comp_tcg_ids:
                 cp = ",".join(["%s"] * len(comp_tcg_ids))
                 comp_rows = db.query(
-                    f"SELECT tcgplayer_id, shopify_qty, shopify_price FROM shopify_product_cache WHERE tcgplayer_id IN ({cp}) AND is_damaged = FALSE",
+                    f"SELECT tcgplayer_id, shopify_qty, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({cp}) AND is_damaged = FALSE",
                     tuple(comp_tcg_ids)
                 )
                 for cr in comp_rows:
@@ -2078,7 +2078,7 @@ def get_store_prices():
         return jsonify({"prices": {}})
     ph = ",".join(["%s"] * len(tcg_ids))
     rows = db.query(
-        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title FROM shopify_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
         tuple(tcg_ids)
     )
     prices = {r["tcgplayer_id"]: dict(r) for r in rows}
