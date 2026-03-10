@@ -21,6 +21,7 @@ TIER1_THRESHOLD   = float(os.environ.get("TIER1_THRESHOLD", "700.00"))   # photo
 TIER2_THRESHOLD   = float(os.environ.get("TIER2_THRESHOLD", "1000.00"))  # photo ID + selfie + confirm address
 SPIKE_THRESHOLD   = float(os.environ.get("SPIKE_THRESHOLD", "1000.00"))  # spend spike minimum order
 SPIKE_RATIO       = float(os.environ.get("SPIKE_RATIO", "0.20"))        # prev max < 20% of current
+SIGNATURE_THRESHOLD = float(os.environ.get("SIGNATURE_THRESHOLD", "500.00"))
 FIRSTTIME5_CODE   = os.environ.get("FIRSTTIME5_CODE", "FIRSTTIME5")
 
 import sys, os as _os
@@ -888,14 +889,22 @@ def check_combine_orders(order_gid: str) -> dict:
     When a new order comes in, check if the same customer has other
     unfulfilled orders that aren't pre-orders or already on hold.
     If so, hold the new order with a note to combine shipping.
+    Also checks if the order needs signature ($500+).
     """
     data = shopify_gql(ORDER_DETAIL_Q, {"id": order_gid})
     order = data["data"]["order"]
     customer = order.get("customer") or {}
     customer_gid = customer.get("id")
 
+    # Signature check (piggybacks on the order we already fetched)
+    sig_result = None
+    try:
+        sig_result = check_signature_required(order_gid, order=order)
+    except Exception as e:
+        print(f"[screening] Signature check failed for {order_gid}: {e}", flush=True)
+
     if not customer_gid:
-        return {"flagged": False, "reason": "no_customer"}
+        return {"flagged": False, "reason": "no_customer", "signature": sig_result}
 
     # Fetch this customer's unfulfilled orders
     cust_data = shopify_gql(CUSTOMER_UNFULFILLED_ORDERS_Q, {
@@ -936,7 +945,7 @@ def check_combine_orders(order_gid: str) -> dict:
         })
 
     if not siblings:
-        return {"flagged": False, "reason": "no_siblings"}
+        return {"flagged": False, "reason": "no_siblings", "signature": sig_result}
 
     # Build the note
     order_name = order.get("name", "?")
@@ -982,5 +991,31 @@ def check_combine_orders(order_gid: str) -> dict:
         "order_name": order_name,
         "siblings": siblings,
         "note": note_text,
+        "signature": sig_result,
     }
+
+# ═══════════════════════════════════════════════════════════════════════
+#  CHECK 6: SIGNATURE REQUIRED ($500+)
+# ═══════════════════════════════════════════════════════════════════════
+
+def check_signature_required(order_gid: str, order: dict = None) -> dict:
+    """
+    Any order $500+ gets a note saying 'needs signature'.
+    If order dict is passed, reuses it to avoid an extra API call.
+    """
+    if order is None:
+        data = shopify_gql(ORDER_DETAIL_Q, {"id": order_gid})
+        order = data["data"]["order"]
+
+    total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+
+    if total < SIGNATURE_THRESHOLD:
+        return {"flagged": False, "reason": "below_signature_threshold", "total": total}
+
+    try:
+        _add_order_note(order_gid, "✍️ NEEDS SIGNATURE — order is $500+")
+    except Exception as e:
+        print(f"[screening] Failed to add signature note to {order_gid}: {e}", flush=True)
+
+    return {"flagged": True, "reason": "signature_required", "total": total}
 
