@@ -3,8 +3,8 @@
 Flask routes for order screening.
 
 Endpoints:
-  POST /screening/order_created   — first-time order checks (FIRSTTIME5 + tiered high-value)
-  POST /screening/order_check     — returning customer checks (spend spike)
+  POST /screening/order_created   — first-time: FIRSTTIME5 abuse only
+  POST /screening/order_combine   — every order: verification, spike, combine, signature
   POST /screening/fraud_risk      — Shopify fraud risk (medium → verify, high → cancel)
   POST /screening/order_cancelled — FIRSTTIME5 abuse → Klaviyo notification
   POST /screening/order_fulfilled — cleanup tags & holds
@@ -12,9 +12,8 @@ Endpoints:
 from flask import Blueprint, jsonify, request, current_app
 from .service import (
     screen_order,
-    screen_order_spike,
+    screen_every_order,
     check_fraud_risk,
-    check_combine_orders,
     on_order_cancelled,
     on_order_fulfilled,
 )
@@ -42,78 +41,48 @@ def ping():
 def order_created():
     """
     Flow trigger: Order created → condition: ordersCount == 1
-    Runs FIRSTTIME5 abuse check + tiered high-value first order check.
+    Runs FIRSTTIME5 abuse check only.
     """
     payload = request.get_json(force=True)
     order_id = payload.get("order_id")
-
     if not order_id or not order_id.startswith("gid://shopify/Order/"):
         return jsonify({"ok": False, "error": "Missing or invalid order_id"}), 400
 
-    customer_id = payload.get("customer_id", "unknown")
-    current_app.logger.info(f"[screening] order_created order={order_id} customer={customer_id}")
-
+    current_app.logger.info(f"[screening] order_created order={order_id}")
     try:
         result = screen_order(order_id)
         if result.get("any_flagged"):
-            current_app.logger.warning(
-                f"[screening] FLAGGED order={order_id} "
-                f"firsttime5={result['firsttime5'].get('flagged')} "
-                f"high_value={result['high_value'].get('flagged')}"
-            )
+            current_app.logger.warning(f"[screening] FIRSTTIME5 FLAGGED order={order_id}")
         return jsonify({"ok": True, **result})
     except Exception as e:
         current_app.logger.exception(f"[screening] Error processing {order_id}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@bp.post("/order_check")
-def order_check():
-    """
-    Flow trigger: Order created → condition: ordersCount > 1 AND total >= $1000
-    Runs spend spike detection for returning customers.
-    """
-    payload = request.get_json(force=True)
-    order_id = payload.get("order_id")
-
-    if not order_id or not order_id.startswith("gid://shopify/Order/"):
-        return jsonify({"ok": False, "error": "Missing or invalid order_id"}), 400
-
-    current_app.logger.info(f"[screening] order_check (spend spike) order={order_id}")
-
-    try:
-        result = screen_order_spike(order_id)
-        if result.get("any_flagged"):
-            current_app.logger.warning(f"[screening] SPEND SPIKE order={order_id}")
-        return jsonify({"ok": True, **result})
-    except Exception as e:
-        current_app.logger.exception(f"[screening] Spend spike error for {order_id}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
 @bp.post("/order_combine")
 def order_combine():
     """
-    Flow trigger: Order created → no conditions (fires on every order)
-    Checks if the same customer has other unfulfilled orders to combine shipping.
+    Flow trigger: Order created → no conditions (every order)
+    Runs: cumulative verification, spend spike, combine shipping, signature.
     """
     payload = request.get_json(force=True)
     order_id = payload.get("order_id")
-
     if not order_id or not order_id.startswith("gid://shopify/Order/"):
         return jsonify({"ok": False, "error": "Missing or invalid order_id"}), 400
 
-    current_app.logger.info(f"[screening] order_combine order={order_id}")
-
+    current_app.logger.info(f"[screening] order_combine (every-order) order={order_id}")
     try:
-        result = check_combine_orders(order_id)
-        if result.get("flagged"):
-            siblings = result.get("siblings", [])
-            sib_names = ", ".join(s["order_name"] for s in siblings)
-            current_app.logger.info(f"[screening] COMBINE order={order_id} with={sib_names}")
+        result = screen_every_order(order_id)
+        if result.get("any_flagged"):
+            flags = []
+            if (result.get("verification") or {}).get("flagged"): flags.append("verification")
+            if (result.get("spend_spike") or {}).get("flagged"): flags.append("spike")
+            if (result.get("combine") or {}).get("flagged"): flags.append("combine")
+            if (result.get("signature") or {}).get("flagged"): flags.append("signature")
+            current_app.logger.warning(f"[screening] FLAGGED order={order_id} checks={','.join(flags)}")
         return jsonify({"ok": True, **result})
     except Exception as e:
-        current_app.logger.exception(f"[screening] Combine check error for {order_id}")
+        current_app.logger.exception(f"[screening] Every-order error for {order_id}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -121,24 +90,18 @@ def order_combine():
 def fraud_risk():
     """
     Flow trigger: Order risk analyzed → condition: risk is MEDIUM or HIGH
-    Medium: hold + Klaviyo verification email.
-    High: auto-cancel + tag.
     """
     payload = request.get_json(force=True)
     order_id = payload.get("order_id")
-
     if not order_id or not order_id.startswith("gid://shopify/Order/"):
         return jsonify({"ok": False, "error": "Missing or invalid order_id"}), 400
 
     current_app.logger.info(f"[screening] fraud_risk order={order_id}")
-
     try:
         result = check_fraud_risk(order_id)
         if result.get("flagged"):
             current_app.logger.warning(
-                f"[screening] FRAUD order={order_id} reason={result.get('reason')} "
-                f"risk={result.get('risk_level')}"
-            )
+                f"[screening] FRAUD order={order_id} reason={result.get('reason')} risk={result.get('risk_level')}")
         return jsonify({"ok": True, **result})
     except Exception as e:
         current_app.logger.exception(f"[screening] Fraud risk error for {order_id}")
@@ -149,22 +112,17 @@ def fraud_risk():
 def order_cancelled():
     """
     Flow trigger: Order cancelled → condition: order has FIRSTTIME5-review tag
-    Sets Klaviyo properties for the FIRSTTIME5 abuse notification email.
     """
     payload = request.get_json(force=True)
     order_id = payload.get("order_id")
-
     if not order_id or not order_id.startswith("gid://shopify/Order/"):
         return jsonify({"ok": False, "error": "Missing or invalid order_id"}), 400
 
     current_app.logger.info(f"[screening] order_cancelled order={order_id}")
-
     try:
         result = on_order_cancelled(order_id)
         if result.get("firsttime5_abuse"):
-            current_app.logger.info(
-                f"[screening] FIRSTTIME5 abuse confirmed for {order_id}, Klaviyo set={result.get('klaviyo_set')}"
-            )
+            current_app.logger.info(f"[screening] FIRSTTIME5 abuse confirmed for {order_id}")
         return jsonify({"ok": True, **result})
     except Exception as e:
         current_app.logger.exception(f"[screening] Order cancelled error for {order_id}")
@@ -175,16 +133,13 @@ def order_cancelled():
 def order_fulfilled():
     """
     Flow trigger: Order fulfilled → condition: order has hold-for-review tag
-    Cleans up screening tags from the order. Customer tags kept as history.
     """
     payload = request.get_json(force=True)
     order_id = payload.get("order_id")
-
     if not order_id or not order_id.startswith("gid://shopify/Order/"):
         return jsonify({"ok": False, "error": "Missing or invalid order_id"}), 400
 
     current_app.logger.info(f"[screening] order_fulfilled order={order_id}")
-
     try:
         result = on_order_fulfilled(order_id)
         return jsonify({"ok": True, **result})

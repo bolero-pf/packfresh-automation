@@ -28,7 +28,7 @@ def verify_flow_signature():
         data = request.get_json(silent=True) or {}
         if not (isinstance(data.get("order_id"), str) and data.get("order_id","").startswith("gid://shopify/Order/")):
             abort(400)
-    if request.path in ("/screening/fraud_risk", "/screening/order_cancelled", "/screening/order_fulfilled", "/screening/order_check", "/screening/order_combine"):
+    if request.path in ("/screening/fraud_risk", "/screening/order_cancelled", "/screening/order_fulfilled", "/screening/order_combine"):
         data = request.get_json(silent=True) or {}
         if not (isinstance(data.get("order_id"), str) and data.get("order_id","").startswith("gid://shopify/Order/")):
             abort(400)
