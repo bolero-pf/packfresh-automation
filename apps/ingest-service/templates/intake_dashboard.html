@@ -2358,7 +2358,29 @@
         loadCacheStatus();
     }
 
-    async function createListingFromStore(tcgplayerId, btn) {
+    async function _pollCacheThenRefreshStoreCheck() {
+        // Poll cache status until refresh completes, then re-run the current store check
+        // so newly created listings show up without the user having to manually refresh.
+        const maxWait = 90000; // 90s max
+        const interval = 3000;
+        const start = Date.now();
+        while (Date.now() - start < maxWait) {
+            await new Promise(r => setTimeout(r, interval));
+            try {
+                const r = await fetch('/api/cache/status');
+                const d = await r.json();
+                if (!d.in_progress) {
+                    // Cache refresh done — re-run store check if one is active
+                    if (_storeCheckData && _storeCheckData.sessionId) {
+                        storeCheck(_storeCheckData.sessionId);
+                    }
+                    return;
+                }
+            } catch(e) { /* ignore poll errors */ }
+        }
+    }
+
+        async function createListingFromStore(tcgplayerId, btn) {
         if (!tcgplayerId) { alert('No TCGPlayer ID — cannot create listing'); return; }
         const origText = btn.innerHTML;
         btn.disabled = true;
@@ -2382,6 +2404,10 @@
             const productId = d.product_id;
             const title = d.title || 'Draft listing';
             btn.outerHTML = `<span style="color:var(--green); font-size:0.7rem;">✓ Draft created</span>`;
+            // Listing injected into cache server-side — re-run store check immediately
+            if (_storeCheckData && _storeCheckData.sessionId) {
+                storeCheck(_storeCheckData.sessionId);
+            }
         } catch(e) {
             btn.disabled = false;
             btn.innerHTML = origText;
@@ -3922,7 +3948,7 @@
             span.style.cssText = 'color:var(--green); font-size:0.7rem;';
             span.textContent = '✓ Draft created';
             btn.replaceWith(span);
-            // Refresh store prices so the UI reflects the new listing
+            // Listing injected into cache — refresh store prices immediately
             _ibdStorePrices = {};
             ibdFetchStorePrices();
         } catch(e) {

@@ -1620,6 +1620,48 @@ def shopify_sync():
 # LISTING CREATION (proxy to ingest enrichment pipeline)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _inject_new_listing_into_cache(enrichment_result: dict, tcgplayer_id: int) -> None:
+    """
+    Insert a freshly created listing directly into shopify_product_cache.
+    Avoids a full 40s cache refresh just to surface one new product.
+    Fetches the variant ID and handle via a single lightweight REST call.
+    """
+    product_id = enrichment_result.get("product_id")
+    title = enrichment_result.get("title", "")
+    price = enrichment_result.get("listing_price") or 0
+    if not product_id:
+        return
+
+    # Fetch variant + handle — one REST call
+    try:
+        product_data = shopify._rest("GET", f"/products/{product_id}.json?fields=id,handle,variants")
+        product = product_data.get("product", {})
+        handle = product.get("handle", "")
+        variants = product.get("variants", [])
+        variant_id = variants[0]["id"] if variants else None
+        sku = variants[0].get("sku", "") if variants else ""
+        variant_price = float(variants[0].get("price", price)) if variants else float(price)
+    except Exception as e:
+        app.logger.warning(f"Could not fetch product details for cache inject: {e}")
+        handle = ""
+        variant_id = None
+        sku = ""
+        variant_price = float(price)
+
+    db.execute("""
+        INSERT INTO shopify_product_cache
+            (tcgplayer_id, shopify_product_id, shopify_variant_id,
+             title, handle, sku, shopify_price, shopify_qty, status, is_damaged, last_synced)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (tcgplayer_id, shopify_variant_id)
+        DO UPDATE SET title = EXCLUDED.title, handle = EXCLUDED.handle, sku = EXCLUDED.sku,
+            shopify_price = EXCLUDED.shopify_price, shopify_qty = EXCLUDED.shopify_qty,
+            status = EXCLUDED.status, last_synced = CURRENT_TIMESTAMP
+    """, (tcgplayer_id, product_id, variant_id,
+          title, handle, sku, variant_price, 0, "DRAFT", False))
+    app.logger.info(f"Injected new listing {product_id} (TCG#{tcgplayer_id}) into cache")
+
+
 @app.route("/api/create-listing", methods=["POST"])
 def proxy_create_listing():
     """
@@ -1653,7 +1695,14 @@ def proxy_create_listing():
             headers=headers,
             timeout=120,  # enrichment can take ~30-60s (image processing)
         )
-        return jsonify(resp.json()), resp.status_code
+        result = resp.json()
+        # Inject the new listing directly into cache — no full refresh needed
+        if resp.status_code == 200:
+            try:
+                _inject_new_listing_into_cache(result, tcgplayer_id)
+            except Exception as ce:
+                app.logger.warning(f"Cache inject after listing creation failed: {ce}")
+        return jsonify(result), resp.status_code
     except _requests.Timeout:
         return jsonify({"error": "Listing creation timed out — it may still be processing"}), 504
     except Exception as e:
