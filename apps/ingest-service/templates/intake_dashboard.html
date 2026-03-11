@@ -1615,7 +1615,7 @@
                                             btns += `<button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">Change Qty (${i.quantity})</button>`;
                                             if (s.session_type === 'raw') {
                                                 const gradedLabel = i.is_graded ? `🏅 Change Grade (${i.grade_company} ${i.grade_value})` : '🏅 Mark as Graded';
-                                                btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id||'null'},${i.is_graded||false},'${i.grade_company||''}','${i.grade_value||''}')">${gradedLabel}</button>`;
+                                                btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},${i.is_graded||false},'${i.grade_company||''}','${i.grade_value||''}')">${gradedLabel}</button>`;
                                             }
                                             
                                             if (s.session_type !== 'raw' && i.tcgplayer_id) {
@@ -2972,7 +2972,29 @@
         document.getElementById('relink-search').addEventListener('keydown', function(e) { if (e.key === 'Enter') _relinkDoSearch(); });
     }
 
-    async function _relinkDoSearch() {
+    function _relinkRenderResults(results, resultsDiv, append) {
+        const html = results.slice(0, 8).map(function(c) {
+            const tid = c.tcgPlayerId || c.tcgplayer_id || '';
+            const sn = c.setName || c.set_name || '';
+            const cn = c.cardNumber || c.number || '';
+            const rarity = c.rarity || '';
+            return '<div class="search-result" data-rtcg="' + tid + '" style="cursor:pointer;">' +
+                '<h4>' + (c.name||'') + (cn ? ' #'+cn : '') + '</h4>' +
+                '<p>' + sn + (rarity ? ' · '+rarity : '') + ' · TCG#' + tid + '</p></div>';
+        }).join('');
+        if (append) {
+            resultsDiv.innerHTML += html;
+        } else {
+            resultsDiv.innerHTML = html;
+        }
+        resultsDiv.querySelectorAll('[data-rtcg]').forEach(function(el) {
+            el.addEventListener('click', function() {
+                _relinkFetchAndShowConditions(parseInt(el.getAttribute('data-rtcg')));
+            });
+        });
+    }
+
+        async function _relinkDoSearch() {
         const rs = window._relinkState;
         const searchName = document.getElementById('relink-search').value.trim();
         const setFilter = document.getElementById('relink-set').value.trim();
@@ -2988,8 +3010,10 @@
 
         resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
         try {
-            const body = { query: searchName };
-            if (setFilter) body.set_name = setFilter;
+            // Fold set into query string — PPT fuzzy-matches better than exact set filter
+            // e.g. "Jolteon ex EX Delta Species" finds the right card even if set name differs slightly
+            const combinedQuery = setFilter ? searchName + ' ' + setFilter : searchName;
+            const body = { query: combinedQuery };
             const r = await fetch('/api/ppt/search-cards', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2998,23 +3022,25 @@
             const d = await r.json();
             const results = d.results || [];
             if (!r.ok || !results.length) {
+                // Retry with just the card name if the combined query found nothing
+                if (setFilter) {
+                    const r2 = await fetch('/api/ppt/search-cards', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ query: searchName }),
+                    });
+                    const d2 = await r2.json();
+                    if (d2.results && d2.results.length) {
+                        // Show results but note the set filter was dropped
+                        resultsDiv.innerHTML = '<div class="alert alert-warning" style="font-size:0.8rem; padding:6px 10px; margin-bottom:8px;">No exact match for set \"' + setFilter + '\" — showing all results for \"' + searchName + '\"</div>';
+                        _relinkRenderResults(d2.results, resultsDiv, true);
+                        return;
+                    }
+                }
                 resultsDiv.innerHTML = '<div class="alert alert-warning">No cards found</div>';
                 return;
             }
-            resultsDiv.innerHTML = results.slice(0, 6).map(function(c) {
-                const tid = c.tcgPlayerId || c.tcgplayer_id || '';
-                const sn = c.setName || c.set_name || '';
-                const cn = c.cardNumber || c.number || '';
-                const rarity = c.rarity || '';
-                return '<div class="search-result" data-rtcg="' + tid + '" style="cursor:pointer;">' +
-                    '<h4>' + (c.name||'') + (cn ? ' #'+cn : '') + '</h4>' +
-                    '<p>' + sn + (rarity ? ' \u00b7 '+rarity : '') + ' \u00b7 TCG#' + tid + '</p></div>';
-            }).join('');
-            resultsDiv.querySelectorAll('[data-rtcg]').forEach(function(el) {
-                el.addEventListener('click', function() {
-                    _relinkFetchAndShowConditions(parseInt(el.getAttribute('data-rtcg')));
-                });
-            });
+            _relinkRenderResults(results, resultsDiv);
         } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
     }
 
@@ -3149,7 +3175,7 @@
         // Pre-load graded prices from PPT if we have a tcgplayer_id
         if (tcgplayerId) {
             try {
-                const r = await fetch('/api/intake/lookup-card', {
+                const r = await fetch('/api/ppt/lookup-card', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ tcgplayer_id: tcgplayerId }),

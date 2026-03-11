@@ -1565,7 +1565,8 @@ def ppt_search_cards():
         return jsonify({"error": "query required"}), 400
 
     try:
-        results = ppt.search_cards(query, set_name=set_name, limit=5)
+        limit = int(data.get('limit', 8))
+        results = ppt.search_cards(query, set_name=set_name, limit=limit)
         return jsonify({"results": results})
     except PPTError as e:
         return jsonify({"error": str(e)}), 502
