@@ -121,13 +121,12 @@ def _build_recommendations():
         variant_ids = [str(r["best_variant_id"]) for r in recipe_map.values()]
         vph = ",".join(["%s"] * len(variant_ids))
         components = db.query(f"""
-            SELECT sbc2.tcgplayer_id AS component_tcg_id,
+            SELECT sbcomp.tcgplayer_id AS component_tcg_id,
                    sbc.tcgplayer_id AS parent_tcg_id,
                    sbv.id AS variant_id
             FROM sealed_breakdown_components sbcomp
             JOIN sealed_breakdown_variants sbv ON sbv.id = sbcomp.variant_id
             JOIN sealed_breakdown_cache sbc ON sbc.id = sbv.breakdown_id
-            LEFT JOIN sealed_breakdown_cache sbc2 ON sbc2.tcgplayer_id = sbcomp.tcgplayer_id
             WHERE sbv.id IN ({vph}) AND sbcomp.tcgplayer_id IS NOT NULL
         """, tuple(variant_ids))
 
@@ -164,7 +163,39 @@ def _build_recommendations():
         recipe = recipe_map[tid]
         store_price = float(row["shopify_price"] or 0)
         store_qty   = int(row["shopify_qty"] or 0)
-        bd_value    = float(recipe["total_component_market"] or 0)
+        bd_value_mkt = float(recipe["total_component_market"] or 0)
+
+        # Prefer store prices of children for bd_value
+        vid = str(recipe["best_variant_id"])
+        child_tcg_ids = variant_comp_map.get(vid, [])
+        child_qtys = [child_qty_map[cid]["shopify_qty"] for cid in child_tcg_ids if cid in child_qty_map]
+        child_store_vals = []
+        for cid in child_tcg_ids:
+            if cid in child_qty_map:
+                sp = float(child_qty_map[cid].get("shopify_price") or 0)
+                # qty_per_parent comes from components lookup — need per-component qty
+                child_store_vals.append((cid, sp))
+
+        # Compute store-based bd value using per-component qtys from recipe
+        bd_value_store = 0.0
+        if child_store_vals:
+            # Get quantity_per_parent for each component in this variant
+            comp_qty_rows = db.query("""
+                SELECT tcgplayer_id, quantity_per_parent
+                FROM sealed_breakdown_components WHERE variant_id = %s
+            """, (vid,))
+            comp_qty_map = {int(r["tcgplayer_id"]): int(r["quantity_per_parent"]) for r in comp_qty_rows}
+            all_have_store = True
+            for cid, sp in child_store_vals:
+                if sp > 0:
+                    bd_value_store += sp * comp_qty_map.get(cid, 1)
+                else:
+                    all_have_store = False
+            if not all_have_store:
+                bd_value_store = 0.0  # partial store data — fall back to market
+
+        bd_value = bd_value_store if bd_value_store > 0 else bd_value_mkt
+        bd_value_label = "store" if bd_value_store > 0 else "market"
 
         if store_price <= 0 or bd_value <= 0:
             continue
@@ -172,9 +203,7 @@ def _build_recommendations():
         delta_pct = (bd_value - store_price) / store_price * 100
 
         # Low-stock signal: avg qty of child components in store
-        vid = str(recipe["best_variant_id"])
-        child_tcg_ids = variant_comp_map.get(vid, [])
-        child_qtys = [child_qty_map[cid]["shopify_qty"] for cid in child_tcg_ids if cid in child_qty_map]
+        # vid and child_tcg_ids already computed above for bd_value_store
         avg_child_qty = sum(child_qtys) / len(child_qtys) if child_qtys else 999
         min_child_qty = min(child_qtys) if child_qtys else 999
         children_in_store = len([q for q in child_qtys if q > 0])
@@ -195,6 +224,7 @@ def _build_recommendations():
             "store_price":        store_price,
             "store_qty":          store_qty,
             "bd_value":           bd_value,
+            "bd_value_label":     bd_value_label,
             "delta_pct":          round(delta_pct, 1),
             "best_variant_id":    vid,
             "best_variant_name":  recipe["variant_name"],
@@ -431,6 +461,45 @@ def store_prices_local():
     return jsonify({"prices": prices})
 
 
+@bp.route("/api/base-component", methods=["POST"])
+@requires_auth
+def mark_base_component():
+    data = request.get_json(silent=True) or {}
+    tcg_id = data.get("tcgplayer_id")
+    name   = data.get("product_name", "")
+    if not tcg_id:
+        return jsonify({"error": "tcgplayer_id required"}), 400
+    db.execute("""
+        INSERT INTO breakdown_base_components (tcgplayer_id, product_name)
+        VALUES (%s, %s) ON CONFLICT (tcgplayer_id) DO UPDATE SET product_name = EXCLUDED.product_name
+    """, (tcg_id, name))
+    return jsonify({"success": True})
+
+@bp.route("/api/base-component/<int:tcg_id>", methods=["DELETE"])
+@requires_auth
+def unmark_base_component(tcg_id):
+    db.execute("DELETE FROM breakdown_base_components WHERE tcgplayer_id = %s", (tcg_id,))
+    return jsonify({"success": True})
+
+@bp.route("/api/no-recipe")
+@requires_auth
+def no_recipe_items():
+    """Items in store that have no breakdown recipe and aren't base components."""
+    rows = db.query("""
+        SELECT c.tcgplayer_id, c.title, c.shopify_qty, c.shopify_price,
+               c.shopify_variant_id, c.inventory_item_id,
+               CASE WHEN bc.tcgplayer_id IS NOT NULL THEN TRUE ELSE FALSE END AS is_base
+        FROM inventory_product_cache c
+        LEFT JOIN sealed_breakdown_cache sbc ON sbc.tcgplayer_id = c.tcgplayer_id
+        LEFT JOIN breakdown_base_components bc ON bc.tcgplayer_id = c.tcgplayer_id
+        WHERE c.is_damaged = FALSE
+          AND c.tcgplayer_id IS NOT NULL
+          AND sbc.tcgplayer_id IS NULL
+        ORDER BY c.title
+    """)
+    return jsonify({"items": [dict(r) for r in rows]})
+
+
 # ─── Page renderer ────────────────────────────────────────────────────────────
 
 def _render_breakdown_page():
@@ -521,6 +590,7 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
     <button class="tab-btn active" onclick="switchTab('recommendations',this)">📊 Recommendations</button>
     <button class="tab-btn" onclick="switchTab('search',this)">🔍 Manual Breakdown</button>
     <button class="tab-btn" onclick="switchTab('ignored',this)">🚫 Ignored SKUs</button>
+    <button class="tab-btn" onclick="switchTab('norecipe',this)">📋 No Recipe</button>
   </div>
 
   <!-- ═══ RECOMMENDATIONS TAB ════════════════════════════════════════════ -->
@@ -573,6 +643,36 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
       <div id="ignored-panel"><div class="loading"><span class="spinner"></span></div></div>
     </div>
   </div>
+
+  <!-- ═══ NO RECIPE TAB ════════════════════════════════════════════════════ -->
+  <div id="tab-norecipe" class="tab-pane">
+    <div class="card" style="padding:10px 16px;margin-bottom:12px">
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="nr-search" placeholder="Filter by name…" style="width:220px"
+               oninput="renderNoRecipe()">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="nr-hide-base" onchange="renderNoRecipe()" style="width:15px;height:15px">
+          Hide base components
+        </label>
+        <span style="font-size:12px;color:var(--text-dim);margin-left:auto">
+          Items with no breakdown recipe. Mark as <em>base component</em> to suppress permanently.
+        </span>
+      </div>
+    </div>
+    <div id="norecipe-panel"><div class="loading"><span class="spinner"></span> Loading...</div></div>
+  </div>
+</div>
+
+<!-- ═══ THEMED CONFIRM DIALOG ═════════════════════════════════════════════ -->
+<div id="themed-confirm-overlay" class="modal-overlay">
+  <div class="modal" style="max-width:420px">
+    <h3 id="tc-title" style="margin-bottom:10px"></h3>
+    <p id="tc-message" style="color:var(--text-dim);font-size:13px;margin-bottom:20px;line-height:1.5"></p>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button id="tc-cancel" class="btn btn-secondary">Cancel</button>
+      <button id="tc-confirm" class="btn btn-primary">Confirm</button>
+    </div>
+  </div>
 </div>
 
 <!-- ═══ RECIPE EDITOR MODAL ════════════════════════════════════════════════ -->
@@ -599,6 +699,26 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
 
 <script>
 // ══════════════════════════════════════════════════════════════════
+// THEMED DIALOG  (matches intake/ingest modal style)
+// ══════════════════════════════════════════════════════════════════
+function themedConfirm(title, message, {{ confirmText='Confirm', dangerous=false }}={{}}) {{
+  return new Promise(resolve => {{
+    const overlay = document.getElementById('themed-confirm-overlay');
+    document.getElementById('tc-title').textContent = title;
+    document.getElementById('tc-message').textContent = message;
+    const btn = document.getElementById('tc-confirm');
+    btn.textContent = confirmText;
+    btn.className = 'btn ' + (dangerous ? 'btn-danger' : 'btn-primary');
+    overlay.classList.add('active');
+    function cleanup() {{ overlay.classList.remove('active'); btn.removeEventListener('click', onOk); document.getElementById('tc-cancel').removeEventListener('click', onCancel); }}
+    function onOk() {{ cleanup(); resolve(true); }}
+    function onCancel() {{ cleanup(); resolve(false); }}
+    btn.addEventListener('click', onOk);
+    document.getElementById('tc-cancel').addEventListener('click', onCancel);
+  }});
+}}
+
+// ══════════════════════════════════════════════════════════════════
 // STATE
 // ══════════════════════════════════════════════════════════════════
 let _allRecs = [];
@@ -617,6 +737,7 @@ function switchTab(id, btn) {{
   document.getElementById('tab-' + id).classList.add('active');
   btn.classList.add('active');
   if (id === 'ignored') loadIgnored();
+  if (id === 'norecipe') loadNoRecipe();
 }}
 
 // ══════════════════════════════════════════════════════════════════
@@ -644,9 +765,9 @@ function renderRecommendations() {{
   if (filter === 'neutral')  recs = recs.filter(r => r.delta_pct >= -10);
 
   if (sort === 'delta')      recs.sort((a,b) => b.delta_pct - a.delta_pct);
-  if (sort === 'child_qty')  recs.sort((a,b) => a.min_child_qty - b.min_child_qty);
-  if (sort === 'store_qty')  recs.sort((a,b) => b.store_qty - a.store_qty);
-  // default: score already sorted server-side
+  else if (sort === 'child_qty')  recs.sort((a,b) => a.min_child_qty - b.min_child_qty);
+  else if (sort === 'store_qty')  recs.sort((a,b) => b.store_qty - a.store_qty);
+  else recs.sort((a,b) => b.score - a.score); // score
 
   if (!recs.length) {{
     panel.innerHTML = '<div class="card" style="color:var(--text-dim); text-align:center; padding:32px">' +
@@ -721,18 +842,71 @@ function recRow(r) {{
 // ══════════════════════════════════════════════════════════════════
 // EXECUTE BREAKDOWN
 // ══════════════════════════════════════════════════════════════════
-function openExecuteModal(rec) {{
+async function openExecuteModal(rec) {{
   if (typeof rec === 'string') rec = JSON.parse(rec.replace(/&quot;/g, '"'));
   const body = document.getElementById('execute-modal-body');
+  document.getElementById('execute-modal').classList.add('active');
+
+  // If multiple configs, fetch all variants and let user pick
+  if (rec.variant_count > 1) {{
+    body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading configs...</div>';
+    try {{
+      const r = await fetch(`/inventory/breakdown/api/cache/${{rec.tcgplayer_id}}`);
+      const d = await r.json();
+      const variants = d.cache?.variants || [];
+      body.innerHTML = `
+        <div style="font-size:15px;font-weight:600;margin-bottom:4px">${{rec.title}}</div>
+        <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">
+          Store: <strong>$${{rec.store_price.toFixed(2)}}</strong> × ${{rec.store_qty}} in stock. Choose which config to break down into:
+        </p>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
+          ${{variants.map(v => {{
+            const storeTotal = parseFloat(v.total_component_market||0);
+            const delta = rec.store_price > 0 ? ((storeTotal - rec.store_price)/rec.store_price*100) : 0;
+            const dc = delta >= 0 ? 'var(--green)' : delta >= -10 ? 'var(--amber)' : 'var(--red)';
+            return `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer;transition:border-color .15s"
+              onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'"
+              onclick="openExecuteWithVariant(${{JSON.stringify(rec).replace(/"/g,'&quot;')}}, '${{v.id}}', '${{v.variant_name.replace(/'/g,'')}}', ${{storeTotal}})">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <strong>${{v.variant_name}}</strong>
+                <span style="color:${{dc}};font-weight:600">${{delta>=0?'+':''}}${{delta.toFixed(1)}}%</span>
+              </div>
+              <div style="font-size:12px;color:var(--text-dim);margin-top:3px">
+                ${{v.component_count}} components · $${{storeTotal.toFixed(2)}} BD value
+                ${{v.notes ? ` · <em>${{v.notes}}</em>` : ''}}
+              </div>
+            </div>`;
+          }}).join('')}}
+        </div>
+        <button class="btn btn-secondary" onclick="document.getElementById('execute-modal').classList.remove('active')">Cancel</button>`;
+    }} catch(e) {{
+      body.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`;
+    }}
+    return;
+  }}
+
+  renderExecuteForm(rec, rec.best_variant_id, rec.best_variant_name, rec.bd_value);
+}}
+
+function openExecuteWithVariant(rec, variantId, variantName, bdValue) {{
+  if (typeof rec === 'string') rec = JSON.parse(rec.replace(/&quot;/g, '"'));
+  // Recompute delta with this variant's bd value
+  const delta = rec.store_price > 0 ? (bdValue - rec.store_price) / rec.store_price * 100 : 0;
+  renderExecuteForm({{...rec, bd_value: bdValue, delta_pct: delta}}, variantId, variantName, bdValue);
+}}
+
+function renderExecuteForm(rec, variantId, variantName, bdValue) {{
+  const body = document.getElementById('execute-modal-body');
   const deltaClass = rec.delta_pct >= 0 ? 'delta-pos' : rec.delta_pct >= -10 ? 'delta-neutral' : 'delta-neg';
+  const bdLabel = rec.bd_value_label === 'store' ? '(store prices)' : '(market prices)';
 
   body.innerHTML = `
     <div style="margin-bottom:16px">
       <div style="font-size:15px;font-weight:600;margin-bottom:4px">${{rec.title}}</div>
       <div style="display:flex;gap:16px;font-size:13px;color:var(--text-dim);flex-wrap:wrap">
         <span>Store: <strong style="color:var(--text)">$${{rec.store_price.toFixed(2)}}</strong> × ${{rec.store_qty}} in stock</span>
-        <span>BD value: <strong class="${{deltaClass}}">$${{rec.bd_value.toFixed(2)}}</strong> (${{rec.delta_pct >= 0 ? '+' : ''}}${{rec.delta_pct.toFixed(1)}}%)</span>
-        <span>Recipe: <strong style="color:var(--text)">${{rec.best_variant_name}}</strong></span>
+        <span>BD value: <strong class="${{deltaClass}}">$${{bdValue.toFixed(2)}}</strong> ${{bdLabel}} (${{rec.delta_pct >= 0 ? '+' : ''}}${{rec.delta_pct.toFixed(1)}}%)</span>
+        <span>Config: <strong style="color:var(--accent)">${{variantName}}</strong></span>
       </div>
     </div>
 
@@ -742,12 +916,12 @@ function openExecuteModal(rec) {{
       </label>
       <div style="display:flex;gap:8px;align-items:center">
         <input type="number" id="exec-qty" value="1" min="1" max="${{rec.store_qty}}"
-               style="width:80px" oninput="updateExecPreview(${{rec.store_qty}}, ${{rec.bd_value}}, ${{rec.store_price}})">
+               style="width:80px" oninput="updateExecPreview(${{rec.store_qty}}, ${{bdValue}}, ${{rec.store_price}})">
         <div style="display:flex;gap:4px">
           ${{[1,2,5,10].filter(n=>n<=rec.store_qty).map(n=>
-            `<button class="btn btn-secondary btn-sm" onclick="document.getElementById('exec-qty').value=${{n}};updateExecPreview(${{rec.store_qty}},${{rec.bd_value}},${{rec.store_price}})">${{n}}</button>`
+            `<button class="btn btn-secondary btn-sm" onclick="document.getElementById('exec-qty').value=${{n}};updateExecPreview(${{rec.store_qty}},${{bdValue}},${{rec.store_price}})">${{n}}</button>`
           ).join('')}}
-          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('exec-qty').value=${{rec.store_qty}};updateExecPreview(${{rec.store_qty}},${{rec.bd_value}},${{rec.store_price}})">All</button>
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('exec-qty').value=${{rec.store_qty}};updateExecPreview(${{rec.store_qty}},${{bdValue}},${{rec.store_price}})">All</button>
         </div>
       </div>
       <div id="exec-preview" style="margin-top:8px;font-size:12px;color:var(--text-dim)"></div>
@@ -757,14 +931,13 @@ function openExecuteModal(rec) {{
 
     <div style="display:flex;gap:8px;margin-top:16px">
       <button class="btn btn-primary" id="exec-confirm-btn"
-        onclick="confirmExecute(${{rec.shopify_variant_id}},${{rec.inventory_item_id}},${{rec.tcgplayer_id}},'${{rec.best_variant_id}}')">
+        onclick="confirmExecute(${{rec.shopify_variant_id}},${{rec.inventory_item_id}},${{rec.tcgplayer_id}},'${{variantId}}')">
         ✓ Confirm Breakdown
       </button>
       <button class="btn btn-secondary" onclick="document.getElementById('execute-modal').classList.remove('active')">Cancel</button>
     </div>
   `;
-  updateExecPreview(rec.store_qty, rec.bd_value, rec.store_price);
-  document.getElementById('execute-modal').classList.add('active');
+  updateExecPreview(rec.store_qty, bdValue, rec.store_price);
 }}
 
 function updateExecPreview(maxQty, bdValue, storePrice) {{
@@ -900,7 +1073,12 @@ async function loadIgnored() {{
 }}
 
 async function ignoreSku(tcgId, name) {{
-  if (!confirm(`Ignore "${{name}}" from breakdown recommendations?`)) return;
+  const ok = await themedConfirm(
+    '🚫 Ignore SKU',
+    `Hide "${{name}}" from breakdown recommendations? You can unignore it anytime from the Ignored SKUs tab.`,
+    {{ confirmText: 'Ignore', dangerous: true }}
+  );
+  if (!ok) return;
   await fetch('/inventory/breakdown/api/ignore', {{
     method: 'POST', headers: {{'Content-Type':'application/json'}},
     body: JSON.stringify({{ tcgplayer_id: tcgId, product_name: name }})
@@ -927,9 +1105,56 @@ async function openRecipeEditor(tcgId, productName) {{
 
   const body = document.getElementById('recipe-modal-body');
   document.getElementById('recipe-modal-title').textContent = productName || 'Breakdown Recipe';
-  body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
   document.getElementById('recipe-modal').classList.add('active');
 
+  // If no item selected yet, show inventory search picker first
+  if (!tcgId) {{
+    body.innerHTML = `
+      <p style="color:var(--text-dim);font-size:13px;margin-bottom:12px">Search your store inventory to find the item you want to build a recipe for.</p>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <input type="text" id="re-picker-search" placeholder="Product name…" style="flex:1"
+               onkeydown="if(event.key==='Enter') rePickerSearch()">
+        <button class="btn btn-primary btn-sm" onclick="rePickerSearch()">Search</button>
+      </div>
+      <div id="re-picker-results" style="max-height:280px;overflow-y:auto"></div>`;
+    setTimeout(() => document.getElementById('re-picker-search')?.focus(), 100);
+    return;
+  }}
+
+  body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
+  let cache = null;
+  try {{
+    const r = await fetch(`/inventory/breakdown/api/cache/${{tcgId}}`);
+    const d = await r.json();
+    if (d.found) cache = d.cache;
+  }} catch(e) {{}}
+  fetchRecipeStorePrices();
+  renderRecipeModal(cache);
+}}
+
+async function rePickerSearch() {{
+  const q = document.getElementById('re-picker-search')?.value.trim().toLowerCase();
+  const panel = document.getElementById('re-picker-results');
+  if (!q) return;
+  panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+  try {{
+    const r = await fetch('/inventory/api/items?q=' + encodeURIComponent(q));
+    const d = await r.json();
+    const items = d.items || [];
+    if (!items.length) {{ panel.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No items found.</p>'; return; }}
+    panel.innerHTML = items.slice(0,20).map(i => `
+      <div class="search-result" onclick="rePickerSelect(${{i.tcgplayer_id||'null'}},${{JSON.stringify(i.name||i.title).replace(/</g,'&lt;')}})">
+        <strong style="font-size:13px">${{i.name||i.title}}</strong>
+        <br><small style="color:var(--text-dim)">TCG#${{i.tcgplayer_id||'—'}} · qty ${{i.shopify_qty}} · $${{parseFloat(i.shopify_price||0).toFixed(2)}}</small>
+      </div>`).join('');
+  }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
+}}
+
+async function rePickerSelect(tcgId, productName) {{
+  _recipeTarget = {{ tcgId, productName }};
+  document.getElementById('recipe-modal-title').textContent = productName;
+  const body = document.getElementById('recipe-modal-body');
+  body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
   let cache = null;
   if (tcgId) {{
     try {{
@@ -1031,7 +1256,8 @@ function loadVariantIntoEditor(v) {{
 }}
 
 async function deleteVariant(variantId, name) {{
-  if (!confirm(`Delete the "${{name}}" config?`)) return;
+  const ok = await themedConfirm('Delete Config', `Remove the "${{name}}" config?`, {{ dangerous: true }});
+  if (!ok) return;
   const r = await fetch(`/inventory/breakdown/api/cache/variant/${{variantId}}`, {{ method: 'DELETE' }});
   const d = await r.json();
   renderRecipeModal(d.cache);
@@ -1169,6 +1395,94 @@ async function saveRecipeVariant() {{
     // Refresh recommendations in background
     loadRecommendations();
   }} catch(e) {{ alert(e.message); }}
+}}
+
+// ══════════════════════════════════════════════════════════════════
+// NO RECIPE TAB
+// ══════════════════════════════════════════════════════════════════
+let _noRecipeItems = [];
+
+async function loadNoRecipe() {{
+  const panel = document.getElementById('norecipe-panel');
+  panel.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
+  try {{
+    const r = await fetch('/inventory/breakdown/api/no-recipe');
+    const d = await r.json();
+    _noRecipeItems = d.items || [];
+    renderNoRecipe();
+  }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
+}}
+
+function renderNoRecipe() {{
+  const panel = document.getElementById('norecipe-panel');
+  const q = (document.getElementById('nr-search')?.value || '').toLowerCase();
+  const hideBase = document.getElementById('nr-hide-base')?.checked;
+
+  let items = _noRecipeItems;
+  if (q) items = items.filter(i => (i.title||'').toLowerCase().includes(q));
+  if (hideBase) items = items.filter(i => !i.is_base);
+
+  const total = items.length;
+  const baseCount = _noRecipeItems.filter(i => i.is_base).length;
+
+  if (!items.length) {{
+    panel.innerHTML = `<div class="card" style="color:var(--text-dim);text-align:center;padding:32px">
+      ${{q ? '🔍 No items match that filter.' : '✓ All store items have recipes or are marked as base components.'}}
+    </div>`;
+    return;
+  }}
+
+  panel.innerHTML = `
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
+      ${{total}} item${{total!==1?'s':''}} without recipes · ${{baseCount}} base component${{baseCount!==1?'s':''}}
+    </div>
+    <div style="overflow-x:auto"><table>
+      <thead><tr>
+        <th>Product</th><th>Qty</th><th>Price</th><th>Status</th><th style="width:180px"></th>
+      </tr></thead>
+      <tbody>
+      ${{items.map(i => `<tr style="${{i.is_base ? 'opacity:0.5' : ''}}">
+        <td>
+          <strong>${{i.title}}</strong>
+          <br><small style="color:var(--text-dim)">TCG#${{i.tcgplayer_id}}</small>
+          ${{i.is_base ? '<br><span class="badge badge-neutral" style="font-size:10px">base component</span>' : ''}}
+        </td>
+        <td style="color:${{i.shopify_qty>0?'var(--green)':'var(--red)'}};font-weight:600">${{i.shopify_qty}}</td>
+        <td>$${{parseFloat(i.shopify_price||0).toFixed(2)}}</td>
+        <td><span class="badge ${{i.shopify_qty>0?'badge-green':'badge-red'}}">${{i.shopify_qty>0?'In Stock':'Out'}}</span></td>
+        <td>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" onclick="openRecipeEditor(${{i.tcgplayer_id}},${{JSON.stringify(i.title).replace(/</g,'&lt;')}})">
+              + Recipe
+            </button>
+            ${{i.is_base
+              ? `<button class="btn btn-secondary btn-sm" onclick="unmarkBase(${{i.tcgplayer_id}},this)">Unmark Base</button>`
+              : `<button class="btn btn-sm" style="color:var(--text-dim);border:1px solid var(--border);background:none" onclick="markBase(${{i.tcgplayer_id}},${{JSON.stringify(i.title)}},this)" title="Mark as base component — won't show here">📌 Base</button>`
+            }}
+          </div>
+        </td>
+      </tr>`).join('')}}
+      </tbody>
+    </table></div>`;
+}}
+
+async function markBase(tcgId, name, btn) {{
+  btn.disabled = true;
+  await fetch('/inventory/breakdown/api/base-component', {{
+    method: 'POST', headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{ tcgplayer_id: tcgId, product_name: name }})
+  }});
+  const item = _noRecipeItems.find(i => i.tcgplayer_id === tcgId);
+  if (item) item.is_base = true;
+  renderNoRecipe();
+}}
+
+async function unmarkBase(tcgId, btn) {{
+  btn.disabled = true;
+  await fetch(`/inventory/breakdown/api/base-component/${{tcgId}}`, {{ method: 'DELETE' }});
+  const item = _noRecipeItems.find(i => i.tcgplayer_id === tcgId);
+  if (item) item.is_base = false;
+  renderNoRecipe();
 }}
 
 // ══════════════════════════════════════════════════════════════════

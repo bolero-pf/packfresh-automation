@@ -75,6 +75,15 @@ def run_migration():
     """)
     logger.info("  ✓ breakdown_ignore")
 
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS breakdown_base_components (
+            tcgplayer_id  BIGINT PRIMARY KEY,
+            product_name  VARCHAR(500),
+            marked_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    logger.info("  ✓ breakdown_base_components")
+
     # Indexes
     db.execute("CREATE INDEX IF NOT EXISTS idx_inv_cache_title ON inventory_product_cache(title)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_inv_cache_status ON inventory_product_cache(status)")
