@@ -1551,7 +1551,7 @@ def _serialize(obj):
 
 @app.route("/api/shopify/sync", methods=["POST"])
 def shopify_sync():
-    """Sync Shopify products into local cache, streaming progress page-by-page."""
+    """Trigger a cache refresh via CacheManager and stream a simple progress response."""
     if not shopify:
         return jsonify({"error": "Shopify not configured (set SHOPIFY_TOKEN + SHOPIFY_STORE)"}), 503
 
@@ -1559,58 +1559,12 @@ def shopify_sync():
         import json
         try:
             yield json.dumps({"status": "starting"}) + "\n"
-            app.logger.info("Starting Shopify sync...")
-
-            total_variants = 0
-            upserted = 0
-            page_num = 0
-
-            # Use the page generator so we yield heartbeats between each Shopify page
-            # (avoids Railway 60s idle timeout that killed the old buffered approach)
-            for page_products, has_more in shopify.iter_products_pages(batch_size=100):
-                page_num += 1
-                total_variants += len(page_products)
-                with_tcg = [p for p in page_products if p.get("tcgplayer_id")]
-
-                for p in with_tcg:
-                    db.execute("""
-                        INSERT INTO inventory_product_cache
-                            (shopify_product_id, shopify_variant_id, tcgplayer_id,
-                             title, handle, shopify_price, shopify_qty, status, is_damaged, last_synced)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                        ON CONFLICT (tcgplayer_id, shopify_variant_id)
-                        DO UPDATE SET title = EXCLUDED.title, handle = EXCLUDED.handle, sku = EXCLUDED.sku,
-                            shopify_price = EXCLUDED.shopify_price, shopify_qty = EXCLUDED.shopify_qty,
-                            status = EXCLUDED.status, is_damaged = EXCLUDED.is_damaged,
-                            last_synced = CURRENT_TIMESTAMP
-                    """, (p["tcgplayer_id"], p["shopify_product_id"], p["variant_id"],
-                          p["title"], p["handle"], p.get("sku"), p["shopify_price"], p["shopify_qty"],
-                          p.get("status", "ACTIVE"), p.get("is_damaged", False)))
-                    upserted += 1
-
-                # Heartbeat after every page — keeps Railway connection alive
-                yield json.dumps({
-                    "status": "progress",
-                    "page": page_num,
-                    "synced": upserted,
-                    "total_variants": total_variants,
-                    "more": has_more,
-                }) + "\n"
-
-            # Backfill sealed_cogs linkage
-            db.execute("""
-                UPDATE sealed_cogs sc SET shopify_product_id = spc.shopify_product_id
-                FROM inventory_product_cache spc
-                WHERE sc.tcgplayer_id = spc.tcgplayer_id AND sc.shopify_product_id IS NULL
-            """)
-            app.logger.info(f"Shopify sync complete: {upserted} upserted from {total_variants} variants")
-            yield json.dumps({
-                "status": "done",
-                "synced": upserted,
-                "total_variants": total_variants,
-            }) + "\n"
+            cache_mgr.invalidate("manual_sync")
+            # Give it a moment to start, then report done —
+            # actual sync runs in background thread via CacheManager
+            yield json.dumps({"status": "done", "message": "Cache refresh triggered in background"}) + "\n"
         except Exception as e:
-            app.logger.error(f"Shopify sync failed: {e}")
+            app.logger.error(f"Shopify sync trigger failed: {e}")
             yield json.dumps({"status": "error", "error": str(e)}) + "\n"
 
     return app.response_class(generate(), mimetype="application/x-ndjson")
