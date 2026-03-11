@@ -279,9 +279,12 @@ class PPTClient:
         if unopened is not None:
             return Decimal(str(unopened))
 
-        # Cards: nested prices object
+        # Cards: nested prices object — prefer 'low' (lowest active listing) over 'market'
         prices = item_data.get("prices", {})
         if isinstance(prices, dict):
+            low = prices.get("low")
+            if low is not None:
+                return Decimal(str(low))
             market = prices.get("market") or prices.get("mid")
             if market is not None:
                 return Decimal(str(market))
@@ -322,6 +325,25 @@ class PPTClient:
         result = {}
         primary = prices.get("primaryPrinting", "Default")
 
+        # Compute low/market ratio so we can scale condition prices down to 'low' basis
+        _market_top = prices.get("market") or prices.get("mid")
+        _low_top = prices.get("low")
+        _low_ratio = (
+            Decimal(str(_low_top)) / Decimal(str(_market_top))
+            if _market_top and _low_top and float(_market_top) > 0
+            else Decimal("1")
+        )
+
+        def _scale(price):
+            """Scale a market price down to 'low' basis using top-level low/market ratio."""
+            if price is None:
+                return None
+            return float(
+                (Decimal(str(price)) * _low_ratio).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            )
+
         # Source 1: flat "conditions" object → goes into the primary variant bucket
         conditions = prices.get("conditions", {})
         if conditions and isinstance(conditions, dict):
@@ -329,8 +351,7 @@ class PPTClient:
             for ppt_cond, cond_data in conditions.items():
                 short_code = _match_condition(ppt_cond)
                 if short_code and isinstance(cond_data, dict):
-                    price = cond_data.get("price")
-                    flat[short_code] = float(price) if price is not None else None
+                    flat[short_code] = _scale(cond_data.get("price"))
             if flat:
                 result[primary] = flat
 
@@ -344,8 +365,7 @@ class PPTClient:
                 for ppt_cond, cond_data in vconditions.items():
                     short_code = _match_condition(ppt_cond)
                     if short_code and isinstance(cond_data, dict):
-                        price = cond_data.get("price")
-                        variant_prices[short_code] = float(price) if price is not None else None
+                        variant_prices[short_code] = _scale(cond_data.get("price"))
                 if variant_prices:
                     # Merge into existing (conditions data) or create new
                     if variant_name in result:
@@ -483,14 +503,23 @@ class PPTClient:
     def get_graded_price(card_data, grade_company: str, grade_value: str) -> "Optional[Decimal]":
         """
         Get a single graded price for a specific company + grade.
-        Returns the avg eBay price as Decimal, or None if not available.
+
+        Uses 'low' (lowest eBay sale) when count < 5 (too few data points for avg to be
+        meaningful — likely stale outliers). Falls back to 'avg' when count >= 5.
+        Returns None if no data available.
         """
         graded = PPTClient.extract_graded_prices(card_data)
         company_data = graded.get(grade_company.upper(), {})
         grade_data = company_data.get(str(grade_value), {})
+
+        count = grade_data.get("count") or 0
+        low = grade_data.get("low")
         avg = grade_data.get("avg")
-        if avg is not None:
-            return Decimal(str(avg)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        # Prefer low when sample is thin; avg when we have enough data
+        price = low if (count < 5 and low is not None) else avg
+        if price is not None:
+            return Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return None
 
     @staticmethod

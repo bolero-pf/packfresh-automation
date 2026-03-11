@@ -1156,6 +1156,57 @@ def update_condition(item_id):
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/intake/item/<item_id>/mark-graded", methods=["POST"])
+def mark_item_graded(item_id):
+    """Mark a raw card item as graded (PSA/BGS/CGC/SGC) and re-price from eBay data."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id")
+    grade_company = (data.get("grade_company") or "").strip().upper()
+    grade_value = (data.get("grade_value") or "").strip()
+    market_price_override = data.get("market_price")
+
+    if not session_id or not grade_company or not grade_value:
+        return jsonify({"error": "session_id, grade_company, and grade_value required"}), 400
+
+    # Update graded fields on the item
+    db.execute(
+        """UPDATE intake_items
+           SET is_graded = TRUE, grade_company = %s, grade_value = %s,
+               condition = 'NM'
+           WHERE id = %s""",
+        (grade_company, grade_value, item_id),
+    )
+    item = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+
+    # Re-price: use override if provided, otherwise fetch from PPT
+    new_price = None
+    if market_price_override is not None:
+        try:
+            new_price = Decimal(str(market_price_override))
+        except Exception:
+            pass
+
+    if new_price is None and ppt and item.get("tcgplayer_id"):
+        try:
+            card_data = ppt.get_card_by_tcgplayer_id(int(item["tcgplayer_id"]))
+            if card_data:
+                new_price = PPTClient.get_graded_price(card_data, grade_company, grade_value)
+                if new_price is None:
+                    app.logger.warning(
+                        f"No graded price for {item['tcgplayer_id']} {grade_company} {grade_value}"
+                    )
+        except Exception as e:
+            app.logger.warning(f"PPT graded price fetch failed: {e}")
+
+    if new_price is not None:
+        item = intake.update_item_price(item_id, new_price, session_id)
+
+    intake._recalculate_session_totals(session_id)
+    return jsonify({"success": True, "item": _serialize(item), "new_price": float(new_price) if new_price else None})
+
+
 @app.route("/api/intake/add-sealed-item", methods=["POST"])
 def add_sealed_item():
     """Add a sealed item to an existing session (manual add during buy)."""

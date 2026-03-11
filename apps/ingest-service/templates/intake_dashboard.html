@@ -747,6 +747,46 @@
         </div>
     </div>
 
+    <!-- Mark Graded Modal -->
+    <div id="mark-graded-modal" class="modal-overlay">
+        <div class="modal" style="max-width:420px;">
+            <div class="modal-header">
+                <h3 id="mark-graded-title">🏅 Mark as Graded</h3>
+                <button class="modal-close" onclick="closeModal('mark-graded-modal')">&times;</button>
+            </div>
+            <div style="padding:16px;">
+                <div id="mark-graded-card-info" style="font-size:0.85rem; color:var(--text-dim); margin-bottom:12px;"></div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                    <div class="form-group">
+                        <label>Grading Company</label>
+                        <select id="mg-company" onchange="onMarkGradedChange()">
+                            <option value="PSA">PSA</option>
+                            <option value="BGS">BGS</option>
+                            <option value="CGC">CGC</option>
+                            <option value="SGC">SGC</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Grade</label>
+                        <select id="mg-grade" onchange="onMarkGradedChange()">
+                            <option value="10">10</option>
+                            <option value="9.5">9.5</option>
+                            <option value="9">9</option>
+                            <option value="8.5">8.5</option>
+                            <option value="8">8</option>
+                            <option value="7">7</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="mg-price-info" style="background:var(--surface-2); border-radius:6px; padding:10px; margin-bottom:14px; font-size:0.85rem; min-height:36px;"></div>
+                <div style="display:flex; gap:8px;">
+                    <button id="mg-confirm-btn" class="btn btn-primary" style="flex:1;" onclick="confirmMarkGraded()">Save Grade</button>
+                    <button class="btn btn-secondary" onclick="closeModal('mark-graded-modal')">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ═══════════════════════════════════ BREAKDOWN MODAL ═══════════════════════════════════ -->
     <div id="intake-breakdown-modal" class="modal-overlay">
         <div class="modal" style="max-width:680px;">
@@ -1564,7 +1604,7 @@
                                             const linkLabel = i.is_mapped ? 'Relink' : 'Link';
                                             const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
                                             if (s.session_type === 'raw') {
-                                                btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${s.offer_percentage})">${linkLabel}</button> `;
+                                                btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${s.offer_percentage},'${(i.set_name||'').replace(/'/g,"\\'")}','${(i.card_number||'').replace(/'/g,"\\'")}',${i.is_graded||false},'${(i.grade_company||'')}','${(i.grade_value||'')}')">${linkLabel}</button> `;
                                             } else {
                                                 btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
                                             }
@@ -1573,6 +1613,10 @@
                                             btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','rejected')">🗑 Remove</button><hr>`;
                                             btns += `<button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price||0})">Override Price</button>`;
                                             btns += `<button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">Change Qty (${i.quantity})</button>`;
+                                            if (s.session_type === 'raw') {
+                                                const gradedLabel = i.is_graded ? `🏅 Change Grade (${i.grade_company} ${i.grade_value})` : '🏅 Mark as Graded';
+                                                btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id||'null'},${i.is_graded||false},'${i.grade_company||''}','${i.grade_value||''}')">${gradedLabel}</button>`;
+                                            }
                                             
                                             if (s.session_type !== 'raw' && i.tcgplayer_id) {
                                                 btns += `<hr><button onclick="openIntakeBreakdown(${i.tcgplayer_id}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}')">📦 Breakdown Recipe</button>`;
@@ -2901,10 +2945,12 @@
         } catch(err) { alert(err.message); }
     }
 
-    async function relinkRawCard(itemId, sessionId, cardName, offerPct) {
-        window._relinkState = { itemId, sessionId, cardName };
+    async function relinkRawCard(itemId, sessionId, cardName, offerPct, setName, cardNumber, isGraded, gradeCompany, gradeValue) {
+        window._relinkState = { itemId, sessionId, cardName, setName: setName||'', cardNumber: cardNumber||'', isGraded: !!isGraded, gradeCompany: gradeCompany||'', gradeValue: gradeValue||'' };
         _relinkShowSearch();
         openModal('relink-modal');
+        // Auto-fire search immediately — we already have name + set from the import
+        _relinkDoSearch();
     }
 
     function _relinkShowSearch() {
@@ -2915,9 +2961,9 @@
             <div class="form-group"><label>Card Name</label>
                 <input type="text" id="relink-search" value="${rs.cardName.replace(/"/g,'&quot;')}" placeholder="e.g. Charizard ex"></div>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-                <div class="form-group"><label>Set (optional)</label>
-                    <input type="text" id="relink-set" placeholder="e.g. Paldean Fates"></div>
-                <div class="form-group"><label>TCGPlayer ID (optional)</label>
+                <div class="form-group"><label>Set</label>
+                    <input type="text" id="relink-set" value="${(rs.setName||'').replace(/"/g,'&quot;')}" placeholder="e.g. Paldean Fates"></div>
+                <div class="form-group"><label>TCGPlayer ID</label>
                     <input type="number" id="relink-tcgid" placeholder="e.g. 535090"></div>
             </div>
             <button class="btn btn-primary" id="relink-search-btn" style="width:100%;">Search</button>
@@ -3089,7 +3135,91 @@
         });
     }
 
-    async function deleteItem(itemId, sessionId) {
+    // ═══════════════════════════════ MARK AS GRADED ═══════════════════════════════
+
+    async function openMarkGraded(itemId, sessionId, cardName, tcgplayerId, isGraded, gradeCompany, gradeValue) {
+        window._mgState = { itemId, sessionId, cardName, tcgplayerId, gradedPrices: null };
+        document.getElementById('mark-graded-title').textContent = isGraded ? '🏅 Change Grade' : '🏅 Mark as Graded';
+        document.getElementById('mark-graded-card-info').textContent = cardName;
+        document.getElementById('mg-company').value = gradeCompany || 'PSA';
+        document.getElementById('mg-grade').value = gradeValue || '9';
+        document.getElementById('mg-price-info').innerHTML = '<span style="color:var(--text-dim);">Loading prices...</span>';
+        openModal('mark-graded-modal');
+
+        // Pre-load graded prices from PPT if we have a tcgplayer_id
+        if (tcgplayerId) {
+            try {
+                const r = await fetch('/api/intake/lookup-card', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ tcgplayer_id: tcgplayerId }),
+                });
+                const d = await r.json();
+                window._mgState.gradedPrices = d.graded_prices || null;
+            } catch(e) {}
+        }
+        onMarkGradedChange();
+    }
+
+    function onMarkGradedChange() {
+        const st = window._mgState;
+        if (!st) return;
+        const company = document.getElementById('mg-company').value;
+        const grade = document.getElementById('mg-grade').value;
+        const priceInfo = document.getElementById('mg-price-info');
+
+        if (!st.gradedPrices) {
+            priceInfo.innerHTML = '<span style="color:var(--text-dim);">No TCGPlayer ID linked — price will need manual override after saving.</span>';
+            return;
+        }
+        const companyData = (st.gradedPrices[company] || {});
+        const gradeData = companyData[grade] || {};
+        const count = gradeData.count || 0;
+        const low = gradeData.low;
+        const avg = gradeData.avg;
+        const price = (count < 5 && low != null) ? low : avg;
+
+        if (price == null) {
+            priceInfo.innerHTML = `<span style="color:var(--text-dim);">No eBay data for ${company} ${grade}</span>`;
+        } else {
+            const src = (count < 5 && low != null) ? 'eBay low' : 'eBay avg';
+            const warn = count < 5 ? ` <span style="color:#f59e0b;font-size:0.78rem;">(only ${count} sale${count===1?'':'s'} — using low)</span>` : `<span style="color:var(--text-dim);font-size:0.78rem;"> · ${count} sales</span>`;
+            priceInfo.innerHTML = `<strong style="font-size:1.1rem;">$${price.toFixed(2)}</strong> <span style="color:var(--text-dim); font-size:0.8rem;">${src}</span>${warn}`;
+            if (avg != null && count >= 5) {
+                priceInfo.innerHTML += `<br><span style="color:var(--text-dim); font-size:0.78rem;">Low: $${low!=null?low.toFixed(2):'—'} · High: $${gradeData.high!=null?gradeData.high.toFixed(2):'—'}</span>`;
+            }
+        }
+        st._selectedPrice = price;
+    }
+
+    async function confirmMarkGraded() {
+        const st = window._mgState;
+        if (!st) return;
+        const company = document.getElementById('mg-company').value;
+        const grade = document.getElementById('mg-grade').value;
+        const btn = document.getElementById('mg-confirm-btn');
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+
+        try {
+            const r = await fetch(`/api/intake/item/${st.itemId}/mark-graded`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: st.sessionId,
+                    grade_company: company,
+                    grade_value: grade,
+                    market_price: st._selectedPrice || null,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Failed'); btn.disabled = false; btn.textContent = 'Save Grade'; return; }
+            closeModal('mark-graded-modal');
+            viewSession(st.sessionId, true);
+        } catch(e) { alert(e.message); btn.disabled = false; btn.textContent = 'Save Grade'; }
+    }
+
+        async function deleteItem(itemId, sessionId) {
         const ok = await themedConfirm(
             '🗑 Delete Item',
             'Permanently remove this item from the session? This cannot be undone.',
