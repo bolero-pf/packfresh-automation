@@ -214,6 +214,26 @@ def _build_recommendations():
         low_stock_bonus = max(0, 20 - avg_child_qty) * 0.5
         score = delta_pct + low_stock_bonus
 
+        # Build per-component detail list for display
+        comp_details = []
+        for cid in child_tcg_ids:
+            info = child_qty_map.get(cid, {})
+            # get quantity_per_parent from components query
+            qty_per_parent = next(
+                (int(comp.get("quantity_per_parent", 1))
+                 for comp in db.query(
+                     "SELECT quantity_per_parent FROM sealed_breakdown_components WHERE variant_id=%s AND tcgplayer_id=%s",
+                     (vid, cid))
+                 ), 1)
+            comp_details.append({
+                "tcgplayer_id":    cid,
+                "title":           info.get("title", f"TCG#{cid}"),
+                "shopify_qty":     int(info.get("shopify_qty") or 0) if info else None,
+                "shopify_price":   float(info.get("shopify_price") or 0) if info else None,
+                "qty_per_parent":  qty_per_parent,
+                "in_store":        bool(info),
+            })
+
         results.append({
             "shopify_variant_id": row["shopify_variant_id"],
             "shopify_product_id": row["shopify_product_id"],
@@ -236,6 +256,7 @@ def _build_recommendations():
             "total_children":     total_children,
             "score":              round(score, 2),
             "use_count":          recipe["use_count"],
+            "components":         comp_details,
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -408,40 +429,127 @@ def execute_breakdown():
     return jsonify({"success": True, "results": results})
 
 
-# ─── Proxy routes to ingest breakdown-cache API ───────────────────────────────
+# ─── Breakdown cache routes — direct DB (same shared Postgres, no proxy needed) ─
+
+def _load_cache_for_tcg(tcg_id):
+    """Load breakdown cache + all variants + components for a tcgplayer_id."""
+    row = db.query_one("SELECT * FROM sealed_breakdown_cache WHERE tcgplayer_id=%s", (tcg_id,))
+    if not row:
+        return {"found": False}
+    variants = db.query(
+        "SELECT * FROM sealed_breakdown_variants WHERE breakdown_id=%s ORDER BY display_order, created_at",
+        (row["id"],)
+    )
+    result_variants = []
+    for v in variants:
+        comps = db.query(
+            "SELECT * FROM sealed_breakdown_components WHERE variant_id=%s ORDER BY display_order",
+            (v["id"],)
+        )
+        result_variants.append({**dict(v), "components": [dict(c) for c in comps]})
+    return {"found": True, "cache": {**dict(row), "variants": result_variants}}
+
 
 @bp.route("/api/cache/<int:tcg_id>")
 @requires_auth
-def proxy_get_cache(tcg_id):
-    data, err = _ingest_get(f"/api/breakdown-cache/{tcg_id}")
-    if err:
-        return jsonify({"error": err}), 502
-    return jsonify(data)
+def get_cache(tcg_id):
+    return jsonify(_load_cache_for_tcg(tcg_id))
+
 
 @bp.route("/api/cache/<int:tcg_id>/variant", methods=["POST"])
 @requires_auth
-def proxy_save_variant(tcg_id):
-    data, err = _ingest_post(f"/api/breakdown-cache/{tcg_id}/variant", request.get_json(silent=True) or {})
-    if err:
-        return jsonify({"error": err}), 502
-    return jsonify(data)
+def save_variant(tcg_id):
+    """Save (create or update) a breakdown variant. Proxies to ingest if available,
+    otherwise writes directly to the shared DB."""
+    body = request.get_json(silent=True) or {}
+    # Try ingest proxy first (it handles best_variant_market recalc etc.)
+    if INGEST_URL:
+        data, err = _ingest_post(f"/api/breakdown-cache/{tcg_id}/variant", body)
+        if not err:
+            return jsonify(data)
+    # Direct write fallback
+    from decimal import Decimal
+    import uuid as _uuid
+    product_name = body.get("product_name", "")
+    variant_name = body.get("variant_name", "Standard")
+    notes        = body.get("notes", "")
+    components   = body.get("components", [])
+    variant_id   = body.get("variant_id")
+
+    cache_row = db.query_one("SELECT id FROM sealed_breakdown_cache WHERE tcgplayer_id=%s", (tcg_id,))
+    if cache_row:
+        cache_id = cache_row["id"]
+        db.execute("UPDATE sealed_breakdown_cache SET product_name=%s, last_updated=CURRENT_TIMESTAMP WHERE id=%s",
+                   (product_name, cache_id))
+    else:
+        new_id = str(_uuid.uuid4())
+        db.execute("INSERT INTO sealed_breakdown_cache (id, tcgplayer_id, product_name) VALUES (%s,%s,%s)",
+                   (new_id, tcg_id, product_name))
+        cache_id = new_id
+
+    total_mkt = sum(
+        Decimal(str(c.get("market_price",0))) * int(c.get("quantity_per_parent", c.get("quantity",1)))
+        for c in components
+    )
+
+    if variant_id:
+        db.execute("UPDATE sealed_breakdown_variants SET variant_name=%s, notes=%s, total_component_market=%s WHERE id=%s",
+                   (variant_name, notes, total_mkt, variant_id))
+        db.execute("DELETE FROM sealed_breakdown_components WHERE variant_id=%s", (variant_id,))
+        vid = variant_id
+    else:
+        vid = str(_uuid.uuid4())
+        db.execute("""INSERT INTO sealed_breakdown_variants
+            (id, breakdown_id, variant_name, notes, total_component_market, component_count)
+            VALUES (%s,%s,%s,%s,%s,%s)""",
+            (vid, cache_id, variant_name, notes, total_mkt, len(components)))
+
+    for i, comp in enumerate(components):
+        db.execute("""INSERT INTO sealed_breakdown_components
+            (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, display_order)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+            (vid, comp.get("tcgplayer_id"), comp.get("product_name",""),
+             comp.get("set_name",""), int(comp.get("quantity_per_parent", comp.get("quantity",1))),
+             Decimal(str(comp.get("market_price",0))), i))
+
+    db.execute("UPDATE sealed_breakdown_variants SET component_count=%s WHERE id=%s", (len(components), vid))
+    # Recalc best_variant_market
+    db.execute("""UPDATE sealed_breakdown_cache SET
+        best_variant_market = (SELECT MAX(total_component_market) FROM sealed_breakdown_variants WHERE breakdown_id=%s),
+        variant_count = (SELECT COUNT(*) FROM sealed_breakdown_variants WHERE breakdown_id=%s)
+        WHERE id=%s""", (cache_id, cache_id, cache_id))
+
+    return jsonify({**_load_cache_for_tcg(tcg_id), "success": True})
+
 
 @bp.route("/api/cache/variant/<variant_id>", methods=["DELETE"])
 @requires_auth
-def proxy_delete_variant(variant_id):
-    data, err = _ingest_delete(f"/api/breakdown-cache/variant/{variant_id}")
-    if err:
-        return jsonify({"error": err}), 502
-    return jsonify(data)
+def delete_variant(variant_id):
+    v = db.query_one("SELECT sbv.breakdown_id, sbc.tcgplayer_id FROM sealed_breakdown_variants sbv JOIN sealed_breakdown_cache sbc ON sbc.id=sbv.breakdown_id WHERE sbv.id=%s", (variant_id,))
+    if not v:
+        return jsonify({"error": "Not found"}), 404
+    db.execute("DELETE FROM sealed_breakdown_components WHERE variant_id=%s", (variant_id,))
+    db.execute("DELETE FROM sealed_breakdown_variants WHERE id=%s", (variant_id,))
+    cnt = db.query_one("SELECT COUNT(*) AS c FROM sealed_breakdown_variants WHERE breakdown_id=%s", (v["breakdown_id"],))
+    if cnt and cnt["c"] == 0:
+        db.execute("DELETE FROM sealed_breakdown_cache WHERE id=%s", (v["breakdown_id"],))
+        return jsonify({"found": False})
+    db.execute("""UPDATE sealed_breakdown_cache SET
+        best_variant_market=(SELECT MAX(total_component_market) FROM sealed_breakdown_variants WHERE breakdown_id=%s),
+        variant_count=(SELECT COUNT(*) FROM sealed_breakdown_variants WHERE breakdown_id=%s)
+        WHERE id=%s""", (v["breakdown_id"], v["breakdown_id"], v["breakdown_id"]))
+    return jsonify(_load_cache_for_tcg(v["tcgplayer_id"]))
+
 
 @bp.route("/api/cache/search")
 @requires_auth
-def proxy_ppt_search():
+def search_ppt():
     q = request.args.get("q", "")
-    data, err = _ingest_post("/api/ppt/search-sealed", {"query": q})
-    if err:
-        return jsonify({"error": err}), 502
-    return jsonify(data)
+    if INGEST_URL:
+        data, err = _ingest_post("/api/ppt/search-sealed", {"query": q})
+        if not err:
+            return jsonify(data)
+    return jsonify({"results": [], "error": "INGEST_INTERNAL_URL not configured — PPT search unavailable"})
 
 @bp.route("/api/store-prices", methods=["POST"])
 @requires_auth
@@ -799,10 +907,14 @@ function renderRecommendations() {{
 function recRow(r) {{
   const deltaClass = r.delta_pct >= 5 ? 'delta-pos' : r.delta_pct >= -10 ? 'delta-neutral' : 'delta-neg';
   const deltaStr   = (r.delta_pct >= 0 ? '+' : '') + r.delta_pct.toFixed(1) + '%';
-  const childStockStr = r.total_children > 0
-    ? `<span class="${{r.min_child_qty === 0 ? 'low-stock' : r.min_child_qty < 5 ? 'delta-neutral' : ''}}">
-        min ${{r.min_child_qty}} · avg ${{r.avg_child_qty}}</span>
-        <br><small style="color:var(--text-dim)">${{r.children_in_store}}/${{r.total_children}} in store</small>`
+  const childStockStr = (r.components && r.components.length > 0)
+    ? r.components.map(comp => {{
+        const qty = comp.shopify_qty;
+        const col = qty === null ? 'var(--text-dim)' : qty === 0 ? 'var(--red)' : qty < 5 ? 'var(--amber)' : 'var(--green)';
+        const qtyStr = qty === null ? '<small style="color:var(--text-dim)">not in store</small>' : `<strong style="color:${{col}}">${{qty}}</strong>`;
+        const perParent = comp.qty_per_parent > 1 ? ` <small style="color:var(--text-dim)">×${{comp.qty_per_parent}}/unit</small>` : '';
+        return `<div style="font-size:12px;white-space:nowrap">${{comp.title.length>32?comp.title.slice(0,30)+'…':comp.title}}${{perParent}}: ${{qtyStr}}</div>`;
+      }}).join('')
     : '<span style="color:var(--text-dim)">—</span>';
 
   const varBadge = r.variant_count > 1
@@ -888,11 +1000,39 @@ async function openExecuteModal(rec) {{
   renderExecuteForm(rec, rec.best_variant_id, rec.best_variant_name, rec.bd_value);
 }}
 
-function openExecuteWithVariant(rec, variantId, variantName, bdValue) {{
+async function openExecuteWithVariant(rec, variantId, variantName, bdValue) {{
   if (typeof rec === 'string') rec = JSON.parse(rec.replace(/&quot;/g, '"'));
-  // Recompute delta with this variant's bd value
   const delta = rec.store_price > 0 ? (bdValue - rec.store_price) / rec.store_price * 100 : 0;
-  renderExecuteForm({{...rec, bd_value: bdValue, delta_pct: delta}}, variantId, variantName, bdValue);
+  const body = document.getElementById('execute-modal-body');
+  body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading components...</div>';
+
+  // Fetch component details for this specific variant with store qtys
+  let components = [];
+  try {{
+    const r = await fetch(`/inventory/breakdown/api/cache/${{rec.tcgplayer_id}}`);
+    const d = await r.json();
+    const variant = (d.cache?.variants||[]).find(v => v.id === variantId);
+    if (variant?.components) {{
+      // Fetch store qtys for each component
+      const tcgIds = variant.components.map(c => c.tcgplayer_id).filter(Boolean);
+      const sr = await fetch('/inventory/breakdown/api/store-prices', {{
+        method: 'POST', headers: {{'Content-Type':'application/json'}},
+        body: JSON.stringify({{ tcgplayer_ids: tcgIds }})
+      }});
+      const sd = await sr.json();
+      const prices = sd.prices || {{}};
+      components = variant.components.map(c => ({{
+        tcgplayer_id: c.tcgplayer_id,
+        title: c.product_name,
+        qty_per_parent: parseInt(c.quantity_per_parent)||1,
+        shopify_qty: prices[String(c.tcgplayer_id)]?.shopify_qty ?? null,
+        shopify_price: prices[String(c.tcgplayer_id)]?.shopify_price ?? null,
+        in_store: !!prices[String(c.tcgplayer_id)],
+      }}));
+    }}
+  }} catch(e) {{}}
+
+  renderExecuteForm({{...rec, bd_value: bdValue, delta_pct: delta, bd_value_label: rec.bd_value_label||'market', components}}, variantId, variantName, bdValue);
 }}
 
 function renderExecuteForm(rec, variantId, variantName, bdValue) {{
@@ -908,6 +1048,23 @@ function renderExecuteForm(rec, variantId, variantName, bdValue) {{
         <span>BD value: <strong class="${{deltaClass}}">$${{bdValue.toFixed(2)}}</strong> ${{bdLabel}} (${{rec.delta_pct >= 0 ? '+' : ''}}${{rec.delta_pct.toFixed(1)}}%)</span>
         <span>Config: <strong style="color:var(--accent)">${{variantName}}</strong></span>
       </div>
+    </div>
+
+    <div id="exec-components-preview" style="margin-bottom:16px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:10px 14px">
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;font-weight:600">Breaking into:</div>
+      ${{(rec.components||[]).length > 0
+        ? rec.components.map(comp => {{
+            const col = comp.shopify_qty === null ? 'var(--text-dim)' : comp.shopify_qty === 0 ? 'var(--red)' : comp.shopify_qty < 5 ? 'var(--amber)' : 'var(--green)';
+            const storeStr = comp.shopify_qty !== null
+              ? `<span style="color:${{col}}">${{comp.shopify_qty}} in store</span>`
+              : '<span style="color:var(--text-dim)">not in store</span>';
+            return `<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0">
+              <span>${{comp.qty_per_parent > 1 ? comp.qty_per_parent + '× ' : ''}}${{comp.title}}</span>
+              <span>${{storeStr}}</span>
+            </div>`;
+          }}).join('')
+        : '<p style="font-size:12px;color:var(--text-dim)">Component list unavailable</p>'
+      }}
     </div>
 
     <div style="margin-bottom:16px">
