@@ -684,6 +684,7 @@ td{{padding:6px 9px;vertical-align:middle;}}
   <span class="badge" style="border-color:var(--accent);">{_html.escape(mode_label)}</span>
   <div class="actions">
     <a class="btn" href="/inventory/sync">🔁 Sync</a>
+    <a class="btn" href="/inventory/breakdown/">🔓 Breakdown</a>
     <a class="btn btn-green" href="/inventory/add">➕ Add</a>
     <a class="btn" href="/inventory/export.csv{qs}">📤 Export</a>
     <form method="post" action="/inventory/push_prices" style="display:inline">

@@ -71,10 +71,29 @@ def _lazy_init():
 # ─── Blueprints ────────────────────────────────────────────────────────────────
 
 from routes.inventory import bp as inventory_bp  # noqa: E402
+from routes.breakdown import bp as breakdown_bp  # noqa: E402
 app.register_blueprint(inventory_bp)
+app.register_blueprint(breakdown_bp)
 
 
 # ─── Root ──────────────────────────────────────────────────────────────────────
+
+@app.route("/inventory/api/items")
+def api_items():
+    """Lightweight item list for breakdown search."""
+    from flask import jsonify, request as req
+    q = req.args.get("q", "").lower()
+    rows = db.query("""
+        SELECT c.title AS name, c.shopify_qty, c.shopify_price, c.tcgplayer_id,
+               c.shopify_variant_id, c.inventory_item_id
+        FROM inventory_product_cache c
+        WHERE c.is_damaged = FALSE
+        ORDER BY c.title
+    """)
+    items = [dict(r) for r in rows]
+    if q:
+        items = [i for i in items if q in (i["name"] or "").lower()]
+    return jsonify({"items": items[:50]})
 
 @app.route("/")
 def root():
