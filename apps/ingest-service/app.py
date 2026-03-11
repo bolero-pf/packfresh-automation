@@ -219,6 +219,9 @@ def upload_collectr():
             "offer_price": offer_price,
             "unit_cost_basis": unit_cost,
             "tcgplayer_id": tcgplayer_id,
+            "is_graded": getattr(item, "is_graded", False),
+            "grade_company": getattr(item, "grade_company", "") or None,
+            "grade_value": getattr(item, "grade_value", "") or None,
         })
 
     # Add items to session
@@ -307,6 +310,9 @@ def upload_collectr_html():
             "offer_price": offer_price,
             "unit_cost_basis": unit_cost,
             "tcgplayer_id": tcgplayer_id,
+            "is_graded": getattr(item, "is_graded", False),
+            "grade_company": getattr(item, "grade_company", "") or None,
+            "grade_value": getattr(item, "grade_value", "") or None,
         })
 
     intake.add_items_to_session(session["id"], processed)
@@ -440,6 +446,9 @@ def upload_generic_csv():
             "offer_price": offer_price,
             "unit_cost_basis": unit_cost,
             "tcgplayer_id": tcgplayer_id,
+            "is_graded": getattr(item, "is_graded", False),
+            "grade_company": getattr(item, "grade_company", "") or None,
+            "grade_value": getattr(item, "grade_value", "") or None,
         })
 
     # Add items to session
@@ -840,9 +849,23 @@ def add_raw_card():
         try:
             card_data = ppt.get_card_by_tcgplayer_id(tcgplayer_id)
             if card_data:
-                market_price = PPTClient.extract_condition_price(
-                    card_data, data["condition"]
-                )
+                is_graded = bool(data.get("is_graded", False))
+                grade_company = (data.get("grade_company") or "").strip()
+                grade_value = (data.get("grade_value") or "").strip()
+
+                if is_graded and grade_company and grade_value:
+                    # Use graded (PSA/BGS/CGC) eBay market price
+                    market_price = PPTClient.get_graded_price(card_data, grade_company, grade_value)
+                    if market_price is None:
+                        app.logger.warning(
+                            f"No graded price for {tcgplayer_id} {grade_company} {grade_value}, "
+                            "falling back to NM raw price"
+                        )
+                        market_price = PPTClient.extract_condition_price(card_data, "NM")
+                else:
+                    market_price = PPTClient.extract_condition_price(
+                        card_data, data["condition"]
+                    )
                 # Enrich with data from PPT if not provided
                 if not data.get("set_name") and card_data.get("setName"):
                     data["set_name"] = card_data["setName"]
@@ -886,6 +909,9 @@ def add_raw_card():
         quantity=quantity,
         market_price=market_price,
         offer_percentage=session["offer_percentage"],
+        is_graded=bool(data.get("is_graded", False)),
+        grade_company=data.get("grade_company", "") or "",
+        grade_value=data.get("grade_value", "") or "",
     )
 
     # Recalculate session totals
@@ -1373,10 +1399,14 @@ def ppt_lookup_card():
         app.logger.info(f"  extract_variants result={variants}")
         app.logger.info(f"  primary_printing={primary_printing}")
 
+        # Extract graded (PSA/BGS/CGC) prices
+        graded_prices = PPTClient.extract_graded_prices(card_data)
+
         return jsonify({
             "card": card_data,
             "variants": variants,            # {"Holofoil": {"NM": 103.85, "LP": 87.80, ...}, ...}
             "primary_printing": primary_printing,  # "Holofoil"
+            "graded_prices": graded_prices,  # {"PSA": {"10": {"avg": 450, ...}, "9": {...}}, ...}
         })
     except PPTError as e:
         return jsonify({"error": str(e)}), 502

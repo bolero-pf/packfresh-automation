@@ -481,10 +481,10 @@
             <div class="card">
                 <h2>Raw Card Intake</h2>
                 <p style="color:var(--text-dim); margin-bottom:16px; font-size:0.9rem;">
-                    Create a session, then search and add cards. Prices are fetched from PPT.
+                    Import from a Collectr export, paste Collectr HTML, match a spreadsheet, or add cards manually.
                 </p>
 
-                <!-- Create session section -->
+                <!-- ── Create session ──────────────────────────── -->
                 <div id="raw-session-setup">
                     <div class="form-row">
                         <div class="form-group">
@@ -499,42 +499,126 @@
                     <button class="btn btn-primary" onclick="createRawSession()">Start Raw Intake Session</button>
                 </div>
 
-                <!-- Active raw session card entry -->
+                <!-- ── Active session entry ─────────────────────── -->
                 <div id="raw-entry-form" style="display:none;">
                     <div class="alert alert-success" id="raw-session-info"></div>
 
-                    <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
-                        <div class="form-group" style="flex:2; min-width:140px; margin:0;">
-                            <label>Card Name</label>
-                            <input type="text" id="raw-card-search" placeholder="e.g. Charizard ex"
-                                   onkeydown="if(event.key==='Enter') smartCardSearch(rawSessionId, parseFloat(document.getElementById('raw-offer-pct').value)||65, 'raw')">
-                        </div>
-                        <div class="form-group" style="flex:1; min-width:100px; margin:0;">
-                            <label>Set (optional)</label>
-                            <input type="text" id="raw-card-set" placeholder="e.g. Paldean Fates">
-                        </div>
-                        <div class="form-group" style="width:90px; margin:0;">
-                            <label>TCG ID</label>
-                            <input type="number" id="raw-tcgid" placeholder="optional"
-                                   onkeydown="if(event.key==='Enter') lookupByTcgId(rawSessionId, parseFloat(document.getElementById('raw-offer-pct').value)||65, 'raw')">
-                        </div>
-                        <div class="form-group" style="width:70px; margin:0;">
-                            <label>Cond</label>
-                            <select id="raw-condition">
-                                <option value="NM">NM</option>
-                                <option value="LP">LP</option>
-                                <option value="MP">MP</option>
-                                <option value="HP">HP</option>
-                                <option value="DMG">DMG</option>
-                            </select>
-                        </div>
-                        <div class="form-group" style="width:50px; margin:0;">
-                            <label>Qty</label>
-                            <input type="number" id="raw-quantity" value="1" min="1">
-                        </div>
-                        <button class="btn btn-primary btn-sm" onclick="smartCardSearch(rawSessionId, parseFloat(document.getElementById('raw-offer-pct').value)||65, 'raw')">Search</button>
+                    <!-- Import sub-tabs -->
+                    <div style="display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap; border-bottom:1px solid var(--border); padding-bottom:10px;">
+                        <button class="btn btn-sm btn-primary" id="raw-subtab-btn-manual" onclick="switchRawSubtab('manual')">✏️ Manual Entry</button>
+                        <button class="btn btn-sm btn-secondary" id="raw-subtab-btn-collectr-csv" onclick="switchRawSubtab('collectr-csv')">📥 Collectr CSV</button>
+                        <button class="btn btn-sm btn-secondary" id="raw-subtab-btn-collectr-html" onclick="switchRawSubtab('collectr-html')">🌐 Collectr HTML</button>
+                        <button class="btn btn-sm btn-secondary" id="raw-subtab-btn-generic-csv" onclick="switchRawSubtab('generic-csv')">📊 Spreadsheet</button>
                     </div>
-                    <div id="raw-search-results" style="margin-top:8px;"></div>
+
+                    <!-- ── Manual entry panel ── -->
+                    <div id="raw-subtab-manual">
+                        <!-- Graded toggle -->
+                        <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; padding:10px 14px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
+                            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9rem;">
+                                <input type="checkbox" id="raw-is-graded" onchange="toggleGradedMode()" style="width:16px;height:16px;">
+                                <span style="font-weight:600;">Graded Card</span>
+                            </label>
+                            <span id="raw-graded-fields" style="display:none; align-items:center; gap:8px;">
+                                <select id="raw-grade-company" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);" onchange="onGradeFieldChange()">
+                                    <option value="PSA">PSA</option>
+                                    <option value="BGS">BGS</option>
+                                    <option value="CGC">CGC</option>
+                                    <option value="SGC">SGC</option>
+                                </select>
+                                <select id="raw-grade-value" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);" onchange="onGradeFieldChange()">
+                                    <option value="10">10</option>
+                                    <option value="9.5">9.5</option>
+                                    <option value="9">9</option>
+                                    <option value="8.5">8.5</option>
+                                    <option value="8">8</option>
+                                    <option value="7">7</option>
+                                </select>
+                                <span id="raw-graded-market-badge" style="display:none; background:var(--accent); color:#fff; padding:3px 8px; border-radius:4px; font-size:0.8rem; font-weight:600;"></span>
+                            </span>
+                            <span style="color:var(--text-dim); font-size:0.8rem;" id="raw-graded-hint">Toggle for PSA/BGS/CGC graded cards — uses eBay market data</span>
+                        </div>
+
+                        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                            <div class="form-group" style="flex:2; min-width:140px; margin:0;">
+                                <label>Card Name</label>
+                                <input type="text" id="raw-card-search" placeholder="e.g. Charizard ex"
+                                       onkeydown="if(event.key==='Enter') smartCardSearch(rawSessionId, parseFloat(document.getElementById('raw-offer-pct').value)||65, 'raw')">
+                            </div>
+                            <div class="form-group" style="flex:1; min-width:100px; margin:0;">
+                                <label>Set (optional)</label>
+                                <input type="text" id="raw-card-set" placeholder="e.g. Paldean Fates">
+                            </div>
+                            <div class="form-group" style="width:90px; margin:0;">
+                                <label>TCG ID</label>
+                                <input type="number" id="raw-tcgid" placeholder="optional"
+                                       onkeydown="if(event.key==='Enter') lookupByTcgId(rawSessionId, parseFloat(document.getElementById('raw-offer-pct').value)||65, 'raw')">
+                            </div>
+                            <div class="form-group" id="raw-cond-group" style="width:70px; margin:0;">
+                                <label>Cond</label>
+                                <select id="raw-condition">
+                                    <option value="NM">NM</option>
+                                    <option value="LP">LP</option>
+                                    <option value="MP">MP</option>
+                                    <option value="HP">HP</option>
+                                    <option value="DMG">DMG</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="width:50px; margin:0;">
+                                <label>Qty</label>
+                                <input type="number" id="raw-quantity" value="1" min="1">
+                            </div>
+                            <button class="btn btn-primary btn-sm" onclick="smartCardSearch(rawSessionId, parseFloat(document.getElementById('raw-offer-pct').value)||65, 'raw')">Search</button>
+                        </div>
+                        <div id="raw-search-results" style="margin-top:8px;"></div>
+                    </div>
+
+                    <!-- ── Collectr CSV panel ── -->
+                    <div id="raw-subtab-collectr-csv" style="display:none;">
+                        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:12px;">
+                            Export your collection from Collectr as a CSV. Raw cards with a Grade column will be imported as graded automatically.
+                        </p>
+                        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+                            <div class="form-group" style="margin:0;">
+                                <label>Collectr CSV File</label>
+                                <input type="file" id="raw-collectr-csv-file" accept=".csv" style="color:var(--text);">
+                            </div>
+                            <button class="btn btn-primary btn-sm" onclick="uploadRawCollectrCSV()">Import CSV</button>
+                        </div>
+                        <div id="raw-collectr-csv-result" style="margin-top:10px;"></div>
+                    </div>
+
+                    <!-- ── Collectr HTML panel ── -->
+                    <div id="raw-subtab-collectr-html" style="display:none;">
+                        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:12px;">
+                            Navigate to your Collectr portfolio page, select-all and copy the HTML source of the product list, then paste it below.
+                        </p>
+                        <div class="form-group">
+                            <label>Paste Collectr HTML</label>
+                            <textarea id="raw-collectr-html-paste" rows="6"
+                                style="width:100%; background:var(--surface); border:1px solid var(--border); border-radius:6px; color:var(--text); padding:10px; font-family:monospace; font-size:0.8rem; resize:vertical;"
+                                placeholder="Paste <ul class=&quot;contents ...&quot;> block here..."></textarea>
+                        </div>
+                        <button class="btn btn-primary btn-sm" onclick="uploadRawCollectrHTML()">Parse HTML</button>
+                        <div id="raw-collectr-html-result" style="margin-top:10px;"></div>
+                    </div>
+
+                    <!-- ── Generic CSV / spreadsheet panel ── -->
+                    <div id="raw-subtab-generic-csv" style="display:none;">
+                        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:12px;">
+                            Upload any CSV or spreadsheet. We'll try to auto-detect columns (card name, set, condition, qty, price). Include a <em>Grade</em> or <em>PSA Grade</em> column for graded cards.
+                        </p>
+                        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+                            <div class="form-group" style="margin:0;">
+                                <label>CSV / Spreadsheet File</label>
+                                <input type="file" id="raw-generic-csv-file" accept=".csv,.xlsx,.xls" style="color:var(--text);">
+                            </div>
+                            <button class="btn btn-secondary btn-sm" onclick="previewRawGenericCSV()">Preview Columns</button>
+                            <button class="btn btn-primary btn-sm" onclick="importRawGenericCSV()">Import</button>
+                        </div>
+                        <div id="raw-generic-csv-preview" style="margin-top:10px;"></div>
+                        <div id="raw-generic-csv-result" style="margin-top:10px;"></div>
+                    </div>
 
                     <!-- Items added so far -->
                     <div id="raw-items-table" style="margin-top:16px;"></div>
@@ -3223,42 +3307,87 @@
 
             const card = d.card || {};
             const variants = d.variants || {};
+            const gradedPrices = d.graded_prices || {};
             let primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
             if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
             const variantData = variants[primary] || {};
 
-            // Get condition-specific price
-            let price = variantData[condition] || null;
-            if (!price && card.prices) price = card.prices.market || card.prices.mid || null;
-
             const setName = card.setName || card.set_name || '';
             const cardNum = card.cardNumber || card.number || '';
             const rarity = card.rarity || '';
-            const displayPrice = price ? Number(price).toFixed(2) : 'no price';
-            const offer = price ? (price * qty * offerPct / 100).toFixed(2) : '—';
 
-            // Show all variants with condition prices
-            const variantNames = Object.keys(variants);
-            let variantHtml = '';
-            if (variantNames.length > 0) {
-                variantHtml = '<div style="margin-top:8px;">' + variantNames.map(v => {
-                    const vData = variants[v] || {};
-                    const vPrice = vData[condition];
-                    const safeName = (card.name||'').replace(/'/g, "\\'");
-                    const safeSet = setName.replace(/'/g, "\\'");
-                    return '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + (vPrice || 0) + ', \'' + context + '\')">' +
-                        '<h4>' + (card.name||'') + ' — ' + v + '</h4>' +
-                        '<p>' + setName + (cardNum ? ' #'+cardNum : '') + ' · ' + condition + ': ' + (vPrice ? '$'+vPrice.toFixed(2) : 'no price') + ' · Qty ' + qty + '</p></div>';
-                }).join('') + '</div>';
-            } else {
-                const safeName = (card.name||'').replace(/'/g, "\\'");
-                const safeSet = setName.replace(/'/g, "\\'");
-                variantHtml = '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + (price || 0) + ', \'' + context + '\')">' +
-                    '<h4>' + (card.name||'') + '</h4>' +
-                    '<p>' + setName + ' · ' + condition + ': $' + displayPrice + ' · Qty ' + qty + '</p></div>';
+            // Update graded badge if in graded mode
+            if (gradedPrices && Object.keys(gradedPrices).length) {
+                _updateGradedBadge(gradedPrices);
             }
 
-            resultsDiv.innerHTML = '<div class="alert alert-success"><strong>' + (card.name||'Unknown') + '</strong> — ' + setName + (cardNum ? ' #'+cardNum : '') + '</div>' + variantHtml;
+            const inGradedMode = context === 'raw' && document.getElementById('raw-is-graded')?.checked;
+
+            if (inGradedMode) {
+                const gradeCompany = (document.getElementById('raw-grade-company')?.value || 'PSA').toUpperCase();
+                const gradeVal = document.getElementById('raw-grade-value')?.value || '10';
+                const companyGrades = gradedPrices[gradeCompany] || {};
+                const gradeEntry = companyGrades[gradeVal] || {};
+                const gradedAvg = gradeEntry.avg;
+                const nmRaw = variantData['NM'];
+                const safeName = (card.name||'').replace(/'/g, "\'");
+                const safeSet = setName.replace(/'/g, "\'");
+
+                let gradedHtml = '<div style="background:var(--surface-2); border-radius:8px; padding:14px; margin-top:8px;">';
+                gradedHtml += '<div style="margin-bottom:10px;"><strong style="color:var(--accent);">' + (card.name||'') + '</strong>';
+                gradedHtml += '<span style="color:var(--text-dim);"> — ' + setName + (cardNum ? ' #'+cardNum : '') + '</span></div>';
+                if (Object.keys(companyGrades).length) {
+                    gradedHtml += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:6px;">' + gradeCompany + ' eBay Market Prices</div>';
+                    gradedHtml += '<div style="display:flex; gap:8px; flex-wrap:wrap;">';
+                    Object.entries(companyGrades).sort((a,b) => parseFloat(b[0])-parseFloat(a[0])).forEach(([g, gd]) => {
+                        const isSel = g === gradeVal;
+                        gradedHtml += '<div style="background:' + (isSel ? 'var(--accent)' : 'var(--surface)') + ';color:' + (isSel ? '#fff' : 'var(--text)') + ';border:1px solid var(--border);border-radius:6px;padding:8px 12px;text-align:center;min-width:70px;">';
+                        gradedHtml += '<div style="font-size:0.75rem;font-weight:600;">' + gradeCompany + ' ' + g + '</div>';
+                        gradedHtml += '<div style="font-size:1rem;font-weight:700;">' + (gd.avg != null ? '$' + Number(gd.avg).toFixed(2) : '—') + '</div>';
+                        if (gd.count) gradedHtml += '<div style="font-size:0.7rem;opacity:0.7;">' + gd.count + ' sales</div>';
+                        gradedHtml += '</div>';
+                    });
+                    gradedHtml += '</div></div>';
+                }
+                if (nmRaw) gradedHtml += '<div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:10px;">Raw NM: $' + Number(nmRaw).toFixed(2) + '</div>';
+                if (gradedAvg) {
+                    const offerAmt = (gradedAvg * qty * offerPct / 100).toFixed(2);
+                    gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + gradedAvg + ', \'' + context + '\')">' +
+                        '<h4>Add ' + gradeCompany + ' ' + gradeVal + ' — ' + (card.name||'') + '</h4>' +
+                        '<p>eBay avg: $' + gradedAvg.toFixed(2) + ' · Qty ' + qty + ' · Offer: $' + offerAmt + '</p></div>';
+                } else {
+                    gradedHtml += '<div class="alert alert-warning">No ' + gradeCompany + ' ' + gradeVal + ' data.</div>';
+                    if (nmRaw) gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + nmRaw + ', \'' + context + '\')">' +
+                        '<h4>Add at Raw NM — ' + (card.name||'') + '</h4><p>$' + Number(nmRaw).toFixed(2) + ' · Qty ' + qty + '</p></div>';
+                }
+                gradedHtml += '</div>';
+                resultsDiv.innerHTML = gradedHtml;
+            } else {
+                let price = variantData[condition] || null;
+                if (!price && card.prices) price = card.prices.market || card.prices.mid || null;
+                const displayPrice = price ? Number(price).toFixed(2) : 'no price';
+                const offer = price ? (price * qty * offerPct / 100).toFixed(2) : '—';
+                const variantNames = Object.keys(variants);
+                let variantHtml = '';
+                if (variantNames.length > 0) {
+                    variantHtml = '<div style="margin-top:8px;">' + variantNames.map(v => {
+                        const vData = variants[v] || {};
+                        const vPrice = vData[condition];
+                        const safeName = (card.name||'').replace(/'/g, "\'");
+                        const safeSet = setName.replace(/'/g, "\'");
+                        return '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + (vPrice || 0) + ', \'' + context + '\')">' +
+                            '<h4>' + (card.name||'') + ' — ' + v + '</h4>' +
+                            '<p>' + setName + (cardNum ? ' #'+cardNum : '') + ' · ' + condition + ': ' + (vPrice ? '$'+vPrice.toFixed(2) : 'no price') + ' · Qty ' + qty + '</p></div>';
+                    }).join('') + '</div>';
+                } else {
+                    const safeName = (card.name||'').replace(/'/g, "\'");
+                    const safeSet = setName.replace(/'/g, "\'");
+                    variantHtml = '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + (price || 0) + ', \'' + context + '\')">' +
+                        '<h4>' + (card.name||'') + '</h4>' +
+                        '<p>' + setName + ' · ' + condition + ': $' + displayPrice + ' · Qty ' + qty + '</p></div>';
+                }
+                resultsDiv.innerHTML = '<div class="alert alert-success"><strong>' + (card.name||'Unknown') + '</strong> — ' + setName + (cardNum ? ' #'+cardNum : '') + '</div>' + variantHtml;
+            }
         } catch(err) {
             resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
         }
@@ -3322,9 +3451,11 @@
                 const safeName = (c.name||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
                 const safeSet = setName.replace(/'/g, "\\'").replace(/"/g, '&quot;');
 
+                const inGraded = context === 'raw' && document.getElementById('raw-is-graded')?.checked;
+                const gradeLabel = inGraded ? (' · <span style="color:var(--accent);font-weight:600;">' + (document.getElementById('raw-grade-company')?.value||'PSA') + ' ' + (document.getElementById('raw-grade-value')?.value||'10') + ' — click for graded price</span>') : '';
                 return `<div class="search-result" onclick="addCardFromSearch('${sessionId}', ${tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${condition}', ${qty}, ${price || 0}, '${context}')">
                     <h4>${c.name} ${cardNum ? '#'+cardNum : ''}</h4>
-                    <p>${setName}${rarity ? ' \u00b7 '+rarity : ''} \u00b7 TCG#${tcgId} \u00b7 ${condition}: $${displayPrice} \u00b7 Qty ${qty} \u00b7 Offer: $${offer}</p>
+                    <p>${setName}${rarity ? ' \u00b7 '+rarity : ''} \u00b7 TCG#${tcgId} \u00b7 ${condition}: $${displayPrice} \u00b7 Qty ${qty} \u00b7 Offer: $${offer}${gradeLabel}</p>
                 </div>`;
             }).join('');
         } catch(err) {
@@ -3464,6 +3595,10 @@
 
         resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding...</div>';
         try {
+            // Pass graded info from the form (only relevant for manual entry in raw tab)
+            const isGraded = context === 'raw' && document.getElementById('raw-is-graded')?.checked;
+            const gradeCompany = isGraded ? (document.getElementById('raw-grade-company')?.value || '') : '';
+            const gradeValue = isGraded ? (document.getElementById('raw-grade-value')?.value || '') : '';
             const r = await fetch('/api/intake/add-raw-card', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -3471,6 +3606,7 @@
                     session_id: sessionId, tcgplayer_id: tcgId, card_name: cardName,
                     condition: condition, set_name: setName, card_number: cardNum,
                     rarity: rarity, quantity: qty, market_price: price,
+                    is_graded: isGraded, grade_company: gradeCompany, grade_value: gradeValue,
                 }),
             });
             const d = await r.json();
@@ -3593,6 +3729,164 @@
     }
 
     // ═══════════════════════════════ RAW CARD SESSION (tab) ═══════════════════════════════
+    // ═══════════════════════════════ RAW INTAKE — SUB-TABS & GRADED ═══════════════════════════════
+
+    function switchRawSubtab(name) {
+        ['manual','collectr-csv','collectr-html','generic-csv'].forEach(function(t) {
+            const el = document.getElementById('raw-subtab-' + t);
+            const btn = document.getElementById('raw-subtab-btn-' + t);
+            if (el) el.style.display = t === name ? '' : 'none';
+            if (btn) {
+                btn.classList.toggle('btn-primary', t === name);
+                btn.classList.toggle('btn-secondary', t !== name);
+            }
+        });
+    }
+
+    function toggleGradedMode() {
+        const isGraded = document.getElementById('raw-is-graded').checked;
+        const gradedFields = document.getElementById('raw-graded-fields');
+        const condGroup = document.getElementById('raw-cond-group');
+        const hint = document.getElementById('raw-graded-hint');
+        gradedFields.style.display = isGraded ? 'flex' : 'none';
+        condGroup.style.opacity = isGraded ? '0.4' : '1';
+        condGroup.title = isGraded ? 'Condition not used for graded cards' : '';
+        hint.style.display = isGraded ? 'none' : '';
+        // Clear cached graded market badge
+        const badge = document.getElementById('raw-graded-market-badge');
+        if (badge) { badge.style.display = 'none'; badge.textContent = ''; }
+    }
+
+    // Called when grade company/value changes — updates badge if a card is already looked up
+    function onGradeFieldChange() {
+        const badge = document.getElementById('raw-graded-market-badge');
+        if (badge) { badge.style.display = 'none'; badge.textContent = ''; }
+        // Clear search results so user re-searches with new grade
+        document.getElementById('raw-search-results').innerHTML = '';
+    }
+
+    // Show the graded price badge after a card lookup returns graded_prices
+    function _updateGradedBadge(gradedPrices) {
+        const badge = document.getElementById('raw-graded-market-badge');
+        if (!badge) return;
+        const company = (document.getElementById('raw-grade-company')?.value || 'PSA').toUpperCase();
+        const grade = document.getElementById('raw-grade-value')?.value || '10';
+        const avg = gradedPrices?.[company]?.[grade]?.avg;
+        if (avg != null) {
+            badge.textContent = company + ' ' + grade + ': $' + Number(avg).toFixed(2);
+            badge.style.display = '';
+        } else {
+            badge.textContent = company + ' ' + grade + ': no data';
+            badge.style.display = '';
+            badge.style.background = 'var(--orange, #f59e0b)';
+        }
+    }
+
+    // ── Collectr CSV upload (raw session) ──
+    async function uploadRawCollectrCSV() {
+        const fileInput = document.getElementById('raw-collectr-csv-file');
+        const resultDiv = document.getElementById('raw-collectr-csv-result');
+        if (!fileInput.files.length) { resultDiv.innerHTML = '<div class="alert alert-warning">Select a CSV file first.</div>'; return; }
+        const offerPct = parseFloat(document.getElementById('raw-offer-pct').value) || 65;
+        const customerName = document.getElementById('raw-customer').value || 'Walk-in';
+
+        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Importing CSV...</div>';
+        const fd = new FormData();
+        fd.append('file', fileInput.files[0]);
+        fd.append('customer_name', customerName);
+        fd.append('offer_percentage', offerPct);
+        try {
+            const r = await fetch('/api/intake/upload-collectr', { method: 'POST', body: fd });
+            const d = await r.json();
+            if (!r.ok) { resultDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Import failed') + '</div>'; return; }
+            // If this creates a new session, switch to it
+            if (d.session_id && !rawSessionId) {
+                rawSessionId = d.session_id;
+                document.getElementById('raw-session-info').innerHTML =
+                    'Session started for <strong>' + customerName + '</strong> · ' + d.item_count + ' cards imported · Offer: ' + offerPct + '%';
+            }
+            const mapped = d.auto_mapped_count || 0;
+            const unmapped = d.unmapped_count || 0;
+            resultDiv.innerHTML = '<div class="alert alert-success">' +
+                '<strong>' + d.item_count + ' cards imported</strong> — $' + (d.total_market_value || 0).toFixed(2) + ' market value, $' + (d.total_offer || 0).toFixed(2) + ' offer' +
+                (unmapped ? ' <span style="color:var(--orange);">· ' + unmapped + ' need mapping</span>' : '') +
+                '</div>';
+            loadRawSessionItems();
+        } catch(err) { resultDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
+    }
+
+    // ── Collectr HTML upload (raw session) ──
+    async function uploadRawCollectrHTML() {
+        const html = document.getElementById('raw-collectr-html-paste').value.trim();
+        const resultDiv = document.getElementById('raw-collectr-html-result');
+        if (!html) { resultDiv.innerHTML = '<div class="alert alert-warning">Paste Collectr HTML first.</div>'; return; }
+        const offerPct = parseFloat(document.getElementById('raw-offer-pct').value) || 65;
+        const customerName = document.getElementById('raw-customer').value || 'Walk-in';
+
+        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Parsing HTML...</div>';
+        try {
+            const r = await fetch('/api/intake/upload-collectr-html', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ html_content: html, customer_name: customerName, offer_percentage: offerPct }),
+            });
+            const d = await r.json();
+            if (!r.ok) { resultDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Parse failed') + '</div>'; return; }
+            if (d.session_id && !rawSessionId) rawSessionId = d.session_id;
+            resultDiv.innerHTML = '<div class="alert alert-success">' +
+                '<strong>' + (d.item_count || 0) + ' items imported</strong> — $' + (d.total_market_value || 0).toFixed(2) + ' market value' +
+                '</div>';
+            loadRawSessionItems();
+        } catch(err) { resultDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
+    }
+
+    // ── Generic CSV preview ──
+    async function previewRawGenericCSV() {
+        const fileInput = document.getElementById('raw-generic-csv-file');
+        const previewDiv = document.getElementById('raw-generic-csv-preview');
+        if (!fileInput.files.length) { previewDiv.innerHTML = '<div class="alert alert-warning">Select a file first.</div>'; return; }
+        previewDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Analyzing columns...</div>';
+        const fd = new FormData();
+        fd.append('file', fileInput.files[0]);
+        try {
+            const r = await fetch('/api/intake/preview-csv', { method: 'POST', body: fd });
+            const d = await r.json();
+            if (!r.ok) { previewDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Preview failed') + '</div>'; return; }
+            const detected = d.detected_columns || {};
+            const all = d.available_columns || [];
+            previewDiv.innerHTML = '<div style="padding:10px; background:var(--surface-2); border-radius:6px; font-size:0.85rem;">' +
+                '<strong>Detected columns:</strong> ' +
+                Object.entries(detected).map(([k,v]) => '<span style="margin:0 4px;"><em>' + k + '</em> → ' + v + '</span>').join(' · ') +
+                '<br><span style="color:var(--text-dim);">All columns: ' + all.join(', ') + '</span></div>';
+        } catch(err) { previewDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
+    }
+
+    // ── Generic CSV import ──
+    async function importRawGenericCSV() {
+        const fileInput = document.getElementById('raw-generic-csv-file');
+        const resultDiv = document.getElementById('raw-generic-csv-result');
+        if (!fileInput.files.length) { resultDiv.innerHTML = '<div class="alert alert-warning">Select a file first.</div>'; return; }
+        const offerPct = parseFloat(document.getElementById('raw-offer-pct').value) || 65;
+        const customerName = document.getElementById('raw-customer').value || 'Walk-in';
+
+        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Importing...</div>';
+        const fd = new FormData();
+        fd.append('file', fileInput.files[0]);
+        fd.append('customer_name', customerName);
+        fd.append('offer_percentage', offerPct);
+        try {
+            const r = await fetch('/api/intake/upload-generic-csv', { method: 'POST', body: fd });
+            const d = await r.json();
+            if (!r.ok) { resultDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Import failed') + '</div>'; return; }
+            if (d.session_id && !rawSessionId) rawSessionId = d.session_id;
+            resultDiv.innerHTML = '<div class="alert alert-success">' +
+                '<strong>' + (d.item_count || 0) + ' items imported</strong> — $' + (d.total_market_value || 0).toFixed(2) + ' market value' +
+                (d.unmapped_count ? ' · <span style="color:var(--orange);">' + d.unmapped_count + ' need mapping</span>' : '') +
+                '</div>';
+            loadRawSessionItems();
+        } catch(err) { resultDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
+    }
+
     async function createRawSession() {
         const customer = document.getElementById('raw-customer').value || 'Walk-in';
         const offerPct = document.getElementById('raw-offer-pct').value || '65';
@@ -3626,7 +3920,7 @@
                 '</div><table><thead><tr><th>Card</th><th>Cond</th><th>Qty</th><th>Market</th><th>Offer</th><th>Actions</th></tr></thead><tbody>' +
                 items.map(i => '<tr>' +
                     '<td>' + i.product_name + '<br><small style="color:var(--text-dim);">' + (i.set_name || '') + ' ' + (i.card_number ? '#'+i.card_number : '') + '</small></td>' +
-                    '<td><span class="badge badge-blue">' + (i.condition || '') + '</span></td>' +
+                    '<td>' + (i.is_graded ? '<span class="badge" style="background:var(--accent-alt,#7c3aed);color:#fff;">' + (i.grade_company||'') + ' ' + (i.grade_value||'') + '</span>' : '<span class="badge badge-blue">' + (i.condition || '') + '</span>') + '</td>' +
                     '<td>' + i.quantity + '</td>' +
                     '<td>$' + (i.market_price || 0).toFixed(2) + '</td>' +
                     '<td>$' + (i.offer_price || 0).toFixed(2) + '</td>' +

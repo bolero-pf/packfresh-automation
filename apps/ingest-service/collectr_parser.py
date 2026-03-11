@@ -30,10 +30,14 @@ class ParsedItem(NamedTuple):
     rarity: str       # empty for sealed
     condition: str    # NM, LP, MP, HP, DMG
     variance: str     # Normal, Reverse Holo, etc.
-    grade: str        # Ungraded, PSA 10, etc.
+    grade: str        # Ungraded, PSA 10, etc. (raw Collectr value)
     quantity: int
     market_price: Decimal  # per-unit price from Collectr
     portfolio_name: str    # customer portfolio name in Collectr
+    # Parsed graded fields (derived from grade above)
+    is_graded: bool = False
+    grade_company: str = ""   # PSA, BGS, CGC, SGC
+    grade_value: str = ""     # 10, 9.5, 9, 8, ...
 
 
 class ParseResult(NamedTuple):
@@ -104,6 +108,39 @@ def _is_raw_card(row: dict) -> bool:
     return False
 
 
+def _parse_grade(grade_str: str) -> tuple[bool, str, str]:
+    """
+    Parse a Collectr Grade field like 'PSA 10', 'BGS 9.5', 'CGC 9', 'Ungraded', etc.
+
+    Returns: (is_graded: bool, grade_company: str, grade_value: str)
+    Examples:
+        'PSA 10'   -> (True,  'PSA', '10')
+        'BGS 9.5'  -> (True,  'BGS', '9.5')
+        'CGC 9'    -> (True,  'CGC', '9')
+        'SGC 8'    -> (True,  'SGC', '8')
+        'Ungraded' -> (False, '',    '')
+        ''         -> (False, '',    '')
+    """
+    if not grade_str or grade_str.strip().lower() in ("ungraded", "raw", "none", ""):
+        return False, "", ""
+
+    grade_str = grade_str.strip()
+    # Match "COMPANY GRADE" pattern
+    m = re.match(r"^(PSA|BGS|CGC|SGC)\s+(\d+(?:\.\d+)?)$", grade_str, re.IGNORECASE)
+    if m:
+        return True, m.group(1).upper(), m.group(2)
+
+    # Fallback: try to find a known company anywhere in the string
+    for company in ("PSA", "BGS", "CGC", "SGC"):
+        if company.lower() in grade_str.lower():
+            # Try to extract a number from the string
+            nums = re.findall(r"\d+(?:\.\d+)?", grade_str)
+            grade_val = nums[0] if nums else ""
+            return True, company, grade_val
+
+    return False, "", ""
+
+
 def parse_collectr_csv(file_content: str) -> ParseResult:
     """
     Parse a Collectr CSV export.
@@ -162,6 +199,9 @@ def parse_collectr_csv(file_content: str) -> ParseResult:
 
             total_market += market_price * quantity
 
+            grade_str = (row.get("Grade") or "Ungraded").strip()
+            is_graded, grade_company, grade_value = _parse_grade(grade_str)
+
             item = ParsedItem(
                 product_name=product_name,
                 product_type=product_type,
@@ -170,10 +210,13 @@ def parse_collectr_csv(file_content: str) -> ParseResult:
                 rarity=(row.get("Rarity") or "").strip() if is_raw else "",
                 condition=_normalize_condition(row.get("Card Condition") or "Near Mint"),
                 variance=(row.get("Variance") or "Normal").strip(),
-                grade=(row.get("Grade") or "Ungraded").strip(),
+                grade=grade_str,
                 quantity=quantity,
                 market_price=market_price,
                 portfolio_name=portfolio_name,
+                is_graded=is_graded,
+                grade_company=grade_company,
+                grade_value=grade_value,
             )
             items.append(item)
 

@@ -144,7 +144,8 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
     
     Each item dict should have:
         product_name, product_type, quantity, market_price, offer_price, unit_cost_basis
-        Optional: tcgplayer_id, set_name, card_number, condition, rarity
+        Optional: tcgplayer_id, set_name, card_number, condition, rarity,
+                  is_graded, grade_company, grade_value
     
     Returns number of items added.
     """
@@ -152,8 +153,9 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
         INSERT INTO intake_items
             (session_id, product_name, tcgplayer_id, product_type,
              set_name, card_number, condition, rarity,
-             quantity, market_price, offer_price, unit_cost_basis, is_mapped)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             quantity, market_price, offer_price, unit_cost_basis, is_mapped,
+             is_graded, grade_company, grade_value)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params_list = [
         (
@@ -170,6 +172,9 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             item["offer_price"],
             item["unit_cost_basis"],
             item.get("tcgplayer_id") is not None,
+            item.get("is_graded", False),
+            item.get("grade_company") or None,
+            item.get("grade_value") or None,
         )
         for item in items
     ]
@@ -179,7 +184,9 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
 def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
                          set_name: str, card_number: str, condition: str,
                          rarity: str, quantity: int, market_price: Decimal,
-                         offer_percentage: Decimal) -> dict:
+                         offer_percentage: Decimal,
+                         is_graded: bool = False, grade_company: str = "",
+                         grade_value: str = "") -> dict:
     """
     Add a single raw card item to a session (manual entry flow).
     Calculates offer_price and unit_cost_basis from the given offer_percentage.
@@ -192,12 +199,14 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
         INSERT INTO intake_items
             (session_id, product_name, tcgplayer_id, product_type,
              set_name, card_number, condition, rarity,
-             quantity, market_price, offer_price, unit_cost_basis, is_mapped)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+             quantity, market_price, offer_price, unit_cost_basis, is_mapped,
+             is_graded, grade_company, grade_value)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s, %s)
         RETURNING *
     """, (session_id, product_name, tcgplayer_id, "raw",
           set_name, card_number, condition, rarity,
-          quantity, market_price, offer_price, unit_cost_basis))
+          quantity, market_price, offer_price, unit_cost_basis,
+          is_graded, grade_company or None, grade_value or None))
 
 
 # ==========================================
@@ -833,6 +842,9 @@ def _finalize_raw(items: list[dict], session_id: str) -> list[dict]:
                 "cost_basis": item["unit_cost_basis"],
                 "current_price": item["market_price"],
                 "intake_session_id": session_id,
+                "is_graded": item.get("is_graded", False),
+                "grade_company": item.get("grade_company") or None,
+                "grade_value": item.get("grade_value") or None,
             })
 
     if not cards_to_insert:
@@ -842,13 +854,15 @@ def _finalize_raw(items: list[dict], session_id: str) -> list[dict]:
         INSERT INTO raw_cards
             (barcode, tcgplayer_id, card_name, set_name, card_number,
              condition, rarity, cost_basis, current_price,
-             intake_session_id, state)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PURCHASED')
+             intake_session_id, state,
+             is_graded, grade_company, grade_value)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PURCHASED', %s, %s, %s)
     """
     params_list = [
         (c["barcode"], c["tcgplayer_id"], c["card_name"], c["set_name"],
          c["card_number"], c["condition"], c["rarity"], c["cost_basis"],
-         c["current_price"], c["intake_session_id"])
+         c["current_price"], c["intake_session_id"],
+         c["is_graded"], c["grade_company"], c["grade_value"])
         for c in cards_to_insert
     ]
     execute_many_batch(sql, params_list)
