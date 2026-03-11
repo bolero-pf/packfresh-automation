@@ -217,7 +217,7 @@ class PPTClient:
     # ── card endpoints ───────────────────────────────────────────────
 
     def get_card_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
-        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1, "days": 30}
+        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1, "includeEbay": "true"}
         if include_history:
             params["includeHistory"] = "true"
         items = self._extract_data(self._get(f"{self.base_url}/v2/cards", params))
@@ -395,27 +395,22 @@ class PPTClient:
 
     # ── graded price extraction ──────────────────────────────────────
 
-    # Canonical grade keys we care about per grading company
-    GRADED_COMPANIES = ("PSA", "BGS", "CGC", "SGC")
-
-    # Map PPT response keys → display label
-    # PPT returns data under card.ebay.{psa10, psa9, psa8} and card.gradedPrices.{psa10, ...}
+    # Map PPT salesByGrade keys → (company, grade) display labels.
+    # Real structure: card.ebay.salesByGrade.{key} (requires includeEbay=true)
     GRADE_KEY_MAP = {
-        # PSA
-        "psa10": ("PSA", "10"),
-        "psa9":  ("PSA", "9"),
-        "psa8":  ("PSA", "8"),
-        "psa7":  ("PSA", "7"),
-        # BGS
-        "bgs10": ("BGS", "10"),
+        "psa10":  ("PSA", "10"),
+        "psa9":   ("PSA", "9"),
+        "psa8":   ("PSA", "8"),
+        "psa7":   ("PSA", "7"),
+        "bgs10":  ("BGS", "10"),
         "bgs9.5": ("BGS", "9.5"),
-        "bgs9":  ("BGS", "9"),
-        # CGC
-        "cgc10": ("CGC", "10"),
-        "cgc9":  ("CGC", "9"),
-        # SGC
-        "sgc10": ("SGC", "10"),
-        "sgc9":  ("SGC", "9"),
+        "bgs9":   ("BGS", "9"),
+        "bgs8":   ("BGS", "8"),
+        "cgc10":  ("CGC", "10"),
+        "cgc9":   ("CGC", "9"),
+        "cgc8":   ("CGC", "8"),
+        "sgc10":  ("SGC", "10"),
+        "sgc9":   ("SGC", "9"),
     }
 
     @staticmethod
@@ -423,81 +418,84 @@ class PPTClient:
         """
         Extract graded (PSA/BGS/CGC/SGC) market prices from a PPT card response.
 
-        PPT stores this data in two possible places:
-          1. card.ebay.{psa10: {avg: X, high: Y, low: Z, count: N}, psa9: {...}, ...}
-          2. card.gradedPrices.{psa10: X, psa9: X, ...}  (flat numeric)
+        Requires includeEbay=true on the API call.
+        Real structure: card.ebay.salesByGrade.{grade_key}: {
+            smartMarketPrice: { price, confidence, daysUsed, method },
+            marketPrice7Day:  float | null,
+            count:            int,       # total historical sales
+            dailyVolume7Day:  float | null,
+            minPrice/maxPrice/medianPrice: float,
+            marketTrend:      "up" | "stable" | "down" | null,
+        }
 
-        Returns a nested dict:
+        Returns:
             {
-                "PSA": {"10": {"avg": 450.0, "high": 520.0, "low": 390.0, "count": 12},
-                         "9":  {"avg": 210.0, ...},
-                         "8":  {"avg": 140.0, ...}},
-                "BGS": {"9.5": {"avg": 380.0, ...}},
-                ...
+                "PSA": {
+                    "10": {
+                        "price":       1742.49,   # smartMarketPrice or 7day fallback
+                        "confidence":  "high",    # high / medium / low
+                        "days_used":   7,
+                        "method":      "7day_filtered_weighted",
+                        "count":       158,
+                        "volume_7day": 4.0,
+                        "trend":       "up",
+                        "min":         310.0,
+                        "max":         2200.0,
+                        "median":      1075.0,
+                    }, ...
+                }, ...
             }
-        Only companies/grades with actual data are included.
+        Only grades with actual price data are included.
         """
         if not card_data:
             return {}
 
+        sales_by_grade = card_data.get("ebay", {}).get("salesByGrade", {})
+        if not isinstance(sales_by_grade, dict):
+            return {}
+
         result: dict = {}
+        for key, (company, grade) in PPTClient.GRADE_KEY_MAP.items():
+            entry = sales_by_grade.get(key)
+            if not isinstance(entry, dict):
+                continue
 
-        def _ensure(company, grade):
-            result.setdefault(company, {}).setdefault(grade, {})
-            return result[company][grade]
+            # Primary: smartMarketPrice (PPT-weighted over best available window)
+            smp = entry.get("smartMarketPrice") or {}
+            price = smp.get("price")
 
-        # Source 1: card.ebay (richest — has avg/high/low/count)
-        ebay = card_data.get("ebay", {})
-        if isinstance(ebay, dict):
-            for key, (company, grade) in PPTClient.GRADE_KEY_MAP.items():
-                entry = ebay.get(key)
-                if isinstance(entry, dict) and entry.get("avg") is not None:
-                    bucket = _ensure(company, grade)
-                    bucket["avg"]   = float(entry["avg"])
-                    bucket["high"]  = float(entry["high"]) if entry.get("high") is not None else None
-                    bucket["low"]   = float(entry["low"])  if entry.get("low")  is not None else None
-                    bucket["count"] = int(entry["count"])  if entry.get("count") is not None else None
-                elif isinstance(entry, (int, float)):
-                    bucket = _ensure(company, grade)
-                    bucket["avg"] = float(entry)
+            # Fallback: 7-day market price
+            if price is None:
+                price = entry.get("marketPrice7Day")
 
-        # Source 2: card.gradedPrices (flat numeric fallback)
-        graded_prices = card_data.get("gradedPrices", {})
-        if isinstance(graded_prices, dict):
-            for key, (company, grade) in PPTClient.GRADE_KEY_MAP.items():
-                val = graded_prices.get(key)
-                if val is not None:
-                    bucket = _ensure(company, grade)
-                    if "avg" not in bucket:
-                        bucket["avg"] = float(val)
+            if price is None:
+                continue
 
-        # Remove empty entries
-        result = {
-            company: {g: v for g, v in grades.items() if v.get("avg") is not None}
-            for company, grades in result.items()
-        }
-        result = {c: g for c, g in result.items() if g}
+            result.setdefault(company, {})[grade] = {
+                "price":       float(price),
+                "confidence":  smp.get("confidence"),
+                "days_used":   smp.get("daysUsed"),
+                "method":      smp.get("method"),
+                "count":       entry.get("count"),
+                "volume_7day": entry.get("dailyVolume7Day"),
+                "trend":       entry.get("marketTrend"),
+                "min":         entry.get("minPrice"),
+                "max":         entry.get("maxPrice"),
+                "median":      entry.get("medianPrice"),
+            }
+
         return result
 
     @staticmethod
     def get_graded_price(card_data, grade_company: str, grade_value: str) -> "Optional[Decimal]":
         """
         Get a single graded price for a specific company + grade.
-
-        Uses 'low' (lowest eBay sale) when count < 5 (too few data points for avg to be
-        meaningful — likely stale outliers). Falls back to 'avg' when count >= 5.
+        Uses smartMarketPrice.price (PPT-weighted) as primary, 7-day market as fallback.
         Returns None if no data available.
         """
         graded = PPTClient.extract_graded_prices(card_data)
-        company_data = graded.get(grade_company.upper(), {})
-        grade_data = company_data.get(str(grade_value), {})
-
-        count = grade_data.get("count") or 0
-        low = grade_data.get("low")
-        avg = grade_data.get("avg")
-
-        # Prefer low when sample is thin; avg when we have enough data
-        price = low if (count < 5 and low is not None) else avg
+        grade_data = graded.get(grade_company.upper(), {}).get(str(grade_value), {})
+        price = grade_data.get("price")
         if price is not None:
             return Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return None

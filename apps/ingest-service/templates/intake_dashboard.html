@@ -3198,22 +3198,34 @@
             priceInfo.innerHTML = '<span style="color:var(--text-dim);">No TCGPlayer ID linked — price will need manual override after saving.</span>';
             return;
         }
-        const companyData = (st.gradedPrices[company] || {});
-        const gradeData = companyData[grade] || {};
-        const count = gradeData.count || 0;
-        const low = gradeData.low;
-        const avg = gradeData.avg;
-        const price = (count < 5 && low != null) ? low : avg;
+        const gradeData = (st.gradedPrices[company] || {})[grade] || {};
+        const price      = gradeData.price;
+        const confidence = gradeData.confidence;  // "high" / "medium" / "low"
+        const daysUsed   = gradeData.days_used;
+        const count      = gradeData.count || 0;
+        const vol7       = gradeData.volume_7day;
+        const trend      = gradeData.trend;
+        const median     = gradeData.median;
 
         if (price == null) {
             priceInfo.innerHTML = `<span style="color:var(--text-dim);">No eBay data for ${company} ${grade}</span>`;
         } else {
-            const src = (count < 5 && low != null) ? 'eBay low' : 'eBay avg';
-            const warn = count < 5 ? ` <span style="color:#f59e0b;font-size:0.78rem;">(only ${count} sale${count===1?'':'s'} — using low)</span>` : `<span style="color:var(--text-dim);font-size:0.78rem;"> · ${count} sales</span>`;
-            priceInfo.innerHTML = `<strong style="font-size:1.1rem;">$${price.toFixed(2)}</strong> <span style="color:var(--text-dim); font-size:0.8rem;">${src}</span>${warn}`;
-            if (avg != null && count >= 5) {
-                priceInfo.innerHTML += `<br><span style="color:var(--text-dim); font-size:0.78rem;">Low: $${low!=null?low.toFixed(2):'—'} · High: $${gradeData.high!=null?gradeData.high.toFixed(2):'—'}</span>`;
-            }
+            const confColor = confidence === 'high' ? '#22c55e' : confidence === 'medium' ? '#f59e0b' : '#ef4444';
+            const confLabel = confidence ? `<span style="color:${confColor};font-size:0.75rem;font-weight:600;text-transform:uppercase;">${confidence} confidence</span>` : '';
+            const windowLabel = daysUsed ? `<span style="color:var(--text-dim);font-size:0.75rem;">${daysUsed}d window</span>` : '';
+            const trendIcon = trend === 'up' ? '↑' : trend === 'down' ? '↓' : trend === 'stable' ? '→' : '';
+            const trendColor = trend === 'up' ? '#22c55e' : trend === 'down' ? '#ef4444' : 'var(--text-dim)';
+            const statsLine = [
+                count ? `${count} sales` : null,
+                vol7  ? `${vol7.toFixed(1)}/day` : null,
+                median ? `median $${median.toFixed(0)}` : null,
+                trendIcon ? `<span style="color:${trendColor}">${trendIcon}</span>` : null,
+            ].filter(Boolean).join(' · ');
+            priceInfo.innerHTML =
+                `<strong style="font-size:1.2rem;">$${price.toFixed(2)}</strong> ` +
+                `<span style="color:var(--text-dim);font-size:0.8rem;">smart market price</span> ` +
+                `${confLabel} ${windowLabel}` +
+                (statsLine ? `<br><span style="color:var(--text-dim);font-size:0.75rem;">${statsLine}</span>` : '');
         }
         st._selectedPrice = price;
     }
@@ -3484,7 +3496,7 @@
                 const gradeVal = document.getElementById('raw-grade-value')?.value || '10';
                 const companyGrades = gradedPrices[gradeCompany] || {};
                 const gradeEntry = companyGrades[gradeVal] || {};
-                const gradedAvg = gradeEntry.avg;
+                const gradedPrice = gradeEntry.price;
                 const nmRaw = variantData['NM'];
                 const safeName = (card.name||'').replace(/'/g, "\'");
                 const safeSet = setName.replace(/'/g, "\'");
@@ -3493,24 +3505,26 @@
                 gradedHtml += '<div style="margin-bottom:10px;"><strong style="color:var(--accent);">' + (card.name||'') + '</strong>';
                 gradedHtml += '<span style="color:var(--text-dim);"> — ' + setName + (cardNum ? ' #'+cardNum : '') + '</span></div>';
                 if (Object.keys(companyGrades).length) {
-                    gradedHtml += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:6px;">' + gradeCompany + ' eBay Market Prices</div>';
+                    gradedHtml += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:6px;">' + gradeCompany + ' Smart Market Prices</div>';
                     gradedHtml += '<div style="display:flex; gap:8px; flex-wrap:wrap;">';
                     Object.entries(companyGrades).sort((a,b) => parseFloat(b[0])-parseFloat(a[0])).forEach(([g, gd]) => {
                         const isSel = g === gradeVal;
                         gradedHtml += '<div style="background:' + (isSel ? 'var(--accent)' : 'var(--surface)') + ';color:' + (isSel ? '#fff' : 'var(--text)') + ';border:1px solid var(--border);border-radius:6px;padding:8px 12px;text-align:center;min-width:70px;">';
                         gradedHtml += '<div style="font-size:0.75rem;font-weight:600;">' + gradeCompany + ' ' + g + '</div>';
-                        gradedHtml += '<div style="font-size:1rem;font-weight:700;">' + (gd.avg != null ? '$' + Number(gd.avg).toFixed(2) : '—') + '</div>';
-                        if (gd.count) gradedHtml += '<div style="font-size:0.7rem;opacity:0.7;">' + gd.count + ' sales</div>';
+                        gradedHtml += '<div style="font-size:1rem;font-weight:700;">' + (gd.price != null ? '$' + Number(gd.price).toFixed(2) : '—') + '</div>';
+                        const confColor = gd.confidence === 'high' ? '#22c55e' : gd.confidence === 'medium' ? '#f59e0b' : '#ef4444';
+                        if (gd.confidence) gradedHtml += '<div style="font-size:0.65rem;color:' + confColor + ';">' + gd.confidence + '</div>';
+                        if (gd.count) gradedHtml += '<div style="font-size:0.65rem;opacity:0.7;">' + gd.count + ' sales</div>';
                         gradedHtml += '</div>';
                     });
                     gradedHtml += '</div></div>';
                 }
                 if (nmRaw) gradedHtml += '<div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:10px;">Raw NM: $' + Number(nmRaw).toFixed(2) + '</div>';
-                if (gradedAvg) {
-                    const offerAmt = (gradedAvg * qty * offerPct / 100).toFixed(2);
-                    gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + gradedAvg + ', \'' + context + '\')">' +
+                if (gradedPrice) {
+                    const offerAmt = (gradedPrice * qty * offerPct / 100).toFixed(2);
+                    gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + gradedPrice + ', \'' + context + '\')">' +
                         '<h4>Add ' + gradeCompany + ' ' + gradeVal + ' — ' + (card.name||'') + '</h4>' +
-                        '<p>eBay avg: $' + gradedAvg.toFixed(2) + ' · Qty ' + qty + ' · Offer: $' + offerAmt + '</p></div>';
+                        '<p>Smart market: $' + gradedPrice.toFixed(2) + ' · Qty ' + qty + ' · Offer: $' + offerAmt + '</p></div>';
                 } else {
                     gradedHtml += '<div class="alert alert-warning">No ' + gradeCompany + ' ' + gradeVal + ' data.</div>';
                     if (nmRaw) gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + nmRaw + ', \'' + context + '\')">' +
@@ -3927,9 +3941,12 @@
         if (!badge) return;
         const company = (document.getElementById('raw-grade-company')?.value || 'PSA').toUpperCase();
         const grade = document.getElementById('raw-grade-value')?.value || '10';
-        const avg = gradedPrices?.[company]?.[grade]?.avg;
-        if (avg != null) {
-            badge.textContent = company + ' ' + grade + ': $' + Number(avg).toFixed(2);
+        const gd = gradedPrices?.[company]?.[grade] || {};
+        const price = gd.price;
+        if (price != null) {
+            const conf = gd.confidence ? ` (${gd.confidence})` : '';
+            badge.textContent = company + ' ' + grade + ': $' + Number(price).toFixed(2) + conf;
+            badge.style.background = '';
             badge.style.display = '';
         } else {
             badge.textContent = company + ' ' + grade + ': no data';
