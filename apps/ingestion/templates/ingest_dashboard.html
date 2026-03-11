@@ -480,15 +480,30 @@ async function viewSession(sessionId, _preserveScroll) {
                     </tr></thead>
                     <tbody>`;
 
-        // Show items — parents first, then children grouped
+        // Show items — parents first, then all descendants grouped
+        // Build a map for fast child lookup
+        const childrenOf = {};
+        items.forEach(i => {
+            if (i.parent_item_id) {
+                if (!childrenOf[i.parent_item_id]) childrenOf[i.parent_item_id] = [];
+                childrenOf[i.parent_item_id].push(i);
+            }
+        });
+
+        // Recursively render an item and all its descendants
+        function renderWithDescendants(item, depth) {
+            const isChild = depth > 0;
+            let rows = renderItemRow(item, isReceived, sessionId, isChild);
+            const kids = childrenOf[item.id] || [];
+            for (const kid of kids) {
+                rows += renderWithDescendants(kid, depth + 1);
+            }
+            return rows;
+        }
+
         const topLevel = items.filter(i => !i.parent_item_id);
         for (const item of topLevel) {
-            html += renderItemRow(item, isReceived, sessionId);
-            // Show children underneath
-            const children = items.filter(c => c.parent_item_id === item.id);
-            for (const child of children) {
-                html += renderItemRow(child, isReceived, sessionId, true);
-            }
+            html += renderWithDescendants(item, 0);
         }
 
         html += `</tbody></table></div></div>`;
