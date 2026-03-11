@@ -521,6 +521,50 @@ def restore_item(item_id: str) -> dict:
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
+def get_item(item_id: str) -> dict | None:
+    """Fetch a single intake item by ID."""
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def clone_item_with_overrides(source_item_id: str, session_id: str,
+                               quantity: int, market_price: Decimal, notes: str) -> dict:
+    """
+    Clone an intake item with overridden quantity and market price.
+    Used when splitting a partial breakdown from a multi-unit item.
+    """
+    import uuid
+    source = query_one("SELECT * FROM intake_items WHERE id = %s", (source_item_id,))
+    if not source:
+        raise ValueError("Source item not found")
+
+    session = get_session(session_id)
+    if not session:
+        raise ValueError("Session not found")
+
+    offer_pct = session["offer_percentage"]
+    discount = DAMAGE_DISCOUNT if source.get("item_status") == "damaged" else Decimal("1")
+    offer_price = market_price * quantity * (offer_pct / Decimal("100")) * discount
+
+    new_id = str(uuid.uuid4())
+    execute("""
+        INSERT INTO intake_items (
+            id, session_id, product_name, tcgplayer_id, product_type,
+            set_name, quantity, market_price, offer_price, unit_cost_basis,
+            is_mapped, item_status, listing_condition, price_override_note
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        new_id, session_id,
+        source["product_name"], source.get("tcgplayer_id"), source.get("product_type"),
+        source.get("set_name"), quantity, market_price, offer_price,
+        source.get("unit_cost_basis"),
+        source.get("is_mapped", False), source.get("item_status", "good"),
+        source.get("listing_condition", "NM"), notes
+    ))
+
+    _recalculate_session_totals(session_id)
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (new_id,))
+
+
 def override_item_price(item_id: str, new_price: Decimal, note: str, session_id: str) -> dict:
     """Override an item's market price with a reason note."""
     session = get_session(session_id)

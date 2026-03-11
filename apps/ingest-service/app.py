@@ -1015,24 +1015,46 @@ def override_price(item_id):
 def apply_breakdown_price(item_id):
     """
     Reprice an item using its breakdown value instead of whole-unit market price.
-    Uses the specified variant's total_component_market as the new market price,
-    with a note indicating it was priced as a breakdown.
-    Body: {session_id, variant_id, variant_name, breakdown_total}
+    If breakdown_qty < item quantity, splits the item first: breakdown_qty units
+    get the breakdown price, the remainder stay at their original price.
+    Body: {session_id, variant_name, breakdown_total, breakdown_qty}
     """
     data = request.get_json(silent=True) or {}
     session_id = data.get("session_id")
     variant_name = data.get("variant_name", "breakdown")
     breakdown_total = data.get("breakdown_total")
+    breakdown_qty = int(data.get("breakdown_qty") or 1)
 
     if not session_id or breakdown_total is None:
         return jsonify({"error": "session_id and breakdown_total required"}), 400
 
     try:
+        item = intake.get_item(item_id)
+        if not item:
+            return jsonify({"error": "Item not found"}), 404
+
+        current_qty = item.get("quantity", 1)
         note = f"Priced as breakdown ({variant_name})"
-        item = intake.override_item_price(
-            item_id, Decimal(str(breakdown_total)), note, session_id
-        )
-        return jsonify({"success": True, "item": _serialize(item)})
+
+        if breakdown_qty >= current_qty:
+            # Apply to whole item
+            updated = intake.override_item_price(
+                item_id, Decimal(str(breakdown_total)), note, session_id
+            )
+            return jsonify({"success": True, "item": _serialize(updated)})
+        else:
+            # Split: reduce original item to remainder qty, create new item for breakdown qty
+            remainder_qty = current_qty - breakdown_qty
+            intake.update_item_quantity(item_id, remainder_qty, session_id)
+
+            # Clone the item with breakdown_qty and breakdown price
+            new_item = intake.clone_item_with_overrides(
+                item_id, session_id,
+                quantity=breakdown_qty,
+                market_price=Decimal(str(breakdown_total)),
+                notes=note
+            )
+            return jsonify({"success": True, "split": True, "item": _serialize(new_item), "remainder_qty": remainder_qty})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
