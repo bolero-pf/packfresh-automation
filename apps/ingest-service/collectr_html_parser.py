@@ -1,11 +1,22 @@
 """
-Collectr HTML Parser — extracts sealed product data from Collectr portfolio HTML.
+Collectr HTML Parser — extracts raw card and sealed product data from Collectr portfolio HTML.
 
 When you can't export a CSV from Collectr but can view the portfolio page,
 copy the HTML list (the <ul class="contents ..."> block) and paste it here.
 
-Produces the same item structure as collectr_parser.parse_collectr_csv()
-so the intake pipeline can handle both identically.
+Detection logic (same as CSV parser):
+    - If card_number looks like a card number AND rarity is populated → raw card
+    - Otherwise → sealed product
+
+Each <li> block contains:
+    - Product name: bold span with line-clamp-2
+    - Set name: underline text-muted-foreground span
+    - Rarity + card number: two <span> inside flex-col text-muted-foreground div
+    - Condition: font-medium span with inline color style (Near Mint, etc.)
+    - Variant: trailing text-muted-foreground p (Holofoil, Reverse Holofoil, etc.)
+    - Market price: bold leading-tight span with $ prefix
+    - Quantity: "Qty: N" text
+    - Price change: muted/red spans with +/- prefix
 """
 
 import hashlib
@@ -19,15 +30,19 @@ from typing import Optional
 class CollectrHTMLItem:
     """A single item parsed from Collectr HTML."""
     product_name: str
-    product_type: str  # always "sealed" for Collectr HTML (portfolio view)
+    product_type: str       # 'raw' or 'sealed'
     set_name: str = ""
     card_number: str = ""
-    condition: str = "NM"
     rarity: str = ""
+    condition: str = "NM"
+    variance: str = ""
     quantity: int = 1
     market_price: Decimal = Decimal("0")
     price_change: Optional[Decimal] = None
     price_change_pct: Optional[float] = None
+    is_graded: bool = False
+    grade_company: str = ""
+    grade_value: str = ""
 
 
 @dataclass
@@ -42,28 +57,56 @@ class CollectrHTMLResult:
     sealed_count: int = 0
 
 
+# Condition normalisation (same mapping as CSV parser)
+_CONDITION_MAP = {
+    "near mint": "NM",
+    "nm": "NM",
+    "lightly played": "LP",
+    "lp": "LP",
+    "moderately played": "MP",
+    "mp": "MP",
+    "heavily played": "HP",
+    "hp": "HP",
+    "damaged": "DMG",
+    "dmg": "DMG",
+}
+
+
+def _normalize_condition(raw: str) -> str:
+    return _CONDITION_MAP.get(raw.strip().lower(), "NM")
+
+
+def _is_card_number(val: str) -> bool:
+    """Return True if the string looks like a Pokemon card number."""
+    return bool(re.match(r"^\d+(/\d+)?$", val.strip()))
+
+
+def _clean(text: str) -> str:
+    """Strip nested tags, HTML entities, and whitespace."""
+    text = re.sub(r"<[^>]+>", "", text)
+    for ent, ch in [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+                    ("&#39;", "'"), ("&quot;", '"'), ("&nbsp;", " ")]:
+        text = text.replace(ent, ch)
+    return text.strip()
+
+
 def parse_collectr_html(html_content: str) -> CollectrHTMLResult:
     """
     Parse Collectr portfolio HTML into structured items.
 
-    Expects the HTML from the portfolio list view — either the full page
-    or just the <ul class="contents"> block with <li> items.
-
-    Each <li> contains:
-        - Product name (bold span with line-clamp-2)
-        - Set name (underline text-muted-foreground span)
-        - Market price (bold leading-tight span with $ prefix)
-        - Price change amount and percentage (red/green spans)
-        - Quantity (text matching "Qty: N")
+    Accepts either the full page or just the <ul class="contents ..."> block.
     """
     result = CollectrHTMLResult()
     result.file_hash = hashlib.md5(html_content.encode("utf-8")).hexdigest()
 
-    # Split into individual <li> items
-    li_blocks = re.findall(r'<li[^>]*>.*?</li>', html_content, re.DOTALL)
+    # Split on <li — each item is one card/product
+    li_blocks = re.findall(r"<li[^>]*>.*?</li>", html_content, re.DOTALL)
 
     if not li_blocks:
-        result.errors.append("No <li> items found in HTML. Make sure you copied the product list.")
+        result.errors.append(
+            "No <li> items found in HTML. "
+            "Make sure you copied the full <ul class=\"contents ...\"> block."
+        )
         return result
 
     for i, block in enumerate(li_blocks):
@@ -71,94 +114,121 @@ def parse_collectr_html(html_content: str) -> CollectrHTMLResult:
             item = _parse_li_block(block, i)
             if item:
                 result.items.append(item)
-                result.sealed_count += 1
                 result.total_market_value += item.market_price * item.quantity
+                if item.product_type == "raw":
+                    result.raw_count += 1
+                else:
+                    result.sealed_count += 1
         except Exception as e:
-            result.errors.append(f"Item {i+1}: {str(e)}")
+            result.errors.append(f"Item {i + 1}: {e}")
 
     return result
 
 
 def _parse_li_block(html: str, index: int) -> Optional[CollectrHTMLItem]:
-    """Parse a single <li> block into a CollectrHTMLItem."""
+    """Parse one <li> into a CollectrHTMLItem, or return None to skip."""
 
-    # ── Product name: first bold span with line-clamp-2 ──
-    name_match = re.search(
-        r'font-bold\s+line-clamp-2[^>]*>(.*?)</span>',
-        html, re.DOTALL
+    # ── Product name ────────────────────────────────────────────────
+    name_m = re.search(
+        r"font-bold\s+line-clamp-2[^>]*>(.*?)</span>", html, re.DOTALL
     )
-    if not name_match:
-        return None  # skip items we can't identify
-
-    product_name = _clean_text(name_match.group(1))
+    if not name_m:
+        return None
+    product_name = _clean(name_m.group(1))
     if not product_name:
         return None
 
-    # ── Set name: underline muted span ──
-    set_match = re.search(
-        r'underline\s+text-muted-foreground["\s][^>]*>(.*?)</span>',
+    # ── Set name ────────────────────────────────────────────────────
+    set_m = re.search(
+        r'underline\s+text-muted-foreground["\s][^>]*>(.*?)</span>', html, re.DOTALL
+    )
+    set_name = _clean(set_m.group(1)) if set_m else ""
+
+    # ── Rarity + card number ─────────────────────────────────────────
+    # Structure: <div class="flex flex-col text-xs sm:text-sm text-muted-foreground">
+    #               <span>Holo Rare</span><span>9</span>
+    #            </div>
+    rarity = ""
+    card_number = ""
+    muted_block_m = re.search(
+        r"flex flex-col text-xs sm:text-sm text-muted-foreground[^>]*>(.*?)</div>",
         html, re.DOTALL
     )
-    set_name = _clean_text(set_match.group(1)) if set_match else ""
+    if muted_block_m:
+        spans = re.findall(r"<span[^>]*>(.*?)</span>", muted_block_m.group(1), re.DOTALL)
+        cleaned = [_clean(s) for s in spans if _clean(s)]
+        if len(cleaned) >= 2:
+            rarity = cleaned[0]
+            card_number = cleaned[1]
+        elif len(cleaned) == 1:
+            # Could be rarity-only or card-number-only; treat as rarity
+            rarity = cleaned[0]
 
-    # ── Market price: bold leading-tight span with $ ──
-    price_match = re.search(
-        r'font-bold\s+leading-tight[^>]*>\$?([\d,]+\.?\d*)</span>',
-        html
+    # ── Condition ───────────────────────────────────────────────────
+    # <span class="font-medium text-xs sm:text-sm" style="color: rgb(...);">Near Mint</span>
+    cond_m = re.search(
+        r'font-medium[^>]+style="color:[^"]*"[^>]*>(.*?)</span>', html
+    )
+    condition = _normalize_condition(_clean(cond_m.group(1))) if cond_m else "NM"
+
+    # ── Variant / printing ───────────────────────────────────────────
+    # <p class="text-xs sm:text-sm text-muted-foreground ...">Holofoil</p>
+    variant_m = re.search(
+        r'<p[^>]+text-muted-foreground[^>]*truncate[^>]*>(.*?)</p>', html, re.DOTALL
+    )
+    variance = _clean(variant_m.group(1)) if variant_m else ""
+
+    # ── Market price ─────────────────────────────────────────────────
+    price_m = re.search(
+        r"font-bold\s+leading-tight[^>]*>\$?([\d,]+\.?\d*)</span>", html
     )
     market_price = Decimal("0")
-    if price_match:
+    if price_m:
         try:
-            market_price = Decimal(price_match.group(1).replace(",", ""))
+            market_price = Decimal(price_m.group(1).replace(",", ""))
         except InvalidOperation:
             pass
 
-    # ── Quantity ──
-    qty_match = re.search(r'Qty:\s*(\d+)', html)
-    quantity = int(qty_match.group(1)) if qty_match else 1
+    # ── Quantity ─────────────────────────────────────────────────────
+    qty_m = re.search(r"Qty:\s*(\d+)", html)
+    quantity = int(qty_m.group(1)) if qty_m else 1
 
-    # ── Price change (informational, not used in intake calc) ──
+    # ── Price change ─────────────────────────────────────────────────
     price_change = None
     price_change_pct = None
-
-    # Negative change: red text with -$
-    neg_change = re.search(r'text-red-\d+[^>]*>-\$?([\d,]+\.?\d*)</span>', html)
-    if neg_change:
+    neg_m = re.search(r"text-red-\d+[^>]*>-\$?([\d,]+\.?\d*)</span>", html)
+    if neg_m:
         try:
-            price_change = -Decimal(neg_change.group(1).replace(",", ""))
+            price_change = -Decimal(neg_m.group(1).replace(",", ""))
         except InvalidOperation:
             pass
     else:
-        # Positive change: muted text with +$
-        pos_change = re.search(r'text-muted-foreground[^>]*>\+\$?([\d,]+\.?\d*)</span>', html)
-        if pos_change:
+        pos_m = re.search(r"text-muted-foreground[^>]*>\+\$?([\d,]+\.?\d*)</span>", html)
+        if pos_m:
             try:
-                price_change = Decimal(pos_change.group(1).replace(",", ""))
+                price_change = Decimal(pos_m.group(1).replace(",", ""))
             except InvalidOperation:
                 pass
-
-    # Percentage
-    pct_match = re.search(r'\((-?[\d.]+)%\)', html)
-    if pct_match:
+    pct_m = re.search(r"\((-?[\d.]+)%\)", html)
+    if pct_m:
         try:
-            price_change_pct = float(pct_match.group(1))
+            price_change_pct = float(pct_m.group(1))
         except ValueError:
             pass
 
+    # ── Determine raw vs sealed ──────────────────────────────────────
+    product_type = "raw" if (card_number and _is_card_number(card_number) and rarity) else "sealed"
+
     return CollectrHTMLItem(
         product_name=product_name,
-        product_type="sealed",
+        product_type=product_type,
         set_name=set_name,
+        card_number=card_number if product_type == "raw" else "",
+        rarity=rarity if product_type == "raw" else "",
+        condition=condition,
+        variance=variance,
         quantity=quantity,
         market_price=market_price,
         price_change=price_change,
         price_change_pct=price_change_pct,
     )
-
-
-def _clean_text(text: str) -> str:
-    """Strip HTML entities and whitespace from extracted text."""
-    text = re.sub(r'<[^>]+>', '', text)  # remove any nested tags
-    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-    text = text.replace("&#39;", "'").replace("&quot;", '"')
-    return text.strip()

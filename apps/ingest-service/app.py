@@ -251,7 +251,7 @@ def upload_collectr():
 def upload_collectr_html():
     """Parse pasted Collectr HTML (from portfolio page) into a session."""
     data = request.json or {}
-    html_content = data.get("html", "").strip()
+    html_content = (data.get("html_content") or data.get("html") or "").strip()
     customer_name = data.get("customer_name", "").strip() or "Unknown"
     try:
         offer_pct = Decimal(str(data.get("offer_percentage", "75")))
@@ -275,7 +275,12 @@ def upload_collectr_html():
             "existing_session_id": dup_session,
         }), 409
 
-    session_type = "sealed"  # Collectr HTML portfolios are always sealed
+    if result.raw_count > 0 and result.sealed_count > 0:
+        session_type = "mixed"
+    elif result.raw_count > 0:
+        session_type = "raw"
+    else:
+        session_type = "sealed"
 
     # Create session
     session = intake.create_session(
