@@ -16,6 +16,10 @@ from functools import wraps
 import db
 from flask import Blueprint, request, jsonify, Response
 from routes.inventory import requires_auth, _get_shopify_client, _get_cache_manager, LOCATION_ID, DRY_RUN
+try:
+    from ppt_client import PPTError as _PPTError
+except ImportError:
+    _PPTError = Exception
 
 logger = logging.getLogger(__name__)
 
@@ -556,8 +560,13 @@ def search_ppt():
             if not err:
                 return jsonify(data)
         return jsonify({"results": [], "error": "PPT not configured"}), 503
-    results = ppt.search_sealed_products(q, limit=15)
-    return jsonify({"results": results})
+    try:
+        results = ppt.search_sealed_products(q, limit=15)
+        return jsonify({"results": results})
+    except _PPTError as e:
+        details = e.args[2] if len(e.args) > 2 else {}
+        retry = details.get("retry_after", 60) if isinstance(details, dict) else 60
+        return jsonify({"results": [], "error": str(e.args[0]) if e.args else str(e), "retry_after": retry}), 429
 
 @bp.route("/api/store-prices", methods=["POST"])
 @requires_auth
@@ -1470,6 +1479,11 @@ async function reSearch() {{
   try {{
     const r = await fetch(`/inventory/breakdown/api/cache/search?q=${{encodeURIComponent(q)}}`);
     const d = await r.json();
+    if (r.status === 429 || (d.error && !d.results?.length)) {{
+      const retryMsg = d.retry_after ? ` Try again in ${{d.retry_after}}s.` : '';
+      panel.innerHTML = `<div class="alert alert-warning" style="font-size:12px">⚠ ${{d.error || 'Rate limited'}}.${{retryMsg}}</div>`;
+      return;
+    }}
     if (!r.ok) {{ panel.innerHTML = `<div class="alert alert-error">${{d.error}}</div>`; return; }}
     const results = d.results || [];
     if (!results.length) {{ panel.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No results</p>'; return; }}

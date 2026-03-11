@@ -145,6 +145,10 @@ class PPTClient:
     # ── request engine ───────────────────────────────────────────────
 
     def _request(self, method, url, *, params=None, json_body=None, max_tries=3):
+        if self.should_throttle():
+            rl = self.get_rate_limit_info()
+            retry_after = rl.get("retry_after") or 60
+            raise PPTError(f"PPT rate limited — retry in {retry_after}s", 429, {"retry_after": retry_after})
         last_err = None
         for attempt in range(1, max_tries + 1):
             try:
