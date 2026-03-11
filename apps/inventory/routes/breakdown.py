@@ -870,9 +870,19 @@ function switchTab(id, btn) {{
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-' + id).classList.add('active');
-  btn.classList.add('active');
+  if (btn) btn.classList.add('active');
+  location.hash = id;
   if (id === 'ignored') loadIgnored();
   if (id === 'norecipe') loadNoRecipe();
+  if (id === 'recommendations') loadRecommendations();
+}}
+
+function restoreTab() {{
+  const hash = location.hash.replace('#', '');
+  const valid = ['recommendations','search','ignored','norecipe'];
+  const id = valid.includes(hash) ? hash : 'recommendations';
+  const btn = document.querySelector(`.tab-btn[onclick*="'${{id}}'"]`);
+  switchTab(id, btn);
 }}
 
 // ══════════════════════════════════════════════════════════════════
@@ -1581,8 +1591,12 @@ async function saveRecipeVariant() {{
     _recipeComponents = [];
     _recipeVariantId = null;
     renderRecipeModal(d.cache);
-    // Refresh recommendations in background
+    // Refresh both recs and no-recipe list (remove item that now has a recipe)
+    const currentTab = location.hash.replace('#','') || 'recommendations';
     loadRecommendations();
+    // Remove from no-recipe list immediately so it's gone when modal closes
+    _noRecipeItems = _noRecipeItems.filter(i => i.tcgplayer_id !== _recipeTarget?.tcgId);
+    if (currentTab === 'norecipe') renderNoRecipe();
   }} catch(e) {{ alert(e.message); }}
 }}
 
@@ -1702,7 +1716,7 @@ document.addEventListener('keydown', e => {{
 // ══════════════════════════════════════════════════════════════════
 // INIT
 // ══════════════════════════════════════════════════════════════════
-loadRecommendations();
+restoreTab();
 </script>
 
 <!-- Inventory all-items endpoint needed by manual search -->
