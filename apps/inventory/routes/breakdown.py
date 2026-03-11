@@ -628,16 +628,20 @@ def unmark_base_component(tcg_id):
 @bp.route("/api/no-recipe")
 @requires_auth
 def no_recipe_items():
-    """Items in store that have no breakdown recipe and aren't base components."""
+    """Items in store that have no breakdown recipe and aren't base components.
+    Includes draft products. Excludes damaged and slab-tagged items.
+    """
     rows = db.query("""
         SELECT c.tcgplayer_id, c.title, c.shopify_qty, c.shopify_price,
-               c.shopify_variant_id, c.inventory_item_id,
+               c.shopify_variant_id, c.inventory_item_id, c.status, c.tags,
                CASE WHEN bc.tcgplayer_id IS NOT NULL THEN TRUE ELSE FALSE END AS is_base
         FROM inventory_product_cache c
         LEFT JOIN sealed_breakdown_cache sbc ON sbc.tcgplayer_id = c.tcgplayer_id
         LEFT JOIN breakdown_base_components bc ON bc.tcgplayer_id = c.tcgplayer_id
         WHERE c.is_damaged = FALSE
           AND c.tcgplayer_id IS NOT NULL
+          AND c.status IN ('ACTIVE', 'DRAFT')
+          AND NOT (c.tags ILIKE '%slab%')
           AND sbc.tcgplayer_id IS NULL
         ORDER BY c.title
     """)
