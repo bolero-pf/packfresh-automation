@@ -194,14 +194,16 @@ def _apply_filters(rows, *, q=None, in_stock=False, tag_any=None, status="all", 
     return rows
 
 def _sort_rows(rows, sort_col, sort_dir):
-    SORTABLE = {"name", "shopify_qty", "shopify_price", "shopify_value", "physical_count", "notes"}
+    SORTABLE = {"name", "shopify_qty", "shopify_price", "shopify_value", "physical_count", "notes", "committed"}
     if sort_col not in SORTABLE:
         return rows
     def key(r):
         v = r.get(sort_col)
         if v is None: return (1, 0, "")
-        if isinstance(v, (int, float)): return (0, v, "")
-        return (0, 0, str(v).lower())
+        try:
+            return (0, float(v), "")
+        except (TypeError, ValueError):
+            return (0, 0, str(v).lower())
     return sorted(rows, key=key, reverse=(sort_dir == "desc"))
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
@@ -702,6 +704,8 @@ td{{padding:6px 9px;vertical-align:middle;}}
       <input type="checkbox" name="qty_mismatch" value="1" {'checked' if qty_mismatch else ''} onchange="this.form.submit()" style="width:15px;height:15px;accent-color:var(--accent);">Qty mismatch
     </label>
     <input type="hidden" name="limit" value="{limit}">
+    <input type="hidden" name="sort" value="{sort_col or ''}">
+    <input type="hidden" name="dir" value="{sort_dir or 'asc'}">
     <button class="btn">Search</button>
   </div>
   <div class="chips">
