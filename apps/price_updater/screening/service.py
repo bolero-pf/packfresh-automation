@@ -106,6 +106,7 @@ query CustomerAllOrders($customerId: ID!, $first: Int!) {
           displayFulfillmentStatus
           displayFinancialStatus
           currentTotalPriceSet { shopMoney { amount } }
+          shippingAddress { address1 address2 city province zip }
         }
       }
     }
@@ -521,6 +522,9 @@ def screen_every_order(order_gid: str) -> dict:
     cust_tags = set(t.lower() for t in (cust.get("tags") or []))
     all_edges = cust.get("orders", {}).get("edges", [])
 
+    # Normalize current order's shipping address for combine matching
+    current_ship_addr = _normalize_address(order.get("shippingAddress"))
+
     # 3. Classify all orders
     has_delivered = False
     non_cancelled_totals = []       # all orders that aren't cancelled (for cumulative)
@@ -546,15 +550,17 @@ def screen_every_order(order_gid: str) -> dict:
             if nid != order_gid and total > max_previous_total:
                 max_previous_total = total
 
-        # Unfulfilled siblings for combine
+        # Unfulfilled siblings for combine — must match shipping address
         if nid != order_gid and status == "UNFULFILLED" and financial not in CANCELLED_STATUSES:
             if not (tags & COMBINE_SKIP_TAGS):
-                unfulfilled_siblings.append({
-                    "order_gid": nid,
-                    "order_name": node.get("name", "?"),
-                    "total": total,
-                    "created_at": node.get("createdAt"),
-                })
+                sib_ship_addr = _normalize_address(node.get("shippingAddress"))
+                if current_ship_addr and sib_ship_addr and current_ship_addr == sib_ship_addr:
+                    unfulfilled_siblings.append({
+                        "order_gid": nid,
+                        "order_name": node.get("name", "?"),
+                        "total": total,
+                        "created_at": node.get("createdAt"),
+                    })
 
     cumulative_total = sum(non_cancelled_totals)
 
