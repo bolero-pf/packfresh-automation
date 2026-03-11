@@ -1499,6 +1499,38 @@ def ppt_lookup_sealed():
         return jsonify({"error": str(e)}), 502
 
 
+@app.route("/api/ppt/debug-card/<int:tcgplayer_id>")
+def debug_card_raw(tcgplayer_id):
+    """Debug: dump raw PPT response for a card with every param combo, to diagnose graded data."""
+    if not ppt:
+        return jsonify({"error": "PPT not configured"}), 503
+    results = {}
+    base = f"{ppt.base_url}/v2/cards"
+    combos = {
+        "bare":             {"tcgPlayerId": str(tcgplayer_id), "limit": 1},
+        "includeHistory":   {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "includeHistory": "true"},
+        "includeEbay":      {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "includeEbay": "true"},
+        "includeBoth":      {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "includeHistory": "true", "includeEbay": "true"},
+        "days30":           {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "days": 30},
+        "days30+ebay":      {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "days": 30, "includeEbay": "true"},
+        "days30+both":      {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "days": 30, "includeHistory": "true", "includeEbay": "true"},
+    }
+    for label, params in combos.items():
+        try:
+            raw = ppt._get(base, params)
+            items = raw.get("data", []) if isinstance(raw, dict) else raw
+            card = items[0] if items else None
+            results[label] = {
+                "top_level_keys": list(card.keys()) if card else [],
+                "ebay": card.get("ebay") if card else None,
+                "gradedPrices": card.get("gradedPrices") if card else None,
+                "prices_keys": list(card["prices"].keys()) if card and isinstance(card.get("prices"), dict) else [],
+            }
+        except Exception as e:
+            results[label] = {"error": str(e)}
+    return jsonify(results)
+
+
 @app.route("/api/ppt/debug-sealed/<int:tcgplayer_id>")
 def debug_sealed(tcgplayer_id):
     """Debug: compare search vs direct lookup for a sealed product."""
