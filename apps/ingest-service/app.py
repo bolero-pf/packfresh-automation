@@ -1297,23 +1297,25 @@ def export_session_csv(session_id):
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Product Name", "TCGPlayer ID", "Condition", "Quantity", "Unit Price", "Offer Total", "Present", "Notes"])
+    writer.writerow(["Product Name", "TCGPlayer ID", "Condition", "Quantity", "Unit Price", "Damage Deduction", "Offer Total", "Present", "Notes"])
     for item in active:
         qty = item.get("quantity", 1)
         offer = float(item.get("offer_price") or 0)
         unit = offer / qty if qty > 0 else 0
+        damaged_unit = unit * 0.15
         writer.writerow([
             item.get("product_name", ""),
             item.get("tcgplayer_id", ""),
             item.get("condition", ""),
             qty,
             f"${unit:.2f}",
+            f"${damaged_unit:.2f}",
             f"${offer:.2f}",
             "",  # Present column — blank for checking off
             "DAMAGED" if item.get("item_status") == "damaged" else "",
         ])
     writer.writerow([])
-    writer.writerow(["TOTAL", "", "", sum(i.get("quantity", 1) for i in active), "",
+    writer.writerow(["TOTAL", "", "", sum(i.get("quantity", 1) for i in active), "", "",
                      f"${sum(float(i.get('offer_price') or 0) for i in active):.2f}", "", ""])
 
     output.seek(0)
