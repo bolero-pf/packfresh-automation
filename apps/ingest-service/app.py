@@ -1501,33 +1501,29 @@ def ppt_lookup_sealed():
 
 @app.route("/api/ppt/debug-card/<int:tcgplayer_id>")
 def debug_card_raw(tcgplayer_id):
-    """Debug: dump raw PPT response for a card with every param combo, to diagnose graded data."""
+    """Debug: dump raw PPT response for a card — bare HTTP, no abstraction."""
+    import requests as _requests
     if not ppt:
         return jsonify({"error": "PPT not configured"}), 503
+
     results = {}
     base = f"{ppt.base_url}/v2/cards"
     combos = {
-        "bare":             {"tcgPlayerId": str(tcgplayer_id), "limit": 1},
-        "includeHistory":   {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "includeHistory": "true"},
-        "includeEbay":      {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "includeEbay": "true"},
-        "includeBoth":      {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "includeHistory": "true", "includeEbay": "true"},
-        "days30":           {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "days": 30},
-        "days30+ebay":      {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "days": 30, "includeEbay": "true"},
-        "days30+both":      {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "days": 30, "includeHistory": "true", "includeEbay": "true"},
+        "bare":         {"tcgPlayerId": str(tcgplayer_id), "limit": 1},
+        "includeEbay":  {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "includeEbay": "true"},
+        "includeBoth":  {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "includeHistory": "true", "includeEbay": "true"},
     }
     for label, params in combos.items():
         try:
-            raw = ppt._get(base, params)
-            items = raw.get("data", []) if isinstance(raw, dict) else raw
-            card = items[0] if items else None
+            r = _requests.get(base, headers=ppt.headers, params=params, timeout=15)
             results[label] = {
-                "top_level_keys": list(card.keys()) if card else [],
-                "ebay": card.get("ebay") if card else None,
-                "gradedPrices": card.get("gradedPrices") if card else None,
-                "prices_keys": list(card["prices"].keys()) if card and isinstance(card.get("prices"), dict) else [],
+                "status": r.status_code,
+                "url": r.url,
+                "body": r.json() if r.headers.get("content-type","").startswith("application/json") else r.text[:500],
             }
         except Exception as e:
-            results[label] = {"error": str(e)}
+            import traceback
+            results[label] = {"error": str(e), "type": type(e).__name__, "tb": traceback.format_exc()}
     return jsonify(results)
 
 
