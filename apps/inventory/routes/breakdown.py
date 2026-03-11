@@ -544,12 +544,20 @@ def delete_variant(variant_id):
 @bp.route("/api/cache/search")
 @requires_auth
 def search_ppt():
+    from routes.inventory import _get_ppt_client
     q = request.args.get("q", "")
-    if INGEST_URL:
-        data, err = _ingest_post("/api/ppt/search-sealed", {"query": q})
-        if not err:
-            return jsonify(data)
-    return jsonify({"results": [], "error": "INGEST_INTERNAL_URL not configured — PPT search unavailable"})
+    if not q:
+        return jsonify({"results": []})
+    ppt = _get_ppt_client()
+    if ppt is None:
+        # fallback to ingest proxy
+        if INGEST_URL:
+            data, err = _ingest_post("/api/ppt/search-sealed", {"query": q})
+            if not err:
+                return jsonify(data)
+        return jsonify({"results": [], "error": "PPT not configured"}), 503
+    results = ppt.search_sealed_products(q, limit=15)
+    return jsonify({"results": results})
 
 @bp.route("/api/store-prices", methods=["POST"])
 @requires_auth
@@ -567,6 +575,25 @@ def store_prices_local():
     )
     prices = {str(r["tcgplayer_id"]): dict(r) for r in rows}
     return jsonify({"prices": prices})
+
+
+@bp.route("/api/inventory-search")
+@requires_auth
+def inventory_search():
+    """Search inventory_product_cache by title for the recipe picker."""
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"items": []})
+    rows = db.query("""
+        SELECT tcgplayer_id, title, shopify_qty, shopify_price, shopify_variant_id
+        FROM inventory_product_cache
+        WHERE LOWER(title) LIKE %s
+          AND is_damaged = FALSE
+          AND shopify_qty > 0
+        ORDER BY title
+        LIMIT 30
+    """, (f"%{q.lower()}%",))
+    return jsonify({"items": [dict(r) for r in rows]})
 
 
 @bp.route("/api/base-component", methods=["POST"])
@@ -1295,19 +1322,24 @@ async function rePickerSearch() {{
   if (!q) return;
   panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
   try {{
-    const r = await fetch('/inventory/api/items?q=' + encodeURIComponent(q));
+    const r = await fetch('/inventory/breakdown/api/inventory-search?q=' + encodeURIComponent(q));
     const d = await r.json();
     const items = d.items || [];
     if (!items.length) {{ panel.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No items found.</p>'; return; }}
-    panel.innerHTML = items.slice(0,20).map(i => `
-      <div class="search-result" onclick="rePickerSelect(${{i.tcgplayer_id||'null'}},${{JSON.stringify(i.name||i.title).replace(/</g,'&lt;')}})">
-        <strong style="font-size:13px">${{i.name||i.title}}</strong>
+    window._rePickerItems = items;
+    panel.innerHTML = items.slice(0,20).map((i,idx) => `
+      <div class="search-result" onclick="rePickerSelect(${{idx}})">
+        <strong style="font-size:13px">${{i.title}}</strong>
         <br><small style="color:var(--text-dim)">TCG#${{i.tcgplayer_id||'—'}} · qty ${{i.shopify_qty}} · $${{parseFloat(i.shopify_price||0).toFixed(2)}}</small>
       </div>`).join('');
   }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
 }}
 
-async function rePickerSelect(tcgId, productName) {{
+async function rePickerSelect(idx) {{
+  const item = (window._rePickerItems||[])[idx];
+  if (!item) return;
+  const tcgId = item.tcgplayer_id || null;
+  const productName = item.name || item.title || '';
   _recipeTarget = {{ tcgId, productName }};
   document.getElementById('recipe-modal-title').textContent = productName;
   const body = document.getElementById('recipe-modal-body');
@@ -1609,12 +1641,12 @@ function renderNoRecipe() {{
         <td><span class="badge ${{i.shopify_qty>0?'badge-green':'badge-red'}}">${{i.shopify_qty>0?'In Stock':'Out'}}</span></td>
         <td>
           <div style="display:flex;gap:4px;flex-wrap:wrap">
-            <button class="btn btn-primary btn-sm" onclick="openRecipeEditor(${{i.tcgplayer_id}},${{JSON.stringify(i.title).replace(/</g,'&lt;')}})">
+            <button class="btn btn-primary btn-sm" onclick="nrOpenRecipe(${{i.tcgplayer_id}})">
               + Recipe
             </button>
             ${{i.is_base
               ? `<button class="btn btn-secondary btn-sm" onclick="unmarkBase(${{i.tcgplayer_id}},this)">Unmark Base</button>`
-              : `<button class="btn btn-sm" style="color:var(--text-dim);border:1px solid var(--border);background:none" onclick="markBase(${{i.tcgplayer_id}},${{JSON.stringify(i.title)}},this)" title="Mark as base component — won't show here">📌 Base</button>`
+              : `<button class="btn btn-sm" style="color:var(--text-dim);border:1px solid var(--border);background:none" onclick="nrMarkBase(${{i.tcgplayer_id}},this)" title="Mark as base component — won't show here">📌 Base</button>`
             }}
           </div>
         </td>
@@ -1623,8 +1655,20 @@ function renderNoRecipe() {{
     </table></div>`;
 }}
 
+function nrOpenRecipe(tcgId) {{
+  const item = _noRecipeItems.find(i => i.tcgplayer_id === tcgId);
+  if (!item) return;
+  openRecipeEditor(item.tcgplayer_id || null, item.title || '');
+}}
+
+async function nrMarkBase(tcgId, btn) {{
+  const item = _noRecipeItems.find(i => i.tcgplayer_id === tcgId);
+  if (!item) return;
+  await markBase(item.tcgplayer_id, item.title, btn);
+}}
+
 async function markBase(tcgId, name, btn) {{
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   await fetch('/inventory/breakdown/api/base-component', {{
     method: 'POST', headers: {{'Content-Type':'application/json'}},
     body: JSON.stringify({{ tcgplayer_id: tcgId, product_name: name }})
