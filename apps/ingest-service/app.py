@@ -1,5 +1,5 @@
 """
-TCG Store - Intake Service Mark 2
+TCG Store - Intake Service
 Flask API for collection intake (sealed via Collectr CSV, raw via manual entry).
 
 Endpoints:
@@ -1915,23 +1915,39 @@ def shopify_session_store_check(session_id):
 
     items = intake.get_session_items(session_id)
     active_items = [i for i in items if i.get("item_status") in ("good", "damaged")]
-    linked = [i for i in active_items if i.get("tcgplayer_id")]
-    unlinked = [i for i in active_items if not i.get("tcgplayer_id")]
-    tcg_ids = list(set(i["tcgplayer_id"] for i in linked))
-    if not tcg_ids and not unlinked:
+    # Items linked by tcgplayer_id (PPT-matched)
+    linked_tcg = [i for i in active_items if i.get("tcgplayer_id")]
+    # Items linked by shopify_product_id only (store-only link — e.g. CN products not on PPT)
+    linked_shopify_only = [i for i in active_items if not i.get("tcgplayer_id") and i.get("shopify_product_id")]
+    truly_unlinked = [i for i in active_items if not i.get("tcgplayer_id") and not i.get("shopify_product_id")]
+
+    tcg_ids = list(set(i["tcgplayer_id"] for i in linked_tcg))
+    shopify_ids = list(set(str(i["shopify_product_id"]) for i in linked_shopify_only))
+
+    if not tcg_ids and not shopify_ids and not truly_unlinked:
         return jsonify({"items": [], "cache_hit_rate": 0})
-    placeholders = ",".join(["%s"] * len(tcg_ids))
 
     try:
-        # Fetch ALL variants (both damaged and non-damaged) for these tcgplayer_ids
-        all_rows = db.query(
-            f"SELECT * FROM inventory_product_cache WHERE tcgplayer_id IN ({placeholders})",
-            tuple(tcg_ids)
-        )
+        # Fetch by tcgplayer_id
+        all_rows = []
+        if tcg_ids:
+            ph = ",".join(["%s"] * len(tcg_ids))
+            all_rows += db.query(
+                f"SELECT * FROM inventory_product_cache WHERE tcgplayer_id IN ({ph})",
+                tuple(tcg_ids)
+            )
+        # Fetch by shopify_product_id for store-only linked items
+        shopify_rows = []
+        if shopify_ids:
+            ph2 = ",".join(["%s"] * len(shopify_ids))
+            shopify_rows = db.query(
+                f"SELECT * FROM inventory_product_cache WHERE shopify_product_id IN ({ph2})",
+                tuple(shopify_ids)
+            )
     except Exception:
         return jsonify({"error": "Shopify cache table not found. Run the migration first, then sync."}), 500
 
-    # Build separate maps for normal and damaged variants
+    # Build separate maps for normal and damaged variants — keyed by tcgplayer_id
     normal_map = {}   # tcg_id -> {title, handle, shopify_price, shopify_qty, ...}
     damaged_map = {}  # tcg_id -> {title, handle, shopify_price, shopify_qty, ...}
 
@@ -1945,11 +1961,33 @@ def shopify_session_store_check(session_id):
                 "title": r["title"], "handle": r["handle"],
                 "shopify_price": float(r["shopify_price"]) if r["shopify_price"] else None,
                 "shopify_qty": 0, "shopify_product_id": r["shopify_product_id"],
+                "shopify_variant_id": r.get("shopify_variant_id"),
                 "status": r["status"],
                 "last_synced": r["last_synced"].isoformat() if r["last_synced"] else None,
                 "is_damaged": is_dmg,
             }
         target[tcg]["shopify_qty"] += (r["shopify_qty"] or 0)
+
+    # Build shopify_product_id -> cache row map for store-only items
+    shopify_direct_map = {}  # shopify_product_id (str) -> cache row
+    for r in shopify_rows:
+        pid = str(r["shopify_product_id"])
+        if pid not in shopify_direct_map:
+            shopify_direct_map[pid] = {
+                "title": r["title"], "handle": r["handle"],
+                "shopify_price": float(r["shopify_price"]) if r["shopify_price"] else None,
+                "shopify_qty": 0, "shopify_product_id": r["shopify_product_id"],
+                "shopify_variant_id": r.get("shopify_variant_id"),
+                "status": r["status"],
+                "last_synced": r["last_synced"].isoformat() if r["last_synced"] else None,
+                "is_damaged": r.get("is_damaged") or False,
+                "tcgplayer_id": r.get("tcgplayer_id"),
+            }
+        shopify_direct_map[pid]["shopify_qty"] += (r["shopify_qty"] or 0)
+
+    # Merge linked list — treat shopify-only as a third category
+    linked = linked_tcg  # still processed via tcg map below
+    unlinked = truly_unlinked
 
     result_items = []
     for item in linked:
@@ -1986,24 +2024,48 @@ def shopify_session_store_check(session_id):
             "item_id": item["id"], "product_name": item.get("product_name"), "tcgplayer_id": tcg_id,
             "offer_price": float(item.get("offer_price") or 0), "market_price": float(item.get("market_price") or 0),
             "quantity": item.get("quantity", 1), "item_status": item_status,
+            "set_name": item.get("set_name"), "product_type": item.get("product_type", "sealed"),
             "in_store": sd is not None,
             "store_title": sd["title"] if sd else None, "store_price": sd["shopify_price"] if sd else None,
             "store_qty": sd["shopify_qty"] if sd else None, "store_handle": sd["handle"] if sd else None,
             "store_product_id": sd["shopify_product_id"] if sd else None,
+            "shopify_variant_id": sd.get("shopify_variant_id") if sd else None,
             "damaged_variant_exists": damaged_variant_exists if is_damaged_item else None,
             "store_note": store_note,
         })
 
-    # Append unlinked items — they can't be store-checked but should appear as not-in-store
-    # so their market_price is included in the combined store value calculation
+    # Shopify-only linked items — look up by shopify_product_id directly
+    for item in linked_shopify_only:
+        pid = str(item["shopify_product_id"])
+        sd = shopify_direct_map.get(pid)
+        result_items.append({
+            "item_id": item["id"], "product_name": item.get("product_name"),
+            "tcgplayer_id": sd.get("tcgplayer_id") if sd else None,
+            "offer_price": float(item.get("offer_price") or 0),
+            "market_price": float(item.get("market_price") or 0),
+            "quantity": item.get("quantity", 1), "item_status": item.get("item_status", "good"),
+            "set_name": item.get("set_name"), "product_type": item.get("product_type", "sealed"),
+            "in_store": sd is not None,
+            "store_title": sd["title"] if sd else item.get("shopify_product_name"),
+            "store_price": sd["shopify_price"] if sd else None,
+            "store_qty": sd["shopify_qty"] if sd else None,
+            "store_handle": sd["handle"] if sd else None,
+            "store_product_id": sd["shopify_product_id"] if sd else item["shopify_product_id"],
+            "shopify_variant_id": sd.get("shopify_variant_id") if sd else None,
+            "damaged_variant_exists": None, "store_note": "Store-linked" if sd else "Linked but not in cache",
+            "breakdown": None,
+        })
+
+    # Append truly unlinked items
     for item in unlinked:
         result_items.append({
             "item_id": item["id"], "product_name": item.get("product_name"), "tcgplayer_id": None,
             "offer_price": float(item.get("offer_price") or 0), "market_price": float(item.get("market_price") or 0),
             "quantity": item.get("quantity", 1), "item_status": item.get("item_status", "good"),
+            "set_name": item.get("set_name"), "product_type": item.get("product_type", "sealed"),
             "in_store": False,
             "store_title": None, "store_price": None, "store_qty": None,
-            "store_handle": None, "store_product_id": None,
+            "store_handle": None, "store_product_id": None, "shopify_variant_id": None,
             "damaged_variant_exists": None, "store_note": "Not linked to TCGPlayer",
             "breakdown": None,
         })
