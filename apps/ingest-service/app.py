@@ -2261,7 +2261,7 @@ def store_search():
         (like,)
     )
     results = [dict(r) for r in rows]
-    return jsonify({"results": _serialize(results), "query": q})
+    return jsonify({"results": [_serialize(r) for r in results], "query": q})
 
 
 # ==========================================
