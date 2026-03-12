@@ -1,5 +1,5 @@
 """
-TCG Store - Intake Service Mark 2
+TCG Store - Intake Service
 Flask API for collection intake (sealed via Collectr CSV, raw via manual entry).
 
 Endpoints:
@@ -637,11 +637,14 @@ def refresh_session_prices(session_id):
     items = intake.get_session_items(session_id)
     linked = [i for i in items if i.get("tcgplayer_id") and i.get("item_status", "good") in ("good", "damaged")]
 
-    # Deduplicate: build ordered list of unique (tcg_id, ptype) to fetch
+    # Deduplicate: unique (tcg_id, ptype, is_graded, grade_company, grade_value)
     seen = set()
     unique_lookups = []
     for item in linked:
-        key = (item["tcgplayer_id"], item.get("product_type", "sealed"))
+        is_graded = bool(item.get("is_graded"))
+        grade_co = (item.get("grade_company") or "").upper() if is_graded else ""
+        grade_val = (item.get("grade_value") or "").upper() if is_graded else ""
+        key = (item["tcgplayer_id"], item.get("product_type", "sealed"), is_graded, grade_co, grade_val)
         if key not in seen:
             seen.add(key)
             unique_lookups.append(key)
@@ -653,7 +656,7 @@ def refresh_session_prices(session_id):
     fetched_count = 0
 
     for idx in range(offset, len(unique_lookups)):
-        tcg_id, ptype = unique_lookups[idx]
+        tcg_id, ptype, is_graded, grade_co, grade_val = unique_lookups[idx]
 
         # Check rate limit BEFORE making the request — never trigger a 429
         if ppt.should_throttle():
@@ -680,19 +683,30 @@ def refresh_session_prices(session_id):
                     unopened = ppt_data.get("unopenedPrice")
                     prices = ppt_data.get("prices") or {}
                     if isinstance(prices, dict):
-                        prices_market = prices.get("market")
                         prices_low = prices.get("low")
                     else:
-                        prices_market = None
                         prices_low = None
                     ppt_price = unopened
                     ppt_low = prices_low
                     ppt_name = ppt_data.get("name")
+                elif is_graded and grade_co and grade_val:
+                    # Use eBay smartMarketPrice for graded cards
+                    ppt_price = PPTClient.get_graded_price(ppt_data, grade_co, grade_val)
+                    ppt_low = None  # no "low" concept for graded eBay data
+                    ppt_name = ppt_data.get("name")
                 else:
                     prices = ppt_data.get("prices", {})
+                    # Use market price as default; per-condition resolved per-item in comparisons below
                     ppt_price = prices.get("market")
                     ppt_low = prices.get("low")
                     ppt_name = ppt_data.get("name")
+                    # Store full prices dict for per-condition lookup in comparisons step
+                    price_cache[(tcg_id, ptype, is_graded, grade_co, grade_val)] = {
+                        "ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name,
+                        "error": None, "raw_prices": prices,
+                    }
+                    fetched_count += 1
+                    continue
 
             fetched_count += 1
 
@@ -708,7 +722,7 @@ def refresh_session_prices(session_id):
             elif status_code == 403:
                 error = str(e)
                 app.logger.warning(f"PPT 403 for {tcg_id}: {e}")
-                price_cache[(tcg_id, ptype)] = {"ppt_price": None, "ppt_low": None, "ppt_name": None, "error": error}
+                price_cache[(tcg_id, ptype, is_graded, grade_co, grade_val)] = {"ppt_price": None, "ppt_low": None, "ppt_name": None, "error": error}
                 rate_limited = True
                 retry_after = None
                 break
@@ -719,18 +733,34 @@ def refresh_session_prices(session_id):
             error = str(e)
             app.logger.warning(f"Unexpected error for {tcg_id}: {e}")
 
-        price_cache[(tcg_id, ptype)] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name, "error": error}
+        price_cache[(tcg_id, ptype, is_graded, grade_co, grade_val)] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name, "error": error}
 
     # Build comparisons for ALL linked items (using whatever we've fetched so far)
     comparisons = []
     for item in linked:
         tcg_id = item["tcgplayer_id"]
         ptype = item.get("product_type", "sealed")
-        cached = price_cache.get((tcg_id, ptype))
+        is_graded = bool(item.get("is_graded"))
+        grade_co = (item.get("grade_company") or "").upper() if is_graded else ""
+        grade_val = (item.get("grade_value") or "").upper() if is_graded else ""
+        cached = price_cache.get((tcg_id, ptype, is_graded, grade_co, grade_val))
 
         ppt_price = cached["ppt_price"] if cached else None
         ppt_low = cached["ppt_low"] if cached else None
         ppt_name = cached.get("ppt_name") if cached else None
+
+        # For raw ungraded cards: resolve per-condition price from cached raw_prices
+        if cached and not is_graded and ptype == "raw" and cached.get("raw_prices"):
+            raw_prices = cached["raw_prices"]
+            condition = item.get("condition") or item.get("listing_condition") or "NM"
+            cond_map = {"NM": "Near Mint", "LP": "Lightly Played", "MP": "Moderately Played",
+                        "HP": "Heavily Played", "DMG": "Damaged"}
+            cond_key = cond_map.get(condition.upper(), "Near Mint")
+            conditions = raw_prices.get("conditions") or {}
+            cond_data = conditions.get(cond_key) or {}
+            cond_price = cond_data.get("price")
+            if cond_price is not None:
+                ppt_price = cond_price
 
         collectr_price = float(item.get("market_price") or 0)
         ppt_price_f = float(ppt_price) if ppt_price is not None else None
@@ -751,6 +781,9 @@ def refresh_session_prices(session_id):
             "significant": abs(delta_pct) > 10 if delta_pct is not None else False,
             "error": cached.get("error") if cached else None,
             "fetched": cached is not None,
+            "is_graded": is_graded,
+            "grade_label": f"{grade_co} {grade_val}".strip() if is_graded else None,
+            "condition": item.get("condition") or item.get("listing_condition"),
         })
 
     succeeded = sum(1 for c in comparisons if c.get("ppt_market") is not None)
@@ -1915,23 +1948,39 @@ def shopify_session_store_check(session_id):
 
     items = intake.get_session_items(session_id)
     active_items = [i for i in items if i.get("item_status") in ("good", "damaged")]
-    linked = [i for i in active_items if i.get("tcgplayer_id")]
-    unlinked = [i for i in active_items if not i.get("tcgplayer_id")]
-    tcg_ids = list(set(i["tcgplayer_id"] for i in linked))
-    if not tcg_ids and not unlinked:
+    # Items linked by tcgplayer_id (PPT-matched)
+    linked_tcg = [i for i in active_items if i.get("tcgplayer_id")]
+    # Items linked by shopify_product_id only (store-only link — e.g. CN products not on PPT)
+    linked_shopify_only = [i for i in active_items if not i.get("tcgplayer_id") and i.get("shopify_product_id")]
+    truly_unlinked = [i for i in active_items if not i.get("tcgplayer_id") and not i.get("shopify_product_id")]
+
+    tcg_ids = list(set(i["tcgplayer_id"] for i in linked_tcg))
+    shopify_ids = list(set(str(i["shopify_product_id"]) for i in linked_shopify_only))
+
+    if not tcg_ids and not shopify_ids and not truly_unlinked:
         return jsonify({"items": [], "cache_hit_rate": 0})
-    placeholders = ",".join(["%s"] * len(tcg_ids))
 
     try:
-        # Fetch ALL variants (both damaged and non-damaged) for these tcgplayer_ids
-        all_rows = db.query(
-            f"SELECT * FROM inventory_product_cache WHERE tcgplayer_id IN ({placeholders})",
-            tuple(tcg_ids)
-        )
+        # Fetch by tcgplayer_id
+        all_rows = []
+        if tcg_ids:
+            ph = ",".join(["%s"] * len(tcg_ids))
+            all_rows += db.query(
+                f"SELECT * FROM inventory_product_cache WHERE tcgplayer_id IN ({ph})",
+                tuple(tcg_ids)
+            )
+        # Fetch by shopify_product_id for store-only linked items
+        shopify_rows = []
+        if shopify_ids:
+            ph2 = ",".join(["%s"] * len(shopify_ids))
+            shopify_rows = db.query(
+                f"SELECT * FROM inventory_product_cache WHERE shopify_product_id IN ({ph2})",
+                tuple(shopify_ids)
+            )
     except Exception:
         return jsonify({"error": "Shopify cache table not found. Run the migration first, then sync."}), 500
 
-    # Build separate maps for normal and damaged variants
+    # Build separate maps for normal and damaged variants — keyed by tcgplayer_id
     normal_map = {}   # tcg_id -> {title, handle, shopify_price, shopify_qty, ...}
     damaged_map = {}  # tcg_id -> {title, handle, shopify_price, shopify_qty, ...}
 
@@ -1945,11 +1994,33 @@ def shopify_session_store_check(session_id):
                 "title": r["title"], "handle": r["handle"],
                 "shopify_price": float(r["shopify_price"]) if r["shopify_price"] else None,
                 "shopify_qty": 0, "shopify_product_id": r["shopify_product_id"],
+                "shopify_variant_id": r.get("shopify_variant_id"),
                 "status": r["status"],
                 "last_synced": r["last_synced"].isoformat() if r["last_synced"] else None,
                 "is_damaged": is_dmg,
             }
         target[tcg]["shopify_qty"] += (r["shopify_qty"] or 0)
+
+    # Build shopify_product_id -> cache row map for store-only items
+    shopify_direct_map = {}  # shopify_product_id (str) -> cache row
+    for r in shopify_rows:
+        pid = str(r["shopify_product_id"])
+        if pid not in shopify_direct_map:
+            shopify_direct_map[pid] = {
+                "title": r["title"], "handle": r["handle"],
+                "shopify_price": float(r["shopify_price"]) if r["shopify_price"] else None,
+                "shopify_qty": 0, "shopify_product_id": r["shopify_product_id"],
+                "shopify_variant_id": r.get("shopify_variant_id"),
+                "status": r["status"],
+                "last_synced": r["last_synced"].isoformat() if r["last_synced"] else None,
+                "is_damaged": r.get("is_damaged") or False,
+                "tcgplayer_id": r.get("tcgplayer_id"),
+            }
+        shopify_direct_map[pid]["shopify_qty"] += (r["shopify_qty"] or 0)
+
+    # Merge linked list — treat shopify-only as a third category
+    linked = linked_tcg  # still processed via tcg map below
+    unlinked = truly_unlinked
 
     result_items = []
     for item in linked:
@@ -1986,24 +2057,48 @@ def shopify_session_store_check(session_id):
             "item_id": item["id"], "product_name": item.get("product_name"), "tcgplayer_id": tcg_id,
             "offer_price": float(item.get("offer_price") or 0), "market_price": float(item.get("market_price") or 0),
             "quantity": item.get("quantity", 1), "item_status": item_status,
+            "set_name": item.get("set_name"), "product_type": item.get("product_type", "sealed"),
             "in_store": sd is not None,
             "store_title": sd["title"] if sd else None, "store_price": sd["shopify_price"] if sd else None,
             "store_qty": sd["shopify_qty"] if sd else None, "store_handle": sd["handle"] if sd else None,
             "store_product_id": sd["shopify_product_id"] if sd else None,
+            "shopify_variant_id": sd.get("shopify_variant_id") if sd else None,
             "damaged_variant_exists": damaged_variant_exists if is_damaged_item else None,
             "store_note": store_note,
         })
 
-    # Append unlinked items — they can't be store-checked but should appear as not-in-store
-    # so their market_price is included in the combined store value calculation
+    # Shopify-only linked items — look up by shopify_product_id directly
+    for item in linked_shopify_only:
+        pid = str(item["shopify_product_id"])
+        sd = shopify_direct_map.get(pid)
+        result_items.append({
+            "item_id": item["id"], "product_name": item.get("product_name"),
+            "tcgplayer_id": sd.get("tcgplayer_id") if sd else None,
+            "offer_price": float(item.get("offer_price") or 0),
+            "market_price": float(item.get("market_price") or 0),
+            "quantity": item.get("quantity", 1), "item_status": item.get("item_status", "good"),
+            "set_name": item.get("set_name"), "product_type": item.get("product_type", "sealed"),
+            "in_store": sd is not None,
+            "store_title": sd["title"] if sd else item.get("shopify_product_name"),
+            "store_price": sd["shopify_price"] if sd else None,
+            "store_qty": sd["shopify_qty"] if sd else None,
+            "store_handle": sd["handle"] if sd else None,
+            "store_product_id": sd["shopify_product_id"] if sd else item["shopify_product_id"],
+            "shopify_variant_id": sd.get("shopify_variant_id") if sd else None,
+            "damaged_variant_exists": None, "store_note": "Store-linked" if sd else "Linked but not in cache",
+            "breakdown": None,
+        })
+
+    # Append truly unlinked items
     for item in unlinked:
         result_items.append({
             "item_id": item["id"], "product_name": item.get("product_name"), "tcgplayer_id": None,
             "offer_price": float(item.get("offer_price") or 0), "market_price": float(item.get("market_price") or 0),
             "quantity": item.get("quantity", 1), "item_status": item.get("item_status", "good"),
+            "set_name": item.get("set_name"), "product_type": item.get("product_type", "sealed"),
             "in_store": False,
             "store_title": None, "store_price": None, "store_qty": None,
-            "store_handle": None, "store_product_id": None,
+            "store_handle": None, "store_product_id": None, "shopify_variant_id": None,
             "damaged_variant_exists": None, "store_note": "Not linked to TCGPlayer",
             "breakdown": None,
         })

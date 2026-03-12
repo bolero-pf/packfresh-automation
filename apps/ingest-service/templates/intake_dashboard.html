@@ -1429,7 +1429,9 @@
             loadRawSessionItems();
         }
         const body = document.getElementById('session-modal-body');
-        const scrollTop = _preserveScroll ? body.scrollTop : 0;
+        const overlay = document.getElementById('session-modal');
+        // Scroll lives on the overlay (overflow-y:auto), not the inner body div
+        const scrollTop = _preserveScroll ? (overlay ? overlay.scrollTop : 0) : 0;
         body.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
         openModal('session-modal');
 
@@ -1478,7 +1480,7 @@
                 <div style="display:flex; gap:2px; margin-bottom:16px; border-bottom:1px solid var(--border);">
                     <button class="tab active" data-stab="offer" onclick="switchSessionTab(this,'offer')">📋 Offer</button>
                     <button class="tab" data-stab="ppt" onclick="switchSessionTab(this,'ppt'); if(!document.getElementById('stab-ppt').dataset.loaded){ refreshPrices('${sessionId}'); document.getElementById('stab-ppt').dataset.loaded='1'; }">💰 PPT Prices</button>
-                    <button class="tab" data-stab="store" onclick="switchSessionTab(this,'store'); if(!document.getElementById('stab-store').dataset.loaded){ storeCheck('${sessionId}'); document.getElementById('stab-store').dataset.loaded='1'; }">🏪 Store</button>
+                    ${s.session_type !== 'raw' ? `<button class="tab" data-stab="store" onclick="switchSessionTab(this,'store'); if(!document.getElementById('stab-store').dataset.loaded){ storeCheck('${sessionId}'); document.getElementById('stab-store').dataset.loaded='1'; }">🏪 Store</button>` : ''}
                 </div>
 
                 <!-- ═══ OFFER TAB ═══ -->
@@ -1593,13 +1595,16 @@
                                 : '<span class="badge" style="background:#666;color:#fff;">Rejected</span>';
                             const overrideNote = i.price_override_note ? `<br><small style="color:var(--accent);" title="${(i.price_override_note||'').replace(/"/g,'&quot;')}">⚡ ${i.price_override_note}</small>` : '';
                             const parentNote = i.parent_item_id ? '<br><small style="color:var(--text-dim);">↳ split from above</small>' : '';
-                            const bd = i.breakdown_summary;
+                            const bd = s.session_type !== 'raw' ? i.breakdown_summary : null;
                             const bdVal = bd ? parseFloat(bd.best_variant_market) || 0 : 0;
                             const mkt = parseFloat(i.market_price) || 0;
                             const bdColor = bdVal > 0 && mkt > 0
                                 ? (bdVal >= mkt ? 'var(--green)' : bdVal >= mkt * 0.85 ? 'var(--amber)' : 'var(--red)')
                                 : 'var(--text-dim)';
-                            const bdNote = bd && bdVal > 0 ? `<br><small style="color:${bdColor};">📦 breakdown: $${bdVal.toFixed(2)}${bd.variant_count > 1 ? ' (' + bd.variant_count + ' configs)' : bd.variant_names ? ' · ' + bd.variant_names : ''}</small>` : '';
+                            const bdTooltip = bd && bdVal > 0
+                                ? (bdVal >= mkt ? `Breakdown ($${bdVal.toFixed(2)}) ≥ market ($${mkt.toFixed(2)}) — better to break` : bdVal >= mkt * 0.85 ? `Breakdown ($${bdVal.toFixed(2)}) near market ($${mkt.toFixed(2)})` : `Breakdown ($${bdVal.toFixed(2)}) < market ($${mkt.toFixed(2)}) — keep sealed`)
+                                : '';
+                            const bdNote = bd && bdVal > 0 ? `<br><small class="bd-baked" style="color:${bdColor};" title="${bdTooltip}">📦 breakdown: $${bdVal.toFixed(2)}${bd.variant_count > 1 ? ' (' + bd.variant_count + ' configs)' : bd.variant_names ? ' · ' + bd.variant_names : ''}</small>` : '';
                             return `<tr style="${rowStyle}" data-item-id="${i.id}">
                                 <td class="name-cell">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}</td>
                                 ${s.session_type === 'raw' ? `<td>${i.is_graded
@@ -1639,7 +1644,7 @@
                                                     btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},true,'${i.grade_company||''}','${i.grade_value||''}')">&#x1F3C5; Change Grade (${i.grade_company} ${i.grade_value})</button>`;
                                                 } else {
                                                     btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},false,'','')">✨ Mark as Graded</button>`;
-                                                    btns += `<button onclick="editCondition('${i.id}','${sessionId}','${i.condition || i.listing_condition || 'NM'}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null})">${condBadgeHtml(i.condition || i.listing_condition || 'NM')} Change Condition</button>`;
+                                                    btns += `<button onclick="editCondition('${i.id}','${sessionId}','${i.condition || i.listing_condition || 'NM'}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},'${(i.product_name||'').replace(/'/g,"\\'")}${i.set_name ? ' · '+i.set_name.replace(/'/g,"\\'") : ''}')">${condBadgeHtml(i.condition || i.listing_condition || 'NM')} Change Condition</button>`;
                                                 }
                                             }
                                             
@@ -1745,7 +1750,10 @@
                 })()}
             `;
             // Restore scroll position after render
-            if (scrollTop) requestAnimationFrame(() => { body.scrollTop = scrollTop; });
+            if (scrollTop) requestAnimationFrame(() => {
+                const ov = document.getElementById('session-modal');
+                if (ov) ov.scrollTop = scrollTop;
+            });
             // Enrich breakdown summaries inline without full reload
             _enrichIntakeBreakdowns(items, sessionId);
         } catch(err) {
@@ -2340,7 +2348,9 @@
                     const deltaColor = sig ? (delta > 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
                     const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
                     return `<tr style="${hasError ? 'background:rgba(255,60,60,0.06);' : sig ? 'background:rgba(255,180,0,0.06);' : ''}">
-                        <td>${c.product_name}<br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small>
+                        <td>${c.product_name}
+                            ${c.is_graded && c.grade_label ? `<br><small><span style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;border-radius:4px;padding:1px 5px;font-size:0.7rem;font-weight:700;">${c.grade_label}</span> <span style="color:var(--text-dim);font-size:0.72rem;">eBay market</span></small>` : (c.condition ? `<br><small style="color:var(--text-dim);">${c.condition}</small>` : '')}
+                            <br><small style="color:var(--text-dim);">TCG#${c.tcgplayer_id}</small>
                             ${c.ppt_name && c.ppt_name !== c.product_name ? '<br><small style="color:var(--amber);">⚠ PPT: ' + c.ppt_name + '</small>' : ''}
                             ${hasError ? '<br><small style="color:var(--red);">✕ ' + c.error + '</small>' : ''}
                         </td>
@@ -2349,7 +2359,7 @@
                         <td style="${sig ? 'font-weight:700; color:var(--accent);' : ''}">
                             ${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : hasError ? '<span style="color:var(--red);">Error</span>' : '—'}
                         </td>
-                        <td>${c.ppt_low != null ? '$' + c.ppt_low.toFixed(2) : '—'}</td>
+                        <td>${c.ppt_low != null ? '$' + c.ppt_low.toFixed(2) : c.is_graded ? '<span style="color:var(--text-dim);font-size:0.75rem;">n/a</span>' : '—'}</td>
                         <td style="color:${deltaColor}; font-weight:${sig ? '700' : '400'};">
                             ${delta != null ? arrow + ' ' + Math.abs(delta).toFixed(1) + '%' : '—'}
                         </td>
@@ -3197,10 +3207,10 @@
         return `<span class="badge" style="${style}">${cond || '—'}</span>`;
     }
 
-    async function editCondition(itemId, sessionId, currentCond, tcgplayerId) {
+    async function editCondition(itemId, sessionId, currentCond, tcgplayerId, cardName) {
         // Show overlay immediately with loading state — don't await fetch before showing UI
         const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;';
         overlay.setAttribute('data-ec-overlay', '1');
 
         let variants = {};
@@ -3221,23 +3231,26 @@
                 const s = COND_STYLES[cond];
                 const price = variants[cond];
                 const isSel = cond === selectedCond;
-                const border = isSel ? `3px solid ${s.color}` : '2px solid var(--border)';
-                return `<div data-cond="${cond}" style="background:${s.bg};color:${s.color};border:${border};border-radius:8px;padding:12px 8px;text-align:center;cursor:pointer;transition:border 0.1s;">
-                    <div style="font-size:0.95rem;font-weight:700;">${cond}</div>
-                    <div style="font-size:0.72rem;opacity:0.85;margin-top:2px;">${s.label}</div>
-                    ${price != null ? `<div style="font-size:1rem;font-weight:700;margin-top:6px;">$${price.toFixed(2)}</div>` : `<div style="font-size:0.8rem;opacity:0.5;margin-top:6px;">—</div>`}
+                const border = isSel ? `2px solid ${s.color}` : '1px solid var(--border)';
+                const bg = isSel ? s.bg : 'var(--surface-2)';
+                const color = isSel ? s.color : 'var(--text-dim)';
+                return `<div data-cond="${cond}" style="background:${bg};color:${color};border:${border};border-radius:6px;padding:6px 4px;text-align:center;cursor:pointer;transition:all 0.1s;min-width:0;">
+                    <div style="font-size:0.8rem;font-weight:700;">${cond}</div>
+                    ${price != null ? `<div style="font-size:0.75rem;font-weight:600;margin-top:2px;">$${price.toFixed(2)}</div>` : `<div style="font-size:0.7rem;opacity:0.4;margin-top:2px;">—</div>`}
                 </div>`;
             }).join('');
             const selPrice = variants[selectedCond];
+            const cardLabel = cardName ? `<div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${(cardName||'').replace(/"/g,'&quot;')}">${cardName}</div>` : '';
             overlay.innerHTML = `
-                <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:380px;max-width:95vw;">
-                    <div style="font-size:1rem;font-weight:700;margin-bottom:16px;">🏷 Change Condition</div>
-                    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">${tiles}</div>
-                    <div style="display:flex;gap:8px;margin-top:4px;">
-                        <button id="ec-confirm" class="btn btn-primary" style="flex:1;">
+                <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;width:320px;max-width:100%;box-sizing:border-box;">
+                    <div style="font-size:0.9rem;font-weight:700;margin-bottom:6px;">🏷 Change Condition</div>
+                    ${cardLabel}
+                    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-bottom:12px;">${tiles}</div>
+                    <div style="display:flex;gap:8px;">
+                        <button id="ec-confirm" class="btn btn-primary" style="flex:1;font-size:0.85rem;padding:6px 8px;">
                             Set ${selectedCond}${selPrice != null ? ' — $'+selPrice.toFixed(2) : ''}
                         </button>
-                        <button id="ec-cancel" class="btn btn-secondary">Cancel</button>
+                        <button id="ec-cancel" class="btn btn-secondary" style="font-size:0.85rem;padding:6px 10px;">Cancel</button>
                     </div>
                 </div>`;
             overlay.querySelectorAll('[data-cond]').forEach(el => {
@@ -3264,22 +3277,22 @@
         }
 
         // Show loading state immediately
+        const cardLabel = cardName ? `<div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${cardName}</div>` : '';
         overlay.innerHTML = `
-            <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:380px;max-width:95vw;">
-                <div style="font-size:1rem;font-weight:700;margin-bottom:16px;">🏷 Change Condition</div>
-                <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">
+            <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;width:320px;max-width:100%;box-sizing:border-box;">
+                <div style="font-size:0.9rem;font-weight:700;margin-bottom:6px;">🏷 Change Condition</div>
+                ${cardLabel}
+                <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-bottom:12px;">
                     ${['NM','LP','MP','HP','DMG'].map(cond => {
                         const s = COND_STYLES[cond];
                         const isSel = cond === selectedCond;
-                        const border = isSel ? `3px solid ${s.color}` : '2px solid var(--border)';
-                        return `<div style="background:${s.bg};color:${s.color};border:${border};border-radius:8px;padding:12px 8px;text-align:center;">
-                            <div style="font-size:0.95rem;font-weight:700;">${cond}</div>
-                            <div style="font-size:0.72rem;opacity:0.85;margin-top:2px;">${s.label}</div>
-                            <div style="font-size:0.8rem;opacity:0.4;margin-top:6px;">…</div>
+                        return `<div style="background:${isSel ? s.bg : 'var(--surface-2)'};color:${isSel ? s.color : 'var(--text-dim)'};border:${isSel ? '2px solid '+s.color : '1px solid var(--border)'};border-radius:6px;padding:6px 4px;text-align:center;">
+                            <div style="font-size:0.8rem;font-weight:700;">${cond}</div>
+                            <div style="font-size:0.7rem;opacity:0.4;margin-top:2px;">…</div>
                         </div>`;
                     }).join('')}
                 </div>
-                <div style="font-size:0.8rem;color:var(--text-dim);text-align:center;">Loading prices…</div>
+                <div style="font-size:0.78rem;color:var(--text-dim);text-align:center;">Loading prices…</div>
             </div>`;
         document.body.appendChild(overlay);
 
@@ -4458,7 +4471,7 @@
                     '<td style="white-space:nowrap;"><div style="display:inline-block; position:relative;">' +
                         '<button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(this)">\u22ee</button>' +
                         '<div class="action-dropdown">' +
-                            '<button onclick="editCondition(\'' + i.id + '\',\'' + rawSessionId + '\',\'' + (i.condition || 'NM') + '\', i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null); loadRawSessionItems();">🏷 Edit Condition</button>' +
+                            '<button onclick="editCondition(\'' + i.id + '\',\'' + rawSessionId + '\',\'' + (i.condition || 'NM') + '\',' + (i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null) + ',\'' + (i.product_name||'').replace(/'/g,"\\'").replace(/"/g,'') + (i.set_name ? ' · '+(i.set_name||'').replace(/'/g,"\\'").replace(/"/g,'') : '') + '\')">🏷 Edit Condition</button>' +
                             '<button onclick="overridePrice(\'' + i.id + '\',\'' + rawSessionId + '\',' + (i.market_price || 0) + ')">💰 Override Price</button>' +
                             '<button onclick="editQuantity(\'' + i.id + '\',\'' + rawSessionId + '\',' + i.quantity + ')">✏ Edit Qty</button>' +
                             '<hr>' +
@@ -4951,8 +4964,7 @@
                     : `${bd.variant_names || 'Standard'} · $${bdVal.toFixed(2)}`;
 
                 // Only inject if the baked-in bdNote is absent (avoid duplicate)
-                const existing = cell.querySelector('small');
-                const hasBdNote = existing && existing.textContent.includes('📦');
+                const hasBdNote = !!cell.querySelector('small.bd-baked');
                 if (!hasBdNote) {
                     const badge = document.createElement('small');
                     badge.className = 'bd-live-badge';

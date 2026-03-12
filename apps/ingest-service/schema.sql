@@ -308,6 +308,7 @@ SELECT
     s.is_distribution,
     s.fulfillment_method,
     s.tracking_number,
+    s.pickup_date,
     COUNT(i.id) as item_count,
     SUM(i.quantity) as total_quantity,
     COUNT(*) FILTER (WHERE i.is_mapped = FALSE) as unmapped_count
