@@ -2029,28 +2029,44 @@
                 return;
             }
 
+            // Build HTML with data-index refs — never put product title/id in onclick attrs (breaks on quotes)
+            window._storeMatchResults = results;
+            const collectrPrice = currentMapCollectrPrice;
             container.innerHTML = `
                 <div style="font-size:0.8rem;color:var(--text-dim);margin:8px 0 6px;">Select a store product to use its price:</div>
-                ${results.map(p => {
-                    const pid = p.shopify_product_id || p.id || '';
+                ${results.map((p, idx) => {
                     const price = p.shopify_price || 0;
                     const title = p.title || '?';
                     const qty = p.shopify_qty != null ? ` · qty ${p.shopify_qty}` : '';
                     const priceStr = price ? '$' + parseFloat(price).toFixed(2) : '—';
-                    const tcgId = p.tcgplayer_id || null;
-                    return `<div class="search-result" onclick="mappingLinkStore('${pid}', ${JSON.stringify(title)}, ${parseFloat(price)||0}, ${tcgId ? parseInt(tcgId) : 'null'})">
+                    return `<div class="search-result" data-smi="${idx}">
                         <h4>${title}</h4>
                         <p>Store price: <strong>${priceStr}</strong>${qty}</p>
-                        ${tcgId ? `<small style="color:var(--text-dim);">TCG#${tcgId}</small>` : ''}
                         <div style="display:flex;gap:6px;margin-top:6px;">
-                            <button class="btn btn-primary btn-sm" style="font-size:0.72rem;" onclick="event.stopPropagation();mappingLinkStore('${pid}', ${JSON.stringify(title)}, ${parseFloat(price)||0}, ${tcgId ? parseInt(tcgId) : 'null'})">Use Store Price (${priceStr})</button>
-                            <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" onclick="event.stopPropagation();mappingLinkStore('${pid}', ${JSON.stringify(title)}, ${currentMapCollectrPrice}, ${tcgId ? parseInt(tcgId) : 'null'})">Use Collectr Price ($${currentMapCollectrPrice.toFixed(2)})</button>
+                            <button class="btn btn-primary btn-sm" style="font-size:0.72rem;" data-smi="${idx}" data-use="store">Use Store Price (${priceStr})</button>
+                            <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" data-smi="${idx}" data-use="collectr">Use Collectr Price ($${collectrPrice.toFixed(2)})</button>
                         </div>
                     </div>`;
                 }).join('')}
                 <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
-                    <button class="btn btn-secondary btn-sm" onclick="mappingAcceptPrice()">✓ None of these — Accept Collectr Price ($${currentMapCollectrPrice.toFixed(2)})</button>
+                    <button class="btn btn-secondary btn-sm" id="store-match-none">✓ None of these — Accept Collectr Price ($${collectrPrice.toFixed(2)})</button>
                 </div>`;
+            // Attach event listeners — safe from quote-in-title issues
+            container.querySelectorAll('[data-smi]').forEach(el => {
+                el.addEventListener('click', (e) => {
+                    const idx = parseInt(el.dataset.smi);
+                    const p = window._storeMatchResults[idx];
+                    const pid = p.shopify_product_id || p.id || '';
+                    const title = p.title || '?';
+                    const storePrice = parseFloat(p.shopify_price) || 0;
+                    const tcgId = p.tcgplayer_id ? parseInt(p.tcgplayer_id) : null;
+                    const useStore = !el.dataset.use || el.dataset.use === 'store';
+                    const price = useStore ? storePrice : collectrPrice;
+                    e.stopPropagation();
+                    mappingLinkStore(pid, title, price, tcgId);
+                });
+            });
+            document.getElementById('store-match-none')?.addEventListener('click', mappingAcceptPrice);
         } catch(err) {
             container.innerHTML = `
                 <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:8px;">
