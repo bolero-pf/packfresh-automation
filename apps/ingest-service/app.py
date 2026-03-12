@@ -1673,9 +1673,13 @@ def _serialize(obj):
     """Convert a dict with Decimal/datetime values to JSON-safe types."""
     if obj is None:
         return None
+    # Fields that must be real JS booleans (DB may return 0/1 integers)
+    BOOL_FIELDS = {"is_graded", "is_mapped", "is_distribution", "needsDetailedScrape"}
     out = {}
     for k, v in obj.items():
-        if isinstance(v, Decimal):
+        if k in BOOL_FIELDS:
+            out[k] = bool(v)
+        elif isinstance(v, Decimal):
             out[k] = float(v)
         elif hasattr(v, "isoformat"):
             out[k] = v.isoformat()

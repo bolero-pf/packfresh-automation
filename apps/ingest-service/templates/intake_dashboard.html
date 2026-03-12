@@ -1623,6 +1623,7 @@
                                                     btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},true,'${i.grade_company||''}','${i.grade_value||''}')">&#x1F3C5; Change Grade (${i.grade_company} ${i.grade_value})</button>`;
                                                 } else {
                                                     btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},false,'','')">✨ Mark as Graded</button>`;
+                                                    btns += `<button onclick="editCondition('${i.id}','${sessionId}','${i.condition || i.listing_condition || 'NM'}')">&#x1F3F7; Change Condition (${i.condition || i.listing_condition || 'NM'})</button>`;
                                                 }
                                             }
                                             
