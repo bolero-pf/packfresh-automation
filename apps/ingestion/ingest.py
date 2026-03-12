@@ -31,7 +31,7 @@ def list_sessions(limit: int = 50) -> list[dict]:
         FROM intake_sessions s
         LEFT JOIN intake_items i ON i.session_id = s.id
             AND i.item_status IN ('good', 'damaged')
-        WHERE s.status IN ('received', 'ingested')
+        WHERE s.status IN ('received', 'ingested', 'partially_ingested')
         GROUP BY s.id
         ORDER BY
             CASE s.status WHEN 'received' THEN 0 ELSE 1 END,

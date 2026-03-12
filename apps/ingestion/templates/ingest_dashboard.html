@@ -383,8 +383,8 @@ async function loadSessions() {
         }
         el.innerHTML = sessions.map(s => {
             const status = s.status;
-            const badgeClass = status === 'received' ? 'badge-amber' : 'badge-green';
-            const badgeLabel = status === 'received' ? 'Ready' : 'Ingested';
+            const badgeClass = status === 'received' ? 'badge-amber' : status === 'partially_ingested' ? 'badge-blue' : 'badge-green';
+            const badgeLabel = status === 'received' ? 'Ready' : status === 'partially_ingested' ? '📦 Partial' : 'Ingested';
             const date = new Date(s.created_at).toLocaleDateString();
             return `<div class="session-row" onclick="viewSession('${s.id}')">
                 <div>
@@ -429,7 +429,7 @@ async function viewSession(sessionId, _preserveScroll) {
         const s = data.session;
         const items = data.items;
 
-        const isReceived = s.status === 'received';
+        const isReceived = s.status === 'received' || s.status === 'partially_ingested';
         const activeItems = items.filter(i => ['good','damaged'].includes(i.item_status || 'good'));
         const brokenItems = items.filter(i => i.item_status === 'broken_down');
         const childItems = items.filter(i => i.parent_item_id);
@@ -439,7 +439,7 @@ async function viewSession(sessionId, _preserveScroll) {
             <div class="card">
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
                     <h2 style="margin:0;">${s.customer_name || 'Unknown'}</h2>
-                    <span class="badge ${isReceived ? 'badge-amber' : 'badge-green'}">${isReceived ? 'Ready to Ingest' : 'Ingested'}</span>
+                    <span class="badge ${s.status === 'received' ? 'badge-amber' : s.status === 'partially_ingested' ? 'badge-blue' : 'badge-green'}">${s.status === 'received' ? 'Ready to Ingest' : s.status === 'partially_ingested' ? '📦 Partially Ingested' : 'Ingested'}</span>
                 </div>
 
                 <div class="stats">
@@ -1471,18 +1471,33 @@ async function forceIngested(sessionId) {
 }
 
 async function pushLive(sessionId) {
+    const approvedCount = _approvedItems.size;
+    const totalRows = document.querySelectorAll('tr[data-item-id]').length;
+    const isPartial = approvedCount > 0 && approvedCount < totalRows;
+
+    const confirmMsg = isPartial
+        ? `You have approved ${approvedCount} of ${totalRows} items. Only those ${approvedCount} will be pushed now — the session will be marked "Partially Ingested" and you can push the rest later.`
+        : 'This will increment inventory for matched items, create damaged listings where needed, and mark the session as ingested. This cannot be easily undone.';
+    const confirmLabel = isPartial ? `Push ${approvedCount} Approved Items` : 'Push Live';
+
     const ok = await themedConfirm(
         '🚀 Push Live to Shopify',
-        'This will increment inventory for matched items, create damaged listings where needed, and mark the session as ingested. This cannot be easily undone.',
-        { confirmText: 'Push Live', dangerous: true }
+        confirmMsg,
+        { confirmText: confirmLabel, dangerous: true }
     );
     if (!ok) return;
 
     const panel = document.getElementById('push-live-results');
     panel.innerHTML = '<div class="loading"><span class="spinner"></span> Pushing to Shopify... This may take a moment.</div>';
 
+    const body = isPartial ? JSON.stringify({ item_ids: [..._approvedItems] }) : '{}';
+
     try {
-        const r = await fetch(`/api/ingest/session/${sessionId}/push-live`, { method: 'POST' });
+        const r = await fetch(`/api/ingest/session/${sessionId}/push-live`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+        });
         const d = await r.json();
         if (!r.ok && !d.results) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
@@ -1495,6 +1510,12 @@ async function pushLive(sessionId) {
 
         if (d.ingested) {
             html += '<div class="alert alert-success">✅ Session ingested! All items pushed to Shopify.</div>';
+        } else if (d.partially_ingested) {
+            html += `<div class="alert" style="background:rgba(79,125,249,0.1);border-color:var(--accent);color:var(--accent);">📦 ${d.pushed_count} item(s) pushed. ${d.remaining_count} remaining — push them when the next batch arrives.</div>`;
+            // Clear approved set so next batch starts fresh
+            _approvedItems.clear();
+            _refreshApprovedVisibility();
+            _updateApproveStats();
         } else if (d.error_count > 0) {
             html += `<div class="alert alert-warning">⚠ ${d.error_count} item(s) had errors. ${(d.results||[]).length} succeeded and won't be re-pushed.<br>
                 <button class="btn btn-sm" style="margin-top:8px;background:var(--amber);color:#000;" onclick="pushLive('${sessionId}')">🔄 Retry Failed Items</button></div>`;

@@ -419,14 +419,21 @@ def push_session_live(session_id):
     session = ingest.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
-    if session["status"] != "received":
-        return jsonify({"error": f"Session must be 'received' (currently: {session['status']})"}), 400
+    if session["status"] not in ("received", "partially_ingested"):
+        return jsonify({"error": f"Session must be 'received' or 'partially_ingested' (currently: {session['status']})"}), 400
+
+    data = request.get_json(silent=True) or {}
+    requested_item_ids = set(str(x) for x in (data.get("item_ids") or []))
 
     items = ingest.get_session_items(session_id)
     # Only push good/damaged mapped items (not broken_down, missing, rejected)
     # Skip items already pushed (have pushed_at timestamp) — allows retry of just failed items
     active = [i for i in items if i.get("item_status") in ("good", "damaged")
               and i.get("is_mapped") and not i.get("pushed_at")]
+
+    # If caller specified a subset (partial push), filter to just those IDs
+    if requested_item_ids:
+        active = [i for i in active if str(i["id"]) in requested_item_ids]
 
     if not active:
         # If nothing to push but there ARE pushed items, everything succeeded — mark ingested
@@ -437,8 +444,6 @@ def push_session_live(session_id):
                             "total": 0, "ingested": True,
                             "message": "All items already pushed. Session marked ingested."})
         return jsonify({"error": "No active mapped items to push"}), 400
-
-    # Build cache maps
     tcg_ids = list(set(i["tcgplayer_id"] for i in active if i.get("tcgplayer_id")))
     normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
 
@@ -493,12 +498,26 @@ def push_session_live(session_id):
                 db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
                            (pushed_item["id"],))
 
-    # Mark session as ingested if no errors
+    # Determine final session status
+    # Check if any unpushed items remain after this push
+    all_items_after = ingest.get_session_items(session_id)
+    remaining_unpushed = [i for i in all_items_after
+                          if i.get("item_status") in ("good", "damaged")
+                          and i.get("is_mapped") and not i.get("pushed_at")]
+
+    partially_ingested = False
     if not errors:
-        ingest.mark_session_ingested(session_id)
+        if remaining_unpushed:
+            # Some items still waiting — mark as partially ingested
+            db.execute(
+                "UPDATE intake_sessions SET status = 'partially_ingested' WHERE id = %s",
+                (session_id,)
+            )
+            partially_ingested = True
+        else:
+            ingest.mark_session_ingested(session_id)
 
     # Notify intake cache that inventory has changed
-    # Uses a fire-and-forget POST so ingest doesn't depend on intake being up
     if not errors:
         try:
             import requests as _req
@@ -519,7 +538,10 @@ def push_session_live(session_id):
         "created_damaged": sum(1 for r in results if r.get("action") == "created_damaged_listing"),
         "created_listing": sum(1 for r in results if r.get("action") == "created_listing"),
         "error_count": len(errors),
-        "ingested": len(errors) == 0,
+        "ingested": not errors and not partially_ingested,
+        "partially_ingested": not errors and partially_ingested,
+        "pushed_count": len(results),
+        "remaining_count": len(remaining_unpushed),
         "can_retry": len(errors) > 0,
     })
 
