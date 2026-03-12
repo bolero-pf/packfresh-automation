@@ -3137,19 +3137,6 @@
             } catch(e) { /* show tiles without prices */ }
         }
         renderTiles();
-
-        return new Promise(resolve => {
-            _ecResolve = resolve;
-            // dummy — resolve is captured above via _ecResolve
-            // Escape and button handlers call _ecResolve directly
-            void 0;
-                }
-            }
-            document.addEventListener('keydown', _ecKeydown);
-
-            render();
-            document.body.appendChild(overlay);
-        });
     }
 
     async function relinkRawCard(itemId, sessionId, cardName, offerPct, setName, cardNumber, isGraded, gradeCompany, gradeValue) {
