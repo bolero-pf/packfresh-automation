@@ -1,5 +1,5 @@
 """
-TCG Store - Intake Service Mark 1
+TCG Store - Intake Service Mark 2
 Flask API for collection intake (sealed via Collectr CSV, raw via manual entry).
 
 Endpoints:
