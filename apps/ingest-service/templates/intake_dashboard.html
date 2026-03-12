@@ -903,25 +903,35 @@
     // ═══════════════════════════════ ESCAPE KEY & CLICK-OUTSIDE ═══════════════════════════════
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
-            // Close topmost modal
+            // Close topmost modal — check in reverse z-order
             const tp = document.getElementById('themed-prompt-overlay');
             if (tp.classList.contains('active')) { tp.classList.remove('active'); return; }
+            const bd = document.getElementById('intake-breakdown-modal');
+            if (bd.classList.contains('active')) { closeModal('intake-breakdown-modal'); return; }
+            const relink = document.getElementById('relink-modal');
+            if (relink && relink.classList.contains('active')) { closeModal('relink-modal'); return; }
             const mapping = document.getElementById('mapping-modal');
             if (mapping.classList.contains('active')) { closeModal('mapping-modal'); return; }
             const session = document.getElementById('session-modal');
             if (session.classList.contains('active')) { closeModal('session-modal'); return; }
         }
     });
-    // Click outside modal to close (only for mapping/relink modals — session & prompt require explicit close)
-    document.querySelectorAll('.modal-overlay').forEach(overlay => {
-        if (overlay.id === 'themed-prompt-overlay') return; // only close via Cancel/Confirm/Escape
-        if (overlay.id === 'session-modal') return;          // only close via × button or Escape
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) {
-                overlay.classList.remove('active');
-            }
+    // Click outside modal to close — track mousedown origin so text-select drags don't dismiss
+    {
+        let _mousedownTarget = null;
+        document.addEventListener('mousedown', (e) => { _mousedownTarget = e.target; });
+        document.querySelectorAll('.modal-overlay').forEach(overlay => {
+            if (overlay.id === 'themed-prompt-overlay') return; // only via Cancel/Confirm/Escape
+            if (overlay.id === 'session-modal') return;          // only via × button or Escape
+            if (overlay.id === 'intake-breakdown-modal') return; // only via Close button or Escape
+            overlay.addEventListener('mouseup', (e) => {
+                // Only dismiss if BOTH mousedown and mouseup landed on the bare overlay (not a drag)
+                if (e.target === overlay && _mousedownTarget === overlay) {
+                    overlay.classList.remove('active');
+                }
+            });
         });
-    });
+    }
 
     // ═══════════════════════════════ STATE ═══════════════════════════════
     let currentSessionId = null;
@@ -2378,10 +2388,14 @@
         const withMaxMargin = enriched.filter(i => i.maxMargin !== null);
 
         const totalOfferValue = enriched.reduce((s, i) => s + (i.offer_price || 0), 0);
-        // Gross margin: use actual store price where available; estimate offer/0.78 for no-price and not-in-store items
+        // Listed store value: actual store prices for items we have listed
         const totalStoreValue = inStoreWithPrice.reduce((s, i) => s + i.store_price * (i.quantity || 1), 0);
         const totalCost = enriched.reduce((s, i) => s + (i.unitOffer || 0) * (i.quantity || 1), 0);
+        // Estimated value for unlisted: use market_price (PPT)
         const estimatedValue = [...notInStore, ...noPrice].reduce((s, i) => s + (i.market_price || 0) * (i.quantity || 1), 0);
+        // Combined = listed store prices + market estimates for unlisted
+        // Also compute full market value (all items at market price) for comparison
+        const totalMarketValue = enriched.reduce((s, i) => s + (i.market_price || 0) * (i.quantity || 1), 0);
         const combinedStoreValue = totalStoreValue + estimatedValue;
         const grossMarginPct = combinedStoreValue > 0 ? ((combinedStoreValue - totalOfferValue) / combinedStoreValue * 100) : 0;
         const avgMargin = withMargin.length > 0 ? withMargin.reduce((s, i) => s + i.margin, 0) / withMargin.length : 0;
@@ -2412,7 +2426,7 @@
                 <div class="stat"><div class="stat-label">In Store</div><div class="stat-value" style="color:var(--green);">${inStore.length}</div></div>
                 <div class="stat"><div class="stat-label">Not Found</div><div class="stat-value" style="color:${notInStore.length > 0 ? 'var(--red)' : 'var(--text-dim)'};">${notInStore.length}</div></div>
                 <div class="stat"><div class="stat-label">Restock (qty=0)</div><div class="stat-value">${zeroQty.length}</div></div>
-                <div class="stat" title="$${totalStoreValue.toFixed(0)} listed in store + $${estimatedValue.toFixed(0)} market est. for unlisted"><div class="stat-label">Store Value</div><div class="stat-value" style="color:var(--green);">$${combinedStoreValue.toFixed(0)}<br><small style="font-size:0.65rem;font-weight:400;color:var(--text-dim);">${inStoreWithPrice.length} listed · ${[...notInStore,...noPrice].length} est.</small></div></div>
+                <div class="stat" title="$${totalStoreValue.toFixed(0)} listed in store + $${estimatedValue.toFixed(0)} market est. for ${[...notInStore,...noPrice].length} unlisted items"><div class="stat-label">Store Value</div><div class="stat-value" style="color:var(--green);">$${combinedStoreValue.toFixed(0)}<br><small style="font-size:0.65rem;font-weight:400;color:var(--text-dim);">${inStoreWithPrice.length} listed · ${[...notInStore,...noPrice].length} est.</small></div></div>
                 <div class="stat"><div class="stat-label">Est. Gross Margin</div><div class="stat-value" style="color:${grossMarginPct > 20 ? 'var(--green)' : grossMarginPct > 10 ? 'var(--amber)' : 'var(--red)'};">${grossMarginPct.toFixed(1)}%<br><small style="font-size:0.65rem; font-weight:400; color:var(--text-dim);">$${(combinedStoreValue - totalOfferValue > 0 ? combinedStoreValue - totalOfferValue : 0).toFixed(0)} est. profit</small></div></div>
                 ${itemsWithBdBoost > 0 ? `<div class="stat" title="Best-case margin if the ${itemsWithBdBoost} item${itemsWithBdBoost!==1?'s':''} where breakdown beats store price are broken down instead"><div class="stat-label">Max Margin ✦</div><div class="stat-value" style="color:var(--green);">${maxGrossMarginPct.toFixed(1)}%<br><small style="font-size:0.65rem; font-weight:400; color:var(--text-dim);">${itemsWithBdBoost} item${itemsWithBdBoost!==1?'s':''} better as bd</small></div></div>` : ''}
             </div>
@@ -4549,12 +4563,68 @@
             renderIntakeBdModal(d.cache);
             // Refresh breakdown badges in offer tab without full reload
             _enrichIntakeBreakdowns();
+            // Patch the ⋯ action dropdown for the affected item(s) so "Price as Breakdown"
+            // appears immediately without needing a full viewSession reload.
+            if (currentSessionId && _intakeBdTcgId) {
+                _patchBreakdownActionButtons(_intakeBdTcgId, d.cache);
+            }
             // If the store tab is currently loaded, refresh it too
             const storeTab = document.getElementById('stab-store');
             if (storeTab && storeTab.style.display !== 'none' && currentSessionId) {
                 storeCheck(currentSessionId);
             }
         } catch(err) { alert(err.message); }
+    }
+
+    // After saving a breakdown recipe, patch the action dropdown buttons live
+    // so "Price as Breakdown" appears without a full viewSession reload.
+    function _patchBreakdownActionButtons(tcgId, cache) {
+        if (!cache || !tcgId) return;
+        const bdVal = parseFloat(cache.best_variant_market) || 0;
+        const variantNames = cache.variant_names || 'breakdown';
+        if (bdVal <= 0) return;
+
+        // Find all rows whose item has this tcgplayer_id
+        document.querySelectorAll('tr[data-item-id]').forEach(row => {
+            const itemId = row.dataset.itemId;
+            if (!itemId) return;
+
+            // Check if this row belongs to the right product — find the action dropdown
+            const dropdown = row.querySelector('.action-dropdown');
+            if (!dropdown) return;
+
+            // Check if a bd-price button already exists (don't double-add)
+            if (dropdown.querySelector('.bd-price-btn')) return;
+
+            // We need the sessionId — it's encoded in the existing Override Price button onclick
+            const overrideBtn = [...dropdown.querySelectorAll('button')].find(b => b.textContent.includes('Override Price'));
+            if (!overrideBtn) return;
+            const onclickStr = overrideBtn.getAttribute('onclick') || '';
+            const sidMatch = onclickStr.match(/overridePrice\('[^']+','([^']+)'/);
+            if (!sidMatch) return;
+            const sessionId = sidMatch[1];
+
+            // Check this item actually has the right tcgplayer_id by looking at the TCG badge in status cell
+            const statusCell = row.cells[row.cells.length - 2]; // status cell
+            if (!statusCell || !statusCell.textContent.includes(`TCG#${tcgId}`)) return;
+
+            // Find the qty — look for Change Qty button
+            const qtyBtn = [...dropdown.querySelectorAll('button')].find(b => b.textContent.includes('Change Qty'));
+            const qtyMatch = qtyBtn ? (qtyBtn.textContent.match(/\((\d+)\)/) || [])[1] : '1';
+            const qty = parseInt(qtyMatch) || 1;
+
+            // Inject the breakdown button before the breakdown recipe button
+            const recipeBtn = [...dropdown.querySelectorAll('button')].find(b => b.textContent.includes('Breakdown Recipe'));
+            const bdBtn = document.createElement('button');
+            bdBtn.className = 'bd-price-btn';
+            bdBtn.textContent = `💲 Price as Breakdown ($${bdVal.toFixed(2)})`;
+            bdBtn.onclick = () => applyBreakdownPriceWithQty(itemId, sessionId, bdVal, variantNames, qty);
+            if (recipeBtn) {
+                dropdown.insertBefore(bdBtn, recipeBtn);
+            } else {
+                dropdown.appendChild(bdBtn);
+            }
+        });
     }
 
     // Enrich offer tab rows with live breakdown summary badges
