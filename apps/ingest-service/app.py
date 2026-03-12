@@ -829,6 +829,52 @@ def map_item():
 
 
 # ==========================================
+# ACCEPT PRICE WITHOUT TCG LINK
+# ==========================================
+
+@app.route("/api/intake/item/<item_id>/accept-price", methods=["POST"])
+def accept_price_no_link(item_id):
+    """Mark an item as resolved (is_mapped=TRUE) without a TCGPlayer ID.
+    Used when PPT has no match and user accepts Collectr/market price as-is,
+    or links to a Shopify store product only."""
+    data = request.json or {}
+    session_id = data.get("session_id")
+    override_price = data.get("override_price")  # optional new price
+    store_product_id = data.get("store_product_id")  # optional shopify ref
+    store_product_name = data.get("store_product_name")
+
+    item = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+
+    session = db.query_one(
+        "SELECT offer_percentage FROM intake_sessions WHERE id = %s",
+        (item["session_id"],)
+    )
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    market_price = Decimal(str(override_price)) if override_price is not None else item["market_price"]
+    offer_pct = session["offer_percentage"]
+    offer_price = market_price * item["quantity"] * (offer_pct / Decimal("100"))
+    unit_cost_basis = offer_price / item["quantity"] if item["quantity"] > 0 else Decimal("0")
+
+    updated = db.execute_returning("""
+        UPDATE intake_items
+        SET is_mapped = TRUE,
+            market_price = %s, offer_price = %s, unit_cost_basis = %s
+        WHERE id = %s
+        RETURNING *
+    """, (market_price, offer_price, unit_cost_basis, item_id))
+
+    if not updated:
+        return jsonify({"error": "Update failed"}), 500
+
+    intake._recalculate_session_totals(item["session_id"])
+    return jsonify({"success": True, "item": _serialize(updated)})
+
+
+# ==========================================
 # RAW CARD MANUAL ENTRY
 # ==========================================
 

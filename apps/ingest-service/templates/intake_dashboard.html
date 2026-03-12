@@ -1981,7 +1981,15 @@
             }
 
             if (!results.length) {
-                container.innerHTML = `<p style="color:var(--text-dim);">No results found. Try pasting the TCGPlayer ID manually from tcgplayer.com.</p>`;
+                container.innerHTML = `
+                    <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:8px;">
+                        <div style="font-size:0.85rem;color:var(--amber);font-weight:600;margin-bottom:10px;">⚠ No PPT match found for "${productName}"</div>
+                        <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:12px;">You can link to a store product instead, or accept the Collectr price with no TCGPlayer link.</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                            <button class="btn btn-secondary" onclick="mappingSearchStore()">🏪 Search Store Products</button>
+                            <button class="btn btn-secondary" onclick="mappingAcceptPrice()">✓ Accept Collectr Price ($${currentMapCollectrPrice.toFixed(2)})</button>
+                        </div>
+                    </div>`;
                 return;
             }
             container.innerHTML = results.map(p => {
@@ -1995,6 +2003,101 @@
                     <small style="color:var(--accent);">TCGPlayer ID: ${tcgId} — click to use</small>
                 </div>`;
             }).join('');
+        } catch(err) {
+            container.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    // ═══════════════════════════════ MAPPING FALLBACKS ═══════════════════════════════
+
+    async function mappingSearchStore() {
+        const productName = document.getElementById('map-product-name').textContent;
+        const container = document.getElementById('fuzzy-results');
+        container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching store...</div>';
+
+        try {
+            const r = await fetch('/api/store/search?q=' + encodeURIComponent(productName));
+            const d = await r.json();
+            const results = d.results || [];
+
+            if (!results.length) {
+                container.innerHTML = `
+                    <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:8px;">
+                        <div style="font-size:0.85rem;color:var(--amber);font-weight:600;margin-bottom:10px;">⚠ No store products found either</div>
+                        <button class="btn btn-secondary" onclick="mappingAcceptPrice()">✓ Accept Collectr Price ($${currentMapCollectrPrice.toFixed(2)})</button>
+                    </div>`;
+                return;
+            }
+
+            container.innerHTML = `
+                <div style="font-size:0.8rem;color:var(--text-dim);margin:8px 0 6px;">Select a store product to use its price:</div>
+                ${results.map(p => {
+                    const pid = p.shopify_product_id || p.id || '';
+                    const price = p.shopify_price || 0;
+                    const title = p.title || '?';
+                    const qty = p.shopify_qty != null ? ` · qty ${p.shopify_qty}` : '';
+                    const priceStr = price ? '$' + parseFloat(price).toFixed(2) : '—';
+                    return `<div class="search-result" onclick="mappingLinkStore('${pid}', ${JSON.stringify(title)}, ${parseFloat(price)||0})">
+                        <h4>${title}</h4>
+                        <p>Store price: <strong>${priceStr}</strong>${qty}</p>
+                        <small style="color:var(--accent);">Click to use store price</small>
+                    </div>`;
+                }).join('')}
+                <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+                    <button class="btn btn-secondary btn-sm" onclick="mappingAcceptPrice()">✓ None of these — Accept Collectr Price ($${currentMapCollectrPrice.toFixed(2)})</button>
+                </div>`;
+        } catch(err) {
+            container.innerHTML = `
+                <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:8px;">
+                    <div style="font-size:0.85rem;color:var(--red);margin-bottom:10px;">Store search unavailable: ${err.message}</div>
+                    <button class="btn btn-secondary" onclick="mappingAcceptPrice()">✓ Accept Collectr Price ($${currentMapCollectrPrice.toFixed(2)})</button>
+                </div>`;
+        }
+    }
+
+    async function mappingLinkStore(storeProductId, storeProductName, storePrice) {
+        // Use store price if available, otherwise fall back to collectr price
+        const price = storePrice > 0 ? storePrice : currentMapCollectrPrice;
+        const container = document.getElementById('fuzzy-results');
+        container.innerHTML = '<div class="loading"><span class="spinner"></span> Saving...</div>';
+        try {
+            const r = await fetch(`/api/intake/item/${currentMapItemId}/accept-price`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: currentSessionId,
+                    override_price: price,
+                    store_product_id: storeProductId,
+                    store_product_name: storeProductName,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { container.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+            closeModal('mapping-modal');
+            viewSession(currentSessionId, true);
+        } catch(err) {
+            container.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        }
+    }
+
+    async function mappingAcceptPrice() {
+        // Accept the Collectr price as-is, mark as mapped, no TCGPlayer link
+        const price = currentMapCollectrPrice;
+        const container = document.getElementById('fuzzy-results');
+        container.innerHTML = '<div class="loading"><span class="spinner"></span> Saving...</div>';
+        try {
+            const r = await fetch(`/api/intake/item/${currentMapItemId}/accept-price`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: currentSessionId,
+                    override_price: price,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { container.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+            closeModal('mapping-modal');
+            viewSession(currentSessionId, true);
         } catch(err) {
             container.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
@@ -2539,8 +2642,11 @@
                             ${found && i.shopify_variant_id
                                 ? '<a href="https://admin.shopify.com/store/' + (window.__shopifyStoreHandle||'') + '/products/' + i.shopify_product_id + '/variants/' + i.shopify_variant_id + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" title="Edit this variant in Shopify admin">Admin &#x2197;</a>'
                                 : ''}
-                            ${!found
-                                ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="findInStore(this, ' + (i.tcgplayer_id||'null') + ', \'' + (i.product_name||'').replace(/'/g,'').replace(/"/g,'') + '\')" title="Search your store cache to find & link this product">&#x1F50D; Find</button>'
+                            ${!i.tcgplayer_id
+                                ? '<button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="openMapping(\'' + i.id + '\',\'' + (i.product_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.set_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.product_type||'sealed') + '\',' + (i.market_price||0) + ')" title="Link this item to a TCGPlayer product">&#x1F517; Link</button>'
+                                : ''}
+                            ${!found && i.tcgplayer_id
+                                ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="findInStore(this, ' + i.tcgplayer_id + ', \'' + (i.product_name||'').replace(/'/g,'').replace(/"/g,'') + '\')" title="Search your store cache to find this listing">&#x1F50D; Find</button>'
                                 : ''}
                             ${!found && i.tcgplayer_id
                                 ? '<button class="btn btn-sm btn-primary" id="cl-btn-' + i.tcgplayer_id + '" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="createListingFromStore(' + i.tcgplayer_id + ', this)">+ List</button>'
