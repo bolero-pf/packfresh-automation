@@ -2037,10 +2037,15 @@
                     const title = p.title || '?';
                     const qty = p.shopify_qty != null ? ` · qty ${p.shopify_qty}` : '';
                     const priceStr = price ? '$' + parseFloat(price).toFixed(2) : '—';
-                    return `<div class="search-result" onclick="mappingLinkStore('${pid}', ${JSON.stringify(title)}, ${parseFloat(price)||0})">
+                    const tcgId = p.tcgplayer_id || null;
+                    return `<div class="search-result" onclick="mappingLinkStore('${pid}', ${JSON.stringify(title)}, ${parseFloat(price)||0}, ${tcgId ? parseInt(tcgId) : 'null'})">
                         <h4>${title}</h4>
                         <p>Store price: <strong>${priceStr}</strong>${qty}</p>
-                        <small style="color:var(--accent);">Click to use store price</small>
+                        ${tcgId ? `<small style="color:var(--text-dim);">TCG#${tcgId}</small>` : ''}
+                        <div style="display:flex;gap:6px;margin-top:6px;">
+                            <button class="btn btn-primary btn-sm" style="font-size:0.72rem;" onclick="event.stopPropagation();mappingLinkStore('${pid}', ${JSON.stringify(title)}, ${parseFloat(price)||0}, ${tcgId ? parseInt(tcgId) : 'null'})">Use Store Price (${priceStr})</button>
+                            <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" onclick="event.stopPropagation();mappingLinkStore('${pid}', ${JSON.stringify(title)}, ${currentMapCollectrPrice}, ${tcgId ? parseInt(tcgId) : 'null'})">Use Collectr Price ($${currentMapCollectrPrice.toFixed(2)})</button>
+                        </div>
                     </div>`;
                 }).join('')}
                 <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
@@ -2055,21 +2060,23 @@
         }
     }
 
-    async function mappingLinkStore(storeProductId, storeProductName, storePrice) {
+    async function mappingLinkStore(storeProductId, storeProductName, storePrice, tcgplayerId) {
         // Use store price if available, otherwise fall back to collectr price
         const price = storePrice > 0 ? storePrice : currentMapCollectrPrice;
         const container = document.getElementById('fuzzy-results');
         container.innerHTML = '<div class="loading"><span class="spinner"></span> Saving...</div>';
         try {
+            const body = {
+                session_id: currentSessionId,
+                override_price: price,
+                store_product_id: storeProductId,
+                store_product_name: storeProductName,
+            };
+            if (tcgplayerId) body.tcgplayer_id = tcgplayerId;
             const r = await fetch(`/api/intake/item/${currentMapItemId}/accept-price`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    session_id: currentSessionId,
-                    override_price: price,
-                    store_product_id: storeProductId,
-                    store_product_name: storeProductName,
-                }),
+                body: JSON.stringify(body),
             });
             const d = await r.json();
             if (!r.ok) { container.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }

@@ -842,6 +842,7 @@ def accept_price_no_link(item_id):
     override_price = data.get("override_price")  # optional new price
     store_product_id = data.get("store_product_id")  # optional shopify ref
     store_product_name = data.get("store_product_name")
+    tcgplayer_id = data.get("tcgplayer_id")  # if store product has a TCGPlayer ID, link it
 
     item = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
@@ -859,13 +860,23 @@ def accept_price_no_link(item_id):
     offer_price = market_price * item["quantity"] * (offer_pct / Decimal("100"))
     unit_cost_basis = offer_price / item["quantity"] if item["quantity"] > 0 else Decimal("0")
 
-    updated = db.execute_returning("""
-        UPDATE intake_items
-        SET is_mapped = TRUE,
-            market_price = %s, offer_price = %s, unit_cost_basis = %s
-        WHERE id = %s
-        RETURNING *
-    """, (market_price, offer_price, unit_cost_basis, item_id))
+    if tcgplayer_id:
+        updated = db.execute_returning("""
+            UPDATE intake_items
+            SET is_mapped = TRUE,
+                market_price = %s, offer_price = %s, unit_cost_basis = %s,
+                tcgplayer_id = %s
+            WHERE id = %s
+            RETURNING *
+        """, (market_price, offer_price, unit_cost_basis, tcgplayer_id, item_id))
+    else:
+        updated = db.execute_returning("""
+            UPDATE intake_items
+            SET is_mapped = TRUE,
+                market_price = %s, offer_price = %s, unit_cost_basis = %s
+            WHERE id = %s
+            RETURNING *
+        """, (market_price, offer_price, unit_cost_basis, item_id))
 
     if not updated:
         return jsonify({"error": "Update failed"}), 500
@@ -2246,22 +2257,60 @@ def get_store_prices():
 
 @app.route("/api/store/search", methods=["GET"])
 def store_search():
-    """Search inventory_product_cache by title — used to find/link existing Shopify listings."""
+    """Search inventory_product_cache by title — fuzzy token matching so partial/reordered names hit."""
     q = request.args.get("q", "").strip()
     if not q or len(q) < 2:
         return jsonify({"results": []})
+
+    # Strip common filler words and tokenize
+    STOPWORDS = {"the", "a", "an", "of", "and", "or", "in", "for", "&", "-", "pokemon", "tcg", "card", "cards"}
+    tokens = [t.lower() for t in q.replace("-", " ").replace(":", " ").split() if t.lower() not in STOPWORDS and len(t) > 1]
+    if not tokens:
+        tokens = q.lower().split()
+
+    # Try substring match on full query first (fastest, most precise)
     like = f"%{q}%"
     rows = db.query(
         """SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
                   title, handle, shopify_price, shopify_qty, is_damaged
            FROM inventory_product_cache
-           WHERE title ILIKE %s
+           WHERE title ILIKE %s AND (is_damaged = false OR is_damaged IS NULL)
            ORDER BY title ASC
            LIMIT 20""",
         (like,)
     )
+
+    # If no direct hit, do per-token AND search (all tokens must appear)
+    if not rows and tokens:
+        conditions = " AND ".join(["title ILIKE %s"] * len(tokens))
+        params = tuple(f"%{t}%" for t in tokens)
+        rows = db.query(
+            f"""SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
+                      title, handle, shopify_price, shopify_qty, is_damaged
+               FROM inventory_product_cache
+               WHERE ({conditions}) AND (is_damaged = false OR is_damaged IS NULL)
+               ORDER BY title ASC
+               LIMIT 20""",
+            params
+        )
+
+    # If still nothing, try majority-of-tokens (drop shortest token and retry)
+    if not rows and len(tokens) > 2:
+        majority = sorted(tokens, key=len, reverse=True)[:-1]  # drop shortest
+        conditions = " AND ".join(["title ILIKE %s"] * len(majority))
+        params = tuple(f"%{t}%" for t in majority)
+        rows = db.query(
+            f"""SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
+                      title, handle, shopify_price, shopify_qty, is_damaged
+               FROM inventory_product_cache
+               WHERE ({conditions}) AND (is_damaged = false OR is_damaged IS NULL)
+               ORDER BY title ASC
+               LIMIT 20""",
+            params
+        )
+
     results = [dict(r) for r in rows]
-    return jsonify({"results": [_serialize(r) for r in results], "query": q})
+    return jsonify({"results": [_serialize(r) for r in results], "query": q, "tokens": tokens})
 
 
 # ==========================================
