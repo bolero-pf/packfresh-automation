@@ -1592,7 +1592,11 @@
                                 <td class="name-cell">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}</td>
                                 ${s.session_type === 'raw' ? `<td>${i.is_graded
                                     ? `<span class="badge" style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;">${i.grade_company || 'PSA'} ${i.grade_value || '?'}</span>`
-                                    : `<span class="badge badge-blue">${i.condition || i.listing_condition || '—'}</span>`
+                                    : (() => {
+                                        const _c = i.condition || i.listing_condition || '—';
+                                        const _condStyle = _c==='NM' ? 'background:#14532d;color:#4ade80;' : _c==='LP' ? 'background:rgba(79,125,249,0.18);color:#7aadff;' : _c==='MP' ? 'background:#422006;color:#fbbf24;' : _c==='HP' ? 'background:#431407;color:#fb923c;' : _c==='DMG' ? 'background:#450a0a;color:#f87171;' : 'background:var(--surface-2);color:var(--text-dim);';
+                                        return `<span class="badge" style="${_condStyle}">${_c}</span>`;
+                                    })()
                                 }</td>` : ''}
                                 <td>${i.quantity}</td>
                                 <td>$${(i.market_price || 0).toFixed(2)}</td>
@@ -1612,7 +1616,7 @@
                                                 btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
                                             }
                                             btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button><div class="action-dropdown">';
-                                            if (!i.is_graded) {
+                                            if (!i.is_graded && s.session_type !== 'raw') {
                                                 btns += status !== 'damaged' ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">&#9888; Damaged${i.quantity > 1 ? ' (partial?)' : ''}</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
                                             }
                                             btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','rejected')">🗑 Remove</button><hr>`;
@@ -1623,7 +1627,7 @@
                                                     btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},true,'${i.grade_company||''}','${i.grade_value||''}')">&#x1F3C5; Change Grade (${i.grade_company} ${i.grade_value})</button>`;
                                                 } else {
                                                     btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},false,'','')">✨ Mark as Graded</button>`;
-                                                    btns += `<button onclick="editCondition('${i.id}','${sessionId}','${i.condition || i.listing_condition || 'NM'}')">&#x1F3F7; Change Condition (${i.condition || i.listing_condition || 'NM'})</button>`;
+                                                    btns += `<button onclick="editCondition('${i.id}','${sessionId}','${i.condition || i.listing_condition || 'NM'}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null})">${condBadgeHtml(i.condition || i.listing_condition || 'NM')} Change Condition</button>`;
                                                 }
                                             }
                                             
@@ -2921,37 +2925,100 @@
         } catch(err) { alert(err.message); }
     }
 
-    async function editCondition(itemId, sessionId, currentCond) {
-        const input = await themedPrompt({
-            title: '🏷 Edit Condition',
-            message: 'Select new condition:',
-            inputs: [{
-                type: 'select', label: 'Condition',
-                default: currentCond,
-                options: [
-                    { value: 'NM', label: 'Near Mint (NM)' },
-                    { value: 'LP', label: 'Lightly Played (LP)' },
-                    { value: 'MP', label: 'Moderately Played (MP)' },
-                    { value: 'HP', label: 'Heavily Played (HP)' },
-                    { value: 'DMG', label: 'Damaged (DMG)' },
-                ]
-            }],
-            confirmText: 'Update Condition',
-        });
-        if (input === null) return;
-        const newCond = input.toUpperCase().trim();
-        if (newCond === currentCond) return;
+    // Condition tile colors — shared by badge renderer and picker
+    const COND_STYLES = {
+        NM:  { bg: '#14532d',              color: '#4ade80', label: 'Near Mint' },
+        LP:  { bg: 'rgba(79,125,249,0.25)', color: '#7aadff', label: 'Lightly Played' },
+        MP:  { bg: '#422006',              color: '#fbbf24', label: 'Mod. Played' },
+        HP:  { bg: '#431407',              color: '#fb923c', label: 'Heavily Played' },
+        DMG: { bg: '#450a0a',              color: '#f87171', label: 'Damaged' },
+    };
 
-        try {
-            const r = await fetch(`/api/intake/item/${itemId}/update-condition`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ condition: newCond, session_id: sessionId }),
-            });
-            const d = await r.json();
-            if (!r.ok) { alert(d.error); return; }
-            viewSession(sessionId, true);
-        } catch(err) { alert(err.message); }
+    function condBadgeHtml(cond) {
+        const s = COND_STYLES[cond];
+        const style = s ? `background:${s.bg};color:${s.color};` : 'background:var(--surface-2);color:var(--text-dim);';
+        return `<span class="badge" style="${style}">${cond || '—'}</span>`;
+    }
+
+    async function editCondition(itemId, sessionId, currentCond, tcgplayerId) {
+        // Fetch prices if we have a TCGPlayer ID so tiles show market values
+        let variants = {};
+        if (tcgplayerId) {
+            try {
+                const pr = await fetch('/api/ppt/lookup-card', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ tcgplayer_id: parseInt(tcgplayerId) }),
+                });
+                if (pr.ok) {
+                    const pd = await pr.json();
+                    // variants[printing][condition] = price
+                    const primary = pd.primary_printing || Object.keys(pd.variants || {})[0];
+                    variants = (pd.variants || {})[primary] || {};
+                }
+            } catch(e) { /* prices unavailable — show tiles without prices */ }
+        }
+
+        return new Promise(resolve => {
+            // Build modal content
+            const overlay = document.createElement('div');
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+
+            let selectedCond = currentCond;
+
+            function render() {
+                const tiles = ['NM','LP','MP','HP','DMG'].map(cond => {
+                    const s = COND_STYLES[cond];
+                    const price = variants[cond];
+                    const isSel = cond === selectedCond;
+                    const border = isSel ? `3px solid ${s.color}` : '2px solid var(--border)';
+                    return `<div data-cond="${cond}" style="background:${s.bg};color:${s.color};border:${border};border-radius:8px;padding:12px 8px;text-align:center;cursor:pointer;transition:border 0.1s;">
+                        <div style="font-size:0.95rem;font-weight:700;">${cond}</div>
+                        <div style="font-size:0.72rem;opacity:0.85;margin-top:2px;">${s.label}</div>
+                        ${price != null ? `<div style="font-size:1rem;font-weight:700;margin-top:6px;">$${price.toFixed(2)}</div>` : `<div style="font-size:0.8rem;opacity:0.5;margin-top:6px;">—</div>`}
+                    </div>`;
+                }).join('');
+
+                const selPrice = variants[selectedCond];
+                overlay.innerHTML = `
+                    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:380px;max-width:95vw;">
+                        <div style="font-size:1rem;font-weight:700;margin-bottom:16px;">🏷 Change Condition</div>
+                        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">${tiles}</div>
+                        <div style="display:flex;gap:8px;margin-top:4px;">
+                            <button id="ec-confirm" class="btn btn-primary" style="flex:1;">
+                                Set ${selectedCond}${selPrice != null ? ' — $'+selPrice.toFixed(2) : ''}
+                            </button>
+                            <button id="ec-cancel" class="btn btn-secondary">Cancel</button>
+                        </div>
+                    </div>`;
+
+                overlay.querySelectorAll('[data-cond]').forEach(el => {
+                    el.addEventListener('click', () => { selectedCond = el.dataset.cond; render(); });
+                });
+                document.getElementById('ec-confirm').addEventListener('click', async () => {
+                    document.body.removeChild(overlay);
+                    if (selectedCond === currentCond) return resolve(null);
+                    try {
+                        const r = await fetch(`/api/intake/item/${itemId}/update-condition`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ condition: selectedCond, session_id: sessionId }),
+                        });
+                        const d = await r.json();
+                        if (!r.ok) { alert(d.error); return resolve(null); }
+                        viewSession(sessionId, true);
+                        resolve(selectedCond);
+                    } catch(err) { alert(err.message); resolve(null); }
+                });
+                document.getElementById('ec-cancel').addEventListener('click', () => {
+                    document.body.removeChild(overlay);
+                    resolve(null);
+                });
+            }
+
+            render();
+            document.body.appendChild(overlay);
+        });
     }
 
     async function relinkRawCard(itemId, sessionId, cardName, offerPct, setName, cardNumber, isGraded, gradeCompany, gradeValue) {
@@ -3107,8 +3174,11 @@
             var p = variantData[cond];
             var isSel = cond === selectedCond;
             var hasP = p != null;
-            html += '<div data-rc="' + cond + '" style="background:' + (isSel ? 'var(--accent)' : 'var(--surface)') + '; color:' + (isSel ? '#fff' : 'var(--text)') + '; padding:10px 6px; border-radius:6px; text-align:center; cursor:pointer; border:1px solid var(--border); opacity:' + (hasP ? '1' : '0.4') + ';">';
-            html += '<div style="font-size:0.75rem; font-weight:600;">' + cond + '</div>';
+            var cs = COND_STYLES[cond] || {};
+            var border = isSel ? ('3px solid ' + (cs.color||'#fff')) : '2px solid var(--border)';
+            html += '<div data-rc="' + cond + '" style="background:' + (cs.bg||'var(--surface)') + '; color:' + (cs.color||'var(--text)') + '; padding:10px 6px; border-radius:6px; text-align:center; cursor:pointer; border:' + border + '; opacity:' + (hasP ? '1' : '0.5') + ';">';
+            html += '<div style="font-size:0.75rem; font-weight:700;">' + cond + '</div>';
+            html += '<div style="font-size:0.65rem; opacity:0.8; margin-bottom:4px;">' + ((COND_STYLES[cond]||{}).label||'') + '</div>';
             html += '<div style="font-size:1.05rem; font-weight:700;">' + (hasP ? '$' + p.toFixed(2) : '\u2014') + '</div>';
             html += '</div>';
         });
@@ -4102,14 +4172,14 @@
                 '</div><table><thead><tr><th>Card</th><th>Cond</th><th>Qty</th><th>Market</th><th>Offer</th><th>Actions</th></tr></thead><tbody>' +
                 items.map(i => '<tr>' +
                     '<td>' + i.product_name + '<br><small style="color:var(--text-dim);">' + (i.set_name || '') + ' ' + (i.card_number ? '#'+i.card_number : '') + '</small></td>' +
-                    '<td>' + (i.is_graded ? '<span class="badge" style="background:var(--accent-alt,#7c3aed);color:#fff;">' + (i.grade_company||'') + ' ' + (i.grade_value||'') + '</span>' : '<span class="badge badge-blue">' + (i.condition || '') + '</span>') + '</td>' +
+                    '<td>' + (i.is_graded ? '<span class="badge" style="background:var(--accent-alt,#7c3aed);color:#fff;">' + (i.grade_company||'') + ' ' + (i.grade_value||'') + '</span>' : (() => { const _c2 = i.condition || ''; const _s2 = _c2==='NM' ? 'background:#14532d;color:#4ade80;' : _c2==='LP' ? 'background:rgba(79,125,249,0.18);color:#7aadff;' : _c2==='MP' ? 'background:#422006;color:#fbbf24;' : _c2==='HP' ? 'background:#431407;color:#fb923c;' : _c2==='DMG' ? 'background:#450a0a;color:#f87171;' : 'background:var(--surface-2);color:var(--text-dim);'; return '<span class="badge" style="' + _s2 + '">' + _c2 + '</span>'; })()) + '</td>' +
                     '<td>' + i.quantity + '</td>' +
                     '<td>$' + (i.market_price || 0).toFixed(2) + '</td>' +
                     '<td>$' + (i.offer_price || 0).toFixed(2) + '</td>' +
                     '<td style="white-space:nowrap;"><div style="display:inline-block; position:relative;">' +
                         '<button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(this)">\u22ee</button>' +
                         '<div class="action-dropdown">' +
-                            '<button onclick="editCondition(\'' + i.id + '\',\'' + rawSessionId + '\',\'' + (i.condition || 'NM') + '\'); loadRawSessionItems();">🏷 Edit Condition</button>' +
+                            '<button onclick="editCondition(\'' + i.id + '\',\'' + rawSessionId + '\',\'' + (i.condition || 'NM') + '\', i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null); loadRawSessionItems();">🏷 Edit Condition</button>' +
                             '<button onclick="overridePrice(\'' + i.id + '\',\'' + rawSessionId + '\',' + (i.market_price || 0) + ')">💰 Override Price</button>' +
                             '<button onclick="editQuantity(\'' + i.id + '\',\'' + rawSessionId + '\',' + i.quantity + ')">✏ Edit Qty</button>' +
                             '<hr>' +
