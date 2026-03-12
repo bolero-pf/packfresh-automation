@@ -3,6 +3,8 @@ Migration: Add pickup_date column and update intake_session_summary view.
 Run once: python migrate_pickup_date.py
 """
 import os
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 import psycopg2
 
 DATABASE_URL = os.getenv("DATABASE_URL")

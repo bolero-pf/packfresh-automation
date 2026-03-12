@@ -881,13 +881,13 @@ def accept_price_no_link(item_id):
         SET is_mapped = TRUE,
             market_price = %s, offer_price = %s, unit_cost_basis = %s,
             tcgplayer_id = COALESCE(%s, tcgplayer_id),
-            shopify_product_id = COALESCE(%s::bigint, shopify_product_id),
+            shopify_product_id = COALESCE(%s, shopify_product_id),
             shopify_product_name = COALESCE(%s, shopify_product_name)
         WHERE id = %s
         RETURNING *
     """, (market_price, offer_price, unit_cost_basis,
           tcgplayer_id or None,
-          int(store_product_id) if store_product_id else None,
+          str(store_product_id) if store_product_id else None,
           store_product_name or None,
           item_id))
 
@@ -899,7 +899,7 @@ def accept_price_no_link(item_id):
         item["product_name"],
         tcgplayer_id or None,
         item.get("product_type", "sealed"),
-        shopify_product_id=int(store_product_id) if store_product_id else None,
+        shopify_product_id=str(store_product_id) if store_product_id else None,
         shopify_product_name=store_product_name or None,
     )
 
@@ -2305,102 +2305,64 @@ def get_store_prices():
 
 
 @app.route("/api/store/search", methods=["GET"])
+@app.route("/api/store/search", methods=["GET"])
 def store_search():
     """Search inventory_product_cache by title — fuzzy token matching so partial/reordered names hit."""
-    q = request.args.get("q", "").strip()
-    if not q or len(q) < 2:
-        return jsonify({"results": []})
-
     import re as _re
-    # Strip parenthetical suffixes like (CN), (International Version), (Japanese) etc.
-    # before tokenizing — these rarely appear in store titles
-    q_stripped = _re.sub(r'\s*\([^)]{1,30}\)\s*$', '', q).strip()
-    q_for_tokens = q_stripped if q_stripped else q
+    try:
+        q = request.args.get("q", "").strip()
+        if not q or len(q) < 2:
+            return jsonify({"results": []})
 
-    # Strip common filler words and tokenize
-    STOPWORDS = {"the", "a", "an", "of", "and", "or", "in", "for", "&", "-", "pokemon", "tcg", "card", "cards",
-                 "collection", "set", "box", "pack"}
-    # Also drop very short tokens (2 chars or less) — "cn", "ex" etc. too ambiguous for AND matching
-    tokens = [t.lower() for t in q_for_tokens.replace("-", " ").replace(":", " ").split()
-              if t.lower() not in STOPWORDS and len(t) > 2]
-    if not tokens:
-        tokens = [t.lower() for t in q_for_tokens.split() if len(t) > 1]
+        # Strip parenthetical suffixes like (CN), (International Version), (Japanese) etc.
+        q_stripped = _re.sub(r'\s*\([^)]{1,30}\)\s*$', '', q).strip()
+        q_for_tokens = q_stripped if q_stripped else q
 
-    # Try substring match on full stripped query first
-    like = f"%{q_stripped}%"
-    rows = db.query(
-        """SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
-                  title, handle, shopify_price, shopify_qty, is_damaged
-           FROM inventory_product_cache
-           WHERE title ILIKE %s AND (is_damaged = false OR is_damaged IS NULL)
-           ORDER BY title ASC
-           LIMIT 20""",
-        (like,)
-    )
+        STOPWORDS = {"the", "a", "an", "of", "and", "or", "in", "for", "&", "-", "pokemon", "tcg", "card", "cards",
+                     "collection", "set", "box", "pack"}
+        tokens = [t.lower() for t in q_for_tokens.replace("-", " ").replace(":", " ").split()
+                  if t.lower() not in STOPWORDS and len(t) > 2]
+        if not tokens:
+            tokens = [t.lower() for t in q_for_tokens.split() if len(t) > 1]
 
-    # If no direct hit, try original full query (in case stripped was worse)
-    if not rows and q_stripped != q:
-        rows = db.query(
-            """SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
-                      title, handle, shopify_price, shopify_qty, is_damaged
-               FROM inventory_product_cache
-               WHERE title ILIKE %s AND (is_damaged = false OR is_damaged IS NULL)
-               ORDER BY title ASC
-               LIMIT 20""",
-            (f"%{q}%",)
-        )
-
-    # If still no hit, do per-token AND search (all tokens must appear in any order)
-    if not rows and tokens:
-        conditions = " AND ".join(["title ILIKE %s"] * len(tokens))
-        params = tuple(f"%{t}%" for t in tokens)
-        rows = db.query(
-            f"""SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
-                      title, handle, shopify_price, shopify_qty, is_damaged
-               FROM inventory_product_cache
-               WHERE ({conditions}) AND (is_damaged = false OR is_damaged IS NULL)
-               ORDER BY title ASC
-               LIMIT 20""",
-            params
-        )
-
-    # Last resort: drop tokens one at a time (longest-first) until we get hits
-    if not rows and len(tokens) > 2:
-        for drop_count in range(1, len(tokens) - 1):
-            # Try dropping the last N tokens (usually the most specific/variant ones)
-            reduced = tokens[:len(tokens) - drop_count]
-            conditions = " AND ".join(["title ILIKE %s"] * len(reduced))
-            params = tuple(f"%{t}%" for t in reduced)
-            rows = db.query(
+        def run_query(conditions_sql, params):
+            return db.query(
                 f"""SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
                           title, handle, shopify_price, shopify_qty, is_damaged
                    FROM inventory_product_cache
-                   WHERE ({conditions}) AND (is_damaged = false OR is_damaged IS NULL)
-                   ORDER BY title ASC
-                   LIMIT 20""",
+                   WHERE ({conditions_sql}) AND (is_damaged = false OR is_damaged IS NULL)
+                   ORDER BY title ASC LIMIT 20""",
                 params
             )
-            if rows:
-                break
 
-    # If still nothing, try majority-of-tokens (drop shortest token and retry)
-    if not rows and len(tokens) > 2:
-        majority = sorted(tokens, key=len, reverse=True)[:-1]  # drop shortest
-        conditions = " AND ".join(["title ILIKE %s"] * len(majority))
-        params = tuple(f"%{t}%" for t in majority)
-        rows = db.query(
-            f"""SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
-                      title, handle, shopify_price, shopify_qty, is_damaged
-               FROM inventory_product_cache
-               WHERE ({conditions}) AND (is_damaged = false OR is_damaged IS NULL)
-               ORDER BY title ASC
-               LIMIT 20""",
-            params
-        )
+        rows = run_query("title ILIKE %s", (f"%{q_stripped}%",))
 
-    results = [dict(r) for r in rows]
-    return jsonify({"results": [_serialize(r) for r in results], "query": q, "tokens": tokens})
+        if not rows and q_stripped != q:
+            rows = run_query("title ILIKE %s", (f"%{q}%",))
 
+        if not rows and tokens:
+            conds = " AND ".join(["title ILIKE %s"] * len(tokens))
+            rows = run_query(conds, tuple(f"%{t}%" for t in tokens))
+
+        if not rows and len(tokens) > 2:
+            for drop_count in range(1, len(tokens) - 1):
+                reduced = tokens[:len(tokens) - drop_count]
+                conds = " AND ".join(["title ILIKE %s"] * len(reduced))
+                rows = run_query(conds, tuple(f"%{t}%" for t in reduced))
+                if rows:
+                    break
+
+        if not rows and len(tokens) > 2:
+            majority = sorted(tokens, key=len, reverse=True)[:-1]
+            conds = " AND ".join(["title ILIKE %s"] * len(majority))
+            rows = run_query(conds, tuple(f"%{t}%" for t in majority))
+
+        results = [_serialize(dict(r)) for r in rows]
+        return jsonify({"results": results, "query": q, "tokens": tokens})
+
+    except Exception as e:
+        app.logger.error(f"store_search error: {e}")
+        return jsonify({"results": [], "error": str(e)})
 
 # ==========================================
 # MAIN
