@@ -1590,7 +1590,10 @@
                             const bdNote = bd && bdVal > 0 ? `<br><small style="color:${bdColor};">📦 breakdown: $${bdVal.toFixed(2)}${bd.variant_count > 1 ? ' (' + bd.variant_count + ' configs)' : bd.variant_names ? ' · ' + bd.variant_names : ''}</small>` : '';
                             return `<tr style="${rowStyle}" data-item-id="${i.id}">
                                 <td class="name-cell">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}</td>
-                                ${s.session_type === 'raw' ? `<td><span class="badge badge-blue">${i.condition || i.listing_condition || '—'}</span></td>` : ''}
+                                ${s.session_type === 'raw' ? `<td>${i.is_graded
+                                    ? `<span class="badge" style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;">${i.grade_company || 'PSA'} ${i.grade_value || '?'}</span>`
+                                    : `<span class="badge badge-blue">${i.condition || i.listing_condition || '—'}</span>`
+                                }</td>` : ''}
                                 <td>${i.quantity}</td>
                                 <td>$${(i.market_price || 0).toFixed(2)}</td>
                                 <td>$${(i.offer_price || 0).toFixed(2)}</td>
@@ -1609,13 +1612,18 @@
                                                 btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
                                             }
                                             btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button><div class="action-dropdown">';
-                                            btns += status !== 'damaged' ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">⚠ Damaged${i.quantity > 1 ? ' (partial?)' : ''}</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
+                                            if (!i.is_graded) {
+                                                btns += status !== 'damaged' ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">&#9888; Damaged${i.quantity > 1 ? ' (partial?)' : ''}</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
+                                            }
                                             btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','rejected')">🗑 Remove</button><hr>`;
                                             btns += `<button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price||0})">Override Price</button>`;
                                             btns += `<button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">Change Qty (${i.quantity})</button>`;
                                             if (s.session_type === 'raw') {
-                                                const gradedLabel = i.is_graded ? `🏅 Change Grade (${i.grade_company} ${i.grade_value})` : '🏅 Mark as Graded';
-                                                btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},${i.is_graded||false},'${i.grade_company||''}','${i.grade_value||''}')">${gradedLabel}</button>`;
+                                                if (i.is_graded) {
+                                                    btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},true,'${i.grade_company||''}','${i.grade_value||''}')">&#x1F3C5; Change Grade (${i.grade_company} ${i.grade_value})</button>`;
+                                                } else {
+                                                    btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},false,'','')">✨ Mark as Graded</button>`;
+                                                }
                                             }
                                             
                                             if (s.session_type !== 'raw' && i.tcgplayer_id) {
