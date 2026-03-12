@@ -2435,7 +2435,8 @@
                 return;
             }
 
-            _storeCheckData = { items: d.items || [], sessionId: sessionId };
+            // Backend returns item_id; normalize to id for consistency with rest of frontend
+            _storeCheckData = { items: (d.items || []).map(i => ({...i, id: i.id || i.item_id})), sessionId: sessionId };
             _storeFilter = 'all';
             renderStoreCheck();
 
@@ -2465,7 +2466,7 @@
                     const r2 = await fetch(`/api/shopify/session/${sessionId}/store-check`);
                     const d2 = await r2.json();
                     if (r2.ok) {
-                        _storeCheckData = { items: d2.items || [], sessionId };
+                        _storeCheckData = { items: (d2.items || []).map(i => ({...i, id: i.id || i.item_id})), sessionId };
                         renderStoreCheck();
                     }
                 }
@@ -2669,7 +2670,7 @@
                                 ? '<button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="openMapping(\'' + i.id + '\',\'' + (i.product_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.set_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.product_type||'sealed') + '\',' + (i.market_price||0) + ')" title="Link this item to a TCGPlayer product">&#x1F517; Link</button>'
                                 : ''}
                             ${!found && i.tcgplayer_id
-                                ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="findInStore(this, ' + i.tcgplayer_id + ', \'' + (i.product_name||'').replace(/'/g,'').replace(/"/g,'') + '\')" title="Search your store cache to find this listing">&#x1F50D; Find</button>'
+                                ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="findInStore(this, ' + i.tcgplayer_id + ', \'' + (i.product_name||'').replace(/'/g,'').replace(/"/g,'') + '\', \'' + i.id + '\', ' + (i.offer_price||0) + ', ' + (i.market_price||0) + ')" title="Search your store cache to find this listing">&#x1F50D; Find</button>'
                                 : ''}
                             ${!found && i.tcgplayer_id
                                 ? '<button class="btn btn-sm btn-primary" id="cl-btn-' + i.tcgplayer_id + '" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="createListingFromStore(' + i.tcgplayer_id + ', this, \'' + i.id + '\', ' + (i.offer_price||0) + ')">+ List</button>'
@@ -2683,7 +2684,7 @@
         loadCacheStatus();
     }
 
-    async function findInStore(btn, tcgplayerId, productName) {
+    async function findInStore(btn, tcgplayerId, productName, itemId, offerPrice, marketPrice) {
         // Build a mini search modal to find an existing Shopify listing by name
         const overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
@@ -2705,7 +2706,7 @@
                         ${loading ? '<div class="loading"><span class="spinner"></span> Searching…</div>'
                           : error ? '<div class="alert alert-error">' + error + '</div>'
                           : results.length === 0 && query ? '<div style="color:var(--text-dim);font-size:0.85rem;">No results for "' + query + '"</div>'
-                          : results.map(r => `
+                          : results.map((r, ri) => `
                             <div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:6px;border:1px solid var(--border);margin-bottom:6px;background:var(--surface-2);">
                                 <div style="flex:1;min-width:0;">
                                     <div style="font-size:0.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.title}</div>
@@ -2716,6 +2717,7 @@
                                     </div>
                                 </div>
                                 <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0;">
+                                    ${itemId ? '<button class="btn btn-sm btn-primary" style="font-size:0.7rem;padding:2px 8px;" data-link-idx="' + ri + '">🔗 Link</button>' : ''}
                                     ${r.shopify_variant_id
                                         ? '<a href="https://admin.shopify.com/store/' + (window.__shopifyStoreHandle||'') + '/products/' + r.shopify_product_id + '/variants/' + r.shopify_variant_id + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 8px;">Admin ↗</a>'
                                         : ''}
@@ -2733,6 +2735,33 @@
             document.getElementById('fis-go').onclick = () => doSearch(document.getElementById('fis-input').value.trim());
             document.getElementById('fis-cancel').onclick = () => document.body.removeChild(overlay);
             document.getElementById('fis-input').focus();
+            if (itemId) {
+                overlay.querySelectorAll('[data-link-idx]').forEach(linkBtn => {
+                    linkBtn.addEventListener('click', async () => {
+                        const r = results[parseInt(linkBtn.dataset.linkIdx)];
+                        const storePrice = parseFloat(r.shopify_price) || 0;
+                        const usePrice = storePrice > 0 ? storePrice : (parseFloat(marketPrice) || parseFloat(offerPrice) || 0);
+                        linkBtn.disabled = true; linkBtn.textContent = '⟳';
+                        try {
+                            const resp = await fetch(`/api/intake/item/${itemId}/accept-price`, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    session_id: currentSessionId,
+                                    override_price: usePrice,
+                                    store_product_id: String(r.shopify_product_id || r.id || ''),
+                                    store_product_name: r.title || '',
+                                    tcgplayer_id: r.tcgplayer_id ? parseInt(r.tcgplayer_id) : undefined,
+                                }),
+                            });
+                            const d = await resp.json();
+                            if (!resp.ok) { alert(d.error || 'Link failed'); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; return; }
+                            document.body.removeChild(overlay);
+                            storeCheck(currentSessionId);
+                        } catch(e) { alert(e.message); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; }
+                    });
+                });
+            }
         }
 
         async function doSearch(q) {
