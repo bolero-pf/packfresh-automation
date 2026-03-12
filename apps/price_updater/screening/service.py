@@ -485,7 +485,7 @@ def check_firsttime5_abuse(order_gid: str) -> dict:
 #  All run from /screening/order_combine — one Flow, one API call
 # ═══════════════════════════════════════════════════════════════════════
 
-COMBINE_SKIP_TAGS = {"pre-order", "preorder", "pre_order", "hold-for-review"}
+COMBINE_SKIP_TAGS = {"pre-order", "preorder", "pre_order"}
 VERIFICATION_TAGS = {"high-value-tier1", "high-value-tier2"}
 CANCELLED_STATUSES = {"VOIDED", "REFUNDED", "EXPIRED"}
 
