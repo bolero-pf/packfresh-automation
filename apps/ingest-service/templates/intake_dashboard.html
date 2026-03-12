@@ -2536,6 +2536,12 @@
                                 onclick="openIntakeBreakdown(${i.tcgplayer_id||'null'}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}')">
                                 ${bd ? '&#x1F4E6; Recipe' : '+ Recipe'}
                             </button>
+                            ${found && i.shopify_variant_id
+                                ? '<a href="https://admin.shopify.com/store/' + (window.__shopifyStoreHandle||'') + '/products/' + i.shopify_product_id + '/variants/' + i.shopify_variant_id + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" title="Edit this variant in Shopify admin">Admin &#x2197;</a>'
+                                : ''}
+                            ${!found
+                                ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="findInStore(this, ' + (i.tcgplayer_id||'null') + ', \'' + (i.product_name||'').replace(/'/g,'').replace(/"/g,'') + '\')" title="Search your store cache to find & link this product">&#x1F50D; Find</button>'
+                                : ''}
                             ${!found && i.tcgplayer_id
                                 ? '<button class="btn btn-sm btn-primary" id="cl-btn-' + i.tcgplayer_id + '" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="createListingFromStore(' + i.tcgplayer_id + ', this)">+ List</button>'
                                 : ''}
@@ -2546,6 +2552,76 @@
             </div>
         `;
         loadCacheStatus();
+    }
+
+    async function findInStore(btn, tcgplayerId, productName) {
+        // Build a mini search modal to find an existing Shopify listing by name
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+
+        function renderFind(query, results, loading, error) {
+            overlay.innerHTML = `
+                <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:480px;max-width:95vw;">
+                    <div style="font-size:1rem;font-weight:700;margin-bottom:4px;">🔍 Find in Store Cache</div>
+                    <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:14px;">
+                        Searching for: <em>${productName}</em>
+                    </div>
+                    <div style="display:flex;gap:8px;margin-bottom:12px;">
+                        <input id="fis-input" type="text" value="${query}" placeholder="Search store by name…"
+                            style="flex:1;font-size:0.9rem;"
+                            onkeydown="if(event.key==='Enter') document.getElementById('fis-go').click()">
+                        <button id="fis-go" class="btn btn-primary" style="padding:4px 12px;">Search</button>
+                    </div>
+                    <div id="fis-results" style="max-height:260px;overflow-y:auto;">
+                        ${loading ? '<div class="loading"><span class="spinner"></span> Searching…</div>'
+                          : error ? '<div class="alert alert-error">' + error + '</div>'
+                          : results.length === 0 && query ? '<div style="color:var(--text-dim);font-size:0.85rem;">No results for "' + query + '"</div>'
+                          : results.map(r => `
+                            <div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:6px;border:1px solid var(--border);margin-bottom:6px;background:var(--surface-2);">
+                                <div style="flex:1;min-width:0;">
+                                    <div style="font-size:0.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.title}</div>
+                                    <div style="font-size:0.75rem;color:var(--text-dim);">
+                                        $${parseFloat(r.shopify_price||0).toFixed(2)} · qty ${r.shopify_qty??'?'}
+                                        ${r.is_damaged ? ' · <span style="color:var(--red);">dmg</span>' : ''}
+                                        ${r.tcgplayer_id ? ' · TCG#' + r.tcgplayer_id : ''}
+                                    </div>
+                                </div>
+                                <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0;">
+                                    ${r.shopify_variant_id
+                                        ? '<a href="https://admin.shopify.com/store/' + (window.__shopifyStoreHandle||'') + '/products/' + r.shopify_product_id + '/variants/' + r.shopify_variant_id + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 8px;">Admin ↗</a>'
+                                        : ''}
+                                    ${r.handle
+                                        ? '<a href="https://' + (window.__shopifyStore||'') + '/products/' + r.handle + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem;padding:2px 8px;">Store ↗</a>'
+                                        : ''}
+                                </div>
+                            </div>`).join('')}
+                    </div>
+                    <div style="margin-top:12px;text-align:right;">
+                        <button id="fis-cancel" class="btn btn-secondary">Close</button>
+                    </div>
+                </div>`;
+
+            document.getElementById('fis-go').onclick = () => doSearch(document.getElementById('fis-input').value.trim());
+            document.getElementById('fis-cancel').onclick = () => document.body.removeChild(overlay);
+            document.getElementById('fis-input').focus();
+        }
+
+        async function doSearch(q) {
+            if (!q) return;
+            renderFind(q, [], true, null);
+            try {
+                const r = await fetch('/api/store/search?q=' + encodeURIComponent(q));
+                const d = await r.json();
+                renderFind(q, d.results || [], false, null);
+            } catch(e) {
+                renderFind(q, [], false, e.message);
+            }
+        }
+
+        // Auto-search with the product name on open
+        renderFind(productName, [], true, null);
+        document.body.appendChild(overlay);
+        doSearch(productName);
     }
 
     async function createListingFromStore(tcgplayerId, btn) {
@@ -2657,7 +2733,11 @@
         try {
             const r = await fetch('/api/shopify/status');
             const d = await r.json();
-            if (d.store) window.__shopifyStore = d.store;
+            if (d.store) {
+                window.__shopifyStore = d.store;
+                // Extract handle for admin URLs: "mystore.myshopify.com" -> "mystore"
+                window.__shopifyStoreHandle = d.store.replace('.myshopify.com', '').replace(/\..*$/, '');
+            }
         } catch(e) {}
     })();
 

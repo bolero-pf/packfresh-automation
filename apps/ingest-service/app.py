@@ -2191,11 +2191,31 @@ def get_store_prices():
         return jsonify({"prices": {}})
     ph = ",".join(["%s"] * len(tcg_ids))
     rows = db.query(
-        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+        f"SELECT tcgplayer_id, shopify_product_id, shopify_variant_id, shopify_price, shopify_qty, handle, title FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
         tuple(tcg_ids)
     )
     prices = {r["tcgplayer_id"]: dict(r) for r in rows}
     return jsonify({"prices": _serialize(prices)})
+
+
+@app.route("/api/store/search", methods=["GET"])
+def store_search():
+    """Search inventory_product_cache by title — used to find/link existing Shopify listings."""
+    q = request.args.get("q", "").strip()
+    if not q or len(q) < 2:
+        return jsonify({"results": []})
+    like = f"%{q}%"
+    rows = db.query(
+        """SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
+                  title, handle, shopify_price, shopify_qty, is_damaged
+           FROM inventory_product_cache
+           WHERE title ILIKE %s
+           ORDER BY title ASC
+           LIMIT 20""",
+        (like,)
+    )
+    results = [dict(r) for r in rows]
+    return jsonify({"results": _serialize(results), "query": q})
 
 
 # ==========================================
