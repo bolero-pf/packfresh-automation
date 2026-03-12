@@ -2388,15 +2388,15 @@
         const withMaxMargin = enriched.filter(i => i.maxMargin !== null);
 
         const totalOfferValue = enriched.reduce((s, i) => s + (i.offer_price || 0), 0);
-        // Listed store value: actual store prices for items we have listed
-        const totalStoreValue = inStoreWithPrice.reduce((s, i) => s + i.store_price * (i.quantity || 1), 0);
         const totalCost = enriched.reduce((s, i) => s + (i.unitOffer || 0) * (i.quantity || 1), 0);
-        // Estimated value for unlisted: use market_price (PPT)
+        // Store value: store_price * intake_qty for items listed in store, market_price * intake_qty for everything else
+        const combinedStoreValue = enriched.reduce((s, i) => {
+            const qty = i.quantity || 1;
+            if (i.hasStorePrice) return s + i.store_price * qty;
+            return s + (i.market_price || 0) * qty;
+        }, 0);
+        const totalStoreValue = inStoreWithPrice.reduce((s, i) => s + i.store_price * (i.quantity || 1), 0);
         const estimatedValue = [...notInStore, ...noPrice].reduce((s, i) => s + (i.market_price || 0) * (i.quantity || 1), 0);
-        // Combined = listed store prices + market estimates for unlisted
-        // Also compute full market value (all items at market price) for comparison
-        const totalMarketValue = enriched.reduce((s, i) => s + (i.market_price || 0) * (i.quantity || 1), 0);
-        const combinedStoreValue = totalStoreValue + estimatedValue;
         const grossMarginPct = combinedStoreValue > 0 ? ((combinedStoreValue - totalOfferValue) / combinedStoreValue * 100) : 0;
         const avgMargin = withMargin.length > 0 ? withMargin.reduce((s, i) => s + i.margin, 0) / withMargin.length : 0;
 
