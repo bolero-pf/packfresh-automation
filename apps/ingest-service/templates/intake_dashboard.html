@@ -3010,6 +3010,7 @@
                     el.addEventListener('click', () => { selectedCond = el.dataset.cond; render(); });
                 });
                 document.getElementById('ec-confirm').addEventListener('click', async () => {
+                    document.removeEventListener('keydown', _ecKeydown);
                     document.body.removeChild(overlay);
                     if (selectedCond === currentCond) return resolve(null);
                     try {
@@ -3025,10 +3026,21 @@
                     } catch(err) { alert(err.message); resolve(null); }
                 });
                 document.getElementById('ec-cancel').addEventListener('click', () => {
+                    document.removeEventListener('keydown', _ecKeydown);
                     document.body.removeChild(overlay);
                     resolve(null);
                 });
             }
+
+            // Handle Escape key for this overlay
+            function _ecKeydown(e) {
+                if (e.key === 'Escape') {
+                    document.removeEventListener('keydown', _ecKeydown);
+                    if (document.body.contains(overlay)) document.body.removeChild(overlay);
+                    resolve(null);
+                }
+            }
+            document.addEventListener('keydown', _ecKeydown);
 
             render();
             document.body.appendChild(overlay);
@@ -4254,6 +4266,18 @@
         const body = document.getElementById('intake-breakdown-body');
         body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
         openModal('intake-breakdown-modal');
+
+        // Belt-and-suspenders: local keydown for Escape in case focus is inside an input
+        const _bdEscHandler = (e) => {
+            if (e.key === 'Escape') {
+                const modal = document.getElementById('intake-breakdown-modal');
+                if (modal && modal.classList.contains('active')) {
+                    closeModal('intake-breakdown-modal');
+                    document.removeEventListener('keydown', _bdEscHandler);
+                }
+            }
+        };
+        document.addEventListener('keydown', _bdEscHandler);
 
         // Fetch parent store price immediately (before components are loaded/added)
         if (tcgId) ibdFetchStorePrices();
