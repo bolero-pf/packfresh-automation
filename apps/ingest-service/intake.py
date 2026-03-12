@@ -43,18 +43,43 @@ def get_cached_mapping(collectr_name: str, product_type: str) -> Optional[int]:
     return None
 
 
-def save_mapping(collectr_name: str, tcgplayer_id: int, product_type: str,
-                 set_name: str = None, card_number: str = None):
-    """Save or update a product mapping for future imports."""
+def save_mapping(collectr_name: str, tcgplayer_id: Optional[int], product_type: str,
+                 set_name: str = None, card_number: str = None,
+                 shopify_product_id: int = None, shopify_product_name: str = None):
+    """Save or update a product mapping for future imports.
+    tcgplayer_id may be None when linking directly to a Shopify product with no PPT match.
+    """
     execute("""
-        INSERT INTO product_mappings (collectr_name, tcgplayer_id, product_type, set_name, card_number)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO product_mappings
+            (collectr_name, tcgplayer_id, product_type, set_name, card_number,
+             shopify_product_id, shopify_product_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (collectr_name, product_type)
         DO UPDATE SET
-            tcgplayer_id = EXCLUDED.tcgplayer_id,
+            tcgplayer_id = COALESCE(EXCLUDED.tcgplayer_id, product_mappings.tcgplayer_id),
+            shopify_product_id = COALESCE(EXCLUDED.shopify_product_id, product_mappings.shopify_product_id),
+            shopify_product_name = COALESCE(EXCLUDED.shopify_product_name, product_mappings.shopify_product_name),
             last_used = CURRENT_TIMESTAMP,
             use_count = product_mappings.use_count + 1
-    """, (collectr_name, tcgplayer_id, product_type, set_name, card_number))
+    """, (collectr_name, tcgplayer_id, product_type, set_name, card_number,
+          shopify_product_id, shopify_product_name))
+
+
+def get_cached_shopify_link(collectr_name: str, product_type: str) -> Optional[dict]:
+    """Return cached Shopify product link (id + name) for a Collectr product name, if any."""
+    row = query_one("""
+        SELECT shopify_product_id, shopify_product_name, tcgplayer_id
+        FROM product_mappings
+        WHERE collectr_name = %s AND product_type = %s
+          AND shopify_product_id IS NOT NULL
+    """, (collectr_name, product_type))
+    if row:
+        return {
+            "shopify_product_id": row["shopify_product_id"],
+            "shopify_product_name": row["shopify_product_name"],
+            "tcgplayer_id": row["tcgplayer_id"],
+        }
+    return None
 
 
 def get_all_mappings(product_type: str = None) -> list[dict]:
@@ -154,8 +179,9 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             (session_id, product_name, tcgplayer_id, product_type,
              set_name, card_number, condition, rarity,
              quantity, market_price, offer_price, unit_cost_basis, is_mapped,
-             is_graded, grade_company, grade_value)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             is_graded, grade_company, grade_value,
+             shopify_product_id, shopify_product_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params_list = [
         (
@@ -171,10 +197,13 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             item["market_price"],
             item["offer_price"],
             item["unit_cost_basis"],
-            item.get("tcgplayer_id") is not None,
+            # is_mapped: true if we have TCGPlayer ID OR a shopify link
+            (item.get("tcgplayer_id") is not None or item.get("shopify_product_id") is not None),
             item.get("is_graded", False),
             item.get("grade_company") or None,
             item.get("grade_value") or None,
+            item.get("shopify_product_id") or None,
+            item.get("shopify_product_name") or None,
         )
         for item in items
     ]

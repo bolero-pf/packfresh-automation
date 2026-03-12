@@ -2672,7 +2672,7 @@
                                 ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="findInStore(this, ' + i.tcgplayer_id + ', \'' + (i.product_name||'').replace(/'/g,'').replace(/"/g,'') + '\')" title="Search your store cache to find this listing">&#x1F50D; Find</button>'
                                 : ''}
                             ${!found && i.tcgplayer_id
-                                ? '<button class="btn btn-sm btn-primary" id="cl-btn-' + i.tcgplayer_id + '" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="createListingFromStore(' + i.tcgplayer_id + ', this)">+ List</button>'
+                                ? '<button class="btn btn-sm btn-primary" id="cl-btn-' + i.tcgplayer_id + '" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="createListingFromStore(' + i.tcgplayer_id + ', this, \'' + i.id + '\', ' + (i.offer_price||0) + ')">+ List</button>'
                                 : ''}
                         </td>
                     </tr>`;
@@ -2753,7 +2753,7 @@
         doSearch(productName);
     }
 
-    async function createListingFromStore(tcgplayerId, btn) {
+    async function createListingFromStore(tcgplayerId, btn, itemId, offerPrice) {
         if (!tcgplayerId) { alert('No TCGPlayer ID — cannot create listing'); return; }
         const origText = btn.innerHTML;
         btn.disabled = true;
@@ -2761,10 +2761,13 @@
         btn.title = 'Creating listing... this takes ~30-60s for image processing';
 
         try {
+            const body = { tcgplayer_id: tcgplayerId, quantity: 0 };
+            if (itemId) body.item_id = itemId;
+            if (offerPrice) body.offer_price = offerPrice;
             const r = await fetch('/api/create-listing', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tcgplayer_id: tcgplayerId, quantity: 0 }),
+                body: JSON.stringify(body),
             });
             const d = await r.json();
             if (!r.ok) {

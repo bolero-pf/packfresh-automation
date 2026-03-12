@@ -204,8 +204,12 @@ def upload_collectr():
         offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
         unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
 
-        # Check for cached tcgplayer_id mapping
+        # Check for cached tcgplayer_id mapping and/or shopify link
         tcgplayer_id = intake.get_cached_mapping(item.product_name, item.product_type)
+        shopify_link = intake.get_cached_shopify_link(item.product_name, item.product_type)
+        # If shopify link has a tcgplayer_id that our mapping table missed, use it
+        if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
+            tcgplayer_id = shopify_link["tcgplayer_id"]
 
         processed.append({
             "product_name": item.product_name,
@@ -222,6 +226,8 @@ def upload_collectr():
             "is_graded": getattr(item, "is_graded", False),
             "grade_company": getattr(item, "grade_company", "") or None,
             "grade_value": getattr(item, "grade_value", "") or None,
+            "shopify_product_id": shopify_link["shopify_product_id"] if shopify_link else None,
+            "shopify_product_name": shopify_link["shopify_product_name"] if shopify_link else None,
         })
 
     # Add items to session
@@ -302,6 +308,9 @@ def upload_collectr_html():
         unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
 
         tcgplayer_id = intake.get_cached_mapping(item.product_name, item.product_type)
+        shopify_link = intake.get_cached_shopify_link(item.product_name, item.product_type)
+        if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
+            tcgplayer_id = shopify_link["tcgplayer_id"]
 
         processed.append({
             "product_name": item.product_name,
@@ -318,6 +327,8 @@ def upload_collectr_html():
             "is_graded": getattr(item, "is_graded", False),
             "grade_company": getattr(item, "grade_company", "") or None,
             "grade_value": getattr(item, "grade_value", "") or None,
+            "shopify_product_id": shopify_link["shopify_product_id"] if shopify_link else None,
+            "shopify_product_name": shopify_link["shopify_product_name"] if shopify_link else None,
         })
 
     intake.add_items_to_session(session["id"], processed)
@@ -438,6 +449,9 @@ def upload_generic_csv():
 
         # Check for cached tcgplayer_id mapping (or use the one from CSV)
         tcgplayer_id = item.tcgplayer_id or intake.get_cached_mapping(item.product_name, item.product_type)
+        shopify_link = intake.get_cached_shopify_link(item.product_name, item.product_type)
+        if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
+            tcgplayer_id = shopify_link["tcgplayer_id"]
 
         processed.append({
             "product_name": item.product_name,
@@ -454,6 +468,8 @@ def upload_generic_csv():
             "is_graded": getattr(item, "is_graded", False),
             "grade_company": getattr(item, "grade_company", "") or None,
             "grade_value": getattr(item, "grade_value", "") or None,
+            "shopify_product_id": shopify_link["shopify_product_id"] if shopify_link else None,
+            "shopify_product_name": shopify_link["shopify_product_name"] if shopify_link else None,
         })
 
     # Add items to session
@@ -860,26 +876,32 @@ def accept_price_no_link(item_id):
     offer_price = market_price * item["quantity"] * (offer_pct / Decimal("100"))
     unit_cost_basis = offer_price / item["quantity"] if item["quantity"] > 0 else Decimal("0")
 
-    if tcgplayer_id:
-        updated = db.execute_returning("""
-            UPDATE intake_items
-            SET is_mapped = TRUE,
-                market_price = %s, offer_price = %s, unit_cost_basis = %s,
-                tcgplayer_id = %s
-            WHERE id = %s
-            RETURNING *
-        """, (market_price, offer_price, unit_cost_basis, tcgplayer_id, item_id))
-    else:
-        updated = db.execute_returning("""
-            UPDATE intake_items
-            SET is_mapped = TRUE,
-                market_price = %s, offer_price = %s, unit_cost_basis = %s
-            WHERE id = %s
-            RETURNING *
-        """, (market_price, offer_price, unit_cost_basis, item_id))
+    updated = db.execute_returning("""
+        UPDATE intake_items
+        SET is_mapped = TRUE,
+            market_price = %s, offer_price = %s, unit_cost_basis = %s,
+            tcgplayer_id = COALESCE(%s, tcgplayer_id),
+            shopify_product_id = COALESCE(%s::bigint, shopify_product_id),
+            shopify_product_name = COALESCE(%s, shopify_product_name)
+        WHERE id = %s
+        RETURNING *
+    """, (market_price, offer_price, unit_cost_basis,
+          tcgplayer_id or None,
+          int(store_product_id) if store_product_id else None,
+          store_product_name or None,
+          item_id))
 
     if not updated:
         return jsonify({"error": "Update failed"}), 500
+
+    # Persist the mapping so future imports of the same product name auto-link
+    intake.save_mapping(
+        item["product_name"],
+        tcgplayer_id or None,
+        item.get("product_type", "sealed"),
+        shopify_product_id=int(store_product_id) if store_product_id else None,
+        shopify_product_name=store_product_name or None,
+    )
 
     intake._recalculate_session_totals(item["session_id"])
     return jsonify({"success": True, "item": _serialize(updated)})
@@ -1791,6 +1813,7 @@ def proxy_create_listing():
 
     data = request.get_json() or {}
     tcgplayer_id = data.get("tcgplayer_id")
+    item_id = data.get("item_id")  # optional — if provided, save resulting product ID back
     if not tcgplayer_id:
         return jsonify({"error": "tcgplayer_id required"}), 400
 
@@ -1807,7 +1830,33 @@ def proxy_create_listing():
             headers=headers,
             timeout=120,  # enrichment can take ~30-60s (image processing)
         )
-        return jsonify(resp.json()), resp.status_code
+        result = resp.json()
+
+        # If creation succeeded and we know which intake item triggered this,
+        # save the Shopify product ID back to intake_items and product_mappings
+        if resp.ok and item_id and result.get("product_id"):
+            shopify_product_id = int(result["product_id"])
+            product_name = result.get("title", "")
+            try:
+                db.execute("""
+                    UPDATE intake_items
+                    SET shopify_product_id = %s
+                    WHERE id = %s
+                """, (shopify_product_id, item_id))
+                # Also persist in product_mappings for future imports
+                item = db.query_one("SELECT product_name, product_type FROM intake_items WHERE id = %s", (item_id,))
+                if item:
+                    intake.save_mapping(
+                        item["product_name"],
+                        int(tcgplayer_id),
+                        item.get("product_type", "sealed"),
+                        shopify_product_id=shopify_product_id,
+                        shopify_product_name=product_name or item["product_name"],
+                    )
+            except Exception as save_err:
+                app.logger.warning(f"Could not persist shopify_product_id after create-listing: {save_err}")
+
+        return jsonify(result), resp.status_code
     except _requests.Timeout:
         return jsonify({"error": "Listing creation timed out — it may still be processing"}), 504
     except Exception as e:
