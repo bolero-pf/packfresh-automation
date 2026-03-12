@@ -903,6 +903,8 @@
     // ═══════════════════════════════ ESCAPE KEY & CLICK-OUTSIDE ═══════════════════════════════
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
+            // editCondition mounts its own overlay at z-index:9999 with its own keydown — skip global handler if it's present
+            if (document.querySelector('[data-ec-overlay]')) return;
             // Close topmost modal — check in reverse z-order
             const tp = document.getElementById('themed-prompt-overlay');
             if (tp.classList.contains('active')) { tp.classList.remove('active'); return; }
@@ -2955,89 +2957,112 @@
     }
 
     async function editCondition(itemId, sessionId, currentCond, tcgplayerId) {
-        // Fetch prices if we have a TCGPlayer ID so tiles show market values
+        // Show overlay immediately with loading state — don't await fetch before showing UI
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+        overlay.setAttribute('data-ec-overlay', '1');
+
         let variants = {};
+        let selectedCond = currentCond;
+        let _ecResolve = null;
+
+        function _ecClose() {
+            document.removeEventListener('keydown', _ecKeydown);
+            if (document.body.contains(overlay)) document.body.removeChild(overlay);
+        }
+        function _ecKeydown(e) {
+            if (e.key === 'Escape') { _ecClose(); if (_ecResolve) _ecResolve(null); }
+        }
+        document.addEventListener('keydown', _ecKeydown);
+
+        function renderTiles() {
+            const tiles = ['NM','LP','MP','HP','DMG'].map(cond => {
+                const s = COND_STYLES[cond];
+                const price = variants[cond];
+                const isSel = cond === selectedCond;
+                const border = isSel ? `3px solid ${s.color}` : '2px solid var(--border)';
+                return `<div data-cond="${cond}" style="background:${s.bg};color:${s.color};border:${border};border-radius:8px;padding:12px 8px;text-align:center;cursor:pointer;transition:border 0.1s;">
+                    <div style="font-size:0.95rem;font-weight:700;">${cond}</div>
+                    <div style="font-size:0.72rem;opacity:0.85;margin-top:2px;">${s.label}</div>
+                    ${price != null ? `<div style="font-size:1rem;font-weight:700;margin-top:6px;">$${price.toFixed(2)}</div>` : `<div style="font-size:0.8rem;opacity:0.5;margin-top:6px;">—</div>`}
+                </div>`;
+            }).join('');
+            const selPrice = variants[selectedCond];
+            overlay.innerHTML = `
+                <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:380px;max-width:95vw;">
+                    <div style="font-size:1rem;font-weight:700;margin-bottom:16px;">🏷 Change Condition</div>
+                    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">${tiles}</div>
+                    <div style="display:flex;gap:8px;margin-top:4px;">
+                        <button id="ec-confirm" class="btn btn-primary" style="flex:1;">
+                            Set ${selectedCond}${selPrice != null ? ' — $'+selPrice.toFixed(2) : ''}
+                        </button>
+                        <button id="ec-cancel" class="btn btn-secondary">Cancel</button>
+                    </div>
+                </div>`;
+            overlay.querySelectorAll('[data-cond]').forEach(el => {
+                el.addEventListener('click', () => { selectedCond = el.dataset.cond; renderTiles(); });
+            });
+            document.getElementById('ec-confirm').addEventListener('click', async () => {
+                _ecClose();
+                if (_ecResolve) _ecResolve(selectedCond);
+                if (selectedCond === currentCond) return;
+                try {
+                    const r = await fetch(`/api/intake/item/${itemId}/update-condition`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ condition: selectedCond, session_id: sessionId }),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) { alert(d.error); return; }
+                    viewSession(sessionId, true);
+                } catch(err) { alert(err.message); }
+            });
+            document.getElementById('ec-cancel').addEventListener('click', () => {
+                _ecClose();
+                if (_ecResolve) _ecResolve(null);
+            });
+        }
+
+        // Show loading state immediately
+        overlay.innerHTML = `
+            <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:380px;max-width:95vw;">
+                <div style="font-size:1rem;font-weight:700;margin-bottom:16px;">🏷 Change Condition</div>
+                <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">
+                    ${['NM','LP','MP','HP','DMG'].map(cond => {
+                        const s = COND_STYLES[cond];
+                        const isSel = cond === selectedCond;
+                        const border = isSel ? `3px solid ${s.color}` : '2px solid var(--border)';
+                        return `<div style="background:${s.bg};color:${s.color};border:${border};border-radius:8px;padding:12px 8px;text-align:center;">
+                            <div style="font-size:0.95rem;font-weight:700;">${cond}</div>
+                            <div style="font-size:0.72rem;opacity:0.85;margin-top:2px;">${s.label}</div>
+                            <div style="font-size:0.8rem;opacity:0.4;margin-top:6px;">…</div>
+                        </div>`;
+                    }).join('')}
+                </div>
+                <div style="font-size:0.8rem;color:var(--text-dim);text-align:center;">Loading prices…</div>
+            </div>`;
+        document.body.appendChild(overlay);
+
+        // Now fetch prices in the background and re-render with them
         if (tcgplayerId) {
             try {
                 const pr = await fetch('/api/ppt/lookup-card', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ tcgplayer_id: parseInt(tcgplayerId) }),
                 });
                 if (pr.ok) {
                     const pd = await pr.json();
-                    // variants[printing][condition] = price
                     const primary = pd.primary_printing || Object.keys(pd.variants || {})[0];
                     variants = (pd.variants || {})[primary] || {};
                 }
-            } catch(e) { /* prices unavailable — show tiles without prices */ }
+            } catch(e) { /* show tiles without prices */ }
         }
+        renderTiles();
 
         return new Promise(resolve => {
-            // Build modal content
-            const overlay = document.createElement('div');
-            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
-
-            let selectedCond = currentCond;
-
-            function render() {
-                const tiles = ['NM','LP','MP','HP','DMG'].map(cond => {
-                    const s = COND_STYLES[cond];
-                    const price = variants[cond];
-                    const isSel = cond === selectedCond;
-                    const border = isSel ? `3px solid ${s.color}` : '2px solid var(--border)';
-                    return `<div data-cond="${cond}" style="background:${s.bg};color:${s.color};border:${border};border-radius:8px;padding:12px 8px;text-align:center;cursor:pointer;transition:border 0.1s;">
-                        <div style="font-size:0.95rem;font-weight:700;">${cond}</div>
-                        <div style="font-size:0.72rem;opacity:0.85;margin-top:2px;">${s.label}</div>
-                        ${price != null ? `<div style="font-size:1rem;font-weight:700;margin-top:6px;">$${price.toFixed(2)}</div>` : `<div style="font-size:0.8rem;opacity:0.5;margin-top:6px;">—</div>`}
-                    </div>`;
-                }).join('');
-
-                const selPrice = variants[selectedCond];
-                overlay.innerHTML = `
-                    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:380px;max-width:95vw;">
-                        <div style="font-size:1rem;font-weight:700;margin-bottom:16px;">🏷 Change Condition</div>
-                        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">${tiles}</div>
-                        <div style="display:flex;gap:8px;margin-top:4px;">
-                            <button id="ec-confirm" class="btn btn-primary" style="flex:1;">
-                                Set ${selectedCond}${selPrice != null ? ' — $'+selPrice.toFixed(2) : ''}
-                            </button>
-                            <button id="ec-cancel" class="btn btn-secondary">Cancel</button>
-                        </div>
-                    </div>`;
-
-                overlay.querySelectorAll('[data-cond]').forEach(el => {
-                    el.addEventListener('click', () => { selectedCond = el.dataset.cond; render(); });
-                });
-                document.getElementById('ec-confirm').addEventListener('click', async () => {
-                    document.removeEventListener('keydown', _ecKeydown);
-                    document.body.removeChild(overlay);
-                    if (selectedCond === currentCond) return resolve(null);
-                    try {
-                        const r = await fetch(`/api/intake/item/${itemId}/update-condition`, {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({ condition: selectedCond, session_id: sessionId }),
-                        });
-                        const d = await r.json();
-                        if (!r.ok) { alert(d.error); return resolve(null); }
-                        viewSession(sessionId, true);
-                        resolve(selectedCond);
-                    } catch(err) { alert(err.message); resolve(null); }
-                });
-                document.getElementById('ec-cancel').addEventListener('click', () => {
-                    document.removeEventListener('keydown', _ecKeydown);
-                    document.body.removeChild(overlay);
-                    resolve(null);
-                });
-            }
-
-            // Handle Escape key for this overlay
-            function _ecKeydown(e) {
-                if (e.key === 'Escape') {
-                    document.removeEventListener('keydown', _ecKeydown);
-                    if (document.body.contains(overlay)) document.body.removeChild(overlay);
-                    resolve(null);
+            _ecResolve = resolve;
+            // dummy — resolve is captured above via _ecResolve
+            // Escape and button handlers call _ecResolve directly
+            void 0;
                 }
             }
             document.addEventListener('keydown', _ecKeydown);
