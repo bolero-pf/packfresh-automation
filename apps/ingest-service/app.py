@@ -1808,9 +1808,11 @@ def shopify_session_store_check(session_id):
     cache_mgr.check_and_refresh_if_stale()
 
     items = intake.get_session_items(session_id)
-    linked = [i for i in items if i.get("tcgplayer_id") and i.get("item_status") in ("good", "damaged")]
+    active_items = [i for i in items if i.get("item_status") in ("good", "damaged")]
+    linked = [i for i in active_items if i.get("tcgplayer_id")]
+    unlinked = [i for i in active_items if not i.get("tcgplayer_id")]
     tcg_ids = list(set(i["tcgplayer_id"] for i in linked))
-    if not tcg_ids:
+    if not tcg_ids and not unlinked:
         return jsonify({"items": [], "cache_hit_rate": 0})
     placeholders = ",".join(["%s"] * len(tcg_ids))
 
@@ -1884,6 +1886,20 @@ def shopify_session_store_check(session_id):
             "store_product_id": sd["shopify_product_id"] if sd else None,
             "damaged_variant_exists": damaged_variant_exists if is_damaged_item else None,
             "store_note": store_note,
+        })
+
+    # Append unlinked items — they can't be store-checked but should appear as not-in-store
+    # so their market_price is included in the combined store value calculation
+    for item in unlinked:
+        result_items.append({
+            "item_id": item["id"], "product_name": item.get("product_name"), "tcgplayer_id": None,
+            "offer_price": float(item.get("offer_price") or 0), "market_price": float(item.get("market_price") or 0),
+            "quantity": item.get("quantity", 1), "item_status": item.get("item_status", "good"),
+            "in_store": False,
+            "store_title": None, "store_price": None, "store_qty": None,
+            "store_handle": None, "store_product_id": None,
+            "damaged_variant_exists": None, "store_note": "Not linked to TCGPlayer",
+            "breakdown": None,
         })
 
     hit = sum(1 for i in result_items if i["in_store"])
