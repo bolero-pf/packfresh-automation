@@ -290,6 +290,8 @@ class CacheManager:
                 logger.warning(f"Could not fetch staleness signals: {e}")
 
             upserted = 0
+            seen_keys: set[tuple] = set()  # (shopify_product_id, shopify_variant_id)
+
             for page_products, _ in self.shopify.iter_products_pages(batch_size=100):
                 rows_to_upsert = (
                     page_products if self.cache_all_products
@@ -298,6 +300,29 @@ class CacheManager:
                 for p in rows_to_upsert:
                     self._upsert_product(p)
                     upserted += 1
+                    seen_keys.add((str(p["shopify_product_id"]), str(p["variant_id"])))
+
+            # Purge rows for products that no longer exist in Shopify
+            if seen_keys and self.table_prefix == "inventory_":
+                try:
+                    existing = self.db.query(
+                        f"SELECT shopify_product_id, shopify_variant_id FROM {self._cache_table}"
+                    )
+                    stale = [
+                        (r["shopify_product_id"], r["shopify_variant_id"])
+                        for r in existing
+                        if (str(r["shopify_product_id"]), str(r["shopify_variant_id"])) not in seen_keys
+                    ]
+                    if stale:
+                        for pid, vid in stale:
+                            self.db.execute(
+                                f"DELETE FROM {self._cache_table} "
+                                f"WHERE shopify_product_id = %s AND shopify_variant_id = %s",
+                                (pid, vid)
+                            )
+                        logger.info(f"[{self._cache_table}] purged {len(stale)} deleted product(s)")
+                except Exception as e:
+                    logger.warning(f"[{self._cache_table}] stale row purge failed: {e}")
 
             if self.table_prefix == "":
                 # Intake-specific: backfill sealed_cogs linkage

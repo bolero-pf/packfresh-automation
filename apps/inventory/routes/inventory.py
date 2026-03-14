@@ -1022,7 +1022,8 @@ async function runSearch(q){{
     dd.innerHTML = items.map(it=>{{
       const id  = it.tcgPlayerId || it.tcgplayer_id || '';
       const p   = it.unopenedPrice || it.prices?.market || 0;
-      return `<div class="dd-item" onmousedown="event.preventDefault();selectItem(${{JSON.stringify(String(id))}})">
+      if (!id) return '';
+      return `<div class="dd-item" onclick="selectItem(${{JSON.stringify(String(id))}})">
         ${{esc(it.name)}}
         <span class="price">$${{(+p).toFixed(2)}}</span>
         <span class="set">${{esc(it.setName||'')}}</span>
@@ -1042,7 +1043,8 @@ function selectItem(tcgId){{
 }}
 
 document.addEventListener('click', e=>{{
-  if(!document.getElementById('name-search').contains(e.target))
+  const wrap = document.querySelector('.search-wrap');
+  if(wrap && !wrap.contains(e.target))
     document.getElementById('dd').style.display='none';
 }});
 
