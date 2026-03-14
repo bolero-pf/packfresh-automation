@@ -960,6 +960,7 @@ let _recipeTarget = null;   // {{tcgId, name, variantId, variantId}}
 let _recipeComponents = [];  // each item has component_type: 'sealed'|'promo'
 let _recipeVariantId = null;
 let _storePrices = {{}};
+let _pendingListings = new Set(); // TCG IDs listed this session, not yet in cache
 let _ingestUrl = "{ingest_url}";
 
 // ══════════════════════════════════════════════════════════════════
@@ -1396,6 +1397,7 @@ async function openRecipeEditor(tcgId, productName) {{
   _recipeComponents = [];
   _recipeVariantId = null;
   _storePrices = {{}};
+  _pendingListings = new Set();
 
   const body = document.getElementById('recipe-modal-body');
   document.getElementById('recipe-modal-title').textContent = productName || 'Breakdown Recipe';
@@ -1716,9 +1718,11 @@ function reRenderComponents() {{
     const storeCell = hasStore
       ? `<td>${{sp
           ? `<span style="color:var(--green)">$${{parseFloat(sp.shopify_price).toFixed(2)}}${{sp.shopify_qty===0?' <small style="color:var(--red)">qty 0</small>':''}}</span>`
-          : (c.tcgplayer_id && !isPromo
-              ? `<button class="btn btn-sm btn-primary" style="font-size:11px;padding:1px 5px;" onclick="reCreateListing(${{c.tcgplayer_id}},'component',this)">+ List</button>`
-              : '<span style="color:var(--text-dim)">—</span>')}}</td>`
+          : (_pendingListings.has(String(c.tcgplayer_id))
+              ? '<span style="color:var(--green);font-size:11px">✓ Draft</span>'
+              : (c.tcgplayer_id && !isPromo
+                  ? `<button class="btn btn-sm btn-primary" style="font-size:11px;padding:1px 5px;" onclick="reCreateListing(${{c.tcgplayer_id}},'component',this)">+ List</button>`
+                  : '<span style="color:var(--text-dim)">—</span>'))}}</td>`
       : '';
     return `<tr>
       <td>
@@ -1769,11 +1773,9 @@ async function reCreateListing(tcgId, context, btn) {{
       alert('Failed: ' + (d.error || 'Unknown'));
       return;
     }}
-    const span = document.createElement('span');
-    span.style.cssText = 'color:var(--green);font-size:11px;';
-    span.textContent = '✓ Draft';
-    btn.replaceWith(span);
-    // Refresh store prices so the new listing shows up
+    // Track locally so re-renders don't flip back to "+ List" before cache syncs
+    _pendingListings.add(String(tcgId));
+    // Refresh store prices (will re-render, but _pendingListings keeps ✓ Draft visible)
     _storePrices = {{}};
     fetchRecipeStorePrices();
   }} catch(e) {{
