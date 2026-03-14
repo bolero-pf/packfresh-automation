@@ -970,9 +970,10 @@ hr{{border:none;border-top:1px solid var(--border);margin:16px 0;}}
     <div class="lbl">Search by name</div>
     <div class="row">
       <div class="search-wrap">
-        <input type="text" id="name-search" placeholder="e.g. Prismatic Evolutions ETB…" oninput="onSearch()" autocomplete="off">
+        <input type="text" id="name-search" placeholder="e.g. Prismatic Evolutions ETB…" oninput="onSearch()" onkeydown="if(event.key==='Enter')doNameSearch()" autocomplete="off">
         <div class="dd" id="dd"></div>
       </div>
+      <button class="btn" onclick="doNameSearch()">Search</button>
     </div>
     <hr>
     <div class="lbl">Or enter TCGPlayer ID directly</div>
@@ -1005,7 +1006,14 @@ function onSearch(){{
   const q = document.getElementById('name-search').value.trim();
   const dd = document.getElementById('dd');
   if(q.length < 3){{ dd.style.display='none'; return; }}
-  _timer = setTimeout(()=>runSearch(q), 320);
+  _timer = setTimeout(()=>runSearch(q), 600);
+}}
+
+function doNameSearch(){{
+  clearTimeout(_timer);
+  const q = document.getElementById('name-search').value.trim();
+  if(q.length < 2){{ return; }}
+  runSearch(q);
 }}
 
 async function runSearch(q){{
@@ -1023,7 +1031,7 @@ async function runSearch(q){{
       const id  = it.tcgPlayerId || it.tcgplayer_id || '';
       const p   = it.unopenedPrice || it.prices?.market || 0;
       if (!id) return '';
-      return `<div class="dd-item" onmousedown="event.preventDefault();event.stopPropagation();selectItem(${{JSON.stringify(String(id))}})">
+      return `<div class="dd-item" onpointerdown="event.preventDefault();selectItem(${{JSON.stringify(String(id))}})">
         ${{esc(it.name)}}
         <span class="price">$${{(+p).toFixed(2)}}</span>
         <span class="set">${{esc(it.setName||'')}}</span>
@@ -1034,15 +1042,15 @@ async function runSearch(q){{
   }}
 }}
 
-// Fix #9: select fills TCG ID and auto-previews
 function selectItem(tcgId){{
-  document.getElementById('dd').style.display='none';
+  const dd = document.getElementById('dd');
+  dd.style.display='none';
   document.getElementById('name-search').value='';
   document.getElementById('tcg-input').value = tcgId;
   doPreview();
 }}
 
-document.addEventListener('mousedown', e=>{{
+document.addEventListener('pointerdown', e=>{{
   const wrap = document.querySelector('.search-wrap');
   if(wrap && !wrap.contains(e.target))
     document.getElementById('dd').style.display='none';
