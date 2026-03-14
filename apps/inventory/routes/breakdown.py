@@ -517,11 +517,12 @@ def save_variant(tcg_id):
 
     for i, comp in enumerate(components):
         db.execute("""INSERT INTO sealed_breakdown_components
-            (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, display_order)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+            (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, display_order, component_type)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
             (vid, comp.get("tcgplayer_id"), comp.get("product_name",""),
              comp.get("set_name",""), int(comp.get("quantity_per_parent", comp.get("quantity",1))),
-             Decimal(str(comp.get("market_price",0))), i))
+             Decimal(str(comp.get("market_price",0))), i,
+             comp.get("component_type", "sealed")))
 
     db.execute("UPDATE sealed_breakdown_variants SET component_count=%s WHERE id=%s", (len(components), vid))
     # Recalc best_variant_market
@@ -574,6 +575,25 @@ def search_ppt():
         details = e.args[2] if len(e.args) > 2 else {}
         retry = details.get("retry_after", 60) if isinstance(details, dict) else 60
         return jsonify({"results": [], "error": str(e.args[0]) if e.args else str(e), "retry_after": retry}), 429
+
+@bp.route("/api/cache/search-cards")
+@requires_auth
+def search_cards():
+    """Search raw cards via PPT — used for promo components in breakdown recipes.
+    Returns NM condition price as market_price."""
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"results": []})
+    if INGEST_URL:
+        data, err = _ingest_post("/api/ppt/search-cards", {"query": q, "limit": 5})
+        if not err:
+            for r in (data.get("results") or []):
+                if not r.get("market_price"):
+                    conds = (r.get("prices") or {}).get("conditions") or {}
+                    nm = conds.get("Near Mint") or conds.get("NM") or {}
+                    r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
+            return jsonify(data)
+    return jsonify({"results": [], "error": "PPT not configured"}), 503
 
 @bp.route("/api/store-prices", methods=["POST"])
 @requires_auth
@@ -919,7 +939,7 @@ function themedConfirm(title, message, {{ confirmText='Confirm', dangerous=false
 // ══════════════════════════════════════════════════════════════════
 let _allRecs = [];
 let _recipeTarget = null;   // {{tcgId, name, variantId, variantId}}
-let _recipeComponents = [];
+let _recipeComponents = [];  // each item has component_type: 'sealed'|'promo'
 let _recipeVariantId = null;
 let _storePrices = {{}};
 let _ingestUrl = "{ingest_url}";
@@ -1446,9 +1466,9 @@ function renderRecipeModal(cache) {{
             <div style="font-size:12px;color:var(--text-dim)">${{v.component_count}} components · $${{parseFloat(v.total_component_market||0).toFixed(2)}}</div>
             ${{v.notes ? `<div style="font-size:11px;color:var(--amber)">📝 ${{v.notes}}</div>` : ''}}
             <div style="display:flex;gap:6px;margin-top:8px">
-              <button class="btn btn-primary btn-sm" onclick="loadVariantIntoEditor(${{JSON.stringify(v).replace(/"/g,'&quot;')}})">↓ Edit</button>
+              <button class="btn btn-primary btn-sm" onclick="loadVariantIntoEditor(${{JSON.stringify(v).replace(/\"/g,'&quot;')}})">↓ Edit</button>
               <button class="btn btn-sm" style="color:var(--red);border:1px solid var(--border);background:none"
-                onclick="deleteVariant('${{v.id}}','${{v.variant_name.replace(/'/g,'').replace(/"/g,'')}}')">🗑</button>
+                onclick="deleteVariant('${{v.id}}','${{v.variant_name.replace(/'/g,'').replace(/\"/g,'')}}')">🗑</button>
             </div>
           </div>
         `).join('')}}
@@ -1463,20 +1483,31 @@ function renderRecipeModal(cache) {{
     </p>
     ${{variantCards}}
     <div style="border-top:1px solid var(--border);padding-top:14px">
-      <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
         <label style="font-size:12px;color:var(--text-dim)">Config name:</label>
         <input type="text" id="re-variant-name" value="Standard" style="width:160px">
         <span id="re-editing-badge" style="display:none;font-size:11px;color:var(--accent);background:var(--surface-2);padding:2px 8px;border-radius:4px">editing</span>
       </div>
-      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
-        <div style="flex:2;min-width:180px">
-          <label style="font-size:12px;color:var(--text-dim)">Search PPT for component</label>
-          <input type="text" id="re-search" placeholder="e.g. Booster Pack, ETB…"
-                 style="width:100%;margin-top:4px" onkeydown="if(event.key==='Enter') reSearch()">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        <div style="border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">📦 Sealed</div>
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <input type="text" id="re-search" placeholder="Booster Box, ETB…"
+                   style="flex:1;font-size:12px" onkeydown="if(event.key==='Enter') reSearch()">
+            <button class="btn btn-primary btn-sm" onclick="reSearch()" style="height:30px;font-size:11px">Search</button>
+          </div>
+          <div id="re-search-results" style="max-height:130px;overflow-y:auto"></div>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="reSearch()" style="height:36px">Search</button>
+        <div style="border:1px solid rgba(79,125,249,0.4);border-radius:8px;padding:12px">
+          <div style="font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">✨ Promos <span style="color:var(--text-dim);font-weight:400;text-transform:none">(NM price)</span></div>
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <input type="text" id="re-promo-search" placeholder="Pikachu Promo, 187/XY…"
+                   style="flex:1;font-size:12px" onkeydown="if(event.key==='Enter') rePromoSearch()">
+            <button class="btn btn-sm" onclick="rePromoSearch()" style="height:30px;font-size:11px;border-color:var(--accent);color:var(--accent)">Search</button>
+          </div>
+          <div id="re-promo-results" style="max-height:130px;overflow-y:auto"></div>
+        </div>
       </div>
-      <div id="re-search-results" style="max-height:160px;overflow-y:auto;margin-bottom:10px"></div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <h4 style="font-size:13px">Components</h4>
         <div id="re-value-summary" style="font-size:12px;color:var(--text-dim)"></div>
@@ -1504,6 +1535,7 @@ function loadVariantIntoEditor(v) {{
     tcgplayer_id: c.tcgplayer_id,
     market_price: parseFloat(c.market_price)||0,
     quantity: parseInt(c.quantity_per_parent)||1,
+    component_type: c.component_type || 'sealed',
   }}));
   const nameEl = document.getElementById('re-variant-name');
   if (nameEl) nameEl.value = v.variant_name;
@@ -1540,15 +1572,46 @@ async function reSearch() {{
     const results = d.results || [];
     if (!results.length) {{ panel.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No results</p>'; return; }}
     window._reSearchResults = {{}};
-    panel.innerHTML = results.slice(0,15).map((p, idx) => {{
+    panel.innerHTML = results.slice(0,5).map((p, idx) => {{
       const name = p.name||p.productName||'';
       const setName = p.setName||p.set_name||'';
       const tcgId = p.tcgplayer_id||p.tcgplayerId||p.tcgPlayerId||p.id||0;
       const price = p.unopenedPrice||p.marketPrice||0;
-      window._reSearchResults[idx] = {{ tcgId, name, setName, price }};
+      window._reSearchResults[idx] = {{ tcgId, name, setName, price, component_type: 'sealed' }};
       return `<div class="search-result" onclick="reAddByIdx(${{idx}})">
         <strong style="font-size:13px">${{name}}</strong>
-        <br><small style="color:var(--text-dim)">${{setName}} · TCG#${{tcgId}} · $${{(price||0).toFixed(2)}}</small>
+        <br><small style="color:var(--text-dim)">${{setName}} · $${{(price||0).toFixed(2)}}</small>
+      </div>`;
+    }}).join('');
+  }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
+}}
+
+async function rePromoSearch() {{
+  const q = document.getElementById('re-promo-search')?.value.trim();
+  if (!q) return;
+  const panel = document.getElementById('re-promo-results');
+  panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+  try {{
+    const r = await fetch(`/inventory/breakdown/api/cache/search-cards?q=${{encodeURIComponent(q)}}`);
+    const d = await r.json();
+    if (r.status === 429 || (d.error && !d.results?.length)) {{
+      panel.innerHTML = `<div class="alert alert-warning" style="font-size:12px">⚠ ${{d.error || 'Rate limited — try again shortly.'}}</div>`;
+      return;
+    }}
+    if (!r.ok) {{ panel.innerHTML = `<div class="alert alert-error">${{d.error}}</div>`; return; }}
+    const results = d.results || [];
+    if (!results.length) {{ panel.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No results</p>'; return; }}
+    window._rePromoResults = {{}};
+    panel.innerHTML = results.slice(0,5).map((p, idx) => {{
+      const name = p.name||p.productName||'';
+      const setName = p.setName||p.set_name||'';
+      const tcgId = p.tcgPlayerId||p.tcgplayer_id||p.id||0;
+      const nmCond = (p.prices?.conditions||{{}})['Near Mint'] || {{}};
+      const price = parseFloat(p.market_price) || parseFloat(nmCond.price) || parseFloat(p.prices?.market) || 0;
+      window._rePromoResults[idx] = {{ tcgId, name, setName, price, component_type: 'promo' }};
+      return `<div class="search-result" onclick="reAddPromoByIdx(${{idx}})">
+        <strong style="font-size:13px">${{name}}</strong>
+        <br><small style="color:var(--text-dim)">${{setName}} · NM $${{price.toFixed(2)}}</small>
       </div>`;
     }}).join('');
   }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
@@ -1556,18 +1619,25 @@ async function reSearch() {{
 
 function reAddByIdx(idx) {{
   const r = (window._reSearchResults||{{}})[idx];
-  if (r) reAdd(r.tcgId, r.name, r.setName, r.price);
+  if (r) reAdd(r.tcgId, r.name, r.setName, r.price, 'sealed');
 }}
 
-function reAdd(tcgId, name, setName, price) {{
-  const existing = _recipeComponents.find(c => c.tcgplayer_id && c.tcgplayer_id === tcgId);
+function reAddPromoByIdx(idx) {{
+  const r = (window._rePromoResults||{{}})[idx];
+  if (r) reAdd(r.tcgId, r.name, r.setName, r.price, 'promo');
+}}
+
+function reAdd(tcgId, name, setName, price, componentType) {{
+  const existing = _recipeComponents.find(c => c.tcgplayer_id && c.tcgplayer_id === tcgId && c.component_type === componentType);
   if (existing) {{ existing.quantity += 1; }}
-  else {{ _recipeComponents.push({{ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1 }}); }}
+  else {{ _recipeComponents.push({{ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1, component_type: componentType || 'sealed' }}); }}
   reRenderComponents();
   fetchRecipeStorePrices();
-  document.getElementById('re-search-results').innerHTML = '';
-  document.getElementById('re-search').value = '';
-  document.getElementById('re-search').focus();
+  const resultEl = componentType === 'promo' ? 're-promo-results' : 're-search-results';
+  const inputEl  = componentType === 'promo' ? 're-promo-search' : 're-search';
+  document.getElementById(resultEl).innerHTML = '';
+  document.getElementById(inputEl).value = '';
+  document.getElementById(inputEl).focus();
 }}
 
 async function fetchRecipeStorePrices() {{
@@ -1590,6 +1660,9 @@ function reRenderComponents() {{
   const el = document.getElementById('re-components-list');
   const summary = document.getElementById('re-value-summary');
   if (!el) return;
+
+  const sealedComps = _recipeComponents.filter(c => c.component_type !== 'promo');
+  const promoComps  = _recipeComponents.filter(c => c.component_type === 'promo');
   const totalMkt = _recipeComponents.reduce((s,c) => s+(parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
   const storeComps = _recipeComponents.filter(c => c.tcgplayer_id && _storePrices[c.tcgplayer_id]);
   const totalStore = storeComps.reduce((s,c) => s+(_storePrices[c.tcgplayer_id].shopify_price||0)*(parseInt(c.quantity)||1), 0);
@@ -1599,10 +1672,14 @@ function reRenderComponents() {{
     const parentEntry = parentId ? _storePrices[String(parentId)] : null;
     const parentStore = parentEntry ? parseFloat(parentEntry.shopify_price)||0 : 0;
     let sh = _recipeComponents.length ? `Market: <strong>$${{totalMkt.toFixed(2)}}</strong>` : '';
+    if (promoComps.length) {{
+      const promoMkt = promoComps.reduce((s,c) => s+(parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
+      sh += ` <span style="color:var(--accent);font-size:11px">(incl. $${{promoMkt.toFixed(2)}} promos)</span>`;
+    }}
     if (totalStore > 0) {{
       const diff = parentStore > 0 ? totalStore - parentStore : null;
       const col = diff !== null ? (diff >= 0 ? 'var(--green)' : diff >= -parentStore*0.1 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
-      const diffStr = diff !== null ? ` <small style="color:${{diff>=0?'var(--green)':'var(--red)'}}">(${{diff>=0?'+':''}}$${{diff.toFixed(2)}} vs store)</small>` : '';
+      const diffStr = diff !== null ? ` <small style="color:${{diff>=0?'var(--green)':'var(--red)'}}">${{diff>=0?'+':''}}$${{diff.toFixed(2)}} vs store</small>` : '';
       sh += ` · <span style="color:${{col}}">Store: <strong>$${{totalStore.toFixed(2)}}</strong>${{diffStr}}</span>`;
     }}
     summary.innerHTML = sh;
@@ -1612,28 +1689,46 @@ function reRenderComponents() {{
     el.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No components yet.</p>';
     return;
   }}
+
   const hasStore = Object.keys(_storePrices).length > 0;
-  el.innerHTML = `<div style="overflow-x:auto"><table style="font-size:13px"><thead><tr>
-    <th>Component</th><th style="width:70px">Qty</th><th style="width:90px">Market</th>
-    ${{hasStore ? '<th style="width:90px;color:var(--accent)">Store</th>' : ''}}
-    <th style="width:30px"></th>
-  </tr></thead><tbody>` +
-  _recipeComponents.map((c, idx) => {{
+  const renderRows = (comps) => comps.map((c) => {{
+    const realIdx = _recipeComponents.indexOf(c);
     const sp = c.tcgplayer_id ? _storePrices[String(c.tcgplayer_id)] : null;
+    const isPromo = c.component_type === 'promo';
     const storeCell = hasStore
       ? `<td>${{sp
           ? `<span style="color:var(--green)">$${{parseFloat(sp.shopify_price).toFixed(2)}}${{sp.shopify_qty===0?' <small style="color:var(--red)">qty 0</small>':''}}</span>`
           : '<span style="color:var(--text-dim)">—</span>'}}</td>`
       : '';
     return `<tr>
-      <td>${{c.product_name}}<br><small style="color:${{c.tcgplayer_id?'var(--text-dim)':'var(--red)'}}">${{c.tcgplayer_id?'TCG#'+c.tcgplayer_id:'⚠ No TCG ID'}}${{c.set_name?' · '+c.set_name:''}}</small></td>
-      <td><input type="number" value="${{c.quantity}}" min="1" style="width:55px" onchange="_recipeComponents[${{idx}}].quantity=parseInt(this.value)||1;reRenderComponents()"></td>
-      <td><input type="number" value="${{(c.market_price||0).toFixed(2)}}" min="0" step="0.01" style="width:80px" onchange="_recipeComponents[${{idx}}].market_price=parseFloat(this.value)||0;reRenderComponents()"></td>
+      <td>
+        ${{isPromo ? '<span style="font-size:10px;background:rgba(79,125,249,0.15);color:var(--accent);padding:1px 5px;border-radius:3px;margin-right:4px">PROMO</span>' : ''}}
+        ${{c.product_name}}<br>
+        <small style="color:${{c.tcgplayer_id?'var(--text-dim)':'var(--red)'}};">${{c.tcgplayer_id?'TCG#'+c.tcgplayer_id:'⚠ No TCG ID'}}${{c.set_name?' · '+c.set_name:''}}</small>
+      </td>
+      <td><input type="number" value="${{c.quantity}}" min="1" style="width:55px" onchange="_recipeComponents[${{realIdx}}].quantity=parseInt(this.value)||1;reRenderComponents()"></td>
+      <td><input type="number" value="${{(c.market_price||0).toFixed(2)}}" min="0" step="0.01" style="width:80px" onchange="_recipeComponents[${{realIdx}}].market_price=parseFloat(this.value)||0;reRenderComponents()"></td>
       ${{storeCell}}
       <td><button class="btn btn-sm" style="color:var(--red);font-size:11px;padding:2px 6px;border:1px solid var(--border);background:none"
-        onclick="_recipeComponents.splice(${{idx}},1);_storePrices={{}};reRenderComponents()">✕</button></td>
+        onclick="_recipeComponents.splice(${{realIdx}},1);_storePrices={{}};reRenderComponents()">✕</button></td>
     </tr>`;
-  }}).join('') + '</tbody></table></div>';
+  }}).join('');
+
+  let html = `<div style="overflow-x:auto"><table style="font-size:13px"><thead><tr>
+    <th>Component</th><th style="width:70px">Qty</th><th style="width:90px">Market</th>
+    ${{hasStore ? '<th style="width:90px;color:var(--accent)">Store</th>' : ''}}
+    <th style="width:30px"></th>
+  </tr></thead><tbody>`;
+  if (sealedComps.length) {{
+    if (promoComps.length) html += `<tr><td colspan="5" style="font-size:11px;color:var(--text-dim);padding:4px 0;font-weight:600;text-transform:uppercase;letter-spacing:.05em">📦 Sealed</td></tr>`;
+    html += renderRows(sealedComps);
+  }}
+  if (promoComps.length) {{
+    html += `<tr><td colspan="5" style="font-size:11px;color:var(--accent);padding:4px 0;font-weight:600;text-transform:uppercase;letter-spacing:.05em;border-top:1px solid var(--border)">✨ Promos</td></tr>`;
+    html += renderRows(promoComps);
+  }}
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
 }}
 
 async function saveRecipeVariant() {{

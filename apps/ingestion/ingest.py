@@ -489,8 +489,8 @@ def save_variant(tcgplayer_id: int, product_name: str,
     for order, comp in enumerate(components):
         execute("""
             INSERT INTO sealed_breakdown_components
-                (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, notes, display_order)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, notes, display_order, component_type)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             vid,
             comp.get("tcgplayer_id"),
@@ -500,6 +500,7 @@ def save_variant(tcgplayer_id: int, product_name: str,
             Decimal(str(comp.get("market_price", 0))),
             comp.get("notes"),
             order,
+            comp.get("component_type", "sealed"),
         ))
 
     _refresh_cache_totals(cache_id)
