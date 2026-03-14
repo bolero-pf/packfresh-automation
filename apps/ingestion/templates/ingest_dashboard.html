@@ -1515,14 +1515,17 @@ async function forceIngested(sessionId) {
 }
 
 async function pushLive(sessionId) {
-    const approvedCount = _approvedItems.size;
+    const pendingApproved = [..._approvedItems].filter(id => !_pushedItemIds.has(id));
     const totalRows = document.querySelectorAll('tr[data-item-id]').length;
-    const isPartial = approvedCount > 0 && approvedCount < totalRows;
+    const totalPending = totalRows - _pushedItemIds.size; // rows not yet pushed
+    const isPartial = pendingApproved.length > 0 && pendingApproved.length < totalPending;
 
     const confirmMsg = isPartial
-        ? `You have approved ${approvedCount} of ${totalRows} items. Only those ${approvedCount} will be pushed now — the session will be marked "Partially Ingested" and you can push the rest later.`
-        : 'This will increment inventory for matched items, create damaged listings where needed, and mark the session as ingested. This cannot be easily undone.';
-    const confirmLabel = isPartial ? `Push ${approvedCount} Approved Items` : 'Push Live';
+        ? `You have approved ${pendingApproved.length} of ${totalPending} remaining items. Only those ${pendingApproved.length} will be pushed now — the session will be marked "Partially Ingested" and you can push the rest later.`
+        : _pushedItemIds.size > 0
+            ? `Pushing the remaining ${totalPending} item(s) — ${_pushedItemIds.size} already pushed previously.`
+            : 'This will increment inventory for matched items, create damaged listings where needed, and mark the session as ingested. This cannot be easily undone.';
+    const confirmLabel = isPartial ? `Push ${pendingApproved.length} Approved Items` : `Push ${totalPending} Items`;
 
     const ok = await themedConfirm(
         '🚀 Push Live to Shopify',
@@ -1534,7 +1537,9 @@ async function pushLive(sessionId) {
     const panel = document.getElementById('push-live-results');
     panel.innerHTML = '<div class="loading"><span class="spinner"></span> Pushing to Shopify... This may take a moment.</div>';
 
-    const body = isPartial ? JSON.stringify({ item_ids: [..._approvedItems] }) : '{}';
+    const body = pendingApproved.length > 0 && pendingApproved.length < totalRows
+        ? JSON.stringify({ item_ids: pendingApproved })
+        : '{}';
 
     try {
         const r = await fetch(`/api/ingest/session/${sessionId}/push-live`, {
