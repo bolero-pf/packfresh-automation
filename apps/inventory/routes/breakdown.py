@@ -568,7 +568,7 @@ def search_ppt():
                 return jsonify(data)
         return jsonify({"results": [], "error": "PPT not configured"}), 503
     try:
-        results = ppt.search_sealed_products(q, limit=15)
+        results = ppt.search_sealed_products(q, limit=5)
         return jsonify({"results": results})
     except _PPTError as e:
         details = e.args[2] if len(e.args) > 2 else {}
