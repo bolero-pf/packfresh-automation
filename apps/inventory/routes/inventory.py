@@ -1023,7 +1023,7 @@ async function runSearch(q){{
       const id  = it.tcgPlayerId || it.tcgplayer_id || '';
       const p   = it.unopenedPrice || it.prices?.market || 0;
       if (!id) return '';
-      return `<div class="dd-item" onclick="selectItem(${{JSON.stringify(String(id))}})">
+      return `<div class="dd-item" onmousedown="event.preventDefault();event.stopPropagation();selectItem(${{JSON.stringify(String(id))}})">
         ${{esc(it.name)}}
         <span class="price">$${{(+p).toFixed(2)}}</span>
         <span class="set">${{esc(it.setName||'')}}</span>
@@ -1042,7 +1042,7 @@ function selectItem(tcgId){{
   doPreview();
 }}
 
-document.addEventListener('click', e=>{{
+document.addEventListener('mousedown', e=>{{
   const wrap = document.querySelector('.search-wrap');
   if(wrap && !wrap.contains(e.target))
     document.getElementById('dd').style.display='none';
