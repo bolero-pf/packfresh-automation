@@ -700,7 +700,8 @@ def get_breakdown_summary_for_items(tcg_ids: list[int]) -> dict:
 
     comp_rows = query(f"""
         SELECT sbco.variant_id, sbco.tcgplayer_id AS comp_tcg_id,
-               sbco.quantity_per_parent, sbco.market_price AS comp_market
+               sbco.quantity_per_parent, sbco.market_price AS comp_market,
+               COALESCE(sbco.component_type, 'sealed') AS component_type
         FROM sealed_breakdown_components sbco
         WHERE sbco.variant_id IN ({vph})
     """, tuple(variant_ids))
@@ -742,10 +743,16 @@ def get_breakdown_summary_for_items(tcg_ids: list[int]) -> dict:
             qty = c["quantity_per_parent"] or 1
             mkt = float(c["comp_market"] or 0)
             total_comp_market += mkt * qty
-            cs = store_map.get(c["comp_tcg_id"])
-            if cs and cs.get("shopify_price"):
-                total_comp_store += float(cs["shopify_price"]) * qty
+            is_promo = c.get("component_type") == "promo"
+            if is_promo:
+                # Promos are never in the store — use market price for apples-to-apples comparison
+                total_comp_store += mkt * qty
                 comps_with_store += 1
+            else:
+                cs = store_map.get(c["comp_tcg_id"])
+                if cs and cs.get("shopify_price"):
+                    total_comp_store += float(cs["shopify_price"]) * qty
+                    comps_with_store += 1
 
         total_components = len(comps)
         all_comps_in_store = (comps_with_store == total_components and total_components > 0)

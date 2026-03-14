@@ -1684,8 +1684,9 @@ function reRenderComponents() {{
   const sealedComps = _recipeComponents.filter(c => c.component_type !== 'promo');
   const promoComps  = _recipeComponents.filter(c => c.component_type === 'promo');
   const totalMkt = _recipeComponents.reduce((s,c) => s+(parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
-  const storeComps = _recipeComponents.filter(c => c.tcgplayer_id && _storePrices[c.tcgplayer_id]);
-  const totalStore = storeComps.reduce((s,c) => s+(_storePrices[c.tcgplayer_id].shopify_price||0)*(parseInt(c.quantity)||1), 0);
+  const storeComps = _recipeComponents.filter(c => c.component_type !== 'promo' && c.tcgplayer_id && _storePrices[c.tcgplayer_id]);
+  const promoMktTotal = promoComps.reduce((s,c) => s+(parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
+  const totalStore = storeComps.reduce((s,c) => s+(_storePrices[c.tcgplayer_id].shopify_price||0)*(parseInt(c.quantity)||1), 0) + promoMktTotal;
 
   if (summary) {{
     const parentId = _recipeTarget?.tcgId;
@@ -1700,7 +1701,8 @@ function reRenderComponents() {{
       const diff = parentStore > 0 ? totalStore - parentStore : null;
       const col = diff !== null ? (diff >= 0 ? 'var(--green)' : diff >= -parentStore*0.1 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
       const diffStr = diff !== null ? ` <small style="color:${{diff>=0?'var(--green)':'var(--red)'}}">  ${{diff>=0?'+':''}}$${{diff.toFixed(2)}} vs store</small>` : '';
-      sh += ` · <span style="color:${{col}}">Store: <strong>$${{totalStore.toFixed(2)}}</strong>${{diffStr}}</span>`;
+      const promoNote = promoComps.length > 0 ? ` <small style="color:var(--accent)">+promos@mkt</small>` : '';
+      sh += ` · <span style="color:${{col}}">Store+Promos: <strong>$${{totalStore.toFixed(2)}}</strong>${{diffStr}}${{promoNote}}</span>`;
     }}
     summary.innerHTML = sh;
   }}

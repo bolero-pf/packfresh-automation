@@ -1257,9 +1257,11 @@ function bdUpdateValueSummary() {
     const parentMkt = _breakDownParentMarket;
 
     // Store totals
-    const storeComps = _breakDownComponents.filter(c => c.tcgplayer_id && _bdStorePrices[c.tcgplayer_id]);
-    const totalStore = storeComps.reduce((s, c) => s + (parseFloat(_bdStorePrices[c.tcgplayer_id].shopify_price)||0) * (parseInt(c.quantity)||1), 0);
-    const allHaveStore = _breakDownComponents.length > 0 && storeComps.length === _breakDownComponents.length;
+    const storeComps = _breakDownComponents.filter(c => c.component_type !== 'promo' && c.tcgplayer_id && _bdStorePrices[c.tcgplayer_id]);
+    const promoComps = _breakDownComponents.filter(c => c.component_type === 'promo');
+    const promoMktTotal = promoComps.reduce((s, c) => s + (parseFloat(c.market_price)||0) * (parseInt(c.quantity)||1), 0);
+    const totalStore = storeComps.reduce((s, c) => s + (parseFloat(_bdStorePrices[c.tcgplayer_id].shopify_price)||0) * (parseInt(c.quantity)||1), 0) + promoMktTotal;
+    const allHaveStore = _breakDownComponents.length > 0 && (storeComps.length + promoComps.length) === _breakDownComponents.length;
     const parentStoreEntry = _breakDownParentTcgId ? _bdStorePrices[_breakDownParentTcgId] : null;
     const parentStore = parentStoreEntry ? parseFloat(parentStoreEntry.shopify_price) || 0 : 0;
 
@@ -1290,8 +1292,10 @@ function bdUpdateValueSummary() {
         const diff = storeRef !== null ? totalStore - storeRef : null;
         const storeCol = diff !== null ? (diff >= 0 ? 'var(--green)' : diff >= -storeRef * 0.1 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
         const diffStr = diff !== null ? ` <small style="color:${diff >= 0 ? 'var(--green)' : 'var(--red)'};">(${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} vs ${storeRefLabel})</small>` : '';
-        const coverageStr = !allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComps.length}/${_breakDownComponents.length} comps in store)</small>` : '';
-        html += `<span style="color:${storeCol}; margin-left:12px;">Store total: <strong>$${totalStore.toFixed(2)}</strong>${diffStr}${coverageStr}</span>`;
+        const sealedTotal = _breakDownComponents.filter(c => c.component_type !== 'promo').length;
+        const coverageStr = !allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComps.length}/${sealedTotal} sealed in store${promoComps.length ? ', promos@mkt' : ''})</small>` : (promoComps.length ? ` <small style="color:var(--accent);">+promos@mkt</small>` : '');
+        const storeLabel = promoComps.length > 0 ? 'Store+Promos' : 'Store total';
+        html += `<span style="color:${storeCol}; margin-left:12px;">${storeLabel}: <strong>$${totalStore.toFixed(2)}</strong>${diffStr}${coverageStr}</span>`;
     }
     if (_bdSaveToCache) html += `<span style="color:var(--green); margin-left:8px; font-size:0.75rem;">&#x1F4BE;</span>`;
     el.innerHTML = html;

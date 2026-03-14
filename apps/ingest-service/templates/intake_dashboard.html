@@ -4794,9 +4794,11 @@
         const summary = document.getElementById('ibd-value-summary');
         if (!el) return;
         const totalMkt = _intakeBdComponents.reduce((s,c) => s + (parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
-        const storeComps = _intakeBdComponents.filter(c => c.tcgplayer_id && _ibdStorePrices[c.tcgplayer_id]);
-        const totalStore = storeComps.reduce((s,c) => s + (_ibdStorePrices[c.tcgplayer_id].shopify_price||0)*(parseInt(c.quantity)||1), 0);
-        const allHaveStore = _intakeBdComponents.length > 0 && storeComps.length === _intakeBdComponents.length;
+        const storeComps = _intakeBdComponents.filter(c => c.component_type !== 'promo' && c.tcgplayer_id && _ibdStorePrices[c.tcgplayer_id]);
+        const ibdPromoComps = _intakeBdComponents.filter(c => c.component_type === 'promo');
+        const ibdPromoMktTotal = ibdPromoComps.reduce((s,c) => s+(_ibdStorePrices[c.tcgplayer_id]?.shopify_price||parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
+        const totalStore = storeComps.reduce((s,c) => s + (_ibdStorePrices[c.tcgplayer_id].shopify_price||0)*(parseInt(c.quantity)||1), 0) + ibdPromoMktTotal;
+        const allHaveStore = _intakeBdComponents.length > 0 && (storeComps.length + ibdPromoComps.length) === _intakeBdComponents.length;
         if (summary) {
             // Parent store price (looked up alongside components)
             const parentStoreEntry = _intakeBdTcgId ? _ibdStorePrices[_intakeBdTcgId] : null;
@@ -4814,8 +4816,10 @@
                 const diff = storeRef !== null ? totalStore - storeRef : null;
                 const storeCol = diff !== null ? (diff >= 0 ? 'var(--green)' : diff >= -storeRef * 0.1 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
                 const diffStr = diff !== null ? ` <small style="color:${diff >= 0 ? 'var(--green)' : 'var(--red)'};"> (${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} vs ${storeRefLabel})</small>` : '';
-                const coverageStr = !allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComps.length}/${_intakeBdComponents.length})</small>` : '';
-                sh += ` &nbsp;·&nbsp; <span style="color:${storeCol};">Store: <strong>$${totalStore.toFixed(2)}</strong>${diffStr}${coverageStr}</span>`;
+                const sealedCount = _intakeBdComponents.filter(c => c.component_type !== 'promo').length;
+                const coverageStr = !allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComps.length}/${sealedCount} sealed in store${ibdPromoComps.length ? ', promos@mkt' : ''})</small>` : (ibdPromoComps.length ? ` <small style="color:var(--accent);">+promos@mkt</small>` : '');
+                const storeLabel = ibdPromoComps.length > 0 ? 'Store+Promos' : 'Store';
+                sh += ` &nbsp;·&nbsp; <span style="color:${storeCol};">${storeLabel}: <strong>$${totalStore.toFixed(2)}</strong>${diffStr}${coverageStr}</span>`;
             }
             // Parent "not in store" nudge
             const parentEntry = _intakeBdTcgId ? _ibdStorePrices[_intakeBdTcgId] : null;
