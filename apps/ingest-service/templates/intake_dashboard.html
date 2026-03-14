@@ -2115,18 +2115,22 @@
     }
 
     async function mappingAcceptPrice() {
-        // Accept the Collectr price as-is, mark as mapped, no TCGPlayer link
+        // Accept the Collectr price as-is, mark as mapped.
+        // If a TCGPlayer ID was manually typed, pass it along so it gets saved.
         const price = currentMapCollectrPrice;
+        const manualTcgId = document.getElementById('map-tcgplayer-id').value.trim();
         const container = document.getElementById('fuzzy-results');
         container.innerHTML = '<div class="loading"><span class="spinner"></span> Saving...</div>';
         try {
+            const body = {
+                session_id: currentSessionId,
+                override_price: price,
+            };
+            if (manualTcgId && parseInt(manualTcgId)) body.tcgplayer_id = parseInt(manualTcgId);
             const r = await fetch(`/api/intake/item/${currentMapItemId}/accept-price`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    session_id: currentSessionId,
-                    override_price: price,
-                }),
+                body: JSON.stringify(body),
             });
             const d = await r.json();
             if (!r.ok) { container.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
