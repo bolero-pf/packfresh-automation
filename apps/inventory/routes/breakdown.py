@@ -581,19 +581,37 @@ def search_ppt():
 def search_cards():
     """Search raw cards via PPT — used for promo components in breakdown recipes.
     Returns NM condition price as market_price."""
+    from routes.inventory import _get_ppt_client
     q = request.args.get("q", "").strip()
     if not q:
         return jsonify({"results": []})
-    if INGEST_URL:
-        data, err = _ingest_post("/api/ppt/search-cards", {"query": q, "limit": 5})
-        if not err:
-            for r in (data.get("results") or []):
-                if not r.get("market_price"):
-                    conds = (r.get("prices") or {}).get("conditions") or {}
-                    nm = conds.get("Near Mint") or conds.get("NM") or {}
-                    r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
-            return jsonify(data)
-    return jsonify({"results": [], "error": "PPT not configured"}), 503
+
+    def _enrich_nm_price(results):
+        for r in (results or []):
+            if not r.get("market_price"):
+                conds = (r.get("prices") or {}).get("conditions") or {}
+                nm = conds.get("Near Mint") or conds.get("NM") or {}
+                r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
+        return results
+
+    ppt = _get_ppt_client()
+    if ppt is None:
+        if INGEST_URL:
+            data, err = _ingest_post("/api/ppt/search-cards", {"query": q, "limit": 5})
+            if not err:
+                return jsonify({"results": _enrich_nm_price(data.get("results") or [])})
+        return jsonify({"results": [], "error": "PPT not configured"}), 503
+
+    try:
+        results = ppt.search_cards(q, limit=5)
+        return jsonify({"results": _enrich_nm_price(results)})
+    except Exception as e:
+        # Fallback to ingest proxy on local failure
+        if INGEST_URL:
+            data, err = _ingest_post("/api/ppt/search-cards", {"query": q, "limit": 5})
+            if not err:
+                return jsonify({"results": _enrich_nm_price(data.get("results") or [])})
+        return jsonify({"results": [], "error": str(e)}), 502
 
 @bp.route("/api/store-prices", methods=["POST"])
 @requires_auth
@@ -893,7 +911,7 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
 
 <!-- ═══ RECIPE EDITOR MODAL ════════════════════════════════════════════════ -->
 <div id="recipe-modal" class="modal-overlay">
-  <div class="modal">
+  <div class="modal" style="max-width:860px">
     <div class="modal-header">
       <h3 id="recipe-modal-title">Breakdown Recipe</h3>
       <button class="modal-close" onclick="closeModal()">✕</button>
@@ -1488,7 +1506,7 @@ function renderRecipeModal(cache) {{
         <input type="text" id="re-variant-name" value="Standard" style="width:160px">
         <span id="re-editing-badge" style="display:none;font-size:11px;color:var(--accent);background:var(--surface-2);padding:2px 8px;border-radius:4px">editing</span>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-bottom:14px">
         <div style="border:1px solid var(--border);border-radius:8px;padding:12px">
           <div style="font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">📦 Sealed</div>
           <div style="display:flex;gap:6px;margin-bottom:6px">

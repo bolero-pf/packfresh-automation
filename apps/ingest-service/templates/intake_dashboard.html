@@ -789,7 +789,7 @@
 
     <!-- ═══════════════════════════════════ BREAKDOWN MODAL ═══════════════════════════════════ -->
     <div id="intake-breakdown-modal" class="modal-overlay">
-        <div class="modal" style="max-width:680px;">
+        <div class="modal" style="max-width:860px;">
             <div class="modal-header">
                 <h3>📦 Breakdown Recipe</h3>
                 <button class="modal-close" onclick="closeModal('intake-breakdown-modal')">&times;</button>
@@ -4615,7 +4615,7 @@
                     <span id="ibd-editing-badge" style="display:none; font-size:0.72rem; color:var(--accent); background:var(--surface-2); padding:2px 8px; border-radius:4px;">editing existing</span>
                 </div>
 
-                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:10px;">
+                <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; margin-bottom:10px;">
                     <div style="border:1px solid var(--border); border-radius:8px; padding:10px;">
                         <div style="font-size:0.72rem; font-weight:600; color:var(--text-dim); text-transform:uppercase; letter-spacing:.07em; margin-bottom:8px;">📦 Sealed</div>
                         <div style="display:flex; gap:6px; margin-bottom:6px;">
