@@ -1697,7 +1697,7 @@ function reRenderComponents() {{
     if (totalStore > 0) {{
       const diff = parentStore > 0 ? totalStore - parentStore : null;
       const col = diff !== null ? (diff >= 0 ? 'var(--green)' : diff >= -parentStore*0.1 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
-      const diffStr = diff !== null ? ` <small style="color:${{diff>=0?'var(--green)':'var(--red)'}}">${{diff>=0?'+':''}}$${{diff.toFixed(2)}} vs store</small>` : '';
+      const diffStr = diff !== null ? ` <small style="color:${{diff>=0?'var(--green)':'var(--red)'}}">  ${{diff>=0?'+':''}}$${{diff.toFixed(2)}} vs store</small>` : '';
       sh += ` · <span style="color:${{col}}">Store: <strong>$${{totalStore.toFixed(2)}}</strong>${{diffStr}}</span>`;
     }}
     summary.innerHTML = sh;
@@ -1716,7 +1716,9 @@ function reRenderComponents() {{
     const storeCell = hasStore
       ? `<td>${{sp
           ? `<span style="color:var(--green)">$${{parseFloat(sp.shopify_price).toFixed(2)}}${{sp.shopify_qty===0?' <small style="color:var(--red)">qty 0</small>':''}}</span>`
-          : '<span style="color:var(--text-dim)">—</span>'}}</td>`
+          : (c.tcgplayer_id && !isPromo
+              ? `<button class="btn btn-sm btn-primary" style="font-size:11px;padding:1px 5px;" onclick="reCreateListing(${{c.tcgplayer_id}},'component',this)">+ List</button>`
+              : '<span style="color:var(--text-dim)">—</span>')}}</td>`
       : '';
     return `<tr>
       <td>
@@ -1747,6 +1749,38 @@ function reRenderComponents() {{
   }}
   html += '</tbody></table></div>';
   el.innerHTML = html;
+}}
+
+async function reCreateListing(tcgId, context, btn) {{
+  if (!tcgId) {{ alert('No TCGPlayer ID'); return; }}
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⟳';
+  btn.title = 'Creating draft listing... ~30-60s';
+  try {{
+    const r = await fetch('/inventory/api/enrich/create-listing', {{
+      method: 'POST', headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{ tcgplayer_id: tcgId, quantity: 0 }}),
+    }});
+    const d = await r.json();
+    if (!r.ok) {{
+      btn.disabled = false;
+      btn.textContent = origText;
+      alert('Failed: ' + (d.error || 'Unknown'));
+      return;
+    }}
+    const span = document.createElement('span');
+    span.style.cssText = 'color:var(--green);font-size:11px;';
+    span.textContent = '✓ Draft';
+    btn.replaceWith(span);
+    // Refresh store prices so the new listing shows up
+    _storePrices = {{}};
+    fetchRecipeStorePrices();
+  }} catch(e) {{
+    btn.disabled = false;
+    btn.textContent = origText;
+    alert('Error: ' + e.message);
+  }}
 }}
 
 async function saveRecipeVariant() {{
