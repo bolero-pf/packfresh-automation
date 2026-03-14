@@ -248,7 +248,7 @@
 
 <!-- Break Down Modal -->
 <div id="breakdown-modal" class="modal-overlay">
-    <div class="modal" style="max-width:700px;">
+    <div class="modal" style="max-width:860px;">
         <button class="modal-close-sticky" onclick="closeBreakdown()">×</button>
         <div id="breakdown-body"></div>
     </div>
@@ -1031,16 +1031,28 @@ async function openBreakdown(itemId, sessionId, productName, parentQty, parentTc
                 onchange="_bdVariantName=this.value.trim()||'Standard';">
         </div>
 
-        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px;">
-            <div style="flex:2; min-width:200px;">
-                <label style="font-size:0.8rem; color:var(--text-dim);">Add Component (search PPT)</label>
-                <input type="text" id="bd-search" placeholder="e.g. Booster Pack, ETB, Promo..."
-                       style="width:100%; margin-top:4px;"
-                       onkeydown="if(event.key==='Enter') bdSearch()">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; margin-bottom:12px;">
+            <div style="border:1px solid var(--border); border-radius:8px; padding:10px;">
+                <div style="font-size:0.72rem; font-weight:600; color:var(--text-dim); text-transform:uppercase; letter-spacing:.07em; margin-bottom:8px;">📦 Sealed</div>
+                <div style="display:flex; gap:6px; margin-bottom:6px;">
+                    <input type="text" id="bd-search" placeholder="Booster Pack, ETB..."
+                           style="flex:1; font-size:0.82rem;"
+                           onkeydown="if(event.key==='Enter') bdSearch()">
+                    <button class="btn btn-primary btn-sm" onclick="bdSearch()" style="height:32px; font-size:0.75rem;">Search</button>
+                </div>
+                <div id="bd-search-results" style="max-height:130px; overflow-y:auto;"></div>
             </div>
-            <button class="btn btn-primary btn-sm" onclick="bdSearch()" style="height:40px;">Search</button>
+            <div style="border:1px solid rgba(79,125,249,0.4); border-radius:8px; padding:10px;">
+                <div style="font-size:0.72rem; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:.07em; margin-bottom:8px;">✨ Promos <span style="color:var(--text-dim); font-weight:400; text-transform:none;">(NM price)</span></div>
+                <div style="display:flex; gap:6px; margin-bottom:6px;">
+                    <input type="text" id="bd-promo-search" placeholder="Pikachu Promo, 187/XY..."
+                           style="flex:1; font-size:0.82rem;"
+                           onkeydown="if(event.key==='Enter') bdPromoSearch()">
+                    <button class="btn btn-sm" onclick="bdPromoSearch()" style="height:32px; font-size:0.75rem; border-color:var(--accent); color:var(--accent);">Search</button>
+                </div>
+                <div id="bd-promo-results" style="max-height:130px; overflow-y:auto;"></div>
+            </div>
         </div>
-        <div id="bd-search-results" style="max-height:200px; overflow-y:auto; margin-bottom:12px;"></div>
 
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; gap:8px; flex-wrap:wrap;">
             <h4 style="font-size:0.9rem;">Components</h4>
@@ -1121,6 +1133,7 @@ function bdApplyVariant(v) {
         tcgplayer_id: c.tcgplayer_id,
         market_price: parseFloat(c.market_price) || 0,
         quantity: parseInt(c.quantity_per_parent) || 1,
+        component_type: c.component_type || 'sealed',
     }));
     if (v.notes) {
         const pn = document.getElementById('bd-promo-notes');
@@ -1186,18 +1199,55 @@ async function bdSearch() {
 
 function bdAddByIdx(idx) {
     const r = (window._bdSearchResults || {})[idx];
-    if (r) bdAddComponent(r.tcgId, r.name, r.setName, r.price);
+    if (r) bdAddComponent(r.tcgId, r.name, r.setName, r.price, 'sealed');
 }
 
-function bdAddComponent(tcgId, name, setName, price) {
-    const existing = _breakDownComponents.find(c => c.tcgplayer_id && c.tcgplayer_id === tcgId);
+async function bdPromoSearch() {
+    const q = document.getElementById('bd-promo-search')?.value.trim();
+    if (!q) return;
+    const panel = document.getElementById('bd-promo-results');
+    panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+    try {
+        const r = await fetch('/api/ppt/search-cards', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query: q }),
+        });
+        const d = await r.json();
+        if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+        const results = d.results || [];
+        if (!results.length) { panel.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No results found</p>'; return; }
+        window._bdPromoResults = {};
+        panel.innerHTML = results.slice(0, 5).map((p, idx) => {
+            const name = p.name || p.productName || '';
+            const setName = p.setName || p.set_name || '';
+            const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.id || 0;
+            const nmCond = (p.prices?.conditions || {})['Near Mint'] || {};
+            const price = parseFloat(p.market_price) || parseFloat(nmCond.price) || parseFloat(p.prices?.market) || 0;
+            window._bdPromoResults[idx] = { tcgId, name, setName, price };
+            return `<div class="search-result" onclick="bdAddPromoByIdx(${idx})">
+                <strong style="font-size:0.88rem;">${name}</strong>
+                <br><small style="color:var(--text-dim);">${setName} &middot; NM $${price.toFixed(2)}</small>
+            </div>`;
+        }).join('');
+    } catch(err) { panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`; }
+}
+
+function bdAddPromoByIdx(idx) {
+    const r = (window._bdPromoResults || {})[idx];
+    if (r) bdAddComponent(r.tcgId, r.name, r.setName, r.price, 'promo');
+}
+
+function bdAddComponent(tcgId, name, setName, price, componentType) {
+    const existing = _breakDownComponents.find(c => c.tcgplayer_id && c.tcgplayer_id === tcgId && c.component_type === (componentType || 'sealed'));
     if (existing) { existing.quantity += 1; }
-    else { _breakDownComponents.push({ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1 }); }
+    else { _breakDownComponents.push({ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1, component_type: componentType || 'sealed' }); }
     bdRenderComponents();
     bdFetchStorePrices();
-    document.getElementById('bd-search-results').innerHTML = '';
-    document.getElementById('bd-search').value = '';
-    document.getElementById('bd-search').focus();
+    const resultEl = componentType === 'promo' ? 'bd-promo-results' : 'bd-search-results';
+    const inputEl  = componentType === 'promo' ? 'bd-promo-search' : 'bd-search';
+    document.getElementById(resultEl).innerHTML = '';
+    document.getElementById(inputEl).value = '';
+    document.getElementById(inputEl).focus();
 }
 
 function bdUpdateValueSummary() {
@@ -1229,6 +1279,8 @@ function bdUpdateValueSummary() {
     }
 
     let html = `<span style="color:var(--text);">Market total: <strong>$${totalMkt.toFixed(2)}</strong></span>`;
+    const promoMkt = _breakDownComponents.filter(c => c.component_type === 'promo').reduce((s,c) => s+(parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
+    if (promoMkt > 0) html += ` <span style="color:var(--accent); font-size:0.78rem;">(incl. $${promoMkt.toFixed(2)} promos)</span>`;
     if (parentMkt > 0 && totalMkt > 0) {
         const diff = totalMkt - parentMkt;
         const col = diff >= 0 ? 'var(--green)' : 'var(--red)';
@@ -1269,35 +1321,52 @@ function bdRenderComponents() {
         return;
     }
     const hasStore = Object.keys(_bdStorePrices).length > 0;
-    el.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:0.85rem;"><thead><tr>
+    const sealedComps = _breakDownComponents.filter(c => c.component_type !== 'promo');
+    const promoComps  = _breakDownComponents.filter(c => c.component_type === 'promo');
+
+    const renderRows = (comps) => comps.map((c) => {
+        const realIdx = _breakDownComponents.indexOf(c);
+        const sp = c.tcgplayer_id ? _bdStorePrices[c.tcgplayer_id] : null;
+        const isPromo = c.component_type === 'promo';
+        const storeCell = hasStore
+            ? `<td style="color:${sp ? 'var(--green)' : 'var(--text-dim)'}; font-size:0.8rem;">${sp ? '$' + parseFloat(sp.shopify_price).toFixed(2) + (sp.shopify_qty === 0 ? '<br><small style="color:var(--red);">qty 0</small>' : '') : '—'}</td>`
+            : '';
+        return `<tr>
+            <td>
+                ${isPromo ? '<span style="font-size:10px;background:rgba(79,125,249,0.15);color:var(--accent);padding:1px 5px;border-radius:3px;margin-right:4px;">PROMO</span>' : ''}
+                <span>${c.product_name}</span><br>
+                <small style="color:${c.tcgplayer_id ? 'var(--text-dim)' : 'var(--red)'};">
+                    ${c.tcgplayer_id ? 'TCG#' + c.tcgplayer_id : '&#x26A0; No TCG ID'}
+                    ${c.set_name ? ' &middot; ' + c.set_name : ''}
+                </small>
+            </td>
+            <td><input type="number" value="${c.quantity}" min="1" style="width:55px;"
+                onchange="_breakDownComponents[${realIdx}].quantity = parseInt(this.value)||1; bdUpdateValueSummary();"></td>
+            <td><input type="number" value="${(c.market_price||0).toFixed(2)}" min="0" step="0.01" style="width:80px;"
+                onchange="_breakDownComponents[${realIdx}].market_price = parseFloat(this.value)||0; bdUpdateValueSummary();"></td>
+            ${storeCell}
+            <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 6px;"
+                onclick="_breakDownComponents.splice(${realIdx},1); _bdStorePrices={}; bdRenderComponents();">&#x2715;</button></td>
+        </tr>`;
+    }).join('');
+
+    let html = `<div style="overflow-x:auto;"><table style="font-size:0.85rem;"><thead><tr>
         <th>Component</th>
         <th style="width:70px;">Qty</th>
         <th style="width:90px;">Market</th>
         ${hasStore ? '<th style="width:90px; color:var(--accent);">Store ↗</th>' : ''}
         <th style="width:30px;"></th>
-    </tr></thead><tbody>` +
-        _breakDownComponents.map((c, idx) => {
-            const sp = c.tcgplayer_id ? _bdStorePrices[c.tcgplayer_id] : null;
-            const storeCell = hasStore
-                ? `<td style="color:${sp ? 'var(--green)' : 'var(--text-dim)'}; font-size:0.8rem;">${sp ? '$' + parseFloat(sp.shopify_price).toFixed(2) + (sp.shopify_qty === 0 ? '<br><small style="color:var(--red);">qty 0</small>' : '') : '—'}</td>`
-                : '';
-            return `<tr>
-                <td>
-                    <span>${c.product_name}</span><br>
-                    <small style="color:${c.tcgplayer_id ? 'var(--text-dim)' : 'var(--red)'};">
-                        ${c.tcgplayer_id ? 'TCG#' + c.tcgplayer_id : '&#x26A0; No TCG ID'}
-                        ${c.set_name ? ' &middot; ' + c.set_name : ''}
-                    </small>
-                </td>
-                <td><input type="number" value="${c.quantity}" min="1" style="width:55px;"
-                    onchange="_breakDownComponents[${idx}].quantity = parseInt(this.value)||1; bdUpdateValueSummary();"></td>
-                <td><input type="number" value="${(c.market_price||0).toFixed(2)}" min="0" step="0.01" style="width:80px;"
-                    onchange="_breakDownComponents[${idx}].market_price = parseFloat(this.value)||0; bdUpdateValueSummary();"></td>
-                ${storeCell}
-                <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 6px;"
-                    onclick="_breakDownComponents.splice(${idx},1); _bdStorePrices={}; bdRenderComponents();">&#x2715;</button></td>
-            </tr>`;
-        }).join('') + '</tbody></table></div>';
+    </tr></thead><tbody>`;
+    if (sealedComps.length) {
+        if (promoComps.length) html += `<tr><td colspan="5" style="font-size:11px;color:var(--text-dim);padding:4px 0;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">📦 Sealed</td></tr>`;
+        html += renderRows(sealedComps);
+    }
+    if (promoComps.length) {
+        html += `<tr><td colspan="5" style="font-size:11px;color:var(--accent);padding:4px 0;font-weight:600;text-transform:uppercase;letter-spacing:.05em;border-top:1px solid var(--border);">✨ Promos</td></tr>`;
+        html += renderRows(promoComps);
+    }
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
     bdUpdateValueSummary();
 }
 
