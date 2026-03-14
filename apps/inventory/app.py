@@ -80,15 +80,19 @@ app.register_blueprint(breakdown_bp)
 
 @app.route("/inventory/api/items")
 def api_items():
-    """Lightweight item list for breakdown search."""
+    """Lightweight item list for breakdown search. Includes drafts, excludes damaged/slabs."""
     from flask import jsonify, request as req
     q = req.args.get("q", "").lower()
     rows = db.query("""
         SELECT c.title AS name, c.shopify_qty, c.shopify_price, c.tcgplayer_id,
-               c.shopify_variant_id, c.inventory_item_id
+               c.shopify_variant_id, c.inventory_item_id, c.status
         FROM inventory_product_cache c
         WHERE c.is_damaged = FALSE
-        ORDER BY c.title
+          AND c.tcgplayer_id IS NOT NULL
+          AND LOWER(COALESCE(c.tags, '')) NOT LIKE '%slab%'
+          AND LOWER(COALESCE(c.tags, '')) NOT LIKE '%graded%'
+          AND c.status IN ('ACTIVE', 'DRAFT')
+        ORDER BY c.shopify_qty DESC, c.title
     """)
     items = [dict(r) for r in rows]
     if q:

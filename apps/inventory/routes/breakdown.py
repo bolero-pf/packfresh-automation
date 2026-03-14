@@ -74,7 +74,8 @@ def _build_recommendations():
 
     Returns list of dicts sorted by desirability score.
     """
-    # All non-ignored inventory items that have a TCGPlayer ID and qty > 0
+    # All non-ignored inventory items that have a TCGPlayer ID
+    # Include drafts and zero-qty if they have a breakdown recipe (stub entries)
     inventory = db.query("""
         SELECT
             c.shopify_product_id,
@@ -87,9 +88,15 @@ def _build_recommendations():
             c.status
         FROM inventory_product_cache c
         WHERE c.tcgplayer_id IS NOT NULL
-          AND c.shopify_qty > 0
           AND c.is_damaged = FALSE
           AND c.tcgplayer_id NOT IN (SELECT tcgplayer_id FROM breakdown_ignore)
+          AND (
+              c.shopify_qty > 0
+              OR EXISTS (
+                  SELECT 1 FROM sealed_breakdown_cache sbc
+                  WHERE sbc.tcgplayer_id = c.tcgplayer_id
+              )
+          )
         ORDER BY c.title
     """)
 
@@ -629,6 +636,30 @@ def unmark_base_component(tcg_id):
     db.execute("DELETE FROM breakdown_base_components WHERE tcgplayer_id = %s", (tcg_id,))
     return jsonify({"success": True})
 
+@bp.route("/api/all-recipes")
+@requires_auth
+def all_recipes():
+    """All saved breakdown recipes with their variants and store inventory status."""
+    rows = db.query("""
+        SELECT
+            sbc.id            AS cache_id,
+            sbc.tcgplayer_id,
+            sbc.product_name,
+            sbc.variant_count,
+            sbc.use_count,
+            sbc.best_variant_market,
+            sbc.last_updated,
+            ipc.title         AS store_title,
+            ipc.shopify_qty   AS store_qty,
+            ipc.shopify_price AS store_price,
+            ipc.status        AS store_status
+        FROM sealed_breakdown_cache sbc
+        LEFT JOIN inventory_product_cache ipc ON ipc.tcgplayer_id = sbc.tcgplayer_id
+          AND ipc.is_damaged = FALSE
+        ORDER BY sbc.product_name
+    """)
+    return jsonify({"recipes": [dict(r) for r in rows]})
+
 @bp.route("/api/no-recipe")
 @requires_auth
 def no_recipe_items():
@@ -741,6 +772,7 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
   <div class="tabs">
     <button class="tab-btn active" onclick="switchTab('recommendations',this)">📊 Recommendations</button>
     <button class="tab-btn" onclick="switchTab('search',this)">🔍 Manual Breakdown</button>
+    <button class="tab-btn" onclick="switchTab('recipes',this)">📖 Known Recipes</button>
     <button class="tab-btn" onclick="switchTab('ignored',this)">🚫 Ignored SKUs</button>
     <button class="tab-btn" onclick="switchTab('norecipe',this)">📋 No Recipe</button>
   </div>
@@ -783,6 +815,18 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
       </div>
       <div id="inv-search-results"></div>
     </div>
+  </div>
+
+  <!-- ═══ KNOWN RECIPES TAB ════════════════════════════════════════════════ -->
+  <div id="tab-recipes" class="tab-pane">
+    <div class="card" style="padding:10px 16px;margin-bottom:12px">
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="kr-search" placeholder="Filter by name…" style="width:260px"
+               oninput="renderKnownRecipes()">
+        <span id="kr-count" style="font-size:12px;color:var(--text-dim);margin-left:auto"></span>
+      </div>
+    </div>
+    <div id="known-recipes-panel"><div class="loading"><span class="spinner"></span> Loading...</div></div>
   </div>
 
   <!-- ═══ IGNORED SKUs TAB ═══════════════════════════════════════════════ -->
@@ -892,11 +936,12 @@ function switchTab(id, btn) {{
   if (id === 'ignored') loadIgnored();
   if (id === 'norecipe') loadNoRecipe();
   if (id === 'recommendations') loadRecommendations();
+  if (id === 'recipes') loadKnownRecipes();
 }}
 
 function restoreTab() {{
   const hash = location.hash.replace('#', '');
-  const valid = ['recommendations','search','ignored','norecipe'];
+  const valid = ['recommendations','search','ignored','norecipe','recipes'];
   const id = valid.includes(hash) ? hash : 'recommendations';
   const btn = document.querySelector(`.tab-btn[onclick*="'${{id}}'"]`);
   switchTab(id, btn);
@@ -1738,6 +1783,75 @@ document.addEventListener('keydown', e => {{
 // INIT
 // ══════════════════════════════════════════════════════════════════
 restoreTab();
+</script>
+
+<!-- Known Recipes tab -->
+<script>
+let _allKnownRecipes = [];
+
+async function loadKnownRecipes() {{
+  const panel = document.getElementById('known-recipes-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
+  try {{
+    const r = await fetch('/inventory/breakdown/api/all-recipes');
+    const d = await r.json();
+    _allKnownRecipes = d.recipes || [];
+    renderKnownRecipes();
+  }} catch(e) {{
+    panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`;
+  }}
+}}
+
+function renderKnownRecipes() {{
+  const panel = document.getElementById('known-recipes-panel');
+  const countEl = document.getElementById('kr-count');
+  if (!panel) return;
+  const q = (document.getElementById('kr-search')?.value || '').toLowerCase();
+  let recs = _allKnownRecipes;
+  if (q) recs = recs.filter(r => (r.product_name || '').toLowerCase().includes(q));
+  if (countEl) countEl.textContent = `${{recs.length}} recipe${{recs.length !== 1 ? 's' : ''}}`;
+  if (!recs.length) {{
+    panel.innerHTML = `<div style="color:var(--text-dim);padding:20px;text-align:center">${{
+      q ? '🔍 No recipes match that filter.' : '📭 No breakdown recipes saved yet.'
+    }}</div>`;
+    return;
+  }}
+  panel.innerHTML = `<div style="overflow-x:auto"><table>
+    <thead><tr>
+      <th>Product</th><th>TCG ID</th><th>Variants</th>
+      <th>Best Value</th><th>Store Qty</th><th>Store Price</th><th>Status</th><th></th>
+    </tr></thead>
+    <tbody>
+    ${{recs.map(r => {{
+      const storeStatus = r.store_status ? r.store_status.toLowerCase() : '—';
+      const statusBadge = storeStatus === 'active'
+        ? '<span class="badge badge-green">ACTIVE</span>'
+        : storeStatus === 'draft'
+          ? '<span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DRAFT</span>'
+          : '<span class="badge badge-dim" style="font-size:0.65rem;">NOT IN STORE</span>';
+      const bdVal = r.best_variant_market ? `<span style="color:var(--green);font-weight:600">$${{parseFloat(r.best_variant_market).toFixed(2)}}</span>` : '—';
+      const storeQty = r.store_qty != null ? `<span style="color:${{r.store_qty > 0 ? 'var(--green)' : 'var(--red)'}};font-weight:600">${{r.store_qty}}</span>` : '—';
+      const storePrice = r.store_price ? `$${{parseFloat(r.store_price).toFixed(2)}}` : '—';
+      const name = r.store_title || r.product_name || '—';
+      return `<tr>
+        <td><strong style="font-size:13px">${{name}}</strong></td>
+        <td style="color:var(--text-dim);font-size:12px">${{r.tcgplayer_id || '—'}}</td>
+        <td style="text-align:center">${{r.variant_count || 0}}</td>
+        <td>${{bdVal}}</td>
+        <td style="text-align:center">${{storeQty}}</td>
+        <td>${{storePrice}}</td>
+        <td>${{statusBadge}}</td>
+        <td>
+          <button class="btn btn-secondary btn-sm"
+            onclick="openRecipeEditor(${{r.tcgplayer_id || 'null'}},'${{(r.store_title || r.product_name || '').replace(/'/g,'').replace(/"/g,'')}}')">
+            ✎ Edit
+          </button>
+        </td>
+      </tr>`;
+    }}).join('')}}
+    </tbody></table></div>`;
+}}
 </script>
 
 <!-- Inventory all-items endpoint needed by manual search -->

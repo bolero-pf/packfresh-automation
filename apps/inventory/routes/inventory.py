@@ -224,8 +224,10 @@ def sync_now():
 @bp.route("/api/status")
 @requires_auth
 def api_status():
-    """Polled every 30s to update sync timestamp without page reload."""
-    return jsonify({"last_sync": _get_last_sync_str()})
+    """Polled to update sync timestamp without page reload."""
+    cm = _get_cache_manager()
+    in_progress = cm._refresh_in_progress if cm else False
+    return jsonify({"last_sync": _get_last_sync_str(), "refresh_in_progress": in_progress})
 
 
 @bp.route("/api/cache/record-push", methods=["POST"])
@@ -855,16 +857,30 @@ td{{padding:6px 9px;vertical-align:middle;}}
     }}
   }}
 
-  // Poll sync time every 30s — reload page if timestamp changed (data is fresh)
+  // Adaptive poll: 3s while refresh in progress, 30s otherwise
+  // Reloads page when last_sync changes (data is fresh)
   const _initSync = document.getElementById('sync-badge').textContent.replace('🔄 ','').trim();
-  setInterval(async ()=>{{
-    try{{
+  const _syncBadge = document.getElementById('sync-badge');
+  let _pollTimer = null;
+  async function _pollStatus() {{
+    try {{
       const d = await (await fetch('/inventory/api/status')).json();
-      if(d.last_sync && d.last_sync !== _initSync){{
+      if (d.refresh_in_progress) {{
+        _syncBadge.innerHTML = '⟳ Refreshing...';
+        _syncBadge.style.color = 'var(--accent, #4f7df9)';
+        _pollTimer = setTimeout(_pollStatus, 3000);
+      }} else if (d.last_sync && d.last_sync !== _initSync) {{
         window.location.reload();
+      }} else {{
+        _syncBadge.innerHTML = '🔄 ' + (d.last_sync || _initSync);
+        _syncBadge.style.color = '';
+        _pollTimer = setTimeout(_pollStatus, 30000);
       }}
-    }}catch(_){{}}
-  }}, 30000);
+    }} catch(_) {{
+      _pollTimer = setTimeout(_pollStatus, 30000);
+    }}
+  }}
+  _pollTimer = setTimeout(_pollStatus, 5000);
 }})();
 </script>
 </body>

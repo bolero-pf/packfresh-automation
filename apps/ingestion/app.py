@@ -321,18 +321,25 @@ def ppt_search_sealed():
 
 @app.route("/api/ingest/session/<session_id>/push-dry-run", methods=["POST"])
 def push_dry_run(session_id):
+    """Dry run — shows exactly what push-live would do without calling Shopify."""
     if cache_mgr:
         cache_mgr.check_and_refresh_if_stale()
-    """Dry run — shows exactly what push-live would do without calling Shopify."""
     session = ingest.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
+    data = request.get_json(silent=True) or {}
+    requested_item_ids = set(str(x) for x in (data.get("item_ids") or []))
+
     items = ingest.get_session_items(session_id)
-    active = [i for i in items if i.get("item_status") in ("good", "damaged") and i.get("is_mapped")]
+    active = [i for i in items if i.get("item_status") in ("good", "damaged")
+              and i.get("is_mapped") and not i.get("pushed_at")]
+
+    if requested_item_ids:
+        active = [i for i in active if str(i["id"]) in requested_item_ids]
 
     if not active:
-        return jsonify({"error": "No active mapped items to push"}), 400
+        return jsonify({"error": "No active mapped items to preview"}), 400
 
     tcg_ids = list(set(i["tcgplayer_id"] for i in active if i.get("tcgplayer_id")))
     normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)

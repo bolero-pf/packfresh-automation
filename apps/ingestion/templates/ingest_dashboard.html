@@ -435,6 +435,16 @@ async function viewSession(sessionId, _preserveScroll) {
         const childItems = items.filter(i => i.parent_item_id);
         const totalQty = activeItems.reduce((sum, i) => sum + (i.quantity || 1), 0);
 
+        // Pre-populate approvals from DB: items already pushed get a locked ✓
+        // Items approved in this session (preserve-scroll reload) keep their state
+        if (!_preserveScroll) {
+            // Fresh load — seed from pushed_at (persists across sessions/refreshes)
+            _approvedItems.clear();
+            items.forEach(i => { if (i.pushed_at) _approvedItems.add(i.id); });
+        }
+        // Track which IDs are locked (already pushed to Shopify)
+        _pushedItemIds = new Set(items.filter(i => i.pushed_at).map(i => i.id));
+
         let html = `
             <div class="card">
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
@@ -558,6 +568,7 @@ async function viewSession(sessionId, _preserveScroll) {
 
 // ── APPROVE SYSTEM ──────────────────────────────────────────────────────────
 let _approvedItems = new Set();
+let _pushedItemIds = new Set();
 let _hideApproved = false;
 
 function toggleApproved(itemId) {
@@ -585,9 +596,15 @@ function _updateApproveStats() {
     const el = document.getElementById('approve-stats');
     if (!el) return;
     const total = document.querySelectorAll('tr[data-item-id]').length;
-    const done = _approvedItems.size;
-    el.textContent = `${done}/${total} approved`;
-    el.style.color = done === total ? 'var(--green)' : 'var(--text-dim)';
+    const pushed = _pushedItemIds.size;
+    const approved = _approvedItems.size - pushed; // pending approvals not yet pushed
+    const totalApproved = _approvedItems.size;
+    if (pushed > 0) {
+        el.innerHTML = `<span style="color:var(--green)">✓${pushed} pushed</span> · ${approved} pending · ${total - totalApproved} unapproved`;
+    } else {
+        el.textContent = `${totalApproved}/${total} approved`;
+    }
+    el.style.color = totalApproved === total ? 'var(--green)' : 'var(--text-dim)';
 }
 
 function toggleHideApproved(cb) {
@@ -690,16 +707,22 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
 
     let actionCell = '';
     if (isReceived && !isBroken && !isChild) {
+        const isPushed = _pushedItemIds.has(item.id);
         const isApproved = _approvedItems.has(item.id);
-        const approveStyle = isApproved
-            ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;'
-            : 'color:var(--text-dim);border-color:var(--border);width:32px;';
+        const approveStyle = isPushed
+            ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;opacity:0.6;cursor:default;'
+            : isApproved
+                ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;'
+                : 'color:var(--text-dim);border-color:var(--border);width:32px;';
+        const approveBtn = isPushed
+            ? `<button class="btn btn-sm" style="${approveStyle}" title="Already pushed to Shopify" disabled>✓</button>`
+            : `<button class="btn btn-sm" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>`;
         const damageToggle = isDamaged
             ? `<button onclick="markGood('${item.id}', '${sessionId}')">✅ Mark Good</button>`
             : `<button onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠️ Mark Damaged</button>`;
         actionCell = `
             <div style="display:flex; align-items:center; gap:6px;">
-                <button class="btn btn-sm" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>
+                ${approveBtn}
                 <button class="btn btn-sm btn-primary" style="font-size:0.78rem;padding:3px 10px;" onclick="openBreakdown('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button>
                 <div class="action-dropdown-container" style="position:relative;display:inline-block;">
                     <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.78rem;padding:3px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
@@ -715,7 +738,18 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     } else if (isReceived && isBroken) {
         actionCell = `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;border-color:var(--amber);" onclick="undoBreakdown('${item.id}', '${sessionId}')">↩ Undo</button>`;
     } else if (isReceived && isChild) {
-        actionCell = `<div style="display:flex;gap:6px;">
+        const isPushed = _pushedItemIds.has(item.id);
+        const isApproved = _approvedItems.has(item.id);
+        const approveStyle = isPushed
+            ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;opacity:0.6;cursor:default;'
+            : isApproved
+                ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;'
+                : 'color:var(--text-dim);border-color:var(--border);width:32px;';
+        const approveBtn = isPushed
+            ? `<button class="btn btn-sm" style="${approveStyle}" title="Already pushed to Shopify" disabled>✓</button>`
+            : `<button class="btn btn-sm" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>`;
+        actionCell = `<div style="display:flex;gap:6px;align-items:center;">
+            ${approveBtn}
             <button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Qty</button>
             <button class="btn btn-sm" style="font-size:0.72rem;padding:3px 8px;color:var(--red);" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕</button>
         </div>`;
@@ -1404,11 +1438,21 @@ async function pushDryRun(sessionId) {
     panel.innerHTML = '<div class="loading"><span class="spinner"></span> Running dry run...</div>';
 
     try {
-        const r = await fetch(`/api/ingest/session/${sessionId}/push-dry-run`, { method: 'POST' });
+        const pendingApproved = [..._approvedItems].filter(id => !_pushedItemIds.has(id));
+        const bodyData = pendingApproved.length > 0 ? { item_ids: pendingApproved } : {};
+        const r = await fetch(`/api/ingest/session/${sessionId}/push-dry-run`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(bodyData),
+        });
         const d = await r.json();
         if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
-        let html = '<div class="alert" style="background:rgba(79,125,249,0.1); border-color:var(--accent); color:var(--accent);">🔍 <strong>DRY RUN</strong> — No changes made. This is what Push Live would do:</div>';
+        const scopeNote = pendingApproved.length > 0
+            ? ` Scoped to <strong>${pendingApproved.length}</strong> approved item(s).`
+            : ' All items included (none specifically approved).';
+
+        let html = `<div class="alert" style="background:rgba(79,125,249,0.1); border-color:var(--accent); color:var(--accent);">🔍 <strong>DRY RUN</strong> — No changes made.${scopeNote}</div>`;
 
         html += `<div class="stats" style="margin-bottom:12px;">
             <div class="stat"><div class="stat-label">Would Increment</div><div class="stat-value" style="color:var(--green);">${d.would_increment || 0}</div></div>
