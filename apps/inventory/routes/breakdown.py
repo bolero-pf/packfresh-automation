@@ -589,7 +589,8 @@ def store_prices_local():
 @bp.route("/api/inventory-search")
 @requires_auth
 def inventory_search():
-    """Search inventory_product_cache by title for the recipe picker."""
+    """Search inventory_product_cache by title for the recipe picker.
+    Only returns sealed products — slabs/graded cards cannot be broken down."""
     q = request.args.get("q", "").strip()
     if not q:
         return jsonify({"items": []})
@@ -599,6 +600,9 @@ def inventory_search():
         WHERE LOWER(title) LIKE %s
           AND is_damaged = FALSE
           AND shopify_qty > 0
+          AND LOWER(COALESCE(tags, '')) LIKE '%%sealed%%'
+          AND LOWER(COALESCE(tags, '')) NOT LIKE '%%slab%%'
+          AND LOWER(COALESCE(tags, '')) NOT LIKE '%%graded%%'
         ORDER BY title
         LIMIT 30
     """, (f"%{q.lower()}%",))
@@ -1484,8 +1488,7 @@ async function reSearch() {{
     const r = await fetch(`/inventory/breakdown/api/cache/search?q=${{encodeURIComponent(q)}}`);
     const d = await r.json();
     if (r.status === 429 || (d.error && !d.results?.length)) {{
-      const retryMsg = d.retry_after ? ` Try again in ${{d.retry_after}}s.` : '';
-      panel.innerHTML = `<div class="alert alert-warning" style="font-size:12px">⚠ ${{d.error || 'Rate limited'}}.${{retryMsg}}</div>`;
+      panel.innerHTML = `<div class="alert alert-warning" style="font-size:12px">⚠ ${{d.error || 'Rate limited — try again shortly.'}}</div>`;
       return;
     }}
     if (!r.ok) {{ panel.innerHTML = `<div class="alert alert-error">${{d.error}}</div>`; return; }}

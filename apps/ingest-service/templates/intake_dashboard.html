@@ -1430,12 +1430,10 @@
         }
         const body = document.getElementById('session-modal-body');
         const overlay = document.getElementById('session-modal');
-        // Scroll lives on the overlay (overflow-y:auto), not the inner body div
+        // Capture scroll BEFORE any DOM mutation — spinner reflow will zero it out
         const scrollTop = _preserveScroll ? (overlay ? overlay.scrollTop : 0) : 0;
         body.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
         openModal('session-modal');
-        // Re-apply immediately after loading spinner reflow so scroll doesn't snap to 0
-        if (scrollTop && overlay) overlay.scrollTop = scrollTop;
 
         try {
             const r = await fetch(`/api/intake/session/${sessionId}`);
@@ -1751,11 +1749,14 @@
                     return html;
                 })()}
             `;
-            // Restore scroll position after render — setTimeout survives the full repaint
-            if (scrollTop) setTimeout(() => {
-                const ov = document.getElementById('session-modal');
-                if (ov) ov.scrollTop = scrollTop;
-            }, 50);
+            // Restore scroll after render — try multiple times to survive repaint/reflow
+            if (scrollTop) {
+                const _ov = document.getElementById('session-modal');
+                const _restoreScroll = () => { if (_ov) _ov.scrollTop = scrollTop; };
+                _restoreScroll();
+                setTimeout(_restoreScroll, 50);
+                setTimeout(_restoreScroll, 150);
+            }
             // Enrich breakdown summaries inline without full reload
             _enrichIntakeBreakdowns(items, sessionId);
         } catch(err) {
@@ -3543,6 +3544,8 @@
         document.getElementById('mg-company').value = gradeCompany || 'PSA';
         document.getElementById('mg-grade').value = gradeValue || '9';
         document.getElementById('mg-price-info').innerHTML = '<span style="color:var(--text-dim);">Loading prices...</span>';
+        const _mgBtn = document.getElementById('mg-confirm-btn');
+        if (_mgBtn) { _mgBtn.disabled = false; _mgBtn.textContent = 'Save Grade'; }
         openModal('mark-graded-modal');
 
         // Pre-load graded prices from PPT if we have a tcgplayer_id
