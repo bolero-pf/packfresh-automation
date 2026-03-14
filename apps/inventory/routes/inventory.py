@@ -1031,7 +1031,9 @@ async function runSearch(q){{
       const id  = it.tcgPlayerId || it.tcgplayer_id || '';
       const p   = it.unopenedPrice || it.prices?.market || 0;
       if (!id) return '';
-      return `<div class="dd-item" onpointerdown="event.preventDefault();selectItem(${{JSON.stringify(String(id))}})">
+      const safeId = String(id).replace(/[^0-9]/g, '');
+      if (!safeId) return '';
+      return `<div class="dd-item" onpointerdown="event.preventDefault();selectItem('${{safeId}}')">
         ${{esc(it.name)}}
         <span class="price">$${{(+p).toFixed(2)}}</span>
         <span class="set">${{esc(it.setName||'')}}</span>
