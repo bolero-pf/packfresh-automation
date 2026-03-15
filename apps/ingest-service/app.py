@@ -890,10 +890,38 @@ def map_item():
             card_number=data.get("card_number"),
             rarity=data.get("rarity"),
         )
+
+        # Auto-link other unmapped items in the same session with the same product_name
+        # so you don't have to manually relink duplicates
+        siblings_updated = 0
+        session_id = data.get("session_id") or updated.get("session_id")
+        if session_id and new_price is not None:
+            siblings = db.query("""
+                SELECT id FROM intake_items
+                WHERE session_id = %s
+                  AND id != %s
+                  AND product_name = %s
+                  AND (tcgplayer_id IS NULL OR is_mapped = FALSE)
+                  AND item_status IN ('good', 'damaged')
+            """, (session_id, item_id, updated.get("product_name") or data.get("product_name", "")))
+            for sib in siblings:
+                try:
+                    intake.map_item(
+                        sib["id"], tcgplayer_id, new_price,
+                        product_name=data.get("product_name"),
+                        set_name=data.get("set_name"),
+                        card_number=data.get("card_number"),
+                        rarity=data.get("rarity"),
+                    )
+                    siblings_updated += 1
+                except Exception:
+                    pass
+
         return jsonify({
             "success": True,
             "item": _serialize(updated),
             "price_updated": new_price is not None,
+            "siblings_linked": siblings_updated,
         })
     except ValueError as e:
         return jsonify({"error": str(e)}), 404

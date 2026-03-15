@@ -1948,11 +1948,20 @@
                     tcgplayer_id: parseInt(tcgId),
                     verify_price: false,
                     override_price: price,
+                    session_id: currentSessionId,
                 }),
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
             closeModal('mapping-modal');
+            if (d.siblings_linked > 0) {
+                // Brief toast so user knows duplicates were auto-linked
+                const toast = document.createElement('div');
+                toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--green);color:#000;padding:10px 18px;border-radius:8px;font-size:0.85rem;font-weight:600;z-index:9999;';
+                toast.textContent = `✓ Also linked ${d.siblings_linked} duplicate${d.siblings_linked>1?'s':''} automatically`;
+                document.body.appendChild(toast);
+                setTimeout(() => toast.remove(), 3500);
+            }
             viewSession(currentSessionId, true);
         } catch(err) { alert(err.message); }
     }
@@ -3443,71 +3452,134 @@
             rs.setName = card.setName || card.set_name || '';
             rs.cardNum = card.cardNumber || '';
             rs.rarity = card.rarity || '';
+            rs.gradedPrices = d.graded_prices || null;
+            // Seed mode: graded if item is already graded, else raw
+            if (!rs._relinkMode) rs._relinkMode = rs.isGraded ? 'graded' : 'raw';
+            if (!rs._relinkGradeCompany) rs._relinkGradeCompany = rs.gradeCompany || 'PSA';
+            if (!rs._relinkGradeValue) rs._relinkGradeValue = rs.gradeValue || '9';
             _relinkRenderConditions('NM');
         } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
     }
 
     function _relinkRenderConditions(selectedCond) {
         const rs = window._relinkState;
+        if (!rs._relinkMode) rs._relinkMode = rs.isGraded ? 'graded' : 'raw';
         const body = document.getElementById('relink-body');
-        const variantNames = Object.keys(rs.variants);
+        const variantNames = Object.keys(rs.variants || {});
         const selectedVariant = rs.primary;
-        const variantData = rs.variants[selectedVariant] || {};
+        const variantData = (rs.variants || {})[selectedVariant] || {};
 
-        let html = '<div style="margin-bottom:4px; font-size:0.8rem; color:var(--text-dim);">Replacing: <span style="text-decoration:line-through;">' + rs.cardName + '</span></div>';
-        html += '<div style="margin-bottom:12px;"><strong style="color:var(--accent); font-size:1.1rem;">' + rs.newName + '</strong>';
-        html += '<span style="color:var(--text-dim);"> \u2014 ' + rs.setName + (rs.cardNum ? ' #'+rs.cardNum : '') + ' \u2022 TCG#' + rs.tcgId + '</span></div>';
+        let html = `<div style="margin-bottom:6px; font-size:0.8rem; color:var(--text-dim);">Replacing: <span style="text-decoration:line-through;">${rs.cardName}</span></div>`;
+        html += `<div style="margin-bottom:12px;"><strong style="color:var(--accent); font-size:1.1rem;">${rs.newName}</strong>`;
+        html += `<span style="color:var(--text-dim);"> — ${rs.setName}${rs.cardNum ? ' #'+rs.cardNum : ''} · TCG#${rs.tcgId}</span></div>`;
 
-        if (variantNames.length > 1) {
-            html += '<div style="margin-bottom:10px;"><label style="font-size:0.8rem; color:var(--text-dim); display:block; margin-bottom:4px;">Variant</label><div style="display:flex; gap:6px; flex-wrap:wrap;">';
-            variantNames.forEach(function(v) {
-                html += '<button class="btn btn-sm ' + (v === selectedVariant ? 'btn-primary' : 'btn-secondary') + '" data-rv="' + v.replace(/"/g,'&quot;') + '">' + v + '</button>';
+        // Raw / Graded toggle
+        const modeRaw = rs._relinkMode === 'raw';
+        html += `<div style="display:flex;gap:6px;margin-bottom:14px;">
+            <button class="btn btn-sm ${modeRaw ? 'btn-primary' : 'btn-secondary'}" onclick="_relinkSetMode('raw')">🃏 Raw Card</button>
+            <button class="btn btn-sm ${!modeRaw ? 'btn-primary' : 'btn-secondary'}" onclick="_relinkSetMode('graded')">🏅 Graded Slab</button>
+        </div>`;
+
+        if (modeRaw) {
+            // Variant selector
+            if (variantNames.length > 1) {
+                html += `<div style="margin-bottom:10px;"><label style="font-size:0.8rem;color:var(--text-dim);display:block;margin-bottom:4px;">Variant</label><div style="display:flex;gap:6px;flex-wrap:wrap;">`;
+                variantNames.forEach(v => {
+                    html += `<button class="btn btn-sm ${v === selectedVariant ? 'btn-primary' : 'btn-secondary'}" data-rv="${v.replace(/"/g,'&quot;')}">${v}</button>`;
+                });
+                html += `</div></div>`;
+            } else if (variantNames.length === 1) {
+                html += `<div style="margin-bottom:8px;font-size:0.85rem;color:var(--text-dim);">Printing: <strong style="color:var(--text);">${variantNames[0]}</strong></div>`;
+            }
+
+            html += `<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px;">`;
+            ['NM','LP','MP','HP','DMG'].forEach(cond => {
+                const p = variantData[cond];
+                const isSel = cond === selectedCond;
+                const hasP = p != null;
+                const cs = COND_STYLES[cond] || {};
+                const border = isSel ? `3px solid ${cs.color||'#fff'}` : '2px solid var(--border)';
+                html += `<div data-rc="${cond}" style="background:${cs.bg||'var(--surface)'};color:${cs.color||'var(--text)'};padding:10px 6px;border-radius:6px;text-align:center;cursor:pointer;border:${border};opacity:${hasP?'1':'0.5'};">`;
+                html += `<div style="font-size:0.75rem;font-weight:700;">${cond}</div>`;
+                html += `<div style="font-size:0.65rem;opacity:0.8;margin-bottom:4px;">${(COND_STYLES[cond]||{}).label||''}</div>`;
+                html += `<div style="font-size:1.05rem;font-weight:700;">${hasP ? '$'+p.toFixed(2) : '—'}</div>`;
+                html += `</div>`;
             });
-            html += '</div></div>';
-        } else if (variantNames.length === 1) {
-            html += '<div style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Printing: <strong style="color:var(--text);">' + variantNames[0] + '</strong></div>';
+            html += `</div>`;
+
+            const selPrice = variantData[selectedCond];
+            html += `<div style="display:flex;gap:8px;">`;
+            html += `<button id="relink-ok" class="btn btn-primary" style="flex:1;">Relink ${selectedCond}${selPrice ? ' — $'+selPrice.toFixed(2) : ''}</button>`;
+            html += `<button id="relink-back" class="btn btn-secondary">← Back</button>`;
+            html += `</div>`;
+
+        } else {
+            // Graded mode
+            const graded = rs.gradedPrices || {};
+            const selCompany = rs._relinkGradeCompany || 'PSA';
+            const selGrade   = rs._relinkGradeValue || '9';
+            const gradeData  = (graded[selCompany] || {})[selGrade] || {};
+            const gradePrice = gradeData.price;
+
+            html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+                <div class="form-group"><label>Grading Company</label>
+                <select id="relink-grade-company" onchange="_relinkGradeChanged()">
+                    ${['PSA','BGS','CGC','SGC'].map(c => `<option value="${c}"${c===selCompany?' selected':''}>${c}</option>`).join('')}
+                </select></div>
+                <div class="form-group"><label>Grade</label>
+                <select id="relink-grade-value" onchange="_relinkGradeChanged()">
+                    ${['10','9.5','9','8.5','8','7','6','5','4','3','2','1'].map(g => `<option value="${g}"${g===selGrade?' selected':''}>${g}</option>`).join('')}
+                </select></div>
+            </div>`;
+
+            // Price info box
+            if (gradePrice != null) {
+                const conf = gradeData.confidence;
+                const confColor = conf === 'high' ? '#22c55e' : conf === 'medium' ? '#f59e0b' : '#ef4444';
+                const method = (gradeData.method || '').replace(/_/g,' ');
+                const signals = [];
+                if (gradeData.count) signals.push(`${gradeData.count} sales`);
+                if (gradeData.volume_7day) signals.push(`${gradeData.volume_7day.toFixed(1)}/day`);
+                const breakdown = [];
+                if (gradeData.price_7day != null) breakdown.push(`7d $${gradeData.price_7day.toFixed(2)}`);
+                if (gradeData.median != null) breakdown.push(`median $${gradeData.median.toFixed(2)}`);
+                if (gradeData.min != null && gradeData.max != null) breakdown.push(`range $${gradeData.min.toFixed(0)}–$${gradeData.max.toFixed(0)}`);
+                html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;">
+                    <strong style="font-size:1.15rem;">$${gradePrice.toFixed(2)}</strong>
+                    <span style="color:${confColor};font-size:0.72rem;font-weight:600;text-transform:uppercase;margin-left:6px;">${conf||''}</span>
+                    <span style="color:var(--text-dim);font-size:0.7rem;margin-left:4px;">${method}</span>
+                    ${signals.length ? `<br><span style="color:var(--text-dim);font-size:0.72rem;">${signals.join(' · ')}</span>` : ''}
+                    ${breakdown.length ? `<br><span style="color:var(--text-dim);font-size:0.68rem;opacity:0.8;">${breakdown.join(' · ')}</span>` : ''}
+                </div>`;
+            } else {
+                html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;color:var(--text-dim);">No eBay data for ${selCompany} ${selGrade}</div>`;
+            }
+
+            html += `<div style="display:flex;gap:8px;">`;
+            html += `<button id="relink-ok" class="btn btn-primary" style="flex:1;">Relink ${selCompany} ${selGrade}${gradePrice ? ' — $'+gradePrice.toFixed(2) : ''}</button>`;
+            html += `<button id="relink-back" class="btn btn-secondary">← Back</button>`;
+            html += `</div>`;
         }
-
-        html += '<div style="display:grid; grid-template-columns: repeat(5, 1fr); gap:8px; margin-bottom:12px;">';
-        ['NM','LP','MP','HP','DMG'].forEach(function(cond) {
-            var p = variantData[cond];
-            var isSel = cond === selectedCond;
-            var hasP = p != null;
-            var cs = COND_STYLES[cond] || {};
-            var border = isSel ? ('3px solid ' + (cs.color||'#fff')) : '2px solid var(--border)';
-            html += '<div data-rc="' + cond + '" style="background:' + (cs.bg||'var(--surface)') + '; color:' + (cs.color||'var(--text)') + '; padding:10px 6px; border-radius:6px; text-align:center; cursor:pointer; border:' + border + '; opacity:' + (hasP ? '1' : '0.5') + ';">';
-            html += '<div style="font-size:0.75rem; font-weight:700;">' + cond + '</div>';
-            html += '<div style="font-size:0.65rem; opacity:0.8; margin-bottom:4px;">' + ((COND_STYLES[cond]||{}).label||'') + '</div>';
-            html += '<div style="font-size:1.05rem; font-weight:700;">' + (hasP ? '$' + p.toFixed(2) : '\u2014') + '</div>';
-            html += '</div>';
-        });
-        html += '</div>';
-
-        var selPrice = variantData[selectedCond];
-        html += '<div style="display:flex; gap:8px;">';
-        html += '<button id="relink-ok" class="btn btn-primary" style="flex:1;">Relink ' + selectedCond + (selPrice ? ' \u2014 $' + selPrice.toFixed(2) : '') + '</button>';
-        html += '<button id="relink-back" class="btn btn-secondary">\u2190 Back</button>';
-        html += '</div>';
 
         body.innerHTML = html;
 
-        // Event listeners
-        body.querySelectorAll('[data-rc]').forEach(function(el) {
-            el.addEventListener('click', function() { _relinkRenderConditions(el.getAttribute('data-rc')); });
+        // Attach listeners
+        body.querySelectorAll('[data-rc]').forEach(el => {
+            el.addEventListener('click', () => _relinkRenderConditions(el.getAttribute('data-rc')));
         });
-        body.querySelectorAll('[data-rv]').forEach(function(el) {
-            el.addEventListener('click', function() {
-                rs.primary = el.getAttribute('data-rv');
-                _relinkRenderConditions(selectedCond);
-            });
+        body.querySelectorAll('[data-rv]').forEach(el => {
+            el.addEventListener('click', () => { rs.primary = el.getAttribute('data-rv'); _relinkRenderConditions(selectedCond); });
         });
         document.getElementById('relink-back').addEventListener('click', _relinkShowSearch);
         document.getElementById('relink-ok').addEventListener('click', async function() {
-            var price = selPrice || 0;
+            const modeRaw = rs._relinkMode === 'raw';
+            const variantData2 = (rs.variants || {})[rs.primary] || {};
+            let price = modeRaw ? (variantData2[selectedCond] || 0) : ((rs.gradedPrices || {})[rs._relinkGradeCompany || 'PSA']?.[rs._relinkGradeValue || '9']?.price || 0);
+
             if (!price) {
                 const manual = await themedPrompt({
                     title: 'No price',
-                    message: 'No ' + selectedCond + ' price. Enter manually:',
+                    message: 'No price available. Enter manually:',
                     inputs: [{ type: 'number', label: 'Market price ($)', min: 0, step: '0.01' }],
                     confirmText: 'Relink',
                 });
@@ -3515,28 +3587,71 @@
                 price = parseFloat(manual);
                 if (isNaN(price) || price <= 0) return;
             }
+
             body.innerHTML = '<div class="loading"><span class="spinner"></span> Relinking...</div>';
             try {
+                const mapPayload = {
+                    item_id: rs.itemId, tcgplayer_id: rs.tcgId,
+                    override_price: price,
+                    product_name: rs.newName, set_name: rs.setName,
+                    card_number: rs.cardNum, rarity: rs.rarity,
+                    session_id: rs.sessionId,
+                };
                 const mapR = await fetch('/api/intake/map-item', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        item_id: rs.itemId, tcgplayer_id: rs.tcgId,
-                        override_price: price,
-                        product_name: rs.newName, set_name: rs.setName,
-                        card_number: rs.cardNum, rarity: rs.rarity,
-                    }),
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(mapPayload),
                 });
                 if (!mapR.ok) { const md = await mapR.json(); body.innerHTML = '<div class="alert alert-error">' + (md.error||'Failed') + '</div>'; return; }
-                await fetch('/api/intake/item/' + rs.itemId + '/update-condition', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ condition: selectedCond, session_id: rs.sessionId }),
-                });
+
+                if (modeRaw) {
+                    await fetch('/api/intake/item/' + rs.itemId + '/update-condition', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ condition: selectedCond, session_id: rs.sessionId }),
+                    });
+                } else {
+                    const company = rs._relinkGradeCompany || 'PSA';
+                    const gradeVal = rs._relinkGradeValue || '9';
+                    await fetch(`/api/intake/item/${rs.itemId}/mark-graded`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ session_id: rs.sessionId, grade_company: company, grade_value: gradeVal, market_price: price }),
+                    });
+                }
                 closeModal('relink-modal');
                 viewSession(rs.sessionId, true);
             } catch(err) { body.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
         });
+    }
+
+    function _relinkSetMode(mode) {
+        const rs = window._relinkState;
+        if (!rs) return;
+        rs._relinkMode = mode;
+        if (mode === 'graded' && !rs.gradedPrices && rs.tcgId) {
+            // Load graded prices if not already loaded
+            const body = document.getElementById('relink-body');
+            const spinner = document.createElement('div');
+            spinner.className = 'loading';
+            spinner.innerHTML = '<span class="spinner"></span> Loading graded prices...';
+            // Keep existing HTML, just append loading indicator
+            fetch('/api/ppt/lookup-card', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ tcgplayer_id: rs.tcgId }),
+            }).then(r => r.json()).then(d => {
+                rs.gradedPrices = d.graded_prices || null;
+                _relinkRenderConditions('NM');
+            }).catch(() => _relinkRenderConditions('NM'));
+            _relinkRenderConditions('NM');
+        } else {
+            _relinkRenderConditions('NM');
+        }
+    }
+
+    function _relinkGradeChanged() {
+        const rs = window._relinkState;
+        if (!rs) return;
+        rs._relinkGradeCompany = document.getElementById('relink-grade-company')?.value || 'PSA';
+        rs._relinkGradeValue   = document.getElementById('relink-grade-value')?.value || '9';
+        _relinkRenderConditions('NM');
     }
 
     // ═══════════════════════════════ MARK AS GRADED ═══════════════════════════════
@@ -3580,32 +3695,51 @@
         }
         const gradeData = (st.gradedPrices[company] || {})[grade] || {};
         const price      = gradeData.price;
-        const confidence = gradeData.confidence;  // "high" / "medium" / "low"
+        const confidence = gradeData.confidence;
+        const method     = gradeData.method || '';
         const daysUsed   = gradeData.days_used;
         const count      = gradeData.count || 0;
         const vol7       = gradeData.volume_7day;
         const trend      = gradeData.trend;
         const median     = gradeData.median;
+        const min_p      = gradeData.min;
+        const max_p      = gradeData.max;
+        const price7day  = gradeData.price_7day;
+        const smpPrice   = gradeData.smp_price;
 
         if (price == null) {
             priceInfo.innerHTML = `<span style="color:var(--text-dim);">No eBay data for ${company} ${grade}</span>`;
         } else {
             const confColor = confidence === 'high' ? '#22c55e' : confidence === 'medium' ? '#f59e0b' : '#ef4444';
-            const confLabel = confidence ? `<span style="color:${confColor};font-size:0.75rem;font-weight:600;text-transform:uppercase;">${confidence} confidence</span>` : '';
-            const windowLabel = daysUsed ? `<span style="color:var(--text-dim);font-size:0.75rem;">${daysUsed}d window</span>` : '';
+            const confLabel = confidence
+                ? `<span style="color:${confColor};font-size:0.72rem;font-weight:600;text-transform:uppercase;">${confidence}</span>`
+                : '';
+            const methodLabel = method
+                ? `<span style="color:var(--text-dim);font-size:0.7rem;">${method.replace(/_/g,' ')}</span>`
+                : '';
             const trendIcon = trend === 'up' ? '↑' : trend === 'down' ? '↓' : trend === 'stable' ? '→' : '';
             const trendColor = trend === 'up' ? '#22c55e' : trend === 'down' ? '#ef4444' : 'var(--text-dim)';
-            const statsLine = [
-                count ? `${count} sales` : null,
-                vol7  ? `${vol7.toFixed(1)}/day` : null,
-                median ? `median $${median.toFixed(0)}` : null,
-                trendIcon ? `<span style="color:${trendColor}">${trendIcon}</span>` : null,
-            ].filter(Boolean).join(' · ');
+
+            // Signal lines — show what we have so you can judge the price
+            const signals = [];
+            if (count) signals.push(`${count} sales`);
+            if (vol7) signals.push(`${vol7.toFixed(1)}/day`);
+            if (trendIcon) signals.push(`<span style="color:${trendColor}">${trendIcon}</span>`);
+            const statsLine = signals.join(' · ');
+
+            // Price breakdown — show the raw signals vs what we picked
+            const breakdown = [];
+            if (price7day != null) breakdown.push(`7d avg $${price7day.toFixed(2)}`);
+            if (median != null)    breakdown.push(`median $${median.toFixed(2)}`);
+            if (smpPrice != null && method !== 'smart_market') breakdown.push(`smp $${smpPrice.toFixed(2)}`);
+            if (min_p != null && max_p != null) breakdown.push(`range $${min_p.toFixed(0)}–$${max_p.toFixed(0)}`);
+            const breakdownLine = breakdown.join(' · ');
+
             priceInfo.innerHTML =
                 `<strong style="font-size:1.2rem;">$${price.toFixed(2)}</strong> ` +
-                `<span style="color:var(--text-dim);font-size:0.8rem;">smart market price</span> ` +
-                `${confLabel} ${windowLabel}` +
-                (statsLine ? `<br><span style="color:var(--text-dim);font-size:0.75rem;">${statsLine}</span>` : '');
+                `${confLabel} ${methodLabel}` +
+                (statsLine ? `<br><span style="color:var(--text-dim);font-size:0.72rem;">${statsLine}</span>` : '') +
+                (breakdownLine ? `<br><span style="color:var(--text-dim);font-size:0.68rem;opacity:0.8;">${breakdownLine}</span>` : '');
         }
         st._selectedPrice = price;
     }
