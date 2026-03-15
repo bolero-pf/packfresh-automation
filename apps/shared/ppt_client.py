@@ -460,28 +460,57 @@ class PPTClient:
             if not isinstance(entry, dict):
                 continue
 
-            # Primary: smartMarketPrice (PPT-weighted over best available window)
-            smp = entry.get("smartMarketPrice") or {}
-            price = smp.get("price")
+            count        = entry.get("count") or 0
+            vol7         = entry.get("dailyVolume7Day")
+            price7day    = entry.get("marketPrice7Day")
+            median       = entry.get("medianPrice")
+            smp          = entry.get("smartMarketPrice") or {}
+            smp_price    = smp.get("price")
+            min_p        = entry.get("minPrice")
+            max_p        = entry.get("maxPrice")
 
-            # Fallback: 7-day market price
-            if price is None:
-                price = entry.get("marketPrice7Day")
-
-            if price is None:
+            # Better pricing hierarchy:
+            # 1. 7-day market when there's enough recent volume (fresh, less manipulation)
+            # 2. Median price (outlier-resistant, good for thinly traded)
+            # 3. smartMarketPrice fallback (PPT's window-adaptive weighted avg — often stale)
+            if price7day is not None and count >= 8:
+                price      = float(price7day)
+                confidence = "high" if (vol7 and vol7 >= 1.0) else "medium"
+                method     = "7day_market"
+                days_used  = 7
+            elif median is not None:
+                price      = float(median)
+                confidence = "medium" if count >= 4 else "low"
+                method     = "median"
+                days_used  = smp.get("daysUsed")
+            elif smp_price is not None:
+                price      = float(smp_price)
+                confidence = smp.get("confidence") or "low"
+                method     = smp.get("method") or "smart_market"
+                days_used  = smp.get("daysUsed")
+            elif price7day is not None:
+                # 7-day with low count — use it but flag low confidence
+                price      = float(price7day)
+                confidence = "low"
+                method     = "7day_market_sparse"
+                days_used  = 7
+            else:
                 continue
 
             result.setdefault(company, {})[grade] = {
-                "price":       float(price),
-                "confidence":  smp.get("confidence"),
-                "days_used":   smp.get("daysUsed"),
-                "method":      smp.get("method"),
-                "count":       entry.get("count"),
-                "volume_7day": entry.get("dailyVolume7Day"),
+                "price":       price,
+                "confidence":  confidence,
+                "days_used":   days_used,
+                "method":      method,
+                "count":       count,
+                "volume_7day": vol7,
                 "trend":       entry.get("marketTrend"),
-                "min":         entry.get("minPrice"),
-                "max":         entry.get("maxPrice"),
-                "median":      entry.get("medianPrice"),
+                "min":         min_p,
+                "max":         max_p,
+                "median":      median,
+                # Keep raw fields for debugging
+                "price_7day":  price7day,
+                "smp_price":   smp_price,
             }
 
         return result
