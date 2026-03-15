@@ -255,10 +255,15 @@ def upload_collectr():
 
 @app.route("/api/intake/upload-collectr-html", methods=["POST"])
 def upload_collectr_html():
-    """Parse pasted Collectr HTML (from portfolio page) into a session."""
+    """Parse pasted Collectr HTML (from portfolio page) into a session.
+    If session_id is provided, appends items to that existing session instead of creating new.
+    If force_product_type is provided ('raw' or 'sealed'), overrides parser classification.
+    """
     data = request.json or {}
     html_content = (data.get("html_content") or data.get("html") or "").strip()
     customer_name = data.get("customer_name", "").strip() or "Unknown"
+    existing_session_id = data.get("session_id")
+    force_product_type = data.get("force_product_type")  # 'raw' or 'sealed' or None
     try:
         offer_pct = Decimal(str(data.get("offer_percentage", "75")))
     except InvalidOperation:
@@ -273,52 +278,68 @@ def upload_collectr_html():
     if result.errors and not result.items:
         return jsonify({"error": "Failed to parse HTML", "details": result.errors}), 400
 
-    # Check for duplicate import
-    dup_session = intake.check_duplicate_import(result.file_hash)
-    if dup_session:
-        return jsonify({
-            "error": "This exact HTML has already been imported",
-            "existing_session_id": dup_session,
-        }), 409
+    # Check for duplicate import (skip if appending to existing session)
+    if not existing_session_id:
+        dup_session = intake.check_duplicate_import(result.file_hash)
+        if dup_session:
+            return jsonify({
+                "error": "This exact HTML has already been imported",
+                "existing_session_id": dup_session,
+            }), 409
 
-    if result.raw_count > 0 and result.sealed_count > 0:
-        session_type = "mixed"
-    elif result.raw_count > 0:
-        session_type = "raw"
+    # Resolve or create session
+    if existing_session_id:
+        session = intake.get_session(existing_session_id)
+        if not session:
+            return jsonify({"error": "Session not found"}), 404
+        session_type = session["session_type"]
+        offer_pct = Decimal(str(session["offer_percentage"]))
     else:
-        session_type = "sealed"
+        if result.raw_count > 0 and result.sealed_count > 0:
+            session_type = "mixed"
+        elif result.raw_count > 0:
+            session_type = "raw"
+        else:
+            session_type = "sealed"
+        # If force_product_type is set, use it as the session type too
+        if force_product_type in ("raw", "sealed"):
+            session_type = force_product_type
 
-    # Create session
-    session = intake.create_session(
-        customer_name=customer_name,
-        session_type=session_type,
-        offer_percentage=offer_pct,
-        file_name="collectr_html_paste",
-        file_hash=result.file_hash,
-    )
+        session = intake.create_session(
+            customer_name=customer_name,
+            session_type=session_type,
+            offer_percentage=offer_pct,
+            file_name="collectr_html_paste",
+            file_hash=result.file_hash,
+        )
 
     # Set distribution flag if provided
     if data.get("is_distribution"):
         db.execute("UPDATE intake_sessions SET is_distribution = TRUE WHERE id = %s", (session["id"],))
 
-    # Process items
+    # Process items — override product_type if forced or inferred from session
+    effective_product_type = force_product_type or (
+        "raw" if session_type == "raw" else None
+    )
+
     processed = []
     for item in result.items:
+        product_type = effective_product_type or item.product_type
         offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
         unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
 
-        tcgplayer_id = intake.get_cached_mapping(item.product_name, item.product_type)
-        shopify_link = intake.get_cached_shopify_link(item.product_name, item.product_type)
+        tcgplayer_id = intake.get_cached_mapping(item.product_name, product_type)
+        shopify_link = intake.get_cached_shopify_link(item.product_name, product_type)
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
             tcgplayer_id = shopify_link["tcgplayer_id"]
 
         processed.append({
             "product_name": item.product_name,
-            "product_type": item.product_type,
+            "product_type": product_type,
             "set_name": item.set_name,
-            "card_number": item.card_number,
+            "card_number": item.card_number if product_type == "raw" else "",
             "condition": item.condition,
-            "rarity": item.rarity,
+            "rarity": item.rarity if product_type == "raw" else "",
             "quantity": item.quantity,
             "market_price": item.market_price,
             "offer_price": offer_price,
@@ -348,6 +369,7 @@ def upload_collectr_html():
         "unmapped_count": unmapped_count,
         "auto_mapped_count": auto_mapped,
         "parse_errors": result.errors[:10] if result.errors else [],
+        "appended_to_existing": bool(existing_session_id),
     })
 
 

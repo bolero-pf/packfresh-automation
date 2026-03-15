@@ -77,8 +77,17 @@ def _normalize_condition(raw: str) -> str:
 
 
 def _is_card_number(val: str) -> bool:
-    """Return True if the string looks like a Pokemon card number."""
-    return bool(re.match(r"^\d+(/\d+)?$", val.strip()))
+    """Return True if the string looks like a Pokemon card number.
+    Handles: 4, 107, 79/73, 096/182, SV13/SV94, 11/108, PROMO, etc.
+    """
+    v = val.strip()
+    # Pure number or number/number (with optional leading zeros)
+    if re.match(r"^\d+(/\d+)?$", v):
+        return True
+    # Alphanumeric with slash: SV13/SV94, RC01/RC32, SWSH001, etc.
+    if re.match(r"^[A-Z0-9]+(/[A-Z0-9]+)?$", v, re.IGNORECASE):
+        return True
+    return False
 
 
 def _clean(text: str) -> str:

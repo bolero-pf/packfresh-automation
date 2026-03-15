@@ -4378,16 +4378,25 @@
 
         resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Parsing HTML...</div>';
         try {
+            const body = {
+                html_content: html,
+                customer_name: customerName,
+                offer_percentage: offerPct,
+                force_product_type: 'raw',  // always treat as raw cards in raw session
+            };
+            // Append to existing raw session if one is open
+            if (rawSessionId) body.session_id = rawSessionId;
+
             const r = await fetch('/api/intake/upload-collectr-html', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ html_content: html, customer_name: customerName, offer_percentage: offerPct }),
+                body: JSON.stringify(body),
             });
             const d = await r.json();
             if (!r.ok) { resultDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Parse failed') + '</div>'; return; }
             if (d.session_id && !rawSessionId) rawSessionId = d.session_id;
             resultDiv.innerHTML = '<div class="alert alert-success">' +
-                '<strong>' + (d.item_count || 0) + ' items imported</strong> — $' + (d.total_market_value || 0).toFixed(2) + ' market value' +
+                '<strong>' + (d.item_count || 0) + ' items ' + (d.appended_to_existing ? 'added to session' : 'imported') + '</strong> — $' + (d.total_market_value || 0).toFixed(2) + ' market value' +
                 '</div>';
             loadRawSessionItems();
         } catch(err) { resultDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
