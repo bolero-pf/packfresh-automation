@@ -525,6 +525,10 @@ def screen_every_order(order_gid: str) -> dict:
     # Normalize current order's shipping address for combine matching
     current_ship_addr = _normalize_address(order.get("shippingAddress"))
 
+    # Check if the current order itself is a pre-order (skip combine if so)
+    current_order_tags = set(t.lower() for t in (order.get("tags") or []))
+    current_is_preorder = bool(current_order_tags & {"pre-order", "preorder", "pre_order"})
+
     # 3. Classify all orders
     has_delivered = False
     non_cancelled_totals = []       # all orders that aren't cancelled (for cumulative)
@@ -662,8 +666,10 @@ def screen_every_order(order_gid: str) -> dict:
     else:
         results["spend_spike"] = {"flagged": False, "reason": "not_applicable"}
 
-    # ── CHECK: Combine shipping ──
-    if unfulfilled_siblings:
+    # ── CHECK: Combine shipping (skip if current order is a pre-order) ──
+    if current_is_preorder:
+        results["combine"] = {"flagged": False, "reason": "current_is_preorder"}
+    elif unfulfilled_siblings:
         sibling_names = ", ".join(s["order_name"] for s in unfulfilled_siblings)
         sibling_details = "; ".join(f"{s['order_name']} (${s['total']:.2f})" for s in unfulfilled_siblings)
 
