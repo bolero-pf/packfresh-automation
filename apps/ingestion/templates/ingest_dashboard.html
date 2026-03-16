@@ -557,6 +557,9 @@ async function viewSession(sessionId, _preserveScroll) {
                 </div>`;
         }
 
+        // Barcode section — always shown if session has raw cards (persists after ingestion)
+        html += `<div id="session-barcode-section"></div>`;
+
         el.innerHTML = html;
         if (scrollY) requestAnimationFrame(() => window.scrollTo(0, scrollY));
         // Enrich items with breakdown summaries after render
@@ -1723,7 +1726,7 @@ async function _loadSessionBarcodes(sessionId) {
         const cards = d.cards || [];
         if (!cards.length) return;
 
-        const panel = document.getElementById('push-live-results');
+        const panel = document.getElementById('session-barcode-section');
         if (!panel) return;
 
         // Build barcode grid from DB records — use reprint endpoint for images
@@ -1739,7 +1742,7 @@ async function _loadSessionBarcodes(sessionId) {
         `).join('');
 
         const barcodeSection = document.createElement('div');
-        barcodeSection.style.cssText = 'margin-top:16px; border-top:1px solid var(--border); padding-top:14px;';
+        barcodeSection.className = 'card';
         barcodeSection.innerHTML = `
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
                 <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${cards.length})</div>
