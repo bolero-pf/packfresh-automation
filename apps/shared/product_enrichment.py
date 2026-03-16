@@ -371,8 +371,8 @@ def _remove_background_rembg(im: Image.Image) -> Image.Image:
     """
     try:
         from rembg import remove as rembg_remove
-    except ImportError:
-        raise RuntimeError("rembg not installed — add 'rembg' to requirements.txt")
+    except (ImportError, SystemExit):
+        raise RuntimeError("rembg not available — onnxruntime not installed in this container")
 
     buf_in = io.BytesIO()
     im.save(buf_in, format="PNG")
@@ -457,6 +457,7 @@ def process_product_image(image_url: str, product_name: str) -> bytes:
 
     # Try remove.bg first
     api_key = os.environ.get("REMOVE_BG_API_KEY", "")
+    no_bg = None
     if api_key:
         try:
             logger.info("Removing background via remove.bg")
@@ -464,10 +465,15 @@ def process_product_image(image_url: str, product_name: str) -> bytes:
             logger.info("remove.bg succeeded")
         except RuntimeError as e:
             logger.warning(f"remove.bg failed ({e}), falling back to rembg")
+
+    if no_bg is None:
+        try:
+            logger.info("Removing background via rembg (local ML)")
             no_bg = _remove_background_rembg(src)
-    else:
-        logger.info("REMOVE_BG_API_KEY not set — using rembg (local ML)")
-        no_bg = _remove_background_rembg(src)
+            logger.info("rembg succeeded")
+        except RuntimeError as e:
+            logger.warning(f"rembg failed ({e}) — proceeding without background removal")
+            no_bg = src.convert("RGBA")
 
     logger.info("Applying matte")
     matted = _matte_product(no_bg)

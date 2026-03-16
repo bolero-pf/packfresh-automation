@@ -756,7 +756,7 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     }
 
     const approvedStyle = _approvedItems.has(item.id) ? 'opacity:0.5;' : '';
-    return `<tr style="${rowStyle}${approvedStyle}" data-item-id="${item.id}">
+    return `<tr style="${rowStyle}${approvedStyle}" data-item-id="${item.id}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${(item.product_name||'').replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
         <td class="name-cell">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
         <td>${item.quantity || 1}</td>
         <td><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
@@ -1590,89 +1590,173 @@ async function forceIngested(sessionId) {
 async function pushLive(sessionId) {
     const pendingApproved = [..._approvedItems].filter(id => !_pushedItemIds.has(id));
     const totalRows = document.querySelectorAll('tr[data-item-id]').length;
-    const totalPending = totalRows - _pushedItemIds.size; // rows not yet pushed
+    const totalPending = totalRows - _pushedItemIds.size;
     const isPartial = pendingApproved.length > 0 && pendingApproved.length < totalPending;
 
-    const confirmMsg = isPartial
-        ? `You have approved ${pendingApproved.length} of ${totalPending} remaining items. Only those ${pendingApproved.length} will be pushed now — the session will be marked "Partially Ingested" and you can push the rest later.`
-        : _pushedItemIds.size > 0
-            ? `Pushing the remaining ${totalPending} item(s) — ${_pushedItemIds.size} already pushed previously.`
-            : 'This will increment inventory for matched items, create damaged listings where needed, and mark the session as ingested. This cannot be easily undone.';
-    const confirmLabel = isPartial ? `Push ${pendingApproved.length} Approved Items` : `Push ${totalPending} Items`;
+    // Separate graded items from sealed/raw — graded get their own cert-entry flow
+    const allItemRows = [...document.querySelectorAll('tr[data-item-id]')];
+    const gradedIds = new Set();
+    const sealedRawIds = new Set();
+    allItemRows.forEach(row => {
+        const id = row.getAttribute('data-item-id');
+        if (_pushedItemIds.has(id)) return;
+        if (pendingApproved.length > 0 && !pendingApproved.includes(id)) return;
+        if (row.getAttribute('data-is-graded') === 'true') gradedIds.add(id);
+        else sealedRawIds.add(id);
+    });
 
-    const ok = await themedConfirm(
-        '🚀 Push Live to Shopify',
-        confirmMsg,
-        { confirmText: confirmLabel, dangerous: true }
-    );
+    const confirmMsg = isPartial
+        ? `Push ${pendingApproved.length} approved items (${gradedIds.size} graded, ${sealedRawIds.size} sealed/raw)?`
+        : `Push ${totalPending} items (${gradedIds.size} graded slabs, ${sealedRawIds.size} sealed/raw). Cannot be easily undone.`;
+
+    const ok = await themedConfirm('🚀 Push Live', confirmMsg,
+        { confirmText: `Push ${totalPending} Items`, dangerous: true });
     if (!ok) return;
 
     const panel = document.getElementById('push-live-results');
-    panel.innerHTML = '<div class="loading"><span class="spinner"></span> Pushing to Shopify... This may take a moment.</div>';
 
-    const body = pendingApproved.length > 0 && pendingApproved.length < totalRows
-        ? JSON.stringify({ item_ids: pendingApproved })
-        : '{}';
+    // ── Step 1: Push sealed + raw items (existing Shopify flow) ───────────────
+    if (sealedRawIds.size > 0) {
+        panel.innerHTML = '<div class="loading"><span class="spinner"></span> Pushing sealed/raw items to Shopify...</div>';
+        try {
+            const body = JSON.stringify({ item_ids: [...sealedRawIds] });
+            const r = await fetch(`/api/ingest/session/${sessionId}/push-live`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+            });
+            const d = await r.json();
+            if (!r.ok && !d.results) {
+                panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`;
+                return;
+            }
+            _renderSealedRawResults(d, sessionId, panel);
+        } catch(err) {
+            panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+            return;
+        }
+    }
+
+    // ── Step 2: Graded slabs — cert-entry UI ──────────────────────────────────
+    if (gradedIds.size > 0) {
+        await _showGradedCertPanel(sessionId, [...gradedIds], panel, sealedRawIds.size > 0);
+    }
+}
+
+function _renderSealedRawResults(d, sessionId, panel) {
+    let html = `<div class="stats" style="margin-bottom:12px;">
+        <div class="stat"><div class="stat-label">Incremented</div><div class="stat-value" style="color:var(--green);">${d.incremented || 0}</div></div>
+        <div class="stat"><div class="stat-label">Damaged Created</div><div class="stat-value">${d.created_damaged || 0}</div></div>
+        <div class="stat"><div class="stat-label">New Listings</div><div class="stat-value" style="color:var(--accent);">${d.created_listing || 0}</div></div>
+        <div class="stat"><div class="stat-label">Errors</div><div class="stat-value" style="color:${(d.error_count||0)>0?'var(--red)':'var(--green)'};">${d.error_count || 0}</div></div>
+    </div>`;
+    if (d.ingested) html += '<div class="alert alert-success">✅ Sealed/raw items ingested.</div>';
+    else if (d.partially_ingested) html += `<div class="alert" style="background:rgba(79,125,249,0.1);border-color:var(--accent);color:var(--accent);">📦 ${d.pushed_count} pushed, ${d.remaining_count} remaining.</div>`;
+    else if (d.error_count > 0) html += `<div class="alert alert-warning">⚠ ${d.error_count} error(s).</div>`;
+
+    const allResults = [...(d.results||[]),...(d.errors||[])];
+    if (allResults.length) {
+        html += '<table style="margin-top:8px;"><thead><tr><th>Product</th><th>Qty</th><th>Action</th></tr></thead><tbody>';
+        html += allResults.map(r => {
+            const color = r.action==='inventory_incremented' ? 'var(--green)' : r.action?.startsWith('created') ? 'var(--accent)' : 'var(--red)';
+            const label = r.action==='inventory_incremented' ? '✅ +'+r.quantity
+                : r.action==='raw_card_ingested' ? `🏷 ${r.quantity} barcode(s) · ${(r.bins||[]).join(', ')}`
+                : r.action?.startsWith('created') ? '🆕 '+( r.new_title||'New Listing') : '❌ '+(r.error||'Error');
+            return `<tr><td>${r.product_name||''}</td><td>${r.quantity||1}</td><td style="color:${color};font-size:0.85rem;">${label}</td></tr>`;
+        }).join('');
+        html += '</tbody></table>';
+    }
+    panel.innerHTML = html;
+}
+
+async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
+    // Build cert-entry cards for each graded item
+    const gradedRows = gradedItemIds.map(id => {
+        const row = document.querySelector(`tr[data-item-id="${id}"]`);
+        if (!row) return null;
+        return {
+            id,
+            name:    row.getAttribute('data-product-name') || 'Unknown',
+            company: row.getAttribute('data-grade-company') || 'PSA',
+            grade:   row.getAttribute('data-grade-value') || '?',
+            price:   row.getAttribute('data-price') || '0',
+        };
+    }).filter(Boolean);
+
+    const certPanel = document.createElement('div');
+    certPanel.style.cssText = 'margin-top:16px; border-top:2px solid var(--border); padding-top:16px;';
+    certPanel.innerHTML = `
+        <div style="font-size:1rem;font-weight:700;margin-bottom:12px;">🏅 Graded Slabs — Enter Cert Numbers</div>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:14px;">
+            Enter the cert number for each slab, then push individually. You can skip any and push them later.
+        </p>
+        ${gradedRows.map(item => `
+            <div id="graded-row-${item.id}" style="display:flex;gap:10px;align-items:center;padding:10px;background:var(--surface-2);border-radius:8px;margin-bottom:8px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:200px;">
+                    <div style="font-weight:600;font-size:0.9rem;">${item.name}</div>
+                    <div style="font-size:0.78rem;color:var(--text-dim);">${item.company} ${item.grade} · $${parseFloat(item.price).toFixed(2)}</div>
+                </div>
+                <input type="text" id="cert-input-${item.id}" placeholder="Cert # (e.g. 12345678)"
+                    style="width:170px;font-size:0.85rem;"
+                    onkeydown="if(event.key==='Enter') pushGradedSlab('${item.id}','${sessionId}')">
+                <button class="btn btn-primary btn-sm" id="cert-btn-${item.id}"
+                    onclick="pushGradedSlab('${item.id}','${sessionId}')"
+                    style="font-size:0.78rem;white-space:nowrap;">
+                    Push Slab
+                </button>
+                <div id="cert-result-${item.id}" style="font-size:0.8rem;min-width:100px;"></div>
+            </div>
+        `).join('')}
+    `;
+
+    if (append) {
+        panel.appendChild(certPanel);
+    } else {
+        panel.innerHTML = '';
+        panel.appendChild(certPanel);
+    }
+}
+
+async function pushGradedSlab(itemId, sessionId) {
+    const certInput = document.getElementById(`cert-input-${itemId}`);
+    const btn       = document.getElementById(`cert-btn-${itemId}`);
+    const resultEl  = document.getElementById(`cert-result-${itemId}`);
+    const cert      = (certInput?.value || '').trim();
+
+    if (!cert) { resultEl.innerHTML = '<span style="color:var(--red);">Enter cert #</span>'; return; }
+
+    btn.disabled = true;
+    btn.textContent = '⟳';
+    resultEl.innerHTML = '<span style="color:var(--text-dim);">Pushing...</span>';
 
     try {
-        const r = await fetch(`/api/ingest/session/${sessionId}/push-live`, {
+        const r = await fetch(`/api/ingest/item/${itemId}/push-graded`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body,
+            body: JSON.stringify({ cert_number: cert, session_id: sessionId }),
         });
         const d = await r.json();
-        if (!r.ok && !d.results) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
-
-        let html = `<div class="stats" style="margin-bottom:12px;">
-            <div class="stat"><div class="stat-label">Incremented</div><div class="stat-value" style="color:var(--green);">${d.incremented || 0}</div></div>
-            <div class="stat"><div class="stat-label">Damaged Created</div><div class="stat-value">${d.created_damaged || 0}</div></div>
-            <div class="stat"><div class="stat-label">New Listings</div><div class="stat-value" style="color:var(--accent);">${d.created_listing || 0}</div></div>
-            <div class="stat"><div class="stat-label">Errors</div><div class="stat-value" style="color:${(d.error_count||0) > 0 ? 'var(--red)' : 'var(--green)'};">${d.error_count || 0}</div></div>
-        </div>`;
-
-        if (d.ingested) {
-            html += '<div class="alert alert-success">✅ Session ingested! All items pushed to Shopify.</div>';
-        } else if (d.partially_ingested) {
-            html += `<div class="alert" style="background:rgba(79,125,249,0.1);border-color:var(--accent);color:var(--accent);">📦 ${d.pushed_count} item(s) pushed. ${d.remaining_count} remaining — push them when the next batch arrives.</div>`;
-            // Clear approved set so next batch starts fresh
-            _approvedItems.clear();
-            _refreshApprovedVisibility();
-            _updateApproveStats();
-        } else if (d.error_count > 0) {
-            html += `<div class="alert alert-warning">⚠ ${d.error_count} item(s) had errors. ${(d.results||[]).length} succeeded and won't be re-pushed.<br>
-                <button class="btn btn-sm" style="margin-top:8px;background:var(--amber);color:#000;" onclick="pushLive('${sessionId}')">🔄 Retry Failed Items</button></div>`;
+        if (!r.ok) {
+            btn.disabled = false; btn.textContent = 'Push Slab';
+            resultEl.innerHTML = `<span style="color:var(--red);">❌ ${d.error||'Failed'}</span>`;
+            return;
         }
 
-        const allResults = [...(d.results || []), ...(d.errors || [])];
-        if (allResults.length) {
-            html += '<table><thead><tr><th>Product</th><th>Qty</th><th>Action</th></tr></thead><tbody>';
-            html += allResults.map(r => {
-                const color = r.action === 'inventory_incremented' ? 'var(--green)'
-                    : r.action === 'created_damaged_listing' ? 'var(--accent)'
-                    : r.action === 'created_listing' ? 'var(--accent)'
-                    : 'var(--red)';
-                const label = r.action === 'inventory_incremented' ? '✅ Inventory +' + r.quantity
-                    : r.action === 'created_damaged_listing' ? '🆕 Created: ' + (r.new_title || 'Damaged Listing')
-                    : r.action === 'created_listing' ? '🆕 Created: ' + (r.new_title || 'New Listing')
-                    : '❌ ' + (r.error || 'Error');
-                return `<tr>
-                    <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}</td>
-                    <td>${r.quantity}</td>
-                    <td style="color:${color};font-size:0.85rem;">${label}</td>
-                </tr>`;
-            }).join('');
-            html += '</tbody></table>';
+        // Success — lock row
+        const row = document.getElementById(`graded-row-${itemId}`);
+        if (row) {
+            const actionLabel = d.action === 'added_variant' ? '✅ Added variant' : '🆕 New listing';
+            row.style.opacity = '0.6';
+            row.innerHTML = `
+                <div style="flex:1;">
+                    <div style="font-weight:600;font-size:0.9rem;">${d.title || 'Slab'}</div>
+                    <div style="font-size:0.78rem;color:var(--text-dim);">Cert: ${cert}</div>
+                </div>
+                <span style="color:var(--green);font-size:0.85rem;">${actionLabel}</span>
+            `;
         }
-
-        panel.innerHTML = html;
-
-        // If ingested, disable the push button
-        if (d.ingested) {
-            const pushBtn = panel.closest('.card').querySelector('.btn-success');
-            if (pushBtn) { pushBtn.disabled = true; pushBtn.textContent = '✅ Ingested'; }
-        }
+        _pushedItemIds.add(itemId);
     } catch(err) {
-        panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+        btn.disabled = false; btn.textContent = 'Push Slab';
+        resultEl.innerHTML = `<span style="color:var(--red);">❌ ${err.message}</span>`;
     }
 }
 

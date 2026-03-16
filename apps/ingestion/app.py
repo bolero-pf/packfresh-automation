@@ -21,6 +21,20 @@ from shopify_client import ShopifyClient, ShopifyError
 from ppt_client import PPTClient
 import product_enrichment as enrichment
 from cache_manager import CacheManager
+try:
+    import psa_client
+    from psa_client import PSAQuotaHit
+except ImportError:
+    psa_client = None
+    PSAQuotaHit = Exception
+try:
+    from storage import assign_bins, release_bins, _canonical_card_type
+except ImportError:
+    assign_bins = release_bins = _canonical_card_type = None
+try:
+    from barcode_gen import generate_barcode_id, generate_barcode_image
+except ImportError:
+    generate_barcode_id = generate_barcode_image = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -560,6 +574,108 @@ def _compute_weighted_cost(current_cost, current_qty, our_unit_cost, adding_qty)
     return (current_cost * current_qty + our_unit_cost * adding_qty) / (current_qty + adding_qty)
 
 
+def _push_raw_item(item: dict) -> dict:
+    """
+    Push a raw (ungraded) card to internal inventory:
+      1. Generate barcode
+      2. Fetch PPT card data for image URL + clean name
+      3. Assign bin location
+      4. Insert into raw_cards table
+      5. Return barcode PNG bytes (base64) for immediate printing
+
+    Returns entry dict with action, barcode, bin assignments.
+    """
+    if not generate_barcode_id or not assign_bins:
+        raise RuntimeError("barcode_gen or storage module not available")
+
+    tcg_id    = item.get("tcgplayer_id")
+    card_name = item.get("product_name", "Unknown")
+    set_name  = item.get("set_name", "")
+    condition = item.get("condition", "NM")
+    qty       = item.get("quantity", 1)
+    cost      = float(item.get("offer_price", 0)) / max(qty, 1)
+    card_type = "pokemon"  # default; could be inferred from tags later
+
+    # Fetch PPT data for image URL + clean name
+    image_url = None
+    if tcg_id and ppt:
+        try:
+            card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+            if card_data:
+                image_url = (card_data.get("imageCdnUrl800")
+                             or card_data.get("imageCdnUrl")
+                             or card_data.get("imageCdnUrl400"))
+                card_name = card_data.get("name") or card_name
+                set_name  = card_data.get("setName") or set_name
+        except Exception as e:
+            logger.warning(f"PPT fetch for raw card TCG#{tcg_id} failed: {e}")
+
+    # Assign bin(s) — one card at a time for placement accuracy
+    assignments = assign_bins(card_type, qty, db)
+
+    results = []
+    for assignment in assignments:
+        bin_id    = assignment["bin_id"]
+        bin_label = assignment["bin_label"]
+        count     = assignment["count"]
+
+        for _ in range(count):
+            barcode_id = generate_barcode_id()
+
+            db.execute("""
+                INSERT INTO raw_cards (
+                    barcode, tcgplayer_id, card_name, set_name,
+                    card_number, condition, rarity,
+                    state, cost_basis, current_price, last_price_update,
+                    bin_id, image_url,
+                    is_graded, grade_company, grade_value,
+                    variant, language,
+                    intake_session_id, stored_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    'STORED', %s, %s, CURRENT_TIMESTAMP,
+                    %s, %s,
+                    FALSE, NULL, NULL,
+                    %s, 'EN',
+                    %s, CURRENT_TIMESTAMP
+                )
+            """, (
+                barcode_id, tcg_id, card_name, set_name,
+                item.get("card_number"), condition, item.get("rarity"),
+                cost, float(item.get("market_price", cost)),
+                bin_id, image_url,
+                item.get("variant"),
+                item.get("session_id"),
+            ))
+
+            # Generate barcode PNG
+            price_str = f"${float(item.get('market_price', 0)):.2f}"
+            png_bytes = generate_barcode_image(
+                barcode_id,
+                card_name=card_name,
+                set_name=set_name,
+                condition=condition,
+                price=price_str,
+            )
+
+            results.append({
+                "barcode":    barcode_id,
+                "bin_label":  bin_label,
+                "card_name":  card_name,
+                "set_name":   set_name,
+                "condition":  condition,
+                "png_b64":    __import__("base64").b64encode(png_bytes).decode(),
+            })
+
+    return {
+        "action":      "raw_card_ingested",
+        "product_name": card_name,
+        "quantity":    qty,
+        "barcodes":    results,
+        "bins":        [a["bin_label"] for a in assignments],
+    }
+
+
 def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cache: dict) -> dict:
     """Push a normal (non-damaged) item: find variant and increment, or create new listing."""
     cache_row = normal_cache.get(tcg_id)
@@ -751,6 +867,199 @@ def store_check(session_id):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# RAW CARD + GRADED SLAB ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/ingest/item/<item_id>/push-graded", methods=["POST"])
+def push_graded_item(item_id):
+    """
+    Push a single graded slab to Shopify.
+    Called per-item from the frontend's cert-entry flow.
+
+    POST body:
+        { "cert_number": "12345678", "session_id": "..." }
+
+    Returns:
+        { action, shopify_product_id, shopify_variant_id, title, cert_number }
+    """
+    if not shopify:
+        return jsonify({"error": "Shopify not configured"}), 503
+    if not psa_client:
+        return jsonify({"error": "psa_client module not available"}), 503
+
+    data        = request.get_json(silent=True) or {}
+    cert_number = (data.get("cert_number") or "").strip()
+    session_id  = data.get("session_id")
+
+    if not cert_number:
+        return jsonify({"error": "cert_number is required"}), 400
+
+    # Load item
+    item = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+    if item.get("pushed_at"):
+        return jsonify({"error": "Item already pushed"}), 400
+
+    grade_company = (item.get("grade_company") or "PSA").upper()
+    grade_value   = item.get("grade_value") or "9"
+    tcg_id        = item.get("tcgplayer_id")
+    price         = float(item.get("offer_price") or item.get("market_price") or 0)
+
+    # Fetch PPT card data for clean name
+    ppt_card = None
+    if tcg_id and ppt:
+        try:
+            ppt_card = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+        except Exception as e:
+            logger.warning(f"PPT fetch for graded TCG#{tcg_id}: {e}")
+
+    try:
+        result = psa_client.push_graded_slab(
+            tcgplayer_id=tcg_id,
+            grade_company=grade_company,
+            grade_value=grade_value,
+            cert_number=cert_number,
+            price=price,
+            ppt_card=ppt_card,
+            shopify_domain=shopify.domain,
+            shopify_token=shopify.token,
+            db=db,
+        )
+    except PSAQuotaHit as e:
+        return jsonify({"error": f"PSA API quota hit — try again tomorrow: {e}"}), 429
+    except Exception as e:
+        logger.exception(f"push_graded_item failed for item {item_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    # Mark item pushed + store cert number
+    db.execute("""
+        UPDATE intake_items
+        SET pushed_at = CURRENT_TIMESTAMP, cert_number = %s
+        WHERE id = %s
+    """, (cert_number, item_id))
+
+    # Update session status
+    if session_id:
+        remaining = db.query_one("""
+            SELECT COUNT(*) AS cnt FROM intake_items
+            WHERE session_id = %s AND pushed_at IS NULL
+              AND item_status IN ('good','damaged') AND is_mapped = TRUE
+        """, (session_id,))
+        if remaining and remaining["cnt"] == 0:
+            db.execute(
+                "UPDATE intake_sessions SET status='ingested' WHERE id=%s",
+                (session_id,)
+            )
+
+    return jsonify({"success": True, **result})
+
+
+@app.route("/api/ingest/session/<session_id>/push-raw", methods=["POST"])
+def push_raw_items(session_id):
+    """
+    Push all unmapped raw (non-graded) items in a session to internal inventory.
+    Generates barcodes, assigns bins, inserts raw_cards rows.
+
+    POST body (optional): { "item_ids": [...] }  — subset of items to push
+
+    Returns list of barcode results with PNG data (base64) for printing.
+    """
+    session = ingest.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    requested_ids = set(str(x) for x in (data.get("item_ids") or []))
+
+    items = db.query("""
+        SELECT * FROM intake_items
+        WHERE session_id = %s
+          AND product_type = 'raw'
+          AND is_graded IS NOT TRUE
+          AND item_status IN ('good', 'damaged')
+          AND is_mapped = TRUE
+          AND pushed_at IS NULL
+    """, (session_id,))
+
+    if requested_ids:
+        items = [i for i in items if str(i["id"]) in requested_ids]
+
+    if not items:
+        return jsonify({"error": "No unmapped raw items to push"}), 400
+
+    results = []
+    errors  = []
+
+    for item in items:
+        item_dict = dict(item)
+        item_dict["session_id"] = session_id
+        try:
+            r = _push_raw_item(item_dict)
+            results.append(r)
+            db.execute(
+                "UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (item["id"],)
+            )
+        except Exception as e:
+            logger.exception(f"push_raw_item failed for {item['id']}: {e}")
+            errors.append({"item_id": str(item["id"]),
+                           "product_name": item.get("product_name"), "error": str(e)})
+
+    return jsonify({
+        "success":  True,
+        "pushed":   len(results),
+        "errors":   errors,
+        "results":  results,
+    })
+
+
+@app.route("/api/raw-cards/barcode/<barcode_id>.png")
+def get_raw_barcode(barcode_id):
+    """
+    Generate + return barcode label PNG for a raw card.
+    Reprintable at any time — looks up card data from raw_cards table.
+    """
+    if not generate_barcode_image:
+        return jsonify({"error": "barcode_gen not available"}), 503
+
+    card = db.query_one("""
+        SELECT card_name, set_name, condition, current_price
+        FROM raw_cards WHERE barcode = %s
+    """, (barcode_id,))
+
+    if not card:
+        return jsonify({"error": "Barcode not found"}), 404
+
+    png = generate_barcode_image(
+        barcode_id,
+        card_name=card["card_name"],
+        set_name=card["set_name"],
+        condition=card.get("condition", ""),
+        price=f"${float(card['current_price']):.2f}" if card.get("current_price") else "",
+    )
+
+    from flask import Response
+    return Response(png, mimetype="image/png",
+                    headers={"Content-Disposition": f'inline; filename="{barcode_id}.png"'})
+
+
+@app.route("/api/raw-cards/session/<session_id>")
+def get_session_raw_cards(session_id):
+    """List all raw cards ingested from a session, with bin assignments."""
+    cards = db.query("""
+        SELECT rc.barcode, rc.card_name, rc.set_name, rc.condition,
+               rc.current_price, rc.state, rc.image_url,
+               sl.bin_label, sl.card_type
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.intake_session_id = %s
+        ORDER BY rc.created_at ASC
+    """, (session_id,))
+    return jsonify({"cards": [dict(c) for c in cards]})
+
+
 # MANUAL OVERRIDES
 # ═══════════════════════════════════════════════════════════════════
 
