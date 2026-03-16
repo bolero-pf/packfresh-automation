@@ -93,8 +93,8 @@ def generate_barcode_image(barcode_id: str, *,
     code_zone_h    = height_px - text_zone_h - barcode_zone_h  # remainder for ID text
 
     # Font sizes — these are pixels, scaled to fit text_zone_h
-    name_size   = int(text_zone_h * 0.52)    # ~117px ≈ 28pt physical
-    detail_size = int(text_zone_h * 0.36)    # ~81px ≈ 19pt physical
+    name_size   = int(text_zone_h * 0.28)    # ~63px ≈ 15pt physical
+    detail_size = int(text_zone_h * 0.20)    # ~45px ≈ 11pt physical
     code_size   = int(code_zone_h * 0.65)    # small ID text
 
     font_name   = _font(name_size)
