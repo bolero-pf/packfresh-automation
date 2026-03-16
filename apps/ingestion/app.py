@@ -29,11 +29,13 @@ except ImportError:
     PSAQuotaHit = Exception
 try:
     from storage import assign_bins, release_bins, _canonical_card_type
-except ImportError:
+except ImportError as e:
+    logger.error(f"storage import failed: {e} — raw card push will not work")
     assign_bins = release_bins = _canonical_card_type = None
 try:
     from barcode_gen import generate_barcode_id, generate_barcode_image
-except ImportError:
+except ImportError as e:
+    logger.error(f"barcode_gen import failed: {e} — raw card push will not work")
     generate_barcode_id = generate_barcode_image = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
