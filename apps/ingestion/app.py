@@ -355,14 +355,41 @@ def push_dry_run(session_id):
     if not active:
         return jsonify({"error": "No active mapped items to preview"}), 400
 
-    tcg_ids = list(set(i["tcgplayer_id"] for i in active if i.get("tcgplayer_id")))
-    normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
+    # Split by product_type
+    raw_items    = [i for i in active if i.get("product_type") == "raw" and not i.get("is_graded")]
+    graded_items = [i for i in active if i.get("is_graded")]
+    sealed_items = [i for i in active if i.get("product_type") != "raw" and not i.get("is_graded")]
 
     results = []
 
+    # Raw cards — show what would be inserted into raw_cards table
+    for item in raw_items:
+        results.append({
+            "product_name": item.get("product_name"),
+            "quantity": item.get("quantity", 1),
+            "action": "would_ingest_raw",
+            "new_title": item.get("product_name"),
+            "listing_price": float(item.get("market_price", 0)),
+            "note": "Barcode generated + assigned to bin — no Shopify listing",
+        })
+
+    # Graded slabs — show cert entry required
+    for item in graded_items:
+        results.append({
+            "product_name": item.get("product_name"),
+            "quantity": item.get("quantity", 1),
+            "action": "would_push_graded",
+            "new_title": item.get("product_name"),
+            "listing_price": float(item.get("market_price", 0)),
+            "note": f"{item.get('grade_company','PSA')} {item.get('grade_value','?')} — cert number required at push",
+        })
+
+    tcg_ids = list(set(i["tcgplayer_id"] for i in sealed_items if i.get("tcgplayer_id")))
+    normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
+
     # Consolidate by (tcg_id, is_damaged)
     consolidated = {}
-    for item in active:
+    for item in sealed_items:
         tcg_id = item["tcgplayer_id"]
         is_damaged = item.get("item_status") == "damaged"
         key = (tcg_id, is_damaged)
@@ -422,9 +449,11 @@ def push_dry_run(session_id):
         "dry_run": True,
         "results": [_serialize(r) for r in results],
         "total": len(active),
-        "would_increment": sum(1 for r in results if r.get("action") == "would_increment"),
+        "would_increment":      sum(1 for r in results if r.get("action") == "would_increment"),
         "would_create_damaged": sum(1 for r in results if r.get("action") == "would_create_damaged"),
         "would_create_listing": sum(1 for r in results if r.get("action") == "would_create_listing"),
+        "would_ingest_raw":     sum(1 for r in results if r.get("action") == "would_ingest_raw"),
+        "would_push_graded":    sum(1 for r in results if r.get("action") == "would_push_graded"),
     })
 
 
@@ -465,15 +494,34 @@ def push_session_live(session_id):
                             "total": 0, "ingested": True,
                             "message": "All items already pushed. Session marked ingested."})
         return jsonify({"error": "No active mapped items to push"}), 400
-    tcg_ids = list(set(i["tcgplayer_id"] for i in active if i.get("tcgplayer_id")))
-    normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
-
     results = []
     errors = []
 
-    # ── Consolidate items by (tcg_id, is_damaged) to minimize Shopify API calls ──
+    # ── Split by product_type — raw cards go to internal DB, sealed go to Shopify ──
+    raw_items    = [i for i in active if i.get("product_type") == "raw" and not i.get("is_graded")]
+    sealed_items = [i for i in active if i.get("product_type") != "raw" or i.get("is_graded")]
+    # Graded slabs are handled per-item via /api/ingest/item/<id>/push-graded — exclude here
+    sealed_items = [i for i in sealed_items if not i.get("is_graded")]
+
+    # ── Raw cards: barcode + bin assignment + raw_cards INSERT ────────────────
+    for item in raw_items:
+        item_dict = dict(item)
+        item_dict["session_id"] = session_id
+        try:
+            r = _push_raw_item(item_dict)
+            results.append(r)
+            db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
+                       (item["id"],))
+        except Exception as e:
+            logger.exception(f"push_raw_item failed for {item['id']}: {e}")
+            errors.append({"product_name": item.get("product_name"), "action": "error", "error": str(e)})
+
+    # ── Sealed items: consolidate and push to Shopify ─────────────────────────
+    tcg_ids = list(set(i["tcgplayer_id"] for i in sealed_items if i.get("tcgplayer_id")))
+    normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
+
     consolidated = {}  # (tcg_id, is_damaged) -> {total_qty, items[], ...}
-    for item in active:
+    for item in sealed_items:
         tcg_id = item["tcgplayer_id"]
         is_damaged = item.get("item_status") == "damaged"
         key = (tcg_id, is_damaged)
@@ -491,7 +539,6 @@ def push_session_live(session_id):
     for key, group in consolidated.items():
         tcg_id, is_damaged = key
         qty = group["total_qty"]
-        item_names = ", ".join(set(i.get("product_name", "") for i in group["items"]))
         entry = {
             "product_name": group["product_name"],
             "tcgplayer_id": tcg_id,
@@ -514,7 +561,6 @@ def push_session_live(session_id):
             errors.append(entry)
         else:
             results.append(entry)
-            # Mark successfully pushed items so retry skips them
             for pushed_item in group["items"]:
                 db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
                            (pushed_item["id"],))

@@ -1531,6 +1531,8 @@ async function pushDryRun(sessionId) {
             <div class="stat"><div class="stat-label">Would Increment</div><div class="stat-value" style="color:var(--green);">${d.would_increment || 0}</div></div>
             <div class="stat"><div class="stat-label">Would Create Damaged</div><div class="stat-value">${d.would_create_damaged || 0}</div></div>
             <div class="stat"><div class="stat-label">Would Create Listing</div><div class="stat-value" style="color:var(--accent);">${d.would_create_listing || 0}</div></div>
+            ${(d.would_ingest_raw||0) > 0 ? `<div class="stat"><div class="stat-label">Raw → DB</div><div class="stat-value" style="color:var(--green);">${d.would_ingest_raw}</div></div>` : ''}
+            ${(d.would_push_graded||0) > 0 ? `<div class="stat"><div class="stat-label">Graded Slabs</div><div class="stat-value" style="color:var(--accent2);">${d.would_push_graded}</div></div>` : ''}
         </div>`;
 
         const results = d.results || [];
@@ -1550,6 +1552,14 @@ async function pushDryRun(sessionId) {
                     actionLabel = '🆕 Create New Listing';
                     color = 'var(--accent)';
                     details = `"${r.new_title}"<br><small>Price: $${r.listing_price?.toFixed(2)} · Qty: ${r.quantity}</small>`;
+                } else if (r.action === 'would_ingest_raw') {
+                    actionLabel = '🏷 Ingest Raw → DB';
+                    color = 'var(--green)';
+                    details = `<small>Barcode generated · bin assigned · no Shopify listing</small>`;
+                } else if (r.action === 'would_push_graded') {
+                    actionLabel = '🏅 Push Graded Slab';
+                    color = 'var(--accent2)';
+                    details = `<small>${r.note || 'Cert # required at push time'}</small>`;
                 }
                 return `<tr>
                     <td>${r.product_name || ''}${r.is_damaged ? ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.6rem;">DMG</span>' : ''}${r.consolidated_from > 1 ? ' <span class="badge badge-dim" style="font-size:0.6rem;">×' + r.consolidated_from + ' items</span>' : ''}</td>
