@@ -499,9 +499,17 @@ def push_session_live(session_id):
 
     # ── Split by product_type — raw cards go to internal DB, sealed go to Shopify ──
     raw_items    = [i for i in active if i.get("product_type") == "raw" and not i.get("is_graded")]
-    sealed_items = [i for i in active if i.get("product_type") != "raw" or i.get("is_graded")]
-    # Graded slabs are handled per-item via /api/ingest/item/<id>/push-graded — exclude here
-    sealed_items = [i for i in sealed_items if not i.get("is_graded")]
+    graded_items = [i for i in active if i.get("is_graded")]
+    sealed_items = [i for i in active if i.get("product_type") != "raw" and not i.get("is_graded")]
+
+    # ── Graded slabs: surfaced in UI for per-item cert entry, not auto-pushed ─
+    for item in graded_items:
+        results.append({
+            "product_name": item.get("product_name"),
+            "quantity":     item.get("quantity", 1),
+            "action":       "graded_pending_cert",
+            "note":         f"{item.get('grade_company','PSA')} {item.get('grade_value','?')} — use cert entry panel below",
+        })
 
     # ── Raw cards: barcode + bin assignment + raw_cards INSERT ────────────────
     for item in raw_items:

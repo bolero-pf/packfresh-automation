@@ -1666,9 +1666,13 @@ function _renderSealedRawResults(d, sessionId, panel) {
     if (allResults.length) {
         html += '<table style="margin-top:8px;"><thead><tr><th>Product</th><th>Qty</th><th>Action</th></tr></thead><tbody>';
         html += allResults.map(r => {
-            const color = r.action==='inventory_incremented' ? 'var(--green)' : r.action?.startsWith('created') ? 'var(--accent)' : 'var(--red)';
+            const color = r.action==='inventory_incremented' ? 'var(--green)'
+                : r.action==='raw_card_ingested' ? 'var(--green)'
+                : r.action==='graded_pending_cert' ? 'var(--accent2)'
+                : r.action?.startsWith('created') ? 'var(--accent)' : 'var(--red)';
             const label = r.action==='inventory_incremented' ? '✅ +'+r.quantity
                 : r.action==='raw_card_ingested' ? `🏷 ${r.quantity} barcode(s) · ${(r.bins||[]).join(', ')}`
+                : r.action==='graded_pending_cert' ? `🏅 ${r.note||'Enter cert below'}`
                 : r.action?.startsWith('created') ? '🆕 '+( r.new_title||'New Listing') : '❌ '+(r.error||'Error');
             return `<tr><td>${r.product_name||''}</td><td>${r.quantity||1}</td><td style="color:${color};font-size:0.85rem;">${label}</td></tr>`;
         }).join('');
