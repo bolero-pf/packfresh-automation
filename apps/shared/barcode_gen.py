@@ -1,17 +1,8 @@
 """
 Barcode generation for raw card inventory.
 
-Label size: 62mm x 29mm landscape at 300dpi
-New layout prioritises human-readable text at the top, barcode below.
-
-  ┌─────────────────────────────────────┐
-  │ Charizard ex              (large)   │
-  │ #079/091  •  NM           (medium)  │
-  │ ▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌  │
-  │ PF-20260316-A3K9X2        (small)   │
-  └─────────────────────────────────────┘
-
-No price — price changes, barcode is the lookup key.
+Label: 62mm x 50mm landscape at 300 DPI = 732 x 591 px
+Big readable text — card name, number, condition — then barcode below.
 """
 
 import io
@@ -35,13 +26,6 @@ def generate_barcode_id(prefix: str = "PF") -> str:
     return f"{prefix}-{date_str}-{suffix}"
 
 
-def _load_font(path, size):
-    try:
-        return ImageFont.truetype(path, size)
-    except Exception:
-        return None
-
-
 def _best_font(size):
     for candidate in [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -49,9 +33,11 @@ def _best_font(size):
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
     ]:
-        f = _load_font(candidate, size)
-        if f:
-            return f
+        if os.path.exists(candidate):
+            try:
+                return ImageFont.truetype(candidate, size)
+            except Exception:
+                continue
     return ImageFont.load_default()
 
 
@@ -60,40 +46,37 @@ def generate_barcode_image(barcode_id: str, *,
                            set_name: str = "",
                            condition: str = "",
                            card_number: str = "",
-                           price: str = "",        # ignored — kept for backward compat
+                           price: str = "",        # ignored — kept for compat
                            width_mm: float = 62,
-                           height_mm: float = 29) -> bytes:
+                           height_mm: float = 50) -> bytes:
     """
-    Generate a barcode label image for thermal printing.
-    62mm x 29mm landscape at 300 DPI.
+    62mm x 50mm at 300 DPI.
 
-    Layout (top to bottom):
-      1. Card name — large, bold, truncated to fit
-      2. Card number + condition — medium
-      3. Barcode bars
-      4. Barcode ID string — small
+    Layout:
+      [CARD NAME — very large                  ]
+      [#079/091  •  NM        — large          ]
+      [barcode bars                            ]
+      [PF-20260316-A3K9X2     — small          ]
     """
-    dpi = 300
-    width_px  = int(width_mm  / 25.4 * dpi)   # 732px
-    height_px = int(height_mm / 25.4 * dpi)   # 343px
+    dpi       = 300
+    width_px  = int(width_mm  / 25.4 * dpi)   # 732
+    height_px = int(height_mm / 25.4 * dpi)   # 591
 
-    PAD = 12   # px padding on left/right
+    PAD = 16
 
-    # ── Fonts ────────────────────────────────────────────────────────────────
-    # Scale sizes to fit within height_px
-    font_name   = _best_font(52)   # card name — big and readable
-    font_detail = _best_font(38)   # card# + condition
-    font_code   = _best_font(24)   # barcode ID at bottom
+    # Font sizes in pixels — at 300dpi, 1pt ≈ 4.17px
+    # 80px ≈ 19pt,  60px ≈ 14pt,  30px ≈ 7pt
+    font_name   = _best_font(90)   # card name
+    font_detail = _best_font(64)   # card# + condition
+    font_code   = _best_font(30)   # barcode ID string
 
-    # ── Canvas ───────────────────────────────────────────────────────────────
     label = Image.new("RGB", (width_px, height_px), "white")
     draw  = ImageDraw.Draw(label)
 
     y = PAD
 
-    # ── Line 1: Card name ────────────────────────────────────────────────────
+    # ── Card name ─────────────────────────────────────────────────────────────
     if card_name:
-        # Truncate to fit width
         name = card_name
         while name and draw.textlength(name, font=font_name) > (width_px - PAD * 2):
             name = name[:-1]
@@ -101,29 +84,28 @@ def generate_barcode_image(barcode_id: str, *,
             name = name[:-1] + "…"
         draw.text((PAD, y), name, fill="black", font=font_name)
         bbox = draw.textbbox((PAD, y), name, font=font_name)
-        y = bbox[3] + 6
+        y = bbox[3] + 8
 
-    # ── Line 2: Card number + condition ──────────────────────────────────────
+    # ── Card number + condition ───────────────────────────────────────────────
     parts = []
     if card_number:
         parts.append(f"#{card_number}")
     if condition:
         parts.append(condition)
     if not parts and set_name:
-        # Fallback: show set if no number/condition
         parts.append(set_name[:28])
     if parts:
-        detail = "  •  ".join(parts)
-        draw.text((PAD, y), detail, fill="#333333", font=font_detail)
+        detail = "   •   ".join(parts)
+        draw.text((PAD, y), detail, fill="#222222", font=font_detail)
         bbox = draw.textbbox((PAD, y), detail, font=font_detail)
-        y = bbox[3] + 8
+        y = bbox[3] + 10
 
     # ── Barcode ───────────────────────────────────────────────────────────────
     code128 = barcode.get("code128", barcode_id, writer=ImageWriter())
     buf = io.BytesIO()
     code128.write(buf, options={
-        "module_width":  0.3,
-        "module_height": 8.0,
+        "module_width":  0.35,
+        "module_height": 12.0,
         "font_size":     0,
         "text_distance": 0,
         "quiet_zone":    2.0,
@@ -132,9 +114,11 @@ def generate_barcode_image(barcode_id: str, *,
     buf.seek(0)
     barcode_img = Image.open(buf)
 
-    # Reserve bottom for barcode ID text
-    code_h = draw.textbbox((0, 0), barcode_id, font=font_code)[3] + 4
-    barcode_h = max(height_px - y - code_h - PAD, 30)
+    # Reserve space for barcode ID at bottom
+    code_bbox = draw.textbbox((0, 0), barcode_id, font=font_code)
+    code_h    = code_bbox[3] - code_bbox[1] + 6
+
+    barcode_h = max(height_px - y - code_h - PAD, 60)
     barcode_w = width_px - PAD * 2
 
     barcode_resized = barcode_img.resize(
@@ -142,12 +126,11 @@ def generate_barcode_image(barcode_id: str, *,
         Image.Resampling.NEAREST
     )
     label.paste(barcode_resized, (PAD, y))
-    y += barcode_h + 2
+    y += barcode_h + 4
 
-    # ── Barcode ID text ────────────────────────────────────────────────────────
-    draw.text((PAD, y), barcode_id, fill="#555555", font=font_code)
+    # ── Barcode ID ────────────────────────────────────────────────────────────
+    draw.text((PAD, y), barcode_id, fill="#666666", font=font_code)
 
-    # ── Export ────────────────────────────────────────────────────────────────
     output = io.BytesIO()
     label.save(output, format="PNG", dpi=(dpi, dpi))
     output.seek(0)
