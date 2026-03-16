@@ -2,3 +2,5 @@ flask>=3.0
 gunicorn>=21.0
 psycopg2-binary>=2.9
 python-dotenv>=1.0
+python-barcode==0.15.1
+Pillow>=10.0

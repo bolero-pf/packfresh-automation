@@ -561,6 +561,8 @@ async function viewSession(sessionId, _preserveScroll) {
         if (scrollY) requestAnimationFrame(() => window.scrollTo(0, scrollY));
         // Enrich items with breakdown summaries after render
         _enrichBreakdownSummaries(items, sessionId, isReceived);
+        // Load raw card barcodes for this session (persists across refreshes)
+        _loadSessionBarcodes(sessionId);
     } catch(err) {
         el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
@@ -1678,7 +1680,115 @@ function _renderSealedRawResults(d, sessionId, panel) {
         }).join('');
         html += '</tbody></table>';
     }
+
+    // ── Barcode labels for raw cards ─────────────────────────────────────────
+    const rawResults = (d.results||[]).filter(r => r.action === 'raw_card_ingested' && r.barcodes?.length);
+    if (rawResults.length) {
+        const allBarcodes = rawResults.flatMap(r => r.barcodes || []);
+        html += `<div style="margin-top:16px; border-top:1px solid var(--border); padding-top:14px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+                <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${allBarcodes.length})</div>
+                <button class="btn btn-primary btn-sm" onclick="printAllBarcodes()" style="font-size:0.78rem;">🖨 Print All</button>
+            </div>
+            <div id="barcode-label-grid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                ${allBarcodes.map(b => `
+                    <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px;">
+                        <img src="data:image/png;base64,${b.png_b64}" style="width:100%; border-radius:4px; background:#fff;" alt="barcode">
+                        <div style="font-size:0.78rem; color:var(--text-dim);">
+                            <strong style="color:var(--text);">${b.card_name||''}</strong><br>
+                            ${b.set_name||''} · ${b.condition||''} · <span style="color:var(--accent); font-family:monospace;">${b.bin_label||''}</span>
+                        </div>
+                        <div style="display:flex; gap:6px;">
+                            <a href="data:image/png;base64,${b.png_b64}" download="${b.barcode}.png" style="flex:1;">
+                                <button class="btn btn-secondary btn-sm" style="width:100%; font-size:0.72rem;">⬇ Download</button>
+                            </a>
+                            <button class="btn btn-secondary btn-sm" style="flex:1; font-size:0.72rem;" onclick="printOneBarcode('${b.barcode}')">🖨 Print</button>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>`;
+        // Store barcodes for print-all
+        window._lastBarcodes = allBarcodes;
+    }
+
     panel.innerHTML = html;
+}
+
+async function _loadSessionBarcodes(sessionId) {
+    try {
+        const r = await fetch(`/api/raw-cards/session/${sessionId}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        const cards = d.cards || [];
+        if (!cards.length) return;
+
+        const panel = document.getElementById('push-live-results');
+        if (!panel) return;
+
+        // Build barcode grid from DB records — use reprint endpoint for images
+        const grid = cards.map(c => `
+            <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px;">
+                <img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:100%; border-radius:4px; background:#fff;" alt="barcode" loading="lazy">
+                <div style="font-size:0.78rem; color:var(--text-dim);">
+                    <strong style="color:var(--text);">${c.card_name||''}</strong><br>
+                    ${c.set_name||''} · ${c.condition||''} · <span style="color:var(--accent); font-family:monospace;">${c.bin_label||'?'}</span>
+                </div>
+                <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" onclick="printOneBarcode('${c.barcode}')">🖨 Print</button>
+            </div>
+        `).join('');
+
+        const barcodeSection = document.createElement('div');
+        barcodeSection.style.cssText = 'margin-top:16px; border-top:1px solid var(--border); padding-top:14px;';
+        barcodeSection.innerHTML = `
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+                <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${cards.length})</div>
+                <button class="btn btn-primary btn-sm" onclick="printAllBarcodesFromSession('${sessionId}')" style="font-size:0.78rem;">🖨 Print All</button>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                ${grid}
+            </div>
+        `;
+
+        // Append to push-live-results if empty, otherwise replace any existing barcode section
+        const existing = panel.querySelector('.barcode-session-section');
+        if (existing) existing.remove();
+        barcodeSection.classList.add('barcode-session-section');
+        panel.appendChild(barcodeSection);
+    } catch(e) { /* silent — barcodes are bonus UI */ }
+}
+
+async function printAllBarcodesFromSession(sessionId) {
+    try {
+        const r = await fetch(`/api/raw-cards/session/${sessionId}`);
+        const d = await r.json();
+        const cards = d.cards || [];
+        if (!cards.length) return;
+        const win = window.open('', '_blank');
+        // Use reprint endpoint URLs — browser will fetch them
+        const imgs = cards.map(c =>
+            `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:62mm; display:block; page-break-after:always;">`
+        ).join('');
+        win.document.write(`<html><head><style>@media print { @page { margin:0; size: 62mm auto; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
+        win.document.close();
+    } catch(e) { alert('Failed to load barcodes: ' + e.message); }
+}
+
+function printOneBarcode(barcodeId) {
+    const win = window.open('', '_blank');
+    win.document.write(`<html><body style="margin:0"><img src="/api/raw-cards/barcode/${barcodeId}.png" style="width:100%;" onload="window.print();window.close()"></body></html>`);
+    win.document.close();
+}
+
+function printAllBarcodes() {
+    const barcodes = window._lastBarcodes || [];
+    if (!barcodes.length) return;
+    const win = window.open('', '_blank');
+    const imgs = barcodes.map(b =>
+        `<img src="data:image/png;base64,${b.png_b64}" style="width:62mm; display:block; page-break-after:always;">`
+    ).join('');
+    win.document.write(`<html><head><style>@media print { @page { margin:0; size: 62mm auto; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
+    win.document.close();
 }
 
 async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
