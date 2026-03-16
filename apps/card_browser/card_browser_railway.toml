@@ -1,8 +1,8 @@
 [build]
-dockerfilePath = "apps/card-browser/Dockerfile"
+dockerfilePath = "apps/card_browser/Dockerfile"
 
 [deploy]
 watchPatterns = [
-  "apps/card-browser/**",
+  "apps/card_browser/**",
   "apps/shared/**"
 ]
