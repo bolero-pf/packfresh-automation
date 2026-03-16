@@ -1772,14 +1772,20 @@ async function printAllBarcodesFromSession(sessionId) {
         const imgs = cards.map(c =>
             `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:62mm; display:block; page-break-after:always;">`
         ).join('');
-        win.document.write(`<html><head><style>@media print { @page { margin:0; size: 62mm auto; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
+        win.document.write(`<html><head><style>@media print { @page { margin:0; size: 62mm 29mm landscape; } body { margin:0; } img { width:62mm; height:29mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
         win.document.close();
     } catch(e) { alert('Failed to load barcodes: ' + e.message); }
 }
 
 function printOneBarcode(barcodeId) {
     const win = window.open('', '_blank');
-    win.document.write(`<html><body style="margin:0"><img src="/api/raw-cards/barcode/${barcodeId}.png" style="width:100%;" onload="window.print();window.close()"></body></html>`);
+    win.document.write(`<html><head><style>
+        @media print { @page { margin:0; size: 62mm 29mm landscape; } }
+        body { margin:0; }
+        img { width:62mm; height:29mm; display:block; }
+    </style></head><body>
+        <img src="/api/raw-cards/barcode/${barcodeId}.png" onload="window.print();window.close()">
+    </body></html>`);
     win.document.close();
 }
 
@@ -1790,7 +1796,7 @@ function printAllBarcodes() {
     const imgs = barcodes.map(b =>
         `<img src="data:image/png;base64,${b.png_b64}" style="width:62mm; display:block; page-break-after:always;">`
     ).join('');
-    win.document.write(`<html><head><style>@media print { @page { margin:0; size: 62mm auto; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
+    win.document.write(`<html><head><style>@media print { @page { margin:0; size: 62mm 29mm landscape; } body { margin:0; } img { width:62mm; height:29mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
     win.document.close();
 }
 

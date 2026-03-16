@@ -711,7 +711,7 @@ def _push_raw_item(item: dict) -> dict:
                 card_name=card_name,
                 set_name=set_name,
                 condition=condition,
-                price=price_str,
+                card_number=item.get("card_number") or "",
             )
 
             results.append({
@@ -1081,7 +1081,7 @@ def get_raw_barcode(barcode_id):
         return jsonify({"error": "barcode_gen not available"}), 503
 
     card = db.query_one("""
-        SELECT card_name, set_name, condition, current_price
+        SELECT card_name, set_name, condition, card_number
         FROM raw_cards WHERE barcode = %s
     """, (barcode_id,))
 
@@ -1093,7 +1093,7 @@ def get_raw_barcode(barcode_id):
         card_name=card["card_name"],
         set_name=card["set_name"],
         condition=card.get("condition", ""),
-        price=f"${float(card['current_price']):.2f}" if card.get("current_price") else "",
+        card_number=card.get("card_number") or "",
     )
 
     from flask import Response
