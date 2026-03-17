@@ -531,6 +531,7 @@ def screen_every_order(order_gid: str) -> dict:
 
     # 3. Classify all orders
     has_delivered = False
+    has_active_verification = False  # any non-cancelled order with a verification tag?
     non_cancelled_totals = []       # all orders that aren't cancelled (for cumulative)
     max_previous_total = 0.0        # for spend spike
     unfulfilled_siblings = []       # for combine
@@ -553,6 +554,9 @@ def screen_every_order(order_gid: str) -> dict:
             # Track max previous order (not current) for spike
             if nid != order_gid and total > max_previous_total:
                 max_previous_total = total
+            # Check if any active order already has a verification tag
+            if nid != order_gid and (tags & {t.lower() for t in VERIFICATION_TAGS}):
+                has_active_verification = True
 
         # Unfulfilled siblings for combine — must match shipping address
         if nid != order_gid and status == "UNFULFILLED" and financial not in CANCELLED_STATUSES:
@@ -570,10 +574,8 @@ def screen_every_order(order_gid: str) -> dict:
 
     # ── CHECK: Cumulative verification (no delivered orders yet) ──
     if not has_delivered:
-        # Skip if already flagged for verification
-        already_flagged = bool(cust_tags & {t.lower() for t in VERIFICATION_TAGS})
-
-        if not already_flagged and cumulative_total >= TIER1_THRESHOLD:
+        # Skip if another active (non-cancelled) order already has a verification tag
+        if not has_active_verification and cumulative_total >= TIER1_THRESHOLD:
             tier = 2 if cumulative_total >= TIER2_THRESHOLD else 1
             if tier >= 2:
                 desc = "photo ID + selfie + shipping address confirmation"
@@ -597,7 +599,7 @@ def screen_every_order(order_gid: str) -> dict:
         else:
             results["verification"] = {
                 "flagged": False,
-                "reason": "already_flagged" if already_flagged else "below_threshold",
+                "reason": "active_verification_exists" if has_active_verification else "below_threshold",
                 "cumulative_total": cumulative_total,
                 "has_delivered": False,
             }
@@ -846,25 +848,45 @@ def on_order_cancelled(order_gid: str) -> dict:
     email = (customer.get("email") or "").strip()
 
     result = {"order_gid": order_gid, "order_name": order_name,
-              "firsttime5_abuse": False, "klaviyo_set": False}
+              "firsttime5_abuse": False, "klaviyo_set": False, "verification_cleared": False}
 
-    if "FIRSTTIME5-review" not in order_tags:
-        result["reason"] = "no_firsttime5_tag"
-        return result
+    # If this was a FIRSTTIME5 abuse cancellation, set the abuse properties
+    if "FIRSTTIME5-review" in order_tags:
+        result["firsttime5_abuse"] = True
+        if customer_gid and email:
+            try:
+                external_id = customer_gid.split("/")[-1]
+                upsert_profile(email=email, external_id=external_id, properties={
+                    "firsttime5_abuse_confirmed": True,
+                    "firsttime5_abuse_order": order_name,
+                    "firsttime5_abuse_confirmed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                result["klaviyo_set"] = True
+            except Exception as e:
+                print(f"[screening] Klaviyo abuse flag failed: {e}", flush=True)
+                result["klaviyo_error"] = str(e)
 
-    result["firsttime5_abuse"] = True
-    if customer_gid and email:
-        try:
-            external_id = customer_gid.split("/")[-1]
-            upsert_profile(email=email, external_id=external_id, properties={
-                "firsttime5_abuse_confirmed": True,
-                "firsttime5_abuse_order": order_name,
-                "firsttime5_abuse_confirmed_at": datetime.now(timezone.utc).isoformat(),
-            })
-            result["klaviyo_set"] = True
-        except Exception as e:
-            print(f"[screening] Klaviyo abuse flag failed: {e}", flush=True)
-            result["klaviyo_error"] = str(e)
+    # If this order had any verification tags, clear Klaviyo so next order re-triggers
+    verification_tags = {"high-value-tier1", "high-value-tier2", "spend-spike-review", "fraud-medium"}
+    if order_tags & verification_tags:
+        if customer_gid and email:
+            try:
+                external_id = customer_gid.split("/")[-1]
+                upsert_profile(email=email, external_id=external_id, properties={
+                    "id_verification_required": False,
+                    "id_selfie_required": False,
+                    "cumulative_verification_required": False,
+                    "spend_spike_verification_required": False,
+                    "fraud_verification_required": False,
+                    "verification_cleared_at": datetime.now(timezone.utc).isoformat(),
+                })
+                result["verification_cleared"] = True
+            except Exception as e:
+                print(f"[screening] Klaviyo verification clear failed: {e}", flush=True)
+
+    if not result["firsttime5_abuse"] and not result["verification_cleared"]:
+        result["reason"] = "no_screening_tags"
+
     return result
 
 # ═══════════════════════════════════════════════════════════════════════
