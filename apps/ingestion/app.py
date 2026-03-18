@@ -652,8 +652,9 @@ def _push_raw_item(item: dict) -> dict:
     cost      = float(item.get("offer_price", 0)) / max(qty, 1)
     card_type = "pokemon"  # default; could be inferred from tags later
 
-    # Fetch PPT data for image URL + clean name
+    # Fetch PPT data for image URL + clean name + real card number
     image_url = None
+    ppt_card_number = None
     if tcg_id and ppt:
         try:
             card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
@@ -663,6 +664,8 @@ def _push_raw_item(item: dict) -> dict:
                              or card_data.get("imageCdnUrl400"))
                 card_name = card_data.get("name") or card_name
                 set_name  = card_data.get("setName") or set_name
+                # Real card number e.g. "004/125" — not the Collectr set code
+                ppt_card_number = card_data.get("cardNumber") or card_data.get("number")
         except Exception as e:
             logger.warning(f"PPT fetch for raw card TCG#{tcg_id} failed: {e}")
 
@@ -697,7 +700,7 @@ def _push_raw_item(item: dict) -> dict:
                 )
             """, (
                 barcode_id, tcg_id, card_name, set_name,
-                item.get("card_number"), condition, item.get("rarity"),
+                ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
                 cost, float(item.get("market_price", cost)),
                 bin_id, image_url,
                 item.get("variant"),
@@ -711,7 +714,7 @@ def _push_raw_item(item: dict) -> dict:
                 card_name=card_name,
                 set_name=set_name,
                 condition=condition,
-                card_number=item.get("card_number") or "",
+                card_number=ppt_card_number or item.get("card_number") or "",
             )
 
             results.append({

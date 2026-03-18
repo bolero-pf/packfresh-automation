@@ -93,8 +93,8 @@ def generate_barcode_image(barcode_id: str, *,
     code_zone_h    = height_px - text_zone_h - barcode_zone_h  # remainder for ID text
 
     # Font sizes — these are pixels, scaled to fit text_zone_h
-    name_size   = int(text_zone_h * 0.28)    # ~63px ≈ 15pt physical
-    detail_size = int(text_zone_h * 0.20)    # ~45px ≈ 11pt physical
+    name_size   = int(text_zone_h * 0.20)    # ~45px ≈ 11pt physical
+    detail_size = int(text_zone_h * 0.15)    # ~34px ≈ 8pt physical
     code_size   = int(code_zone_h * 0.65)    # small ID text
 
     font_name   = _font(name_size)
@@ -107,6 +107,12 @@ def generate_barcode_image(barcode_id: str, *,
     # ── Text zone ─────────────────────────────────────────────────────────────
     y = PAD
 
+    # Card name — strip trailing set code suffixes like "- SWSH138", "- BW001" etc.
+    # These come from Collectr export format and are redundant with card_number field
+    import re as _re
+    if card_name:
+        card_name = _re.sub(r'\s*-\s*[A-Z]{1,4}\d{1,4}[A-Z]?$', '', card_name).strip()
+
     # Card name — truncate to fit width
     if card_name:
         name = card_name
@@ -118,8 +124,12 @@ def generate_barcode_image(barcode_id: str, *,
         y += name_size + 6
 
     # Card number + condition
+    # Skip card_number if it looks like a Collectr set code (e.g. SWSH138, BW001)
+    # rather than a real card number (e.g. 004/125, RC05)
+    import re as _re2
+    _is_set_code = card_number and bool(_re2.match(r'^[A-Z]{2,4}\d{1,4}[A-Z]?$', card_number.strip()))
     parts = []
-    if card_number:
+    if card_number and not _is_set_code:
         parts.append(f"#{card_number}")
     if condition:
         parts.append(condition)
