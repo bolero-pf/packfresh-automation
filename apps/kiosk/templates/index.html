@@ -445,7 +445,7 @@ function renderDetail(card, copies) {
   const condRows = Object.entries(byCondition)
     .sort(([a],[b]) => condOrder.indexOf(a) - condOrder.indexOf(b))
     .map(([cond, copies]) => {
-      const avgPrice = copies.reduce((s,c) => s + (c.current_price||0), 0) / copies.length;
+      const avgPrice = copies.reduce((s,c) => s + (parseFloat(c.current_price)||0), 0) / copies.length;
       const inCart = _cart.filter(ci => ci.card_name === card.card_name && ci.set_name === card.set_name && ci.condition === cond);
       const cartQty = inCart.reduce((s,ci) => s + ci.qty, 0);
       const addLabel = cartQty > 0
@@ -486,7 +486,7 @@ function renderDetail(card, copies) {
 function toggleCondition(row, cardName, setName, imageUrl) {
   const cond   = row.getAttribute('data-cond');
   const avail  = parseInt(row.getAttribute('data-avail'));
-  const price  = parseFloat(row.getAttribute('data-price'));
+  const price  = parseFloat(row.getAttribute('data-price')) || 0;
   const inCart = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
 
   if (inCart) {
@@ -569,7 +569,7 @@ function openCart() {
 
 function renderCart(panel) {
   const total = cartCount();
-  const estimatedTotal = _cart.reduce((s,c) => s + c.price * c.qty, 0);
+  const estimatedTotal = _cart.reduce((s,c) => s + (parseFloat(c.price)||0) * c.qty, 0);
 
   if (!_cart.length) {
     panel.innerHTML = `
@@ -591,7 +591,7 @@ function renderCart(panel) {
       ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:44px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
       <div class="cart-item-info">
         <div class="cart-item-name">${esc(c.card_name)}</div>
-        <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> × ${c.qty} · $${(c.price * c.qty).toFixed(2)}</div>
+        <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> × ${c.qty} · $${((parseFloat(c.price)||0) * c.qty).toFixed(2)}</div>
       </div>
       <button class="cart-item-remove" onclick="removeFromCart('${esc(c.card_name)}','${esc(c.set_name)}','${c.condition}'); renderCart(document.getElementById('cart-panel'));">✕</button>
     </div>
