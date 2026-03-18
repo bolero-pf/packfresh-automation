@@ -591,7 +591,7 @@ function renderCart(panel) {
       ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:44px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
       <div class="cart-item-info">
         <div class="cart-item-name">${esc(c.card_name)}</div>
-        <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> × ${c.qty} · $${((parseFloat(c.price)||0) * c.qty).toFixed(2)}</div>
+        <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> × ${c.qty} · $${(parseFloat(c.price)||0).toFixed(2)} ea · <strong style="color:var(--accent);">$${((parseFloat(c.price)||0) * c.qty).toFixed(2)}</strong></div>
       </div>
       <button class="cart-item-remove" onclick="removeFromCart('${esc(c.card_name)}','${esc(c.set_name)}','${c.condition}'); renderCart(document.getElementById('cart-panel'));">✕</button>
     </div>
@@ -608,7 +608,6 @@ function renderCart(panel) {
       <div class="cart-total-label">Estimated Total</div>
       <div class="cart-total-val">$${estimatedTotal.toFixed(2)}</div>
     </div>
-    <div class="info">💡 Final prices may vary. A staff member will bring these cards to you.</div>
     <div class="form-row">
       <label class="form-label">Your Name *</label>
       <input class="form-input" id="cust-name" type="text" placeholder="e.g. Mark" autocomplete="name">
