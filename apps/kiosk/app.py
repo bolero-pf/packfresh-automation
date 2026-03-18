@@ -192,7 +192,7 @@ def create_hold():
 
     # For each line item, find available STORED cards matching card+set+condition
     # Lock them by setting current_hold_id
-    hold_row = db.query_one("""
+    hold_row = db.execute_returning("""
         INSERT INTO holds (customer_name, customer_phone, status, item_count)
         VALUES (%s, %s, 'PENDING', %s)
         RETURNING id
