@@ -368,7 +368,10 @@ function renderGrid(cards) {
     grid.innerHTML = '<div class="empty"><div class="empty-icon">🃏</div><p>No cards found</p></div>';
     return;
   }
-  grid.innerHTML = cards.map(c => {
+  // Store card data in a map keyed by index to avoid HTML attribute escaping issues
+  window._cardCache = {};
+  grid.innerHTML = cards.map((c, idx) => {
+    window._cardCache[idx] = c;
     const conds = Object.entries(c.conditions || {})
       .sort(([a],[b]) => ['NM','LP','MP','HP','DMG'].indexOf(a) - ['NM','LP','MP','HP','DMG'].indexOf(b));
     const pills = conds.map(([cond, qty]) =>
@@ -381,7 +384,7 @@ function renderGrid(cards) {
         ? `$${c.min_price.toFixed(2)}`
         : `$${c.min_price.toFixed(2)} – $${c.max_price.toFixed(2)}`
       : '';
-    return `<div class="card" onclick="openDetail(${JSON.stringify(c).replace(/"/g,'&quot;')})">
+    return `<div class="card" onclick="openDetail(window._cardCache[${idx}])">
       <div class="card-img">${img}</div>
       <div class="card-body">
         <div class="card-name">${esc(c.card_name)}</div>

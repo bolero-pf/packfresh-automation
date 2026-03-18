@@ -50,22 +50,22 @@ def browse():
     page     = max(1, int(request.args.get("page", 1)))
     offset   = (page - 1) * 24
 
-    filters = ["rc.state = 'STORED'"]
+    filters = ["state = 'STORED'"]
     params  = []
 
     if q:
-        filters.append("(rc.card_name ILIKE %s OR rc.set_name ILIKE %s)")
+        filters.append("(card_name ILIKE %s OR set_name ILIKE %s)")
         params += [f"%{q}%", f"%{q}%"]
     if set_name:
-        filters.append("rc.set_name ILIKE %s")
+        filters.append("set_name ILIKE %s")
         params.append(f"%{set_name}%")
 
     where = " AND ".join(filters)
 
     # Count distinct cards (not individual copies)
     count_row = db.query_one(f"""
-        SELECT COUNT(DISTINCT (rc.card_name, rc.set_name, rc.tcgplayer_id)) AS total
-        FROM raw_cards rc
+        SELECT COUNT(DISTINCT (card_name, set_name, tcgplayer_id)) AS total
+        FROM raw_cards
         WHERE {where}
     """, tuple(params))
     total = count_row["total"] if count_row else 0
