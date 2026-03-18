@@ -535,7 +535,6 @@ def recent_assignments():
         JOIN storage_locations sl ON rc.bin_id = sl.id
         WHERE rc.state = 'STORED'
           AND rc.stored_at >= NOW() - INTERVAL '24 hours'
-          AND rc.current_hold_id IS NULL
         ORDER BY rc.stored_at DESC
         LIMIT 100
     """)
