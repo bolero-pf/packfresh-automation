@@ -1,6 +1,6 @@
 """
 Barcode generation for raw card inventory.
-Label: 62mm x 50mm at 300 DPI = 732 x 591 px
+Label: 89mm x 28mm at 300 DPI = 1051 x 331 px (landscape)
 
 Requires fonts-dejavu-core installed in the container:
     apt-get install -y fonts-dejavu-core
@@ -65,10 +65,10 @@ def generate_barcode_image(barcode_id: str, *,
                            condition: str = "",
                            card_number: str = "",
                            price: str = "",        # ignored
-                           width_mm: float = 62,
-                           height_mm: float = 50) -> bytes:
+                           width_mm: float = 89,
+                           height_mm: float = 28) -> bytes:
     """
-    62mm x 50mm at 300 DPI.
+    89mm x 28mm landscape at 300 DPI.
 
     Fixed layout — text zone gets top 40%, barcode gets bottom 60%.
     This prevents the barcode from swallowing everything when fonts are large.
@@ -82,20 +82,23 @@ def generate_barcode_image(barcode_id: str, *,
       └──────────────────────────────────┘
     """
     dpi       = 300
-    width_px  = int(width_mm  / 25.4 * dpi)   # 732
-    height_px = int(height_mm / 25.4 * dpi)   # 591
+    width_px  = int(width_mm  / 25.4 * dpi)   # 1051px for 89mm
+    height_px = int(height_mm / 25.4 * dpi)   # 331px for 28mm
 
-    PAD = 14
+    PAD = 10
 
-    # Fixed zone heights
-    text_zone_h    = int(height_px * 0.38)   # ~225px for name + detail
-    barcode_zone_h = int(height_px * 0.48)   # ~284px for bars
-    code_zone_h    = height_px - text_zone_h - barcode_zone_h  # remainder for ID text
+    # 28mm tall is a strip — tight layout
+    # Text (name + detail) across the top ~35%, barcode ~50%, ID text ~15%
+    text_zone_h    = int(height_px * 0.35)   # ~116px
+    barcode_zone_h = int(height_px * 0.50)   # ~166px
+    code_zone_h    = height_px - text_zone_h - barcode_zone_h
 
-    # Font sizes — these are pixels, scaled to fit text_zone_h
-    name_size   = int(text_zone_h * 0.20)    # ~45px ≈ 11pt physical
-    detail_size = int(text_zone_h * 0.15)    # ~34px ≈ 8pt physical
-    code_size   = int(code_zone_h * 0.65)    # small ID text
+    # At 300dpi: 1pt physical = ~11.8px
+    # name_size 46px ≈ 3.9pt physical — readable on 28mm label
+    # detail_size 34px ≈ 2.9pt physical
+    name_size   = int(text_zone_h * 0.40)    # ~46px
+    detail_size = int(text_zone_h * 0.28)    # ~32px
+    code_size   = max(int(code_zone_h * 0.55), 18)
 
     font_name   = _font(name_size)
     font_detail = _font(detail_size)
@@ -106,12 +109,6 @@ def generate_barcode_image(barcode_id: str, *,
 
     # ── Text zone ─────────────────────────────────────────────────────────────
     y = PAD
-
-    # Card name — strip trailing set code suffixes like "- SWSH138", "- BW001" etc.
-    # These come from Collectr export format and are redundant with card_number field
-    import re as _re
-    if card_name:
-        card_name = _re.sub(r'\s*-\s*[A-Z]{1,4}\d{1,4}[A-Z]?$', '', card_name).strip()
 
     # Card name — truncate to fit width
     if card_name:
@@ -124,12 +121,8 @@ def generate_barcode_image(barcode_id: str, *,
         y += name_size + 6
 
     # Card number + condition
-    # Skip card_number if it looks like a Collectr set code (e.g. SWSH138, BW001)
-    # rather than a real card number (e.g. 004/125, RC05)
-    import re as _re2
-    _is_set_code = card_number and bool(_re2.match(r'^[A-Z]{2,4}\d{1,4}[A-Z]?$', card_number.strip()))
     parts = []
-    if card_number and not _is_set_code:
+    if card_number:
         parts.append(f"#{card_number}")
     if condition:
         parts.append(condition)
