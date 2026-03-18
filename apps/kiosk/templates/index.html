@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Pack Fresh — Browse Cards</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:       #0a0a0f;
+  --surface:  #111118;
+  --surface2: #1a1a24;
+  --border:   #2a2a38;
+  --accent:   #e8c547;    /* gold — premium card shop feel */
+  --accent2:  #4fc3f7;   /* blue for secondary actions */
+  --green:    #4ade80;
+  --red:      #f87171;
+  --text:     #f0f0f8;
+  --dim:      #6b6b88;
+  --sans:     'DM Sans', sans-serif;
+  --display:  'Bebas Neue', sans-serif;
+  --mono:     'DM Mono', monospace;
+  --r:        12px;
+  --touch:    56px;   /* minimum tap target */
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+html { height: 100%; }
+body {
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16px;
+  overscroll-behavior: none;
+}
+
+/* ── Header ── */
+header {
+  position: sticky; top: 0; z-index: 50;
+  background: linear-gradient(180deg, rgba(10,10,15,0.98) 0%, rgba(10,10,15,0.92) 100%);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 20px;
+}
+.header-inner { max-width: 1200px; margin: 0 auto; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.logo { font-family: var(--display); font-size: 2rem; letter-spacing: 0.06em; color: var(--accent); white-space: nowrap; line-height: 1; }
+.logo-sub { font-size: 0.65rem; color: var(--dim); letter-spacing: 0.15em; text-transform: uppercase; margin-top: -2px; }
+
+.search-wrap { flex: 1; min-width: 200px; display: flex; gap: 10px; }
+.search-input {
+  flex: 1; height: var(--touch);
+  background: var(--surface2); border: 1.5px solid var(--border);
+  border-radius: var(--r); color: var(--text);
+  padding: 0 18px; font-family: var(--sans); font-size: 1rem; outline: none;
+  transition: border-color 0.2s;
+}
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--dim); }
+
+.set-select {
+  height: var(--touch); min-width: 160px;
+  background: var(--surface2); border: 1.5px solid var(--border);
+  border-radius: var(--r); color: var(--text);
+  padding: 0 14px; font-family: var(--sans); font-size: 0.9rem; outline: none;
+  cursor: pointer;
+}
+
+/* Cart button */
+.cart-btn {
+  position: relative; height: var(--touch); min-width: var(--touch);
+  background: var(--accent); border: none; border-radius: var(--r);
+  color: #000; font-family: var(--display); font-size: 1.2rem; letter-spacing: 0.05em;
+  cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 0 18px;
+  transition: transform 0.1s, opacity 0.15s;
+}
+.cart-btn:active { transform: scale(0.97); }
+.cart-badge {
+  position: absolute; top: -6px; right: -6px;
+  background: var(--red); color: #fff; border-radius: 50%;
+  width: 22px; height: 22px; font-family: var(--sans); font-size: 0.7rem;
+  font-weight: 600; display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity 0.2s;
+}
+.cart-badge.visible { opacity: 1; }
+
+/* ── Grid ── */
+.main { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+.results-info { font-size: 0.82rem; color: var(--dim); margin-bottom: 16px; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 14px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--r); overflow: hidden;
+  cursor: pointer; transition: border-color 0.15s, transform 0.1s;
+  display: flex; flex-direction: column;
+  user-select: none;
+}
+.card:active { transform: scale(0.97); }
+.card:hover { border-color: var(--accent); }
+
+.card-img {
+  aspect-ratio: 2.5/3.5;
+  background: var(--surface2);
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+.card-img img { width: 100%; height: 100%; object-fit: contain; }
+.card-img .no-img { font-size: 3rem; opacity: 0.15; }
+
+.card-body { padding: 10px 12px 12px; flex: 1; display: flex; flex-direction: column; gap: 5px; }
+.card-name { font-size: 0.88rem; font-weight: 600; line-height: 1.3; }
+.card-set  { font-size: 0.72rem; color: var(--dim); }
+
+.cond-pills { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.cond-pill {
+  font-size: 0.65rem; font-weight: 700; padding: 2px 7px;
+  border-radius: 20px; letter-spacing: 0.04em;
+}
+.cond-NM  { background: rgba(74,222,128,0.15); color: var(--green); }
+.cond-LP  { background: rgba(232,197,71,0.15); color: var(--accent); }
+.cond-MP  { background: rgba(251,146,60,0.15); color: #fb923c; }
+.cond-HP  { background: rgba(248,113,113,0.15); color: var(--red); }
+.cond-DMG { background: rgba(248,113,113,0.25); color: var(--red); }
+
+.card-price { font-family: var(--mono); font-size: 0.88rem; color: var(--accent); margin-top: auto; padding-top: 6px; }
+
+/* ── Pagination ── */
+.pagination { display: flex; gap: 8px; justify-content: center; margin-top: 28px; flex-wrap: wrap; }
+.pg { height: 44px; min-width: 44px; padding: 0 14px;
+  background: var(--surface2); border: 1.5px solid var(--border);
+  border-radius: 8px; color: var(--text); font-family: var(--sans);
+  font-size: 0.9rem; cursor: pointer; }
+.pg.active { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }
+.pg:disabled { opacity: 0.3; cursor: default; }
+
+/* ── Overlay / panels ── */
+.overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.75); z-index: 100;
+  align-items: flex-end; justify-content: center;
+  backdrop-filter: blur(4px);
+}
+.overlay.active { display: flex; }
+
+.panel {
+  background: var(--surface); border: 1.5px solid var(--border);
+  border-radius: var(--r) var(--r) 0 0;
+  width: 100%; max-width: 600px;
+  max-height: 90vh; overflow-y: auto;
+  padding: 24px; animation: slideUp 0.25s ease;
+}
+@keyframes slideUp {
+  from { transform: translateY(40px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+.panel-title { font-family: var(--display); font-size: 1.6rem; letter-spacing: 0.05em; margin-bottom: 4px; }
+.panel-sub   { font-size: 0.85rem; color: var(--dim); margin-bottom: 20px; }
+
+/* Card detail panel */
+.detail-hero { display: flex; gap: 18px; margin-bottom: 20px; }
+.detail-img  { width: 110px; min-width: 110px; aspect-ratio: 2.5/3.5; border-radius: 8px; overflow: hidden; background: var(--surface2); }
+.detail-img img { width: 100%; height: 100%; object-fit: contain; }
+
+.copy-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+.copy-row {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--surface2); border: 1.5px solid var(--border);
+  border-radius: 10px; padding: 12px 14px; cursor: pointer;
+  transition: border-color 0.15s;
+}
+.copy-row.selected { border-color: var(--accent); }
+.copy-cond { font-weight: 700; font-size: 1rem; min-width: 40px; }
+.copy-num  { font-size: 0.8rem; color: var(--dim); flex: 1; }
+.copy-price { font-family: var(--mono); font-size: 1rem; color: var(--accent); }
+.copy-check { width: 24px; height: 24px; border-radius: 50%;
+  border: 2px solid var(--border); display: flex; align-items: center;
+  justify-content: center; font-size: 0.8rem; flex-shrink: 0; }
+.copy-row.selected .copy-check { background: var(--accent); border-color: var(--accent); color: #000; }
+
+/* Qty controls */
+.qty-row { display: flex; align-items: center; gap: 14px; margin: 16px 0; }
+.qty-label { font-size: 0.85rem; color: var(--dim); flex: 1; }
+.qty-ctrl { display: flex; align-items: center; gap: 12px; }
+.qty-btn {
+  width: 44px; height: 44px; border-radius: 8px;
+  background: var(--surface2); border: 1.5px solid var(--border);
+  color: var(--text); font-size: 1.4rem; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color 0.15s;
+}
+.qty-btn:active { border-color: var(--accent); }
+.qty-val { font-family: var(--mono); font-size: 1.1rem; min-width: 24px; text-align: center; }
+
+/* Cart panel */
+.cart-items { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+.cart-item {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--surface2); border-radius: 10px; padding: 12px 14px;
+}
+.cart-item-info { flex: 1; }
+.cart-item-name { font-weight: 600; font-size: 0.9rem; }
+.cart-item-sub  { font-size: 0.75rem; color: var(--dim); }
+.cart-item-remove { width: 36px; height: 36px; border-radius: 8px; background: none;
+  border: 1.5px solid var(--border); color: var(--red); cursor: pointer; font-size: 1rem; }
+
+/* Form */
+.form-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.form-label { font-size: 0.8rem; color: var(--dim); letter-spacing: 0.05em; text-transform: uppercase; }
+.form-input {
+  height: var(--touch); background: var(--surface2); border: 1.5px solid var(--border);
+  border-radius: var(--r); color: var(--text); padding: 0 18px;
+  font-family: var(--sans); font-size: 1rem; outline: none; width: 100%;
+  transition: border-color 0.2s;
+}
+.form-input:focus { border-color: var(--accent); }
+
+/* Buttons */
+.btn {
+  height: var(--touch); padding: 0 24px; border-radius: var(--r);
+  font-family: var(--sans); font-size: 1rem; font-weight: 600;
+  cursor: pointer; border: none; transition: transform 0.1s, opacity 0.15s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+}
+.btn:active { transform: scale(0.97); }
+.btn-gold    { background: var(--accent); color: #000; width: 100%; }
+.btn-outline { background: none; border: 1.5px solid var(--border); color: var(--text); }
+.btn-row { display: flex; gap: 10px; }
+.btn-row .btn { flex: 1; }
+
+/* Confirmation screen */
+.confirm-screen {
+  text-align: center; padding: 20px 0 10px;
+}
+.confirm-icon { font-size: 4rem; margin-bottom: 16px; }
+.confirm-title { font-family: var(--display); font-size: 2.5rem; letter-spacing: 0.05em; color: var(--accent); margin-bottom: 8px; }
+.confirm-ref { font-family: var(--mono); font-size: 1rem; color: var(--dim); margin-bottom: 20px; }
+.confirm-msg { font-size: 0.95rem; color: var(--dim); line-height: 1.6; margin-bottom: 24px; }
+
+/* Empty / loading */
+.empty { text-align: center; padding: 80px 20px; color: var(--dim); }
+.empty-icon { font-size: 3rem; opacity: 0.2; margin-bottom: 12px; }
+.spinner {
+  width: 32px; height: 32px; border: 3px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin 0.7s linear infinite; margin: 80px auto;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Cart total bar */
+.cart-total-bar {
+  background: var(--surface2); border-top: 1.5px solid var(--border);
+  padding: 12px 0; display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px;
+}
+.cart-total-label { font-size: 0.82rem; color: var(--dim); }
+.cart-total-val { font-family: var(--mono); font-size: 1.1rem; color: var(--accent); }
+.cart-limit { font-size: 0.75rem; color: var(--dim); text-align: center; margin-bottom: 12px; }
+
+/* Warning */
+.warning { background: rgba(248,113,113,0.1); border: 1px solid rgba(248,113,113,0.3);
+  border-radius: 8px; padding: 10px 14px; font-size: 0.85rem; color: var(--red); margin-bottom: 12px; }
+.info { background: rgba(79,195,247,0.1); border: 1px solid rgba(79,195,247,0.3);
+  border-radius: 8px; padding: 10px 14px; font-size: 0.85rem; color: var(--accent2); margin-bottom: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div>
+      <div class="logo">Pack Fresh</div>
+      <div class="logo-sub">Card Browser</div>
+    </div>
+    <div class="search-wrap">
+      <input class="search-input" type="text" id="q" placeholder="Search cards…" oninput="debounce()" autocomplete="off" autocorrect="off">
+      <select class="set-select" id="set-filter" onchange="doSearch()">
+        <option value="">All Sets</option>
+      </select>
+    </div>
+    <button class="cart-btn" onclick="openCart()">
+      🃏 My Picks
+      <span class="cart-badge" id="cart-badge">0</span>
+    </button>
+  </div>
+</header>
+
+<div class="main">
+  <div class="results-info" id="results-info"></div>
+  <div id="grid" class="grid"></div>
+  <div id="pagination" class="pagination"></div>
+</div>
+
+<!-- Card detail overlay -->
+<div class="overlay" id="detail-overlay" onclick="closeDetail(event)">
+  <div class="panel" id="detail-panel"></div>
+</div>
+
+<!-- Cart / checkout overlay -->
+<div class="overlay" id="cart-overlay" onclick="closeCart(event)">
+  <div class="panel" id="cart-panel"></div>
+</div>
+
+<script>
+const MAX = 20;
+let _cart = [];  // [{card_name, set_name, condition, qty, price, image_url}]
+let _page = 1;
+let _timer = null;
+let _detail = null;  // current card being viewed
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+async function boot() {
+  await loadSets();
+  doSearch();
+}
+
+async function loadSets() {
+  try {
+    const d = await get('/api/sets');
+    const sel = document.getElementById('set-filter');
+    (d.sets || []).forEach(s => {
+      const o = document.createElement('option');
+      o.value = o.textContent = s;
+      sel.appendChild(o);
+    });
+  } catch(e) {}
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+function debounce() {
+  clearTimeout(_timer);
+  _timer = setTimeout(() => doSearch(), 400);
+}
+
+async function doSearch(page) {
+  _page = page || 1;
+  const q   = document.getElementById('q').value.trim();
+  const set = document.getElementById('set-filter').value;
+  const params = new URLSearchParams({ q, set, page: _page });
+
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '<div class="spinner"></div>';
+  document.getElementById('pagination').innerHTML = '';
+
+  try {
+    const d = await get('/api/browse?' + params);
+    renderGrid(d.cards || []);
+    renderPagination(d.page, d.pages, d.total);
+    document.getElementById('results-info').textContent =
+      d.total ? `${d.total} card${d.total !== 1 ? 's' : ''} available` : '';
+  } catch(e) {
+    grid.innerHTML = `<div class="empty"><div class="empty-icon">⚠</div><p>${e.message}</p></div>`;
+  }
+}
+
+function renderGrid(cards) {
+  const grid = document.getElementById('grid');
+  if (!cards.length) {
+    grid.innerHTML = '<div class="empty"><div class="empty-icon">🃏</div><p>No cards found</p></div>';
+    return;
+  }
+  grid.innerHTML = cards.map(c => {
+    const conds = Object.entries(c.conditions || {})
+      .sort(([a],[b]) => ['NM','LP','MP','HP','DMG'].indexOf(a) - ['NM','LP','MP','HP','DMG'].indexOf(b));
+    const pills = conds.map(([cond, qty]) =>
+      `<span class="cond-pill cond-${cond}">${cond} ×${qty}</span>`).join('');
+    const img = c.image_url
+      ? `<img src="${esc(c.image_url)}" alt="${esc(c.card_name)}" loading="lazy">`
+      : '<div class="no-img">🃏</div>';
+    const price = c.min_price
+      ? c.min_price === c.max_price
+        ? `$${c.min_price.toFixed(2)}`
+        : `$${c.min_price.toFixed(2)} – $${c.max_price.toFixed(2)}`
+      : '';
+    return `<div class="card" onclick="openDetail(${JSON.stringify(c).replace(/"/g,'&quot;')})">
+      <div class="card-img">${img}</div>
+      <div class="card-body">
+        <div class="card-name">${esc(c.card_name)}</div>
+        <div class="card-set">${esc(c.set_name||'')}</div>
+        <div class="cond-pills">${pills}</div>
+        ${price ? `<div class="card-price">${price}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderPagination(page, pages, total) {
+  const el = document.getElementById('pagination');
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  let h = `<button class="pg" onclick="doSearch(${page-1})" ${page<=1?'disabled':''}>←</button>`;
+  const show = new Set([1, pages, page-1, page, page+1].filter(p=>p>=1&&p<=pages));
+  let prev = 0;
+  [...show].sort((a,b)=>a-b).forEach(p => {
+    if (p - prev > 1) h += `<span style="color:var(--dim);align-self:center">…</span>`;
+    h += `<button class="pg${p===page?' active':''}" onclick="doSearch(${p})">${p}</button>`;
+    prev = p;
+  });
+  h += `<button class="pg" onclick="doSearch(${page+1})" ${page>=pages?'disabled':''}>→</button>`;
+  el.innerHTML = h;
+}
+
+// ── Card Detail ───────────────────────────────────────────────────────────────
+async function openDetail(card) {
+  _detail = card;
+  const overlay = document.getElementById('detail-overlay');
+  const panel   = document.getElementById('detail-panel');
+  panel.innerHTML = '<div class="spinner"></div>';
+  overlay.classList.add('active');
+
+  try {
+    const d = await get(`/api/card?name=${encodeURIComponent(card.card_name)}&set=${encodeURIComponent(card.set_name||'')}`);
+    renderDetail(card, d.copies || []);
+  } catch(e) {
+    panel.innerHTML = `<div class="empty"><p>${e.message}</p></div>`;
+  }
+}
+
+function renderDetail(card, copies) {
+  const panel = document.getElementById('detail-panel');
+  const img = card.image_url
+    ? `<img src="${esc(card.image_url)}" alt="${esc(card.card_name)}">`
+    : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:3rem;opacity:.2">🃏</div>';
+
+  // Group copies by condition for qty selection
+  const byCondition = {};
+  copies.forEach(c => {
+    if (!byCondition[c.condition]) byCondition[c.condition] = [];
+    byCondition[c.condition].push(c);
+  });
+
+  const condOrder = ['NM','LP','MP','HP','DMG'];
+  const condRows = Object.entries(byCondition)
+    .sort(([a],[b]) => condOrder.indexOf(a) - condOrder.indexOf(b))
+    .map(([cond, copies]) => {
+      const avgPrice = copies.reduce((s,c) => s + (c.current_price||0), 0) / copies.length;
+      const inCart = _cart.filter(ci => ci.card_name === card.card_name && ci.set_name === card.set_name && ci.condition === cond);
+      const cartQty = inCart.reduce((s,ci) => s + ci.qty, 0);
+      return `<div class="copy-row${cartQty>0?' selected':''}" data-cond="${cond}" data-avail="${copies.length}" data-price="${avgPrice.toFixed(2)}" onclick="toggleCondition(this,'${esc(card.card_name)}','${esc(card.set_name||'')}','${esc(card.image_url||'')}')">
+        <div>
+          <div class="copy-cond"><span class="cond-pill cond-${cond}">${cond}</span></div>
+        </div>
+        <div class="copy-num">${copies.length} available${copies[0]?.card_number ? ' · #'+copies[0].card_number : ''}</div>
+        <div class="copy-price">$${avgPrice.toFixed(2)}</div>
+        <div class="copy-check">${cartQty > 0 ? '✓' : ''}</div>
+        ${cartQty > 0 ? `<div style="font-family:var(--mono);font-size:0.85rem;color:var(--accent);">×${cartQty}</div>` : ''}
+      </div>`;
+    }).join('');
+
+  const cartTotal = cartCount();
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+      <div>
+        <div class="panel-title">${esc(card.card_name)}</div>
+        <div class="panel-sub">${esc(card.set_name||'')}</div>
+      </div>
+      <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeDetailPanel()">✕</button>
+    </div>
+    <div class="detail-hero">
+      <div class="detail-img">${img}</div>
+      <div style="flex:1;">
+        <div style="font-size:0.82rem;color:var(--dim);margin-bottom:10px;">Select condition(s) to add to your picks:</div>
+        <div class="copy-list" id="copy-list">${condRows}</div>
+      </div>
+    </div>
+    ${cartTotal >= MAX ? `<div class="warning">You've reached the maximum of ${MAX} cards per request.</div>` : ''}
+    <div class="btn-row" style="margin-top:8px;">
+      <button class="btn btn-outline" onclick="closeDetailPanel()">Back to Browse</button>
+      <button class="btn btn-gold" onclick="closeDetailPanel(); openCart();">View My Picks (${cartTotal})</button>
+    </div>
+  `;
+}
+
+function toggleCondition(row, cardName, setName, imageUrl) {
+  const cond   = row.getAttribute('data-cond');
+  const avail  = parseInt(row.getAttribute('data-avail'));
+  const price  = parseFloat(row.getAttribute('data-price'));
+  const inCart = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
+
+  if (inCart) {
+    // Already in cart — show qty adjuster inline
+    showQtyAdjuster(row, cardName, setName, cond, avail, price, imageUrl, inCart.qty);
+  } else {
+    // Not in cart — add with qty 1 if under limit
+    if (cartCount() >= MAX) return;
+    addToCart(cardName, setName, cond, 1, price, imageUrl);
+    openDetail(_detail);  // re-render
+  }
+}
+
+function showQtyAdjuster(row, cardName, setName, cond, avail, price, imageUrl, currentQty) {
+  // Inline qty adjuster replaces the row temporarily
+  const orig = row.innerHTML;
+  row.innerHTML = `
+    <div style="flex:1;font-weight:600;">${cond} — How many?</div>
+    <div class="qty-ctrl">
+      <button class="qty-btn" onclick="adjustQty('${cardName}','${setName}','${cond}',${avail},${price},'${imageUrl}',-1,event)">−</button>
+      <div class="qty-val" id="qa-val-${cond}">${currentQty}</div>
+      <button class="qty-btn" onclick="adjustQty('${cardName}','${setName}','${cond}',${avail},${price},'${imageUrl}',1,event)">+</button>
+    </div>
+    <button class="qty-btn" style="background:var(--red);border-color:var(--red);" onclick="removeFromCart('${cardName}','${setName}','${cond}'); openDetail(_detail);">✕</button>
+  `;
+}
+
+function adjustQty(cardName, setName, cond, avail, price, imageUrl, delta, evt) {
+  evt.stopPropagation();
+  const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
+  if (!item) return;
+  const newQty = item.qty + delta;
+  if (newQty < 1) { removeFromCart(cardName, setName, cond); openDetail(_detail); return; }
+  if (newQty > avail) return;
+  if (delta > 0 && cartCount() >= MAX) return;
+  item.qty = newQty;
+  updateCartBadge();
+  const el = document.getElementById(`qa-val-${cond}`);
+  if (el) el.textContent = newQty;
+}
+
+function addToCart(cardName, setName, cond, qty, price, imageUrl) {
+  const existing = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
+  if (existing) {
+    existing.qty = Math.min(existing.qty + qty, MAX);
+  } else {
+    _cart.push({ card_name: cardName, set_name: setName, condition: cond, qty, price, image_url: imageUrl });
+  }
+  updateCartBadge();
+}
+
+function removeFromCart(cardName, setName, cond) {
+  _cart = _cart.filter(c => !(c.card_name === cardName && c.set_name === setName && c.condition === cond));
+  updateCartBadge();
+}
+
+function cartCount() { return _cart.reduce((s,c) => s + c.qty, 0); }
+
+function updateCartBadge() {
+  const n = cartCount();
+  const badge = document.getElementById('cart-badge');
+  badge.textContent = n;
+  badge.classList.toggle('visible', n > 0);
+}
+
+function closeDetail(evt) {
+  if (evt && evt.target !== document.getElementById('detail-overlay')) return;
+  closeDetailPanel();
+}
+function closeDetailPanel() {
+  document.getElementById('detail-overlay').classList.remove('active');
+}
+
+// ── Cart ──────────────────────────────────────────────────────────────────────
+function openCart() {
+  const panel = document.getElementById('cart-panel');
+  renderCart(panel);
+  document.getElementById('cart-overlay').classList.add('active');
+}
+
+function renderCart(panel) {
+  const total = cartCount();
+  const estimatedTotal = _cart.reduce((s,c) => s + c.price * c.qty, 0);
+
+  if (!_cart.length) {
+    panel.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+        <div class="panel-title">My Picks</div>
+        <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeCartPanel()">✕</button>
+      </div>
+      <div class="empty" style="padding:40px 0;">
+        <div class="empty-icon">🃏</div>
+        <p>No cards selected yet.</p>
+      </div>
+      <button class="btn btn-outline" onclick="closeCartPanel()">Keep Browsing</button>
+    `;
+    return;
+  }
+
+  const items = _cart.map(c => `
+    <div class="cart-item">
+      ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:44px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
+      <div class="cart-item-info">
+        <div class="cart-item-name">${esc(c.card_name)}</div>
+        <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> × ${c.qty} · $${(c.price * c.qty).toFixed(2)}</div>
+      </div>
+      <button class="cart-item-remove" onclick="removeFromCart('${esc(c.card_name)}','${esc(c.set_name)}','${c.condition}'); renderCart(document.getElementById('cart-panel'));">✕</button>
+    </div>
+  `).join('');
+
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <div class="panel-title">My Picks</div>
+      <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeCartPanel()">✕</button>
+    </div>
+    <div class="cart-limit">${total} of ${MAX} cards selected</div>
+    <div class="cart-items">${items}</div>
+    <div class="cart-total-bar">
+      <div class="cart-total-label">Estimated Total</div>
+      <div class="cart-total-val">$${estimatedTotal.toFixed(2)}</div>
+    </div>
+    <div class="info">💡 Final prices may vary. A staff member will bring these cards to you.</div>
+    <div class="form-row">
+      <label class="form-label">Your Name *</label>
+      <input class="form-input" id="cust-name" type="text" placeholder="e.g. Mark" autocomplete="name">
+    </div>
+    <div class="form-row">
+      <label class="form-label">Phone Number (optional)</label>
+      <input class="form-input" id="cust-phone" type="tel" placeholder="e.g. 555-1234" autocomplete="tel">
+    </div>
+    <div id="submit-error" style="display:none;" class="warning"></div>
+    <div class="btn-row" style="margin-top:8px;">
+      <button class="btn btn-outline" onclick="closeCartPanel()">Back</button>
+      <button class="btn btn-gold" id="submit-btn" onclick="submitHold()">Request These Cards →</button>
+    </div>
+  `;
+}
+
+async function submitHold() {
+  const name  = (document.getElementById('cust-name')?.value || '').trim();
+  const phone = (document.getElementById('cust-phone')?.value || '').trim();
+  const errEl = document.getElementById('submit-error');
+  const btn   = document.getElementById('submit-btn');
+
+  if (!name) {
+    errEl.textContent = 'Please enter your name.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Submitting…';
+  errEl.style.display = 'none';
+
+  const items = _cart.map(c => ({
+    card_name: c.card_name,
+    set_name:  c.set_name,
+    condition: c.condition,
+    qty:       c.qty,
+  }));
+
+  try {
+    const d = await post('/api/hold', { customer_name: name, customer_phone: phone, items });
+    showConfirmation(d, name);
+    _cart = [];
+    updateCartBadge();
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = 'Request These Cards →';
+    errEl.textContent = e.message || 'Something went wrong. Please ask a staff member.';
+    errEl.style.display = 'block';
+  }
+}
+
+function showConfirmation(d, name) {
+  const panel = document.getElementById('cart-panel');
+  const warnings = (d.warnings || []).length > 0
+    ? `<div class="warning" style="text-align:left;margin-bottom:16px;">
+        Some cards weren't available: ${d.warnings.join('; ')}
+       </div>` : '';
+  panel.innerHTML = `
+    <div class="confirm-screen">
+      <div class="confirm-icon">✅</div>
+      <div class="confirm-title">You're all set, ${name}!</div>
+      <div class="confirm-ref">Ref: ${d.hold_id?.slice(0,8).toUpperCase()}</div>
+      ${warnings}
+      <div class="confirm-msg">
+        A staff member will retrieve your ${d.assigned} card${d.assigned !== 1 ? 's' : ''} shortly.<br>
+        Please stay nearby — we'll come find you!
+      </div>
+      <button class="btn btn-gold" onclick="closeCartPanel()">Continue Browsing</button>
+    </div>
+  `;
+}
+
+function closeCart(evt) {
+  if (evt && evt.target !== document.getElementById('cart-overlay')) return;
+  closeCartPanel();
+}
+function closeCartPanel() {
+  document.getElementById('cart-overlay').classList.remove('active');
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+async function get(url) {
+  const r = await fetch(url);
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || `HTTP ${r.status}`); }
+  return r.json();
+}
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d;
+}
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeDetailPanel();
+    closeCartPanel();
+  }
+});
+
+boot();
+</script>
+</body>
+</html>
