@@ -10,7 +10,7 @@ Max 20 cards per hold.
 import os
 import logging
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, render_template
 
 import db
 
@@ -24,13 +24,12 @@ MAX_HOLD_ITEMS = 20
 HOLD_EXPIRY_HOURS = 2
 
 # Inline the HTML so no template file needed
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html"), "r") as _f:
-    INDEX_HTML = _f.read()
+
 
 
 @app.route("/")
 def index():
-    return Response(INDEX_HTML, mimetype="text/html")
+    return render_template("index.html")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

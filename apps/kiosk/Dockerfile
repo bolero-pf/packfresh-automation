@@ -2,7 +2,8 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY apps/kiosk/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY apps/kiosk/ .
+COPY apps/kiosk/app.py .
+COPY apps/kiosk/templates/ ./templates/
 COPY apps/ingestion/db.py .
 COPY apps/shared/ ./shared/
 ENV PYTHONPATH=/app/shared:/app
