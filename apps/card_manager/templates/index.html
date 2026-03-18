@@ -91,6 +91,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .badge-pulling  { background: rgba(79,125,249,0.15); color: var(--accent); }
 .badge-ready    { background: rgba(52,208,88,0.15);  color: var(--green); }
 .badge-accepted { background: rgba(52,208,88,0.12);  color: var(--green); }
+.cond-pill { font-size:0.68rem; font-weight:700; padding:2px 7px; border-radius:20px; letter-spacing:0.04em; }
+.cond-NM  { background:rgba(52,208,88,0.15); color:var(--green); }
+.cond-LP  { background:rgba(246,173,85,0.15); color:var(--amber); }
+.cond-MP  { background:rgba(251,146,60,0.15); color:#fb923c; }
+.cond-HP  { background:rgba(252,92,92,0.15); color:var(--red); }
+.cond-DMG { background:rgba(252,92,92,0.25); color:var(--red); }
 .badge-returned { background: rgba(107,114,128,0.15); color: var(--dim); }
 
 .progress-bar { height: 4px; background: var(--s2); border-radius: 2px; margin-top: 8px; overflow: hidden; }
@@ -532,12 +538,15 @@ function flash(color) {
 async function loadReturns() {
   _returnScanned.clear();
   try {
-    const d = await get('/api/returns');
-    const cards = d.cards || [];
+    const [pending, recent] = await Promise.all([
+      get('/api/returns'),
+      get('/api/returns/recent'),
+    ]);
+    const cards = pending.cards || [];
     const badge = document.getElementById('badge-returns');
     badge.textContent = cards.length;
     badge.classList.toggle('visible', cards.length > 0);
-    renderReturns(cards);
+    renderReturns(cards, recent.batches || []);
   } catch(e) {
     document.getElementById('returns-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
   }
@@ -560,7 +569,6 @@ function renderReturns(cards) {
     </div>
     <div class="btn-row" style="margin-bottom:16px;">
       <button class="btn btn-green" onclick="storeBatch()">📦 Store Scanned Cards</button>
-      <button class="btn btn-ghost" onclick="storeAll()">Store All (no scan)</button>
     </div>
     <div id="return-cards-list">
       ${cards.map(c => `
@@ -591,12 +599,7 @@ async function storeBatch() {
     toast('Scan some cards first, or use "Store All"', 'red');
     return;
   }
-  await _storeCards([..._returnScanned]);
-}
-
-async function storeAll() {
-  if (!confirm('Store all PENDING_RETURN cards without scanning?')) return;
-  await _storeCards(null);
+  await _storeCards(Array.from(_returnScanned));
 }
 
 async function _storeCards(barcodes) {
@@ -605,17 +608,21 @@ async function _storeCards(barcodes) {
     const result = document.getElementById('return-assignment-result');
     result.innerHTML = `
       <div class="assignment-result">
-        <div style="font-weight:700;margin-bottom:10px;">✓ ${d.stored} card${d.stored!==1?'s':''} stored</div>
+        <div style="font-weight:700;margin-bottom:12px;">✓ ${d.stored} card${d.stored!==1?'s':''} stored — put them here:</div>
         ${d.assignments.map(a => `
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-            <div class="assignment-bin">${a.bin_label}</div>
-            <div style="font-size:0.82rem;color:var(--dim);">← ${a.count} card${a.count!==1?'s':''}</div>
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding:10px 14px;background:var(--s2);border-radius:8px;">
+            <div class="assignment-bin" style="font-size:1.6rem;">${a.bin_label}</div>
+            <div>
+              <div style="font-weight:600;">${a.count} card${a.count!==1?'s':''}</div>
+              <div style="font-size:0.78rem;color:var(--dim);">${(a.cards||[]).join(', ')}${a.count > (a.cards||[]).length ? ' + more' : ''}</div>
+            </div>
           </div>
         `).join('')}
+        <button class="btn btn-ghost" style="margin-top:10px;width:100%;" onclick="loadReturns()">✓ Done — clear this</button>
       </div>
     `;
     _returnScanned.clear();
-    setTimeout(() => loadReturns(), 2000);
+    await loadReturns();
   } catch(e) { toast(e.message, 'red'); }
 }
 

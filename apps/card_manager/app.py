@@ -521,5 +521,57 @@ def store_returns():
     })
 
 
+@app.route("/api/returns/recent")
+def recent_assignments():
+    """
+    Recent return-to-storage assignments — cards that moved from
+    PENDING_RETURN to STORED, grouped by bin, ordered by stored_at DESC.
+    Shows the last 24 hours so staff can review where things went.
+    """
+    rows = db.query("""
+        SELECT rc.card_name, rc.condition, rc.barcode,
+               sl.bin_label, rc.stored_at
+        FROM raw_cards rc
+        JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.state = 'STORED'
+          AND rc.stored_at >= NOW() - INTERVAL '24 hours'
+          AND rc.current_hold_id IS NULL
+        ORDER BY rc.stored_at DESC
+        LIMIT 100
+    """)
+
+    # Group by bin_label + stored_at batch (within 10 seconds = same batch)
+    batches = []
+    current_batch = None
+
+    for r in rows:
+        stored_at = r["stored_at"]
+        bin_label = r["bin_label"]
+
+        if (current_batch is None or
+            bin_label != current_batch["bin_label"] or
+            abs((stored_at - current_batch["_last_at"]).total_seconds()) > 30):
+            current_batch = {
+                "bin_label": bin_label,
+                "stored_at": stored_at.isoformat(),
+                "_last_at":  stored_at,
+                "cards": [],
+            }
+            batches.append(current_batch)
+
+        current_batch["cards"].append({
+            "card_name": r["card_name"],
+            "condition": r["condition"],
+            "barcode":   r["barcode"],
+        })
+        current_batch["_last_at"] = stored_at
+
+    # Clean internal keys
+    for b in batches:
+        del b["_last_at"]
+
+    return jsonify({"batches": batches})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5006)), debug=False)
