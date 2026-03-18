@@ -540,7 +540,8 @@ def recent_assignments():
         LIMIT 100
     """)
 
-    # Group by bin_label + stored_at batch (within 10 seconds = same batch)
+    # Group cards stored within 30 seconds of each other into one batch
+    # regardless of bin — a single store operation may span multiple bins
     batches = []
     current_batch = None
 
@@ -548,29 +549,35 @@ def recent_assignments():
         stored_at = r["stored_at"]
         bin_label = r["bin_label"]
 
+        # New batch if > 30s gap from last card
         if (current_batch is None or
-            bin_label != current_batch["bin_label"] or
-            abs((stored_at - current_batch["_last_at"]).total_seconds()) > 30):
+            abs((stored_at - current_batch["_ref_at"]).total_seconds()) > 30):
             current_batch = {
-                "bin_label": bin_label,
                 "stored_at": stored_at.isoformat(),
-                "_last_at":  stored_at,
-                "cards": [],
+                "_ref_at":   stored_at,
+                "bins": {},
             }
             batches.append(current_batch)
 
-        current_batch["cards"].append({
+        if bin_label not in current_batch["bins"]:
+            current_batch["bins"][bin_label] = []
+        current_batch["bins"][bin_label].append({
             "card_name": r["card_name"],
             "condition": r["condition"],
             "barcode":   r["barcode"],
         })
-        current_batch["_last_at"] = stored_at
 
-    # Clean internal keys
+    # Flatten bins dict to list for JSON
+    result_batches = []
     for b in batches:
-        del b["_last_at"]
+        for bin_label, cards in b["bins"].items():
+            result_batches.append({
+                "bin_label": bin_label,
+                "stored_at": b["stored_at"],
+                "cards":     cards,
+            })
 
-    return jsonify({"batches": batches})
+    return jsonify({"batches": result_batches})
 
 
 if __name__ == "__main__":

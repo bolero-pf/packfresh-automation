@@ -605,24 +605,34 @@ async function storeBatch() {
 async function _storeCards(barcodes) {
   try {
     const d = await post('/api/returns/store', barcodes ? { barcodes } : {});
-    const result = document.getElementById('return-assignment-result');
-    result.innerHTML = `
-      <div class="assignment-result">
-        <div style="font-weight:700;margin-bottom:12px;">✓ ${d.stored} card${d.stored!==1?'s':''} stored — put them here:</div>
+    _returnScanned.clear();
+
+    // Show full-screen result — stays until user clicks Done
+    const el = document.getElementById('returns-content');
+    el.innerHTML = `
+      <div style="max-width:500px;">
+        <div style="font-size:1.1rem;font-weight:700;color:var(--green);margin-bottom:20px;">
+          ✓ ${d.stored} card${d.stored!==1?'s':''} stored — put them here:
+        </div>
         ${d.assignments.map(a => `
-          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;padding:10px 14px;background:var(--s2);border-radius:8px;">
-            <div class="assignment-bin" style="font-size:1.6rem;">${a.bin_label}</div>
+          <div style="display:flex;align-items:center;gap:16px;padding:16px 20px;
+               background:var(--s1);border:1px solid var(--green);border-radius:10px;margin-bottom:10px;">
+            <div style="font-family:var(--mono);font-size:2.5rem;font-weight:700;
+                        color:var(--green);min-width:80px;">${esc(a.bin_label)}</div>
             <div>
-              <div style="font-weight:600;">${a.count} card${a.count!==1?'s':''}</div>
-              <div style="font-size:0.78rem;color:var(--dim);">${(a.cards||[]).join(', ')}${a.count > (a.cards||[]).length ? ' + more' : ''}</div>
+              <div style="font-weight:700;font-size:1rem;">${a.count} card${a.count!==1?'s':''}</div>
+              <div style="font-size:0.82rem;color:var(--dim);margin-top:2px;">
+                ${(a.cards||[]).join(', ')}${a.count > (a.cards||[]).length ? ' +more' : ''}
+              </div>
             </div>
           </div>
         `).join('')}
-        <button class="btn btn-ghost" style="margin-top:10px;width:100%;" onclick="loadReturns()">✓ Done — clear this</button>
+        <button class="btn btn-ghost" style="margin-top:16px;width:100%;padding:14px;"
+                onclick="loadReturns()">
+          ✓ Done, cards are away
+        </button>
       </div>
     `;
-    _returnScanned.clear();
-    await loadReturns();
   } catch(e) { toast(e.message, 'red'); }
 }
 
