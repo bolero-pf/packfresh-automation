@@ -50,7 +50,7 @@ def browse():
     page     = max(1, int(request.args.get("page", 1)))
     offset   = (page - 1) * 24
 
-    filters = ["state = 'STORED'"]
+    filters = ["state = 'STORED'", "current_hold_id IS NULL"]
     params  = []
 
     if q:
@@ -67,6 +67,7 @@ def browse():
         SELECT COUNT(DISTINCT (card_name, set_name, tcgplayer_id)) AS total
         FROM raw_cards
         WHERE {where}
+          AND current_hold_id IS NULL
     """, tuple(params))
     total = count_row["total"] if count_row else 0
 
@@ -138,7 +139,7 @@ def card_detail():
         SELECT id, barcode, card_name, set_name, card_number,
                condition, current_price, image_url
         FROM raw_cards
-        WHERE card_name = %s AND set_name = %s AND state = 'STORED'
+        WHERE card_name = %s AND set_name = %s AND state = 'STORED' AND current_hold_id IS NULL
         ORDER BY
             CASE condition
                 WHEN 'NM'  THEN 1 WHEN 'LP'  THEN 2 WHEN 'MP' THEN 3
@@ -192,23 +193,17 @@ def create_hold():
 
     # For each line item, find available STORED cards matching card+set+condition
     # Lock them by setting current_hold_id
-    hold_row = db.execute_returning("""
-        INSERT INTO holds (customer_name, customer_phone, status, item_count)
-        VALUES (%s, %s, 'PENDING', %s)
-        RETURNING id
-    """, (name, phone or None, total_qty))
-    hold_id = str(hold_row["id"])
-
     assigned = []
     errors   = []
 
+    # Resolve which cards to hold before opening transaction
+    lines_resolved = []
     for line in items:
         card_name = line.get("card_name", "")
         set_name  = line.get("set_name", "")
         condition = line.get("condition", "NM")
         qty       = max(1, int(line.get("qty", 1)))
 
-        # Find available cards — exclude any already on a hold
         available = db.query("""
             SELECT id, barcode FROM raw_cards
             WHERE card_name = %s AND set_name = %s
@@ -218,37 +213,50 @@ def create_hold():
             LIMIT %s
         """, (card_name, set_name, condition, qty))
 
+        if not available:
+            errors.append(f"No {condition} copies available for {card_name}")
+            continue
         if len(available) < qty:
-            # Partial or none available — hold what we can, flag the rest
-            if not available:
-                errors.append(f"No {condition} copies available for {card_name}")
-                continue
             errors.append(f"Only {len(available)} {condition} {card_name} available (requested {qty})")
 
         for card in available:
-            card_id = str(card["id"])
-            barcode = card["barcode"]
+            lines_resolved.append({
+                "card_name": card_name, "set_name": set_name,
+                "condition": condition,
+                "card_id": str(card["id"]), "barcode": card["barcode"],
+            })
 
-            # Reserve card
-            db.execute("""
-                UPDATE raw_cards SET current_hold_id = %s WHERE id = %s
-            """, (hold_id, card_id))
-
-            # Create hold_item
-            db.execute("""
-                INSERT INTO hold_items (hold_id, raw_card_id, barcode, status)
-                VALUES (%s, %s, %s, 'REQUESTED')
-            """, (hold_id, card_id, barcode))
-
-            assigned.append({"card_name": card_name, "condition": condition, "barcode": barcode})
-
-    if not assigned:
-        # Nothing could be assigned — cancel the hold
-        db.execute("DELETE FROM holds WHERE id = %s", (hold_id,))
+    if not lines_resolved:
         return jsonify({"error": "No cards available for any requested items", "details": errors}), 409
 
-    # Update actual item count
-    db.execute("UPDATE holds SET item_count = %s WHERE id = %s", (len(assigned), hold_id))
+    # Single transaction: create hold + reserve cards + create hold_items
+    with db.get_conn() as conn:
+        conn.autocommit = False
+        try:
+            with conn.cursor() as cur:
+                from psycopg2.extras import RealDictCursor
+                cur = conn.cursor(cursor_factory=RealDictCursor)
+
+                cur.execute("""
+                    INSERT INTO holds (customer_name, customer_phone, status, item_count)
+                    VALUES (%s, %s, 'PENDING', %s) RETURNING id
+                """, (name, phone or None, len(lines_resolved)))
+                hold_id = str(cur.fetchone()["id"])
+
+                for r in lines_resolved:
+                    cur.execute("""
+                        UPDATE raw_cards SET current_hold_id = %s WHERE id = %s
+                    """, (hold_id, r["card_id"]))
+                    cur.execute("""
+                        INSERT INTO hold_items (hold_id, raw_card_id, barcode, status)
+                        VALUES (%s, %s, %s, 'REQUESTED')
+                    """, (hold_id, r["card_id"], r["barcode"]))
+                    assigned.append({"card_name": r["card_name"], "condition": r["condition"], "barcode": r["barcode"]})
+
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     return jsonify({
         "success":   True,

@@ -314,12 +314,24 @@ header {
 <script>
 const MAX = 20;
 let _cart = [];  // [{card_name, set_name, condition, qty, price, image_url}]
+
+function _saveCart() {
+  try { localStorage.setItem('pf_cart', JSON.stringify(_cart)); } catch(e) {}
+}
+function _loadCart() {
+  try {
+    const saved = localStorage.getItem('pf_cart');
+    if (saved) _cart = JSON.parse(saved);
+  } catch(e) { _cart = []; }
+}
 let _page = 1;
 let _timer = null;
 let _detail = null;  // current card being viewed
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 async function boot() {
+  _loadCart();
+  updateCartBadge();
   await loadSets();
   doSearch();
 }
@@ -526,6 +538,7 @@ function adjustQty(cardName, setName, cond, avail, price, imageUrl, delta, evt) 
   updateCartBadge();
   const el = document.getElementById(`qa-val-${cond}`);
   if (el) el.textContent = newQty;
+  _saveCart();
 }
 
 function addToCart(cardName, setName, cond, qty, price, imageUrl) {
@@ -536,11 +549,21 @@ function addToCart(cardName, setName, cond, qty, price, imageUrl) {
     _cart.push({ card_name: cardName, set_name: setName, condition: cond, qty, price, image_url: imageUrl });
   }
   updateCartBadge();
+  _saveCart();
 }
 
 function removeFromCart(cardName, setName, cond) {
   _cart = _cart.filter(c => !(c.card_name === cardName && c.set_name === setName && c.condition === cond));
   updateCartBadge();
+  _saveCart();
+}
+
+function clearCart() {
+  if (!confirm('Clear all picks?')) return;
+  _cart = [];
+  updateCartBadge();
+  _saveCart();
+  renderCart(document.getElementById('cart-panel'));
 }
 
 function cartCount() { return _cart.reduce((s,c) => s + c.qty, 0); }
@@ -600,7 +623,10 @@ function renderCart(panel) {
   panel.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
       <div class="panel-title">My Picks</div>
-      <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeCartPanel()">✕</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-outline" style="padding:0 14px;font-size:0.82rem;color:var(--red);border-color:var(--red);" onclick="clearCart()">Clear All</button>
+        <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeCartPanel()">✕</button>
+      </div>
     </div>
     <div class="cart-limit">${total} of ${MAX} cards selected</div>
     <div class="cart-items">${items}</div>
@@ -654,6 +680,7 @@ async function submitHold() {
     showConfirmation(d, name);
     _cart = [];
     updateCartBadge();
+    _saveCart();
   } catch(e) {
     btn.disabled = false;
     btn.textContent = 'Request These Cards →';
