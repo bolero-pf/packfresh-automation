@@ -1,0 +1,8 @@
+[build]
+dockerfilePath = "apps/card_manager/Dockerfile"
+
+[deploy]
+watchPatterns = [
+  "apps/card_manager/**",
+  "apps/shared/**"
+]

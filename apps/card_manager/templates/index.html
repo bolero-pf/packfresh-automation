@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pack Fresh · Card Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #0d0f14;
+  --s1:      #141720;
+  --s2:      #1c2030;
+  --border:  #2a2f42;
+  --accent:  #4f7df9;
+  --green:   #34d058;
+  --amber:   #f6ad55;
+  --red:     #fc5c5c;
+  --text:    #e8eaf0;
+  --dim:     #6b7280;
+  --mono:    'DM Mono', monospace;
+  --sans:    'DM Sans', sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; }
+
+/* Layout */
+.shell { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
+
+/* Sidebar */
+.sidebar {
+  background: var(--s1); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; padding: 20px 0;
+}
+.logo { padding: 0 20px 20px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.logo-name { font-size: 1.1rem; font-weight: 700; color: var(--text); }
+.logo-sub  { font-size: 0.68rem; color: var(--dim); letter-spacing: 0.1em; text-transform: uppercase; }
+
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 20px; cursor: pointer; border-radius: 0;
+  color: var(--dim); font-size: 0.88rem; font-weight: 500;
+  transition: background 0.12s, color 0.12s; border-left: 3px solid transparent;
+}
+.nav-item:hover { background: var(--s2); color: var(--text); }
+.nav-item.active { color: var(--accent); border-left-color: var(--accent); background: rgba(79,125,249,0.08); }
+.nav-badge {
+  margin-left: auto; background: var(--red); color: #fff;
+  border-radius: 10px; padding: 1px 7px; font-size: 0.7rem; font-weight: 700;
+  display: none;
+}
+.nav-badge.visible { display: inline; }
+
+.scanner-status {
+  margin-top: auto; padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem; color: var(--dim);
+}
+.scanner-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--dim); margin-right: 6px; vertical-align: middle;
+}
+.scanner-dot.active { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+/* Main */
+.main { overflow-y: auto; }
+.view { display: none; padding: 24px; }
+.view.active { display: block; }
+
+.page-title { font-size: 1.3rem; font-weight: 700; margin-bottom: 4px; }
+.page-sub   { font-size: 0.82rem; color: var(--dim); margin-bottom: 20px; }
+
+/* Cards / tables */
+.card {
+  background: var(--s1); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px; margin-bottom: 10px;
+}
+.card:hover { border-color: var(--accent); cursor: pointer; }
+.card.no-hover:hover { border-color: var(--border); cursor: default; }
+
+.hold-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.hold-name { font-weight: 700; font-size: 1rem; flex: 1; min-width: 120px; }
+.hold-meta { font-size: 0.78rem; color: var(--dim); }
+.hold-phone { font-family: var(--mono); font-size: 0.8rem; color: var(--dim); }
+
+.badge {
+  font-size: 0.68rem; font-weight: 700; padding: 3px 9px; border-radius: 12px;
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+.badge-pending  { background: rgba(246,173,85,0.15); color: var(--amber); }
+.badge-pulling  { background: rgba(79,125,249,0.15); color: var(--accent); }
+.badge-ready    { background: rgba(52,208,88,0.15);  color: var(--green); }
+.badge-accepted { background: rgba(52,208,88,0.12);  color: var(--green); }
+.badge-returned { background: rgba(107,114,128,0.15); color: var(--dim); }
+
+.progress-bar { height: 4px; background: var(--s2); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--green); border-radius: 2px; transition: width 0.3s; }
+
+/* Buttons */
+.btn {
+  padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer;
+  font-family: var(--sans); font-size: 0.85rem; font-weight: 600;
+  transition: opacity 0.15s, transform 0.1s;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-green   { background: var(--green); color: #000; }
+.btn-red     { background: var(--red); color: #fff; }
+.btn-amber   { background: var(--amber); color: #000; }
+.btn-ghost   { background: var(--s2); color: var(--text); border: 1px solid var(--border); }
+.btn-sm      { padding: 5px 10px; font-size: 0.78rem; border-radius: 6px; }
+.btn-row     { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+
+/* Hold detail */
+.back-btn { color: var(--dim); cursor: pointer; font-size: 0.85rem; margin-bottom: 16px; display: inline-flex; align-items: center; gap: 6px; }
+.back-btn:hover { color: var(--text); }
+
+.pull-group {
+  background: var(--s1); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px; margin-bottom: 10px;
+}
+.pull-group.all-pulled { border-color: var(--green); }
+
+.pull-header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.pull-img { width: 44px; aspect-ratio: 2.5/3.5; border-radius: 4px; object-fit: contain; background: var(--s2); }
+.pull-name { font-weight: 700; font-size: 0.95rem; flex: 1; }
+.pull-count { font-family: var(--mono); font-size: 0.8rem; color: var(--dim); }
+
+.bin-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.bin-tag {
+  background: var(--s2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 10px; font-family: var(--mono);
+  font-size: 0.78rem; color: var(--accent);
+}
+.bin-tag .bin-count { color: var(--dim); margin-left: 4px; }
+
+.scan-items { display: flex; flex-direction: column; gap: 4px; }
+.scan-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; border-radius: 6px; background: var(--s2);
+  font-size: 0.82rem;
+}
+.scan-item.pulled  { background: rgba(52,208,88,0.08); border: 1px solid rgba(52,208,88,0.2); }
+.scan-item.accepted { background: rgba(52,208,88,0.12); border: 1px solid var(--green); }
+.scan-item.rejected { background: rgba(252,92,92,0.08); border: 1px solid rgba(252,92,92,0.2); opacity: 0.6; }
+
+.scan-check { width: 20px; height: 20px; border-radius: 50%;
+  border: 2px solid var(--border); display: flex; align-items: center;
+  justify-content: center; font-size: 0.65rem; flex-shrink: 0; }
+.scan-item.pulled  .scan-check { background: var(--green); border-color: var(--green); color: #000; }
+.scan-item.accepted .scan-check { background: var(--accent); border-color: var(--accent); }
+.scan-item.rejected .scan-check { background: var(--red); border-color: var(--red); }
+
+/* Scanner flash feedback */
+.scan-flash {
+  position: fixed; inset: 0; pointer-events: none; z-index: 999;
+  opacity: 0; transition: opacity 0.1s;
+}
+.scan-flash.green { background: rgba(52,208,88,0.12); }
+.scan-flash.red   { background: rgba(252,92,92,0.15); }
+.scan-flash.show  { opacity: 1; }
+
+/* Return queue */
+.return-card {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--s1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 14px; margin-bottom: 6px;
+}
+.return-card.scanned { border-color: var(--green); }
+.return-barcode { font-family: var(--mono); font-size: 0.72rem; color: var(--dim); }
+
+/* Stats bar */
+.stats-bar { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.stat-box { background: var(--s1); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; flex: 1; min-width: 100px; }
+.stat-label { font-size: 0.68rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+.stat-val   { font-size: 1.5rem; font-weight: 700; font-family: var(--mono); }
+
+/* Assignment result */
+.assignment-result {
+  background: rgba(52,208,88,0.08); border: 1px solid var(--green);
+  border-radius: 8px; padding: 14px; margin-top: 14px;
+}
+.assignment-bin { font-family: var(--mono); font-size: 1.1rem; color: var(--green); font-weight: 700; }
+
+/* Toast */
+.toast {
+  position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+  background: var(--s1); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 18px; font-size: 0.88rem;
+  display: flex; align-items: center; gap: 10px;
+  animation: toastIn 0.2s ease; max-width: 360px;
+}
+@keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Empty */
+.empty { text-align: center; padding: 60px 20px; color: var(--dim); }
+.empty-icon { font-size: 2.5rem; opacity: 0.3; margin-bottom: 10px; }
+
+/* Spinner */
+.spinner { width: 24px; height: 24px; border: 2px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="scan-flash" id="scan-flash"></div>
+
+<div class="shell">
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="logo">
+      <div class="logo-name">Pack Fresh</div>
+      <div class="logo-sub">Card Manager</div>
+    </div>
+    <div class="nav-item active" onclick="showView('holds')" id="nav-holds">
+      📋 Hold Queue
+      <span class="nav-badge" id="badge-holds"></span>
+    </div>
+    <div class="nav-item" onclick="showView('returns')" id="nav-returns">
+      ↩ Return Queue
+      <span class="nav-badge" id="badge-returns"></span>
+    </div>
+    <div class="scanner-status">
+      <span class="scanner-dot" id="scanner-dot"></span>
+      <span id="scanner-label">Scanner ready</span>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <div class="main">
+
+    <!-- Hold Queue -->
+    <div class="view active" id="view-holds">
+      <div class="page-title">Hold Queue</div>
+      <div class="page-sub">Active customer holds · auto-refreshes every 30s</div>
+      <div id="holds-list">
+        <div class="empty"><div class="spinner"></div></div>
+      </div>
+    </div>
+
+    <!-- Hold Detail -->
+    <div class="view" id="view-hold-detail">
+      <div class="back-btn" onclick="showView('holds')">← Back to Queue</div>
+      <div id="hold-detail-content"></div>
+    </div>
+
+    <!-- Return Queue -->
+    <div class="view" id="view-returns">
+      <div class="page-title">Return Queue</div>
+      <div class="page-sub">Cards pending return to storage</div>
+      <div id="returns-content">
+        <div class="empty"><div class="spinner"></div></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+let _currentHoldId = null;
+let _holdData = null;
+let _scanBuffer = '';
+let _scanTimer = null;
+let _returnScanned = new Set();
+let _pollTimer = null;
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function showView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('view-' + (name === 'hold-detail' ? 'hold-detail' : name)).classList.add('active');
+  if (name !== 'hold-detail') document.getElementById('nav-' + name)?.classList.add('active');
+  if (name === 'holds')   loadHolds();
+  if (name === 'returns') loadReturns();
+}
+
+// ── Hold Queue ────────────────────────────────────────────────────────────────
+async function loadHolds() {
+  try {
+    const d = await get('/api/holds');
+    const holds = d.holds || [];
+    const badge = document.getElementById('badge-holds');
+    const pending = holds.filter(h => h.status === 'PENDING').length;
+    badge.textContent = pending;
+    badge.classList.toggle('visible', pending > 0);
+
+    const el = document.getElementById('holds-list');
+    if (!holds.length) {
+      el.innerHTML = '<div class="empty"><div class="empty-icon">📋</div><p>No active holds</p></div>';
+      return;
+    }
+    el.innerHTML = holds.map(h => {
+      const age     = _age(h.created_at);
+      const pulled  = h.pulled_items || 0;
+      const total   = h.total_items  || 0;
+      const pct     = total ? Math.round(pulled / total * 100) : 0;
+      const badgeCls= h.status === 'PENDING' ? 'badge-pending' : h.status === 'PULLING' ? 'badge-pulling' : 'badge-ready';
+      return `<div class="card" onclick="openHold('${h.id}')">
+        <div class="hold-row">
+          <div>
+            <div class="hold-name">${esc(h.customer_name)}</div>
+            <div class="hold-phone">${esc(h.customer_phone||'—')}</div>
+          </div>
+          <div>
+            <span class="badge ${badgeCls}">${h.status}</span>
+          </div>
+          <div class="hold-meta">${total} card${total!==1?'s':''} · ${age}</div>
+        </div>
+        ${h.status === 'PULLING' ? `
+          <div class="progress-bar" style="margin-top:10px;">
+            <div class="progress-fill" style="width:${pct}%"></div>
+          </div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-top:4px;">${pulled}/${total} pulled</div>
+        ` : ''}
+      </div>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('holds-list').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+async function openHold(holdId) {
+  _currentHoldId = holdId;
+  showView('hold-detail');
+  document.getElementById('hold-detail-content').innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+  await refreshHoldDetail();
+}
+
+async function refreshHoldDetail() {
+  if (!_currentHoldId) return;
+  try {
+    const d = await get(`/api/holds/${_currentHoldId}`);
+    _holdData = d;
+    renderHoldDetail(d);
+  } catch(e) {
+    document.getElementById('hold-detail-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderHoldDetail(d) {
+  const hold  = d.hold;
+  const items = d.items;
+  const pull  = d.pull_list;
+  const el    = document.getElementById('hold-detail-content');
+
+  const allPulled   = items.every(i => ['PULLED','ACCEPTED','REJECTED'].includes(i.item_status));
+  const anyDecided  = items.some(i => ['ACCEPTED','REJECTED'].includes(i.item_status));
+  const pulledCount = items.filter(i => i.item_status === 'PULLED').length;
+  const totalCount  = items.length;
+  const badgeCls    = hold.status === 'PENDING' ? 'badge-pending' : hold.status === 'PULLING' ? 'badge-pulling' : 'badge-ready';
+
+  let html = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
+      <div>
+        <div style="font-size:1.4rem;font-weight:700;">${esc(hold.customer_name)}</div>
+        <div style="font-size:0.82rem;color:var(--dim);">${esc(hold.customer_phone||'')} · ${_age(hold.created_at)} · <span class="badge ${badgeCls}">${hold.status}</span></div>
+      </div>
+      <div class="btn-row" style="margin:0;">
+        ${hold.status === 'PENDING' ? `<button class="btn btn-amber" onclick="transitionHold('PULLING')">▶ Start Pulling</button>` : ''}
+        ${hold.status === 'PULLING' && allPulled ? `<button class="btn btn-green" onclick="transitionHold('READY')">✓ Mark Ready</button>` : ''}
+        ${(hold.status === 'READY' || anyDecided) ? `<button class="btn btn-green" onclick="finishHold()">✓ Finish Hold</button>` : ''}
+      </div>
+    </div>
+  `;
+
+  // Pull list (grouped by card type)
+  if (hold.status === 'PENDING' || hold.status === 'PULLING') {
+    html += `<div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Pull List</div>`;
+    html += pull.map(group => {
+      const groupItems = items.filter(i =>
+        i.tcgplayer_id == group.tcgplayer_id && i.condition === group.condition
+      );
+      const pulledInGroup = groupItems.filter(i => ['PULLED','ACCEPTED','REJECTED'].includes(i.item_status)).length;
+      const allGroupPulled = pulledInGroup === groupItems.length;
+
+      return `<div class="pull-group ${allGroupPulled ? 'all-pulled' : ''}">
+        <div class="pull-header">
+          ${group.image_url ? `<img class="pull-img" src="${esc(group.image_url)}" alt="">` : '<div class="pull-img"></div>'}
+          <div style="flex:1;">
+            <div class="pull-name">${esc(group.card_name)}</div>
+            <div style="font-size:0.75rem;color:var(--dim);">${esc(group.condition)} · need ${group.qty_needed}</div>
+          </div>
+          <div class="pull-count">${pulledInGroup}/${group.qty_needed} ✓</div>
+        </div>
+        ${group.best_bins.length ? `
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Best bins to pull from:</div>
+          <div class="bin-tags">
+            ${group.best_bins.slice(0,4).map(b => `<div class="bin-tag">${b.bin_label}<span class="bin-count">×${b.count}</span></div>`).join('')}
+          </div>
+        ` : '<div style="font-size:0.75rem;color:var(--red);">No bin assignment found</div>'}
+        <div class="scan-items">
+          ${groupItems.map(item => `
+            <div class="scan-item ${item.item_status.toLowerCase()}" id="scan-item-${item.hold_item_id}">
+              <div class="scan-check">${item.item_status === 'PULLED' || item.item_status === 'ACCEPTED' ? '✓' : item.item_status === 'REJECTED' ? '✕' : ''}</div>
+              <span style="font-family:var(--mono);font-size:0.72rem;flex:1;">${esc(item.barcode)}</span>
+              <span style="font-size:0.75rem;color:var(--dim);">${esc(item.bin_label||'')}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  // Decision phase (READY)
+  if (hold.status === 'READY' || anyDecided) {
+    html += `<div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:16px 0 8px;">Customer Decision</div>`;
+    html += items.map(item => `
+      <div class="scan-item ${item.item_status.toLowerCase()} no-hover" style="margin-bottom:6px;padding:10px 14px;border-radius:8px;">
+        <div class="scan-check">${item.item_status === 'ACCEPTED' ? '✓' : item.item_status === 'REJECTED' ? '✕' : ''}</div>
+        ${item.image_url ? `<img src="${esc(item.image_url)}" style="width:32px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">` : ''}
+        <div style="flex:1;">
+          <div style="font-weight:600;font-size:0.88rem;">${esc(item.card_name)}</div>
+          <div style="font-size:0.75rem;color:var(--dim);">${esc(item.condition)} · $${parseFloat(item.current_price||0).toFixed(2)}</div>
+        </div>
+        ${item.item_status === 'PULLED' || item.item_status === 'REQUESTED' ? `
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-sm btn-green" onclick="decide('${item.hold_item_id}','ACCEPTED')">✓ Keep</button>
+            <button class="btn btn-sm btn-red" onclick="decide('${item.hold_item_id}','REJECTED')">✕ Return</button>
+          </div>
+        ` : `<span style="font-size:0.78rem;color:var(--dim);">${item.item_status}</span>`}
+      </div>
+    `).join('');
+  }
+
+  el.innerHTML = html;
+}
+
+async function transitionHold(status) {
+  try {
+    await post(`/api/holds/${_currentHoldId}/status`, { status });
+    await refreshHoldDetail();
+    toast(`Hold ${status === 'PULLING' ? 'started — go pull the cards!' : 'marked ready — present to customer'}`, 'green');
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function decide(holdItemId, decision) {
+  try {
+    await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/decision`, { decision });
+    await refreshHoldDetail();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function finishHold() {
+  const accepted = (_holdData?.items || []).filter(i => i.item_status === 'ACCEPTED').length;
+  const total    = (_holdData?.items || []).length;
+  const msg = accepted > 0
+    ? `Create ${accepted} Shopify listing${accepted>1?'s':''} and close hold? Unchosen cards will be returned.`
+    : 'No accepted cards — close hold and return all cards?';
+  if (!confirm(msg)) return;
+
+  const btn = document.querySelector('.btn-green[onclick="finishHold()"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
+
+  try {
+    const d = await post(`/api/holds/${_currentHoldId}/finish`, {});
+    toast(`Done! ${d.created} listing${d.created!==1?'s':''} created.`, 'green');
+    setTimeout(() => showView('holds'), 1500);
+  } catch(e) {
+    toast(e.message, 'red');
+    if (btn) { btn.disabled = false; btn.textContent = '✓ Finish Hold'; }
+  }
+}
+
+// ── Scanner ───────────────────────────────────────────────────────────────────
+// USB HID scanners send keystrokes ending in Enter.
+// Buffer characters; on Enter, treat accumulated string as a barcode if >= 8 chars.
+document.addEventListener('keydown', e => {
+  // Ignore if user is typing in an input
+  if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
+
+  if (e.key === 'Enter') {
+    const barcode = _scanBuffer.trim();
+    _scanBuffer = '';
+    clearTimeout(_scanTimer);
+    if (barcode.length >= 6) handleScan(barcode);
+    return;
+  }
+
+  if (e.key.length === 1) {
+    _scanBuffer += e.key;
+    clearTimeout(_scanTimer);
+    // Clear buffer if no Enter comes within 500ms (manual typing, not scanner)
+    _scanTimer = setTimeout(() => { _scanBuffer = ''; }, 500);
+  }
+});
+
+async function handleScan(barcode) {
+  const activeView = document.querySelector('.view.active')?.id;
+
+  if (activeView === 'view-hold-detail' && _currentHoldId) {
+    // Pull scan
+    try {
+      const d = await post(`/api/holds/${_currentHoldId}/scan`, { barcode });
+      flash('green');
+      toast(`✓ ${d.card_name} [${d.condition}]`, 'green');
+      await refreshHoldDetail();
+
+      // Update scanner indicator
+      const dot = document.getElementById('scanner-dot');
+      dot.classList.add('active');
+      setTimeout(() => dot.classList.remove('active'), 1000);
+    } catch(e) {
+      flash('red');
+      toast(`✕ ${e.message}`, 'red');
+    }
+  } else if (activeView === 'view-returns') {
+    // Return scan
+    try {
+      const d = await post('/api/returns/scan', { barcode });
+      _returnScanned.add(barcode);
+      flash('green');
+      toast(`↩ ${d.card_name} scanned for return`, 'green');
+      renderReturnScanned();
+    } catch(e) {
+      flash('red');
+      toast(`✕ ${e.message}`, 'red');
+    }
+  }
+}
+
+function flash(color) {
+  const el = document.getElementById('scan-flash');
+  el.className = `scan-flash ${color} show`;
+  setTimeout(() => el.classList.remove('show'), 150);
+}
+
+// ── Return Queue ──────────────────────────────────────────────────────────────
+async function loadReturns() {
+  _returnScanned.clear();
+  try {
+    const d = await get('/api/returns');
+    const cards = d.cards || [];
+    const badge = document.getElementById('badge-returns');
+    badge.textContent = cards.length;
+    badge.classList.toggle('visible', cards.length > 0);
+    renderReturns(cards);
+  } catch(e) {
+    document.getElementById('returns-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderReturns(cards) {
+  const el = document.getElementById('returns-content');
+  if (!cards.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">✅</div><p>No cards pending return</p></div>';
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="stats-bar">
+      <div class="stat-box"><div class="stat-label">Pending Return</div><div class="stat-val" style="color:var(--amber);">${cards.length}</div></div>
+      <div class="stat-box"><div class="stat-label">Scanned</div><div class="stat-val" id="scanned-count" style="color:var(--green);">0</div></div>
+    </div>
+    <div style="font-size:0.82rem;color:var(--dim);margin-bottom:12px;">
+      Scan cards with the barcode scanner as you bring them back, then click Store Batch to assign bins.
+    </div>
+    <div class="btn-row" style="margin-bottom:16px;">
+      <button class="btn btn-green" onclick="storeBatch()">📦 Store Scanned Cards</button>
+      <button class="btn btn-ghost" onclick="storeAll()">Store All (no scan)</button>
+    </div>
+    <div id="return-cards-list">
+      ${cards.map(c => `
+        <div class="return-card" id="rc-${esc(c.barcode)}">
+          ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:36px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">` : ''}
+          <div style="flex:1;">
+            <div style="font-weight:600;">${esc(c.card_name)}</div>
+            <div style="font-size:0.75rem;color:var(--dim);">${esc(c.condition)} · ${esc(c.last_bin||'no bin')}</div>
+          </div>
+          <div class="return-barcode">${esc(c.barcode)}</div>
+        </div>
+      `).join('')}
+    </div>
+    <div id="return-assignment-result"></div>
+  `;
+}
+
+function renderReturnScanned() {
+  document.getElementById('scanned-count').textContent = _returnScanned.size;
+  _returnScanned.forEach(bc => {
+    const el = document.getElementById(`rc-${bc}`);
+    if (el) el.classList.add('scanned');
+  });
+}
+
+async function storeBatch() {
+  if (!_returnScanned.size) {
+    toast('Scan some cards first, or use "Store All"', 'red');
+    return;
+  }
+  await _storeCards([..._returnScanned]);
+}
+
+async function storeAll() {
+  if (!confirm('Store all PENDING_RETURN cards without scanning?')) return;
+  await _storeCards(null);
+}
+
+async function _storeCards(barcodes) {
+  try {
+    const d = await post('/api/returns/store', barcodes ? { barcodes } : {});
+    const result = document.getElementById('return-assignment-result');
+    result.innerHTML = `
+      <div class="assignment-result">
+        <div style="font-weight:700;margin-bottom:10px;">✓ ${d.stored} card${d.stored!==1?'s':''} stored</div>
+        ${d.assignments.map(a => `
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+            <div class="assignment-bin">${a.bin_label}</div>
+            <div style="font-size:0.82rem;color:var(--dim);">← ${a.count} card${a.count!==1?'s':''}</div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    _returnScanned.clear();
+    setTimeout(() => loadReturns(), 2000);
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── Polling ───────────────────────────────────────────────────────────────────
+function startPolling() {
+  _pollTimer = setInterval(() => {
+    const activeView = document.querySelector('.view.active')?.id;
+    if (activeView === 'view-holds') loadHolds();
+  }, 30000);
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+async function get(url) {
+  const r = await fetch(url);
+  if (!r.ok) { const d = await r.json(); throw new Error(d.error || `HTTP ${r.status}`); }
+  return r.json();
+}
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d;
+}
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function _age(iso) {
+  if (!iso) return '';
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1)  return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m%60}m ago`;
+}
+function toast(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  const color = type === 'green' ? 'var(--green)' : type === 'red' ? 'var(--red)' : 'var(--accent)';
+  el.innerHTML = `<span style="color:${color};font-size:1rem;">${type==='green'?'✓':type==='red'?'✕':'ℹ'}</span> ${esc(msg)}`;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+loadHolds();
+loadReturns();
+startPolling();
+</script>
+</body>
+</html>
