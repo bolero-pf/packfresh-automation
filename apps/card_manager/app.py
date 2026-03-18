@@ -151,7 +151,6 @@ def get_hold(hold_id):
             JOIN storage_locations sl ON rc.bin_id = sl.id
             WHERE rc.tcgplayer_id = %s
               AND rc.condition = %s
-              AND rc.state = 'STORED'
             GROUP BY sl.bin_label, sl.id
             ORDER BY available_here DESC
         """, (tcg_id, condition)) if tcg_id else []
@@ -469,19 +468,16 @@ def store_returns():
     data     = request.get_json() or {}
     barcodes = data.get("barcodes")  # optional list
 
-    if barcodes:
-        cards = db.query("""
-            SELECT id, barcode, card_name, current_hold_id
-            FROM raw_cards WHERE barcode = ANY(%s) AND state = 'PENDING_RETURN'
-        """, (barcodes,))
-    else:
-        cards = db.query("""
-            SELECT id, barcode, card_name
-            FROM raw_cards WHERE state = 'PENDING_RETURN'
-        """)
+    if not barcodes:
+        return jsonify({"error": "No barcodes provided — scan cards before storing"}), 400
+
+    cards = db.query("""
+        SELECT id, barcode, card_name
+        FROM raw_cards WHERE barcode = ANY(%s) AND state = 'PENDING_RETURN'
+    """, (list(barcodes),))
 
     if not cards:
-        return jsonify({"error": "No PENDING_RETURN cards found"}), 400
+        return jsonify({"error": "No scanned cards found in PENDING_RETURN state"}), 400
 
     # Group by card_type (pokemon / magic / etc.) for bin assignment
     # Default to 'pokemon' since that's what we have; card_type_hint would help here
@@ -508,14 +504,14 @@ def store_returns():
             UPDATE raw_cards
             SET state = 'STORED', bin_id = %s, current_hold_id = NULL,
                 stored_at = CURRENT_TIMESTAMP
-            WHERE id = ANY(%s)
+            WHERE id::text = ANY(%s)
         """, (bin_id, batch_ids))
 
         bin_summary.append({
             "bin_label": bin_label,
             "count":     take,
             "cards":     [c["card_name"] for c in cards
-                         if str(c["id"]) in batch_ids][:5],  # first 5 for display
+                         if str(c["id"]) in set(batch_ids)][:5],
         })
 
     return jsonify({

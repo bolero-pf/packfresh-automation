@@ -82,14 +82,8 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
         })
         remaining -= take
 
-    # Commit the count increments
-    for a in assignments:
-        db.execute("""
-            UPDATE storage_locations
-            SET current_count = current_count + %s
-            WHERE id = %s
-        """, (a["count"], a["bin_id"]))
-
+    # NOTE: current_count is maintained by the update_bin_count trigger on raw_cards.
+    # Do NOT increment here — that would double-count.
     logger.info(f"Assigned {count} '{ctype}' cards across "
                 f"{len(assignments)} bin(s): "
                 f"{[a['bin_label'] for a in assignments]}")
