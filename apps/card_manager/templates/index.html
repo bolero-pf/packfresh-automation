@@ -552,23 +552,48 @@ async function loadReturns() {
   }
 }
 
-function renderReturns(cards) {
+function renderReturns(cards, recentBatches) {
   const el = document.getElementById('returns-content');
+  recentBatches = recentBatches || [];
+
+  const recentHtml = `
+    <div style="margin-bottom:28px;">
+      <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;">
+        Recently Stored — Last 24hrs
+      </div>
+      ${recentBatches.length === 0
+        ? '<div style="font-size:0.82rem;color:var(--dim);">Nothing stored in the last 24 hours.</div>'
+        : recentBatches.map(b => `
+            <div style="display:flex;align-items:flex-start;gap:12px;padding:10px 14px;
+                 background:var(--s1);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
+              <div style="font-family:var(--mono);font-size:1.4rem;font-weight:700;
+                          color:var(--green);min-width:60px;">${esc(b.bin_label)}</div>
+              <div style="flex:1;">
+                <div style="font-size:0.72rem;color:var(--dim);margin-bottom:4px;">${_fmtTime(b.stored_at)}</div>
+                ${b.cards.map(c => `<div style="font-size:0.82rem;"><strong>${esc(c.condition)}</strong> ${esc(c.card_name)}</div>`).join('')}
+              </div>
+              <div style="font-weight:700;color:var(--dim);">${b.cards.length}</div>
+            </div>
+          `).join('')
+      }
+    </div>
+  `;
+
   if (!cards.length) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">✅</div><p>No cards pending return</p></div>';
+    el.innerHTML = recentHtml + '<div class="empty"><div class="empty-icon">✅</div><p>No cards pending return</p></div>';
     return;
   }
 
   el.innerHTML = `
+    ${recentHtml}
+    <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;">Pending Return (${cards.length})</div>
     <div class="stats-bar">
-      <div class="stat-box"><div class="stat-label">Pending Return</div><div class="stat-val" style="color:var(--amber);">${cards.length}</div></div>
+      <div class="stat-box"><div class="stat-label">To Return</div><div class="stat-val" style="color:var(--amber);">${cards.length}</div></div>
       <div class="stat-box"><div class="stat-label">Scanned</div><div class="stat-val" id="scanned-count" style="color:var(--green);">0</div></div>
-    </div>
-    <div style="font-size:0.82rem;color:var(--dim);margin-bottom:12px;">
-      Scan cards with the barcode scanner as you bring them back, then click Store Batch to assign bins.
     </div>
     <div class="btn-row" style="margin-bottom:16px;">
       <button class="btn btn-green" onclick="storeBatch()">📦 Store Scanned Cards</button>
+      <button class="btn btn-ghost" onclick="storeAll()">Store All (no scan)</button>
     </div>
     <div id="return-cards-list">
       ${cards.map(c => `
@@ -582,8 +607,16 @@ function renderReturns(cards) {
         </div>
       `).join('')}
     </div>
-    <div id="return-assignment-result"></div>
   `;
+}
+
+function _fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const diff = Math.floor((Date.now() - d) / 60000);
+  if (diff < 1)  return 'just now';
+  if (diff < 60) return `${diff}m ago`;
+  return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
 }
 
 function renderReturnScanned() {
