@@ -202,7 +202,13 @@ def index():
 
 @app.route("/api/ingest/sessions")
 def list_sessions():
-    sessions = ingest.list_sessions(limit=int(request.args.get("limit", 50)))
+    status = request.args.get("status", "pending")  # 'pending' or 'completed'
+    limit = int(request.args.get("limit", 50))
+    days = request.args.get("days")  # for completed: filter by recency
+    if status == "completed":
+        sessions = ingest.list_sessions_completed(limit=limit, days=int(days) if days else None)
+    else:
+        sessions = ingest.list_sessions_pending(limit=limit)
     return jsonify([_serialize(s) for s in sessions])
 
 

@@ -40,6 +40,54 @@ def list_sessions(limit: int = 50) -> list[dict]:
     """, (limit,))
 
 
+def list_sessions_pending(limit: int = 50) -> list[dict]:
+    """List sessions that still need ingesting (received + partially_ingested)."""
+    return query("""
+        SELECT s.*,
+               COUNT(i.id) AS item_count,
+               COALESCE(SUM(i.quantity), 0) AS total_qty
+        FROM intake_sessions s
+        LEFT JOIN intake_items i ON i.session_id = s.id
+            AND i.item_status IN ('good', 'damaged')
+        WHERE s.status IN ('received', 'partially_ingested')
+        GROUP BY s.id
+        ORDER BY
+            CASE s.status WHEN 'received' THEN 0 ELSE 1 END,
+            s.created_at DESC
+        LIMIT %s
+    """, (limit,))
+
+
+def list_sessions_completed(limit: int = 50, days: int = None) -> list[dict]:
+    """List fully ingested sessions, optionally filtered by recency."""
+    if days:
+        return query("""
+            SELECT s.*,
+                   COUNT(i.id) AS item_count,
+                   COALESCE(SUM(i.quantity), 0) AS total_qty
+            FROM intake_sessions s
+            LEFT JOIN intake_items i ON i.session_id = s.id
+                AND i.item_status IN ('good', 'damaged')
+            WHERE s.status = 'ingested'
+              AND s.ingested_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'
+            GROUP BY s.id
+            ORDER BY s.ingested_at DESC
+            LIMIT %s
+        """, (days, limit))
+    return query("""
+        SELECT s.*,
+               COUNT(i.id) AS item_count,
+               COALESCE(SUM(i.quantity), 0) AS total_qty
+        FROM intake_sessions s
+        LEFT JOIN intake_items i ON i.session_id = s.id
+            AND i.item_status IN ('good', 'damaged')
+        WHERE s.status = 'ingested'
+        GROUP BY s.id
+        ORDER BY s.ingested_at DESC
+        LIMIT %s
+    """, (limit,))
+
+
 def get_session(session_id: str) -> Optional[dict]:
     return query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,))
 

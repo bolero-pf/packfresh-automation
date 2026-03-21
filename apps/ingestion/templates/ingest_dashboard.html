@@ -162,6 +162,15 @@
         }
         @keyframes spin { to { transform: rotate(360deg); } }
 
+        /* ─── TABS ─── */
+        .tab-btn {
+            background: none; border: none; padding: 8px 16px;
+            font-size: 0.9rem; color: var(--text-dim); cursor: pointer;
+            border-bottom: 2px solid transparent; transition: all 0.15s;
+        }
+        .tab-btn:hover { color: var(--text); }
+        .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
         /* ─── SESSION LIST ─── */
         .session-row {
             display: grid; grid-template-columns: 1fr auto auto auto;
@@ -216,13 +225,33 @@
     <!-- Session List -->
     <div id="session-list-view">
         <div class="card">
-            <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap;">
                 <h2 style="margin-bottom:0;">📦 Ingest Queue</h2>
                 <button class="btn btn-secondary btn-sm" onclick="showBreakdownLibrary()" style="margin-left:auto; font-size:0.8rem;">📚 Breakdown Library</button>
             </div>
-            <p style="color:var(--text-dim); margin-bottom:16px;">Sessions ready for warehouse processing. Click to open.</p>
-            <div id="sessions-list">
-                <div class="loading"><span class="spinner"></span> Loading sessions...</div>
+            <div style="display:flex; gap:2px; margin-bottom:16px; border-bottom:1px solid var(--border);">
+                <button class="tab-btn active" id="tab-btn-pending" onclick="switchQueueTab('pending')">📥 Ready to Ingest</button>
+                <button class="tab-btn" id="tab-btn-completed" onclick="switchQueueTab('completed')">✅ Completed</button>
+            </div>
+            <div id="tab-pending">
+                <div id="sessions-list">
+                    <div class="loading"><span class="spinner"></span> Loading sessions...</div>
+                </div>
+            </div>
+            <div id="tab-completed" style="display:none;">
+                <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="completed-days" onchange="loadCompletedSessions()" style="font-size:0.85rem; padding:4px 8px;">
+                        <option value="7">Last 7 days</option>
+                        <option value="14">Last 14 days</option>
+                        <option value="30" selected>Last 30 days</option>
+                        <option value="90">Last 90 days</option>
+                        <option value="">All time</option>
+                    </select>
+                    <span id="completed-count" style="font-size:0.8rem; color:var(--text-dim);"></span>
+                </div>
+                <div id="completed-sessions-list">
+                    <div class="loading"><span class="spinner"></span> Loading...</div>
+                </div>
             </div>
         </div>
     </div>
@@ -372,19 +401,28 @@ document.addEventListener('click', (e) => {
 // SESSION LIST
 // ═══════════════════════════════════════════════════════════════════
 
+function switchQueueTab(tab) {
+    document.getElementById('tab-pending').style.display = tab === 'pending' ? '' : 'none';
+    document.getElementById('tab-completed').style.display = tab === 'completed' ? '' : 'none';
+    document.getElementById('tab-btn-pending').classList.toggle('active', tab === 'pending');
+    document.getElementById('tab-btn-completed').classList.toggle('active', tab === 'completed');
+    if (tab === 'completed') loadCompletedSessions();
+    else loadSessions();
+}
+
 async function loadSessions() {
     const el = document.getElementById('sessions-list');
     try {
-        const r = await fetch('/api/ingest/sessions');
+        const r = await fetch('/api/ingest/sessions?status=pending');
         const sessions = await r.json();
         if (!sessions.length) {
-            el.innerHTML = '<p style="color:var(--text-dim); text-align:center; padding:20px;">No sessions in queue.</p>';
+            el.innerHTML = '<p style="color:var(--text-dim); text-align:center; padding:20px;">No sessions waiting to be ingested.</p>';
             return;
         }
         el.innerHTML = sessions.map(s => {
             const status = s.status;
-            const badgeClass = status === 'received' ? 'badge-amber' : status === 'partially_ingested' ? 'badge-blue' : 'badge-green';
-            const badgeLabel = status === 'received' ? 'Ready' : status === 'partially_ingested' ? '📦 Partial' : 'Ingested';
+            const badgeClass = status === 'received' ? 'badge-amber' : 'badge-blue';
+            const badgeLabel = status === 'received' ? 'Ready' : '📦 Partial';
             const date = new Date(s.created_at).toLocaleDateString();
             return `<div class="session-row" onclick="viewSession('${s.id}')">
                 <div>
@@ -399,6 +437,46 @@ async function loadSessions() {
                 <div style="font-weight:700; font-size:1.1rem;">$${(s.total_offer_amount || 0).toFixed(2)}</div>
             </div>`;
         }).join('');
+    } catch(err) {
+        el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+async function loadCompletedSessions() {
+    const el = document.getElementById('completed-sessions-list');
+    const countEl = document.getElementById('completed-count');
+    const days = document.getElementById('completed-days').value;
+    el.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
+    try {
+        const url = `/api/ingest/sessions?status=completed&limit=100${days ? '&days=' + days : ''}`;
+        const r = await fetch(url);
+        const sessions = await r.json();
+        if (countEl) countEl.textContent = `${sessions.length} session${sessions.length !== 1 ? 's' : ''}`;
+        if (!sessions.length) {
+            el.innerHTML = '<p style="color:var(--text-dim); text-align:center; padding:20px;">No completed sessions in this period.</p>';
+            return;
+        }
+        el.innerHTML = `<table style="width:100%; font-size:0.85rem;">
+            <thead><tr>
+                <th style="text-align:left;">Customer</th>
+                <th style="text-align:left;">Type</th>
+                <th>Items</th>
+                <th>Offer</th>
+                <th>Ingested</th>
+                <th></th>
+            </tr></thead>
+            <tbody>${sessions.map(s => {
+                const ingestedDate = s.ingested_at ? new Date(s.ingested_at).toLocaleDateString() : '—';
+                return `<tr>
+                    <td style="font-weight:600;">${s.customer_name || 'Unknown'}</td>
+                    <td style="color:var(--text-dim);">${s.session_type || 'sealed'}</td>
+                    <td style="text-align:center;">${s.item_count || 0} <small style="color:var(--text-dim);">(${s.total_qty || 0} units)</small></td>
+                    <td style="text-align:center; font-weight:600;">$${(s.total_offer_amount || 0).toFixed(2)}</td>
+                    <td style="text-align:center; color:var(--text-dim);">${ingestedDate}</td>
+                    <td><button class="btn btn-secondary btn-sm" style="font-size:0.75rem;" onclick="viewSession('${s.id}')">View</button></td>
+                </tr>`;
+            }).join('')}</tbody>
+        </table>`;
     } catch(err) {
         el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
