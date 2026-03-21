@@ -2737,8 +2737,9 @@
 
     async function findInStore(btn, tcgplayerId, productName, itemId, offerPrice, marketPrice) {
         // Build a mini search modal to find an existing Shopify listing by name
+        alert('DEBUG findInStore called: tcg=' + tcgplayerId + ' name=' + productName);
         const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;';
 
         function renderFind(query, results, loading, error) {
             overlay.innerHTML = `
@@ -2828,9 +2829,15 @@
         }
 
         // Auto-search with the product name on open
-        renderFind(productName, [], true, null);
-        document.body.appendChild(overlay);
-        doSearch(productName);
+        try {
+            renderFind(productName, [], true, null);
+            alert('DEBUG: renderFind done, appending overlay');
+            document.body.appendChild(overlay);
+            alert('DEBUG: overlay appended, starting search');
+            doSearch(productName);
+        } catch(err) {
+            alert('DEBUG findInStore error: ' + err.message + '\n' + err.stack);
+        }
     }
 
     // Delegated click handler for Find buttons — survives innerHTML replacement
