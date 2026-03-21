@@ -582,12 +582,7 @@ def screen_every_order(order_gid: str) -> dict:
             else:
                 desc = "photo ID + shipping address confirmation"
 
-            note_text = (
-                f"⚠️ CUMULATIVE VERIFICATION (Tier {tier}) — ${cumulative_total:.2f} total\n"
-                f"No delivered orders yet. Order {order_name} requires {desc}.\n"
-                f"Customer: {customer.get('firstName', '')} {customer.get('lastName', '')} "
-                f"({customer.get('email', '')})"
-            )
+            note_text = f"Waiting on ID Verification (${cumulative_total:.2f})"
 
             order_count = int(customer.get("numberOfOrders", 0) or 0)
             _apply_verification(order_gid, order_name, customer, tier, cumulative_total, note_text,
@@ -614,13 +609,7 @@ def screen_every_order(order_gid: str) -> dict:
         spike_ceiling = order_total * SPIKE_RATIO
         if max_previous_total < spike_ceiling:
             email = (customer.get("email") or "").strip()
-            note_text = (
-                f"⚠️ SPEND SPIKE DETECTED — ${order_total:.2f}\n"
-                f"Order {order_name} is significantly larger than this customer's history.\n"
-                f"Largest previous order: ${max_previous_total:.2f} "
-                f"(threshold: ${spike_ceiling:.2f})\n"
-                f"Requires photo ID + selfie + shipping address confirmation."
-            )
+            note_text = f"Waiting on ID Verification (${order_total:.2f})"
 
             try:
                 shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["spend-spike-review", "hold-for-review"]})
@@ -675,11 +664,7 @@ def screen_every_order(order_gid: str) -> dict:
         sibling_names = ", ".join(s["order_name"] for s in unfulfilled_siblings)
         sibling_details = "; ".join(f"{s['order_name']} (${s['total']:.2f})" for s in unfulfilled_siblings)
 
-        note_text = (
-            f"📦 COMBINE SHIPPING — {len(unfulfilled_siblings)} other unfulfilled order(s):\n"
-            f"  {sibling_details}\n"
-            f"Ship this order together with the above."
-        )
+        note_text = f"Combine Order ({sibling_names})"
 
         try:
             _hold_fulfillment(order_gid, f"Combine with {sibling_names} — same customer")
@@ -694,8 +679,7 @@ def screen_every_order(order_gid: str) -> dict:
         for s in unfulfilled_siblings:
             try:
                 _add_order_note(s["order_gid"],
-                    f"📦 NEW ORDER FROM SAME CUSTOMER — {order_name}\n"
-                    f"Combine shipping with {order_name}.")
+                    f"Combine Order ({order_name})")
             except Exception as e:
                 print(f"[screening] Failed to note sibling {s['order_gid']}: {e}", flush=True)
 
@@ -707,12 +691,16 @@ def screen_every_order(order_gid: str) -> dict:
         results["combine"] = {"flagged": False, "reason": "no_siblings"}
 
     # ── CHECK: Signature ($500+ individual or combined with siblings) ──
-    combined_ship_total = order_total + sum(s["total"] for s in unfulfilled_siblings)
-    results["signature"] = _check_signature(
-        order_gid, order_total,
-        combined_total=combined_ship_total if unfulfilled_siblings else None,
-        siblings=unfulfilled_siblings if unfulfilled_siblings else None,
-    )
+    # Pre-orders don't need signature — they ship later when product arrives
+    if current_is_preorder:
+        results["signature"] = {"flagged": False, "reason": "current_is_preorder"}
+    else:
+        combined_ship_total = order_total + sum(s["total"] for s in unfulfilled_siblings)
+        results["signature"] = _check_signature(
+            order_gid, order_total,
+            combined_total=combined_ship_total if unfulfilled_siblings else None,
+            siblings=unfulfilled_siblings if unfulfilled_siblings else None,
+        )
 
     results["any_flagged"] = any(
         (results[k] or {}).get("flagged", False)
@@ -731,12 +719,7 @@ def _check_signature(order_gid, order_total, combined_total=None, siblings=None)
         return {"flagged": False, "reason": "below_signature_threshold",
                 "order_total": order_total, "combined_total": combined_total}
 
-    if needs_sig:
-        note = f"✍️ NEEDS SIGNATURE — order is ${order_total:.2f}"
-    else:
-        sib_names = ", ".join(s["order_name"] for s in (siblings or []))
-        note = (f"✍️ NEEDS SIGNATURE — combined shipment is ${combined_total:.2f}\n"
-                f"This order (${order_total:.2f}) + {sib_names}")
+    note = "Signature Required"
 
     try:
         _add_order_note(order_gid, note)
@@ -746,8 +729,7 @@ def _check_signature(order_gid, order_total, combined_total=None, siblings=None)
     if combined_sig and siblings:
         for s in siblings:
             try:
-                _add_order_note(s["order_gid"],
-                    f"✍️ NEEDS SIGNATURE — combined shipment with new order is ${combined_total:.2f}")
+                _add_order_note(s["order_gid"], "Signature Required")
             except Exception as e:
                 print(f"[screening] Failed to note sibling signature {s['order_gid']}: {e}", flush=True)
 
@@ -790,10 +772,7 @@ def check_fraud_risk(order_gid: str) -> dict:
     total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
 
     if risk_level == "HIGH":
-        note_text = (
-            f"🚨 HIGH FRAUD RISK — Auto-cancelled\n"
-            f"Order {order_name} (${total:.2f}) auto-cancelled due to high fraud risk."
-        )
+        note_text = "High Fraud Risk — Auto-cancelled"
         try: shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["fraud-high", "auto-cancelled"]})
         except Exception as e: print(f"[screening] Tag failed: {e}", flush=True)
         if customer_gid:
@@ -807,11 +786,7 @@ def check_fraud_risk(order_gid: str) -> dict:
                 "risk_level": risk_level, "order_name": order_name, "note": note_text}
 
     # MEDIUM
-    note_text = (
-        f"⚠️ MEDIUM FRAUD RISK — Verification required\n"
-        f"Order {order_name} (${total:.2f}) flagged with medium fraud risk.\n"
-        f"Hold placed. Verify customer identity before fulfilling."
-    )
+    note_text = "Medium Fraud Verification"
     try: shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["fraud-medium", "hold-for-review"]})
     except Exception as e: print(f"[screening] Tag failed: {e}", flush=True)
     if customer_gid:
@@ -821,7 +796,12 @@ def check_fraud_risk(order_gid: str) -> dict:
     except Exception as e: print(f"[screening] Note failed: {e}", flush=True)
     try: _hold_fulfillment(order_gid, "Medium fraud risk — verify before fulfilling")
     except Exception as e: print(f"[screening] Hold failed: {e}", flush=True)
-    if customer_gid and email:
+
+    # Only set Klaviyo fraud props if no higher-priority verification already exists
+    # ($1000/$700 verification emails take precedence over medium fraud)
+    order_tags = set(t.lower() for t in (order.get("tags") or []))
+    has_verification = bool(order_tags & {"high-value-tier1", "high-value-tier2", "spend-spike-review"})
+    if customer_gid and email and not has_verification:
         try:
             external_id = customer_gid.split("/")[-1]
             upsert_profile(email=email, external_id=external_id, properties={
@@ -831,6 +811,8 @@ def check_fraud_risk(order_gid: str) -> dict:
                 "fraud_verification_requested_at": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e: print(f"[screening] Klaviyo failed: {e}", flush=True)
+    elif has_verification:
+        print(f"[screening] Skipping fraud Klaviyo for {order_name} — verification already active", flush=True)
     return {"flagged": True, "reason": "fraud_medium_verification",
             "risk_level": risk_level, "order_name": order_name, "note": note_text}
 
