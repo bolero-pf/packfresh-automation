@@ -2728,12 +2728,6 @@
             </div>
         `;
         loadCacheStatus();
-        // Bind Find buttons via event delegation (avoids inline onclick escaping issues)
-        panel.querySelectorAll('.find-in-store-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                findInStore(btn, parseInt(btn.dataset.tcg), btn.dataset.name, btn.dataset.item, parseFloat(btn.dataset.offer), parseFloat(btn.dataset.market));
-            });
-        });
         // Restore scroll position after DOM reflow
         if (_savedScroll && _modal) {
             _modal.scrollTop = _savedScroll;
@@ -2838,6 +2832,19 @@
         document.body.appendChild(overlay);
         doSearch(productName);
     }
+
+    // Delegated click handler for Find buttons — survives innerHTML replacement
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('.find-in-store-btn');
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        try {
+            findInStore(btn, parseInt(btn.dataset.tcg), btn.dataset.name, btn.dataset.item, parseFloat(btn.dataset.offer), parseFloat(btn.dataset.market));
+        } catch(err) {
+            alert('Find error: ' + err.message);
+        }
+    });
 
     async function createListingFromStore(tcgplayerId, btn, itemId, offerPrice) {
         if (!tcgplayerId) { alert('No TCGPlayer ID — cannot create listing'); return; }
