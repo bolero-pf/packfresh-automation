@@ -2716,7 +2716,7 @@
                                 ? '<button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="openMapping(\'' + i.id + '\',\'' + (i.product_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.set_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.product_type||'sealed') + '\',' + (i.market_price||0) + ')" title="Link this item to a TCGPlayer product">&#x1F517; Link</button>'
                                 : ''}
                             ${i.tcgplayer_id
-                                ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="findInStore(this, ' + i.tcgplayer_id + ', \'' + (i.product_name||'').replace(/'/g,'').replace(/"/g,'') + '\', \'' + i.id + '\', ' + (i.offer_price||0) + ', ' + (i.market_price||0) + ')" title="Search your store cache to find this listing">&#x1F50D; Find</button>'
+                                ? `<button class="btn btn-sm btn-secondary find-in-store-btn" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" data-tcg="${i.tcgplayer_id}" data-name="${(i.product_name||'').replace(/"/g,'&quot;')}" data-item="${i.id}" data-offer="${i.offer_price||0}" data-market="${i.market_price||0}" title="Search your store cache to find this listing">&#x1F50D; Find</button>`
                                 : ''}
                             ${!found && i.tcgplayer_id
                                 ? '<button class="btn btn-sm btn-primary" id="cl-btn-' + i.tcgplayer_id + '" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="createListingFromStore(' + i.tcgplayer_id + ', this, \'' + i.id + '\', ' + (i.offer_price||0) + ')">+ List</button>'
@@ -2728,6 +2728,12 @@
             </div>
         `;
         loadCacheStatus();
+        // Bind Find buttons via event delegation (avoids inline onclick escaping issues)
+        panel.querySelectorAll('.find-in-store-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                findInStore(btn, parseInt(btn.dataset.tcg), btn.dataset.name, btn.dataset.item, parseFloat(btn.dataset.offer), parseFloat(btn.dataset.market));
+            });
+        });
         // Restore scroll position after DOM reflow
         if (_savedScroll && _modal) {
             _modal.scrollTop = _savedScroll;
@@ -2784,7 +2790,7 @@
                 </div>`;
 
             document.getElementById('fis-go').onclick = () => doSearch(document.getElementById('fis-input').value.trim());
-            document.getElementById('fis-cancel').onclick = () => overlay.parentNode.removeChild(overlay);
+            document.getElementById('fis-cancel').onclick = () => document.body.removeChild(overlay);
             document.getElementById('fis-input').focus();
             if (itemId) {
                 overlay.querySelectorAll('[data-link-idx]').forEach(linkBtn => {
@@ -2807,7 +2813,7 @@
                             });
                             const d = await resp.json();
                             if (!resp.ok) { alert(d.error || 'Link failed'); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; return; }
-                            overlay.parentNode.removeChild(overlay);
+                            document.body.removeChild(overlay);
                             storeCheck(currentSessionId);
                         } catch(e) { alert(e.message); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; }
                     });
@@ -2829,9 +2835,7 @@
 
         // Auto-search with the product name on open
         renderFind(productName, [], true, null);
-        // Append to session modal (not body) so it renders above the modal's backdrop-filter stacking context
-        const sessionModal = document.getElementById('session-modal');
-        (sessionModal || document.body).appendChild(overlay);
+        document.body.appendChild(overlay);
         doSearch(productName);
     }
 
