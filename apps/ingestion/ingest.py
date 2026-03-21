@@ -748,7 +748,8 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
     ))
 
     # Nested breakdown lookup: which components have their own recipes?
-    child_bd_map = {}
+    child_bd_map = {}       # market-based (kept for has_breakdown flag)
+    child_bd_store_map = {} # store-based (used for deep value)
     if all_comp_tcg_ids:
         cbp = ",".join(["%s"] * len(all_comp_tcg_ids))
         child_bd_rows = query(
@@ -756,6 +757,46 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
             tuple(all_comp_tcg_ids)
         )
         child_bd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in child_bd_rows}
+
+        # Compute store-based BD value for children with recipes (grandchild store prices)
+        if child_bd_map:
+            try:
+                child_tcg_list = list(child_bd_map.keys())
+                gcph = ",".join(["%s"] * len(child_tcg_list))
+                gc_rows = query(f"""
+                    SELECT sbc.tcgplayer_id AS child_tcg_id,
+                           sbco.tcgplayer_id AS gc_tcg_id,
+                           sbco.quantity_per_parent
+                    FROM sealed_breakdown_cache sbc
+                    JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
+                        AND sbv.total_component_market = sbc.best_variant_market
+                    LEFT JOIN sealed_breakdown_components sbco ON sbco.variant_id = sbv.id
+                    WHERE sbc.tcgplayer_id IN ({gcph}) AND sbco.tcgplayer_id IS NOT NULL
+                """, tuple(child_tcg_list))
+                gc_ids = list(set(r["gc_tcg_id"] for r in gc_rows if r["gc_tcg_id"]))
+                gc_store = {}
+                if gc_ids:
+                    gcp = ",".join(["%s"] * len(gc_ids))
+                    gc_sp = query(
+                        f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE",
+                        tuple(gc_ids))
+                    gc_store = {r["tcgplayer_id"]: float(r["shopify_price"] or 0) for r in gc_sp}
+                _gc_by_child = {}
+                for r in gc_rows:
+                    _gc_by_child.setdefault(r["child_tcg_id"], []).append(r)
+                for ctid, gcs in _gc_by_child.items():
+                    sv = 0.0
+                    all_have = True
+                    for gc in gcs:
+                        sp = gc_store.get(gc["gc_tcg_id"], 0)
+                        if sp > 0:
+                            sv += sp * (gc["quantity_per_parent"] or 1)
+                        else:
+                            all_have = False
+                    if all_have and sv > 0:
+                        child_bd_store_map[ctid] = sv
+            except Exception:
+                pass
 
     # Step 4: assemble results
     # Index comp_rows by variant_id
@@ -795,7 +836,7 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
         all_comps_in_store = (comps_with_store == total_components and total_components > 0)
         any_comps_in_store = comps_with_store > 0
 
-        # Compute deep value across ALL variants (not just the best)
+        # Compute store-based deep value across ALL variants
         best_deep_value = 0.0
         _pvar_comps = {}
         for avc in all_variant_comps:
@@ -807,15 +848,17 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
             for vc in _pvcomps:
                 cid = int(vc["comp_tcg_id"])
                 qty = vc["quantity_per_parent"] or 1
-                cbd = child_bd_map.get(cid, 0)
-                if cbd > 0:
-                    dv += cbd * qty
+                # Prefer store-based child BD value, fallback to store price, then market
+                cbd_store = child_bd_store_map.get(cid, 0)
+                if cbd_store > 0:
+                    dv += cbd_store * qty
                     dv_has = True
                 else:
                     cs = store_map.get(cid)
                     sp = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else 0
                     if sp > 0:
                         dv += sp * qty
+                        dv_has = True
                     else:
                         dv += float(vc["comp_market"] or 0) * qty
             if dv_has and dv > best_deep_value:
