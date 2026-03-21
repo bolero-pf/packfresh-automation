@@ -1610,8 +1610,8 @@
                             const bdTooltip = bd && bdVal > 0
                                 ? (bdVal >= mkt ? `Breakdown ($${bdVal.toFixed(2)}) ≥ market ($${mkt.toFixed(2)}) — better to break` : bdVal >= mkt * 0.85 ? `Breakdown ($${bdVal.toFixed(2)}) near market ($${mkt.toFixed(2)})` : `Breakdown ($${bdVal.toFixed(2)}) < market ($${mkt.toFixed(2)}) — keep sealed`)
                                 : '';
-                            const bdDeep = bd && bd.deep_bd_value ? parseFloat(bd.deep_bd_value) : 0;
-                            const bdDeepStr = bdDeep > 0 && bdDeep !== bdVal ? ` · <span style="color:var(--accent);" title="Value if children are also broken down">Deep: $${bdDeep.toFixed(2)}</span>` : '';
+                            const bdDeep = bd && bd.deep_bd_market ? parseFloat(bd.deep_bd_market) : 0;
+                            const bdDeepStr = bdDeep > 0 && bdDeep !== bdVal ? ` · <span style="color:var(--accent);" title="Market value if children are also broken down">Deep: $${bdDeep.toFixed(2)}</span>` : '';
                             const bdNote = bd && bdVal > 0 ? `<br><small class="bd-baked" style="color:${bdColor};" title="${bdTooltip}">📦 breakdown: $${bdVal.toFixed(2)}${bdDeepStr}${bd.variant_count > 1 ? ' (' + bd.variant_count + ' configs)' : bd.variant_names ? ' · ' + bd.variant_names : ''}</small>` : '';
                             return `<tr style="${rowStyle}" data-item-id="${i.id}">
                                 <td class="name-cell">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}</td>
@@ -2682,8 +2682,8 @@
                                 const valLabel = childStore ? 'store' : 'mkt';
                                 const valStr = displayVal > 0 ? `${valLabel} $${displayVal.toFixed(2)}` : '';
                                 const name = bd.variant_count > 1 ? `${bd.variant_count} configs` : bd.variant_name || 'breakdown';
-                                const deepVal = bd.deep_bd_value ? parseFloat(bd.deep_bd_value) : 0;
-                                const deepStr = deepVal > 0 && deepVal !== displayVal ? ` &middot; <span style="color:var(--accent);" title="Value if children are also broken down">Deep: $${deepVal.toFixed(2)}</span>` : '';
+                                const deepVal = bd.deep_bd_store ? parseFloat(bd.deep_bd_store) : (bd.deep_bd_market ? parseFloat(bd.deep_bd_market) : 0);
+                                const deepStr = deepVal > 0 && deepVal !== displayVal ? ` &middot; <span style="color:var(--accent);" title="Store value if children are also broken down">Deep: $${deepVal.toFixed(2)}</span>` : '';
                                 return `<br><small style="color:${bdNoteColor};">&#x1F4E6; ${arrow} ${name}${valStr ? ': ' + valStr : ''}${deepStr}${bd.variant_notes ? ' &middot; <em>' + bd.variant_notes + '</em>' : ''}</small>`;
                             })() : ''}
                         </td>

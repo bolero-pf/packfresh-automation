@@ -636,9 +636,9 @@ def get_session(session_id):
                             else:
                                 dv += float(vc["comp_market"] or 0) * qty
                         if dv_has and dv > 0 and pid in bd_map:
-                            existing = bd_map[pid].get("deep_bd_value") or 0
+                            existing = bd_map[pid].get("deep_bd_market") or 0
                             if dv > existing:
-                                bd_map[pid]["deep_bd_value"] = round(dv, 2)
+                                bd_map[pid]["deep_bd_market"] = round(dv, 2)
                 except Exception:
                     pass
         except Exception:
@@ -2299,7 +2299,8 @@ def shopify_session_store_check(session_id):
             except Exception:
                 all_variant_comps = []
 
-            child_bd_map = {}
+            child_bd_map = {}      # tcg_id -> market value of best variant
+            child_bd_store_map = {}  # tcg_id -> store value of best variant's components
             if all_comp_tcg_ids:
                 cbp = ",".join(["%s"] * len(all_comp_tcg_ids))
                 child_bd_rows = db.query(
@@ -2307,6 +2308,49 @@ def shopify_session_store_check(session_id):
                     tuple(all_comp_tcg_ids)
                 )
                 child_bd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in child_bd_rows}
+
+                # For children with recipes, compute their store-based breakdown value
+                # by looking up grandchild components' store prices
+                if child_bd_map:
+                    try:
+                        child_tcg_list = list(child_bd_map.keys())
+                        gcph = ",".join(["%s"] * len(child_tcg_list))
+                        grandchild_rows = db.query(f"""
+                            SELECT sbc.tcgplayer_id AS child_tcg_id,
+                                   sbco.tcgplayer_id AS gc_tcg_id,
+                                   sbco.quantity_per_parent
+                            FROM sealed_breakdown_cache sbc
+                            JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
+                                AND sbv.total_component_market = sbc.best_variant_market
+                            LEFT JOIN sealed_breakdown_components sbco ON sbco.variant_id = sbv.id
+                            WHERE sbc.tcgplayer_id IN ({gcph}) AND sbco.tcgplayer_id IS NOT NULL
+                        """, tuple(child_tcg_list))
+                        # Get store prices for all grandchild components
+                        gc_ids = list(set(r["gc_tcg_id"] for r in grandchild_rows if r["gc_tcg_id"]))
+                        gc_store = {}
+                        if gc_ids:
+                            gcp = ",".join(["%s"] * len(gc_ids))
+                            gc_store_rows = db.query(
+                                f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE",
+                                tuple(gc_ids))
+                            gc_store = {r["tcgplayer_id"]: float(r["shopify_price"] or 0) for r in gc_store_rows}
+                        # Compute store total per child recipe
+                        _gc_by_child = {}
+                        for r in grandchild_rows:
+                            _gc_by_child.setdefault(r["child_tcg_id"], []).append(r)
+                        for ctid, gcs in _gc_by_child.items():
+                            sv = 0.0
+                            all_have = True
+                            for gc in gcs:
+                                sp = gc_store.get(gc["gc_tcg_id"], 0)
+                                if sp > 0:
+                                    sv += sp * (gc["quantity_per_parent"] or 1)
+                                else:
+                                    all_have = False
+                            if all_have and sv > 0:
+                                child_bd_store_map[ctid] = sv
+                    except Exception:
+                        pass
 
             for row in bd_rows:
                 pid = row["parent_id"]
@@ -2362,34 +2406,45 @@ def shopify_session_store_check(session_id):
                         store_total = None  # partial — don't use for margin math
 
             # Compute deep value across ALL variants (not just the best)
-            # This catches cases like 151 mini tin display: variant A (10 tins, each breakdownable)
-            # vs variant B (20 packs, base). Even if B is the "best" by market, A has deep value.
-            best_deep_value = 0.0
-            # Group all_variant_comps by (parent_id, variant_id)
+            # Compute BOTH market deep and store deep — different contexts need different values
+            best_deep_market = 0.0
+            best_deep_store = 0.0
             _var_comps = {}
             for avc in all_variant_comps:
                 if avc["parent_id"] == tcg_id:
                     _var_comps.setdefault(avc["variant_id"], []).append(avc)
             for _vid, _vcomps in _var_comps.items():
-                dv = 0.0
-                dv_has_deep = False
+                dv_mkt = 0.0
+                dv_store = 0.0
+                has_deep_mkt = False
+                has_deep_store = False
                 for vc in _vcomps:
                     cid = vc["comp_tcg_id"]
                     qty = vc["quantity_per_parent"] or 1
-                    cbd = child_bd_map.get(cid, 0)
-                    if cbd > 0:
-                        dv += cbd * qty
-                        dv_has_deep = True
+                    # Market deep: use child's market BD value, fallback to component market price
+                    cbd_mkt = child_bd_map.get(cid, 0)
+                    if cbd_mkt > 0:
+                        dv_mkt += cbd_mkt * qty
+                        has_deep_mkt = True
+                    else:
+                        dv_mkt += float(vc["market_price"] or 0) * qty
+                    # Store deep: use child's store BD value, fallback to component store price
+                    cbd_store = child_bd_store_map.get(cid, 0)
+                    if cbd_store > 0:
+                        dv_store += cbd_store * qty
+                        has_deep_store = True
                     else:
                         cs = comp_store_map.get(cid)
                         sp = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else 0
                         if sp > 0:
-                            dv += sp * qty
+                            dv_store += sp * qty
+                            has_deep_store = True  # at least partially store-based
                         else:
-                            mkt = float(vc["market_price"] or 0)
-                            dv += mkt * qty
-                if dv_has_deep and dv > best_deep_value:
-                    best_deep_value = dv
+                            dv_store += float(vc["market_price"] or 0) * qty
+                if has_deep_mkt and dv_mkt > best_deep_market:
+                    best_deep_market = dv_mkt
+                if has_deep_store and dv_store > best_deep_store:
+                    best_deep_store = dv_store
 
             item["breakdown"] = {
                 "best_variant_market": bd["best_variant_market"],
@@ -2401,7 +2456,8 @@ def shopify_session_store_check(session_id):
                 "all_components_in_store": bd["all_components_in_store"],
                 "components_in_store_count": bd["components_in_store_count"],
                 "total_components": len(bd["components"]),
-                "deep_bd_value": round(best_deep_value, 2) if best_deep_value > 0 else None,
+                "deep_bd_market": round(best_deep_market, 2) if best_deep_market > 0 else None,
+                "deep_bd_store": round(best_deep_store, 2) if best_deep_store > 0 else None,
             }
         else:
             item["breakdown"] = None
