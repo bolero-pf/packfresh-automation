@@ -1434,7 +1434,11 @@
         const overlay = document.getElementById('session-modal');
         // Capture scroll BEFORE any DOM mutation — spinner reflow will zero it out
         const scrollTop = _preserveScroll ? (overlay ? overlay.scrollTop : 0) : 0;
-        body.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+        // Only show spinner for fresh opens — skip it when preserving scroll
+        // so the existing content keeps the modal at full height
+        if (!_preserveScroll) {
+            body.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+        }
         openModal('session-modal');
 
         try {
@@ -1751,13 +1755,16 @@
                     return html;
                 })()}
             `;
-            // Restore scroll after render — try multiple times to survive repaint/reflow
+            // Restore scroll after render — use rAF + retries to survive repaint/reflow
             if (scrollTop) {
                 const _ov = document.getElementById('session-modal');
                 const _restoreScroll = () => { if (_ov) _ov.scrollTop = scrollTop; };
                 _restoreScroll();
-                setTimeout(_restoreScroll, 50);
-                setTimeout(_restoreScroll, 150);
+                requestAnimationFrame(() => {
+                    _restoreScroll();
+                    requestAnimationFrame(_restoreScroll);
+                });
+                setTimeout(_restoreScroll, 100);
                 setTimeout(_restoreScroll, 300);
             }
             // Enrich breakdown summaries inline without full reload
