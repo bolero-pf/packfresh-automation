@@ -2737,7 +2737,6 @@
 
     async function findInStore(btn, tcgplayerId, productName, itemId, offerPrice, marketPrice) {
         // Build a mini search modal to find an existing Shopify listing by name
-        alert('DEBUG findInStore called: tcg=' + tcgplayerId + ' name=' + productName);
         const overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;';
 
@@ -2784,9 +2783,9 @@
                     </div>
                 </div>`;
 
-            document.getElementById('fis-go').onclick = () => doSearch(document.getElementById('fis-input').value.trim());
-            document.getElementById('fis-cancel').onclick = () => document.body.removeChild(overlay);
-            document.getElementById('fis-input').focus();
+            overlay.querySelector('#fis-go').onclick = () => doSearch(overlay.querySelector('#fis-input').value.trim());
+            overlay.querySelector('#fis-cancel').onclick = () => overlay.remove();
+            overlay.querySelector('#fis-input')?.focus();
             if (itemId) {
                 overlay.querySelectorAll('[data-link-idx]').forEach(linkBtn => {
                     linkBtn.addEventListener('click', async () => {
@@ -2829,33 +2828,18 @@
         }
 
         // Auto-search with the product name on open
-        try {
-            renderFind(productName, [], true, null);
-            alert('DEBUG: renderFind done, appending overlay');
-            document.body.appendChild(overlay);
-            alert('DEBUG: overlay appended, starting search');
-            doSearch(productName);
-        } catch(err) {
-            alert('DEBUG findInStore error: ' + err.message + '\n' + err.stack);
-        }
+        document.body.appendChild(overlay);
+        renderFind(productName, [], true, null);
+        doSearch(productName);
     }
 
     // Delegated click handler for Find buttons — survives innerHTML replacement
     document.addEventListener('click', (e) => {
-        // DEBUG: catch any click on something that looks like a Find button
-        const el = e.target;
-        if (el.tagName === 'BUTTON' && el.textContent.includes('Find')) {
-            alert('DEBUG: clicked Find button. class="' + el.className + '" dataset=' + JSON.stringify(el.dataset) + ' hasFinderClass=' + el.classList.contains('find-in-store-btn'));
-        }
         const btn = e.target.closest('.find-in-store-btn');
         if (!btn) return;
         e.preventDefault();
         e.stopPropagation();
-        try {
-            findInStore(btn, parseInt(btn.dataset.tcg), btn.dataset.name, btn.dataset.item, parseFloat(btn.dataset.offer), parseFloat(btn.dataset.market));
-        } catch(err) {
-            alert('Find error: ' + err.message);
-        }
+        findInStore(btn, parseInt(btn.dataset.tcg), btn.dataset.name, btn.dataset.item, parseFloat(btn.dataset.offer), parseFloat(btn.dataset.market));
     });
 
     async function createListingFromStore(tcgplayerId, btn, itemId, offerPrice) {
