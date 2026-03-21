@@ -597,6 +597,50 @@ def get_session(session_id):
                 WHERE sbc.tcgplayer_id IN ({ph})
             """, tuple(tcg_ids))
             bd_map = {r["tcgplayer_id"]: dict(r) for r in rows}
+
+            # Compute deep value for each parent across all variants
+            if bd_map:
+                try:
+                    all_comps = db.query(f"""
+                        SELECT sbc.tcgplayer_id AS parent_id, sbv.id AS variant_id,
+                               sbco.tcgplayer_id AS comp_tcg_id, sbco.quantity_per_parent,
+                               sbco.market_price AS comp_market
+                        FROM sealed_breakdown_cache sbc
+                        JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
+                        LEFT JOIN sealed_breakdown_components sbco ON sbco.variant_id = sbv.id
+                        WHERE sbc.tcgplayer_id IN ({ph}) AND sbco.tcgplayer_id IS NOT NULL
+                    """, tuple(tcg_ids))
+                    # Get which components have their own recipes
+                    _comp_ids = list(set(c["comp_tcg_id"] for c in all_comps if c["comp_tcg_id"]))
+                    _cbd_map = {}
+                    if _comp_ids:
+                        _cbph = ",".join(["%s"] * len(_comp_ids))
+                        _cbd_rows = db.query(
+                            f"SELECT tcgplayer_id, best_variant_market FROM sealed_breakdown_cache WHERE tcgplayer_id IN ({_cbph})",
+                            tuple(_comp_ids))
+                        _cbd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in _cbd_rows}
+                    # Compute best deep value per parent across all variants
+                    _by_parent_variant = {}
+                    for c in all_comps:
+                        key = (c["parent_id"], c["variant_id"])
+                        _by_parent_variant.setdefault(key, []).append(c)
+                    for (pid, _vid), vcomps in _by_parent_variant.items():
+                        dv = 0.0
+                        dv_has = False
+                        for vc in vcomps:
+                            cbd = _cbd_map.get(vc["comp_tcg_id"], 0)
+                            qty = vc["quantity_per_parent"] or 1
+                            if cbd > 0:
+                                dv += cbd * qty
+                                dv_has = True
+                            else:
+                                dv += float(vc["comp_market"] or 0) * qty
+                        if dv_has and dv > 0 and pid in bd_map:
+                            existing = bd_map[pid].get("deep_bd_value") or 0
+                            if dv > existing:
+                                bd_map[pid]["deep_bd_value"] = round(dv, 2)
+                except Exception:
+                    pass
         except Exception:
             pass  # breakdown table may not exist yet
 
@@ -2235,13 +2279,32 @@ def shopify_session_store_check(session_id):
                 for cr in comp_rows:
                     comp_store_map[cr["tcgplayer_id"]] = cr
 
-            # Nested breakdown lookup: which components have their own recipes?
+            # Nested breakdown lookup: which components (across ALL variants) have their own recipes?
+            # We check all variants, not just the best, so deep value works even when
+            # the best variant's components are base items but another variant has breakdownable children
+            all_comp_tcg_ids = set(comp_tcg_ids)
+            try:
+                all_variant_comps = db.query(f"""
+                    SELECT sbco.tcgplayer_id AS comp_tcg_id, sbco.quantity_per_parent,
+                           sbco.market_price, sbv.id AS variant_id,
+                           sbc.tcgplayer_id AS parent_id
+                    FROM sealed_breakdown_cache sbc
+                    JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
+                    LEFT JOIN sealed_breakdown_components sbco ON sbco.variant_id = sbv.id
+                    WHERE sbc.tcgplayer_id IN ({ph}) AND sbco.tcgplayer_id IS NOT NULL
+                """, tuple(all_tcg_ids))
+                for avc in all_variant_comps:
+                    if avc["comp_tcg_id"]:
+                        all_comp_tcg_ids.add(avc["comp_tcg_id"])
+            except Exception:
+                all_variant_comps = []
+
             child_bd_map = {}
-            if comp_tcg_ids:
-                cbp = ",".join(["%s"] * len(comp_tcg_ids))
+            if all_comp_tcg_ids:
+                cbp = ",".join(["%s"] * len(all_comp_tcg_ids))
                 child_bd_rows = db.query(
                     f"SELECT tcgplayer_id, best_variant_market FROM sealed_breakdown_cache WHERE tcgplayer_id IN ({cbp})",
-                    tuple(comp_tcg_ids)
+                    tuple(all_comp_tcg_ids)
                 )
                 child_bd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in child_bd_rows}
 
@@ -2298,22 +2361,35 @@ def shopify_session_store_check(session_id):
                     if len(comp_store_vals) < len(comps):
                         store_total = None  # partial — don't use for margin math
 
-            # Compute deep value (if children have their own recipes)
-            deep_value = 0.0
-            has_deep = False
-            for c in comps:
-                qty = c.get("quantity_per_parent") or 1
-                if c.get("child_bd_value") and c["child_bd_value"] > 0:
-                    deep_value += c["child_bd_value"] * qty
-                    has_deep = True
-                elif c.get("store_price") and c["store_price"] > 0:
-                    deep_value += c["store_price"] * qty
-                elif c.get("market_price") and c["market_price"] > 0:
-                    deep_value += c["market_price"] * qty
-                else:
-                    deep_value = 0.0
-                    has_deep = False
-                    break
+            # Compute deep value across ALL variants (not just the best)
+            # This catches cases like 151 mini tin display: variant A (10 tins, each breakdownable)
+            # vs variant B (20 packs, base). Even if B is the "best" by market, A has deep value.
+            best_deep_value = 0.0
+            # Group all_variant_comps by (parent_id, variant_id)
+            _var_comps = {}
+            for avc in all_variant_comps:
+                if avc["parent_id"] == tcg_id:
+                    _var_comps.setdefault(avc["variant_id"], []).append(avc)
+            for _vid, _vcomps in _var_comps.items():
+                dv = 0.0
+                dv_has_deep = False
+                for vc in _vcomps:
+                    cid = vc["comp_tcg_id"]
+                    qty = vc["quantity_per_parent"] or 1
+                    cbd = child_bd_map.get(cid, 0)
+                    if cbd > 0:
+                        dv += cbd * qty
+                        dv_has_deep = True
+                    else:
+                        cs = comp_store_map.get(cid)
+                        sp = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else 0
+                        if sp > 0:
+                            dv += sp * qty
+                        else:
+                            mkt = float(vc["market_price"] or 0)
+                            dv += mkt * qty
+                if dv_has_deep and dv > best_deep_value:
+                    best_deep_value = dv
 
             item["breakdown"] = {
                 "best_variant_market": bd["best_variant_market"],
@@ -2325,7 +2401,7 @@ def shopify_session_store_check(session_id):
                 "all_components_in_store": bd["all_components_in_store"],
                 "components_in_store_count": bd["components_in_store_count"],
                 "total_components": len(bd["components"]),
-                "deep_bd_value": round(deep_value, 2) if has_deep and deep_value > 0 else None,
+                "deep_bd_value": round(best_deep_value, 2) if best_deep_value > 0 else None,
             }
         else:
             item["breakdown"] = None
