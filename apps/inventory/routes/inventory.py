@@ -362,7 +362,7 @@ def index():
             if (new_phys is not None or new_notes is not None) and variant_id:
                 _save_override(variant_id, physical_count=new_phys, notes=new_notes)
 
-        flash("💾 Saved locally.", "success")
+        flash("💾 Saved.", "success")
         return redirect(request.full_path or "/inventory")
 
     # ── GET ───────────────────────────────────────────────────────────────────
@@ -416,6 +416,15 @@ def push_prices():
     label = "DRY RUN" if DRY_RUN else "LIVE"
     flash(f"💸 {label}: pushed prices for {pushed} variant(s){' (some failed)' if failed else ''}.",
           "success" if not failed else "warning")
+    return redirect("/inventory")
+
+
+@bp.route("/zero_physical", methods=["POST"])
+@requires_auth
+def zero_physical():
+    """Reset all physical counts to zero for a fresh inventory session."""
+    db.execute("UPDATE inventory_overrides SET physical_count = 0, updated_at = CURRENT_TIMESTAMP")
+    flash("🔄 All physical counts zeroed out.", "success")
     return redirect("/inventory")
 
 
@@ -689,8 +698,9 @@ td{{padding:6px 9px;vertical-align:middle;}}
     <a class="btn" href="/inventory/breakdown/">🔓 Breakdown</a>
     <a class="btn btn-green" href="/inventory/add">➕ Add</a>
     <a class="btn" href="/inventory/export.csv{qs}">📤 Export</a>
-    <form method="post" action="/inventory/push_prices" style="display:inline">
-      <button class="btn btn-primary">💸 Push All Prices</button>
+    <form method="post" action="/inventory/zero_physical" style="display:inline"
+          onsubmit="return confirm('Zero out ALL physical counts? This cannot be undone.')">
+      <button class="btn" style="color:var(--red);">🔄 Zero Physical</button>
     </form>
   </div>
 </div>
@@ -727,7 +737,7 @@ td{{padding:6px 9px;vertical-align:middle;}}
       {tbody}
     </table>
   </div>
-  <button id="save-btn" class="btn btn-primary" style="margin-top:10px;" type="button">💾 Save local</button>
+  <button id="save-btn" class="btn btn-primary" style="margin-top:10px;" type="button">💾 Save</button>
 </form>
 
 <script>
