@@ -566,6 +566,23 @@ def get_session(session_id):
 
     # Attach breakdown summaries to sealed items that have a tcgplayer_id
     tcg_ids = list({int(i["tcgplayer_id"]) for i in items if i.get("tcgplayer_id")})
+
+    # JIT refresh stale component market prices for these items' recipes
+    if tcg_ids and ppt:
+        try:
+            from breakdown_helpers import refresh_stale_component_prices
+            _ph = ",".join(["%s"] * len(tcg_ids))
+            _vids = db.query(f"""
+                SELECT sbv.id AS variant_id
+                FROM sealed_breakdown_cache sbc
+                JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
+                WHERE sbc.tcgplayer_id IN ({_ph})
+            """, tuple(tcg_ids))
+            if _vids:
+                refresh_stale_component_prices([v["variant_id"] for v in _vids], db, ppt)
+        except Exception:
+            pass
+
     bd_map = {}
     if tcg_ids:
         try:
@@ -2218,6 +2235,16 @@ def shopify_session_store_check(session_id):
                 for cr in comp_rows:
                     comp_store_map[cr["tcgplayer_id"]] = cr
 
+            # Nested breakdown lookup: which components have their own recipes?
+            child_bd_map = {}
+            if comp_tcg_ids:
+                cbp = ",".join(["%s"] * len(comp_tcg_ids))
+                child_bd_rows = db.query(
+                    f"SELECT tcgplayer_id, best_variant_market FROM sealed_breakdown_cache WHERE tcgplayer_id IN ({cbp})",
+                    tuple(comp_tcg_ids)
+                )
+                child_bd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in child_bd_rows}
+
             for row in bd_rows:
                 pid = row["parent_id"]
                 if pid not in breakdown_data:
@@ -2235,6 +2262,7 @@ def shopify_session_store_check(session_id):
                     cs = comp_store_map.get(row["comp_tcg_id"])
                     in_store = cs is not None and (cs.get("shopify_qty") or 0) > 0
                     store_price = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else None
+                    child_bd_val = child_bd_map.get(row["comp_tcg_id"], 0)
                     breakdown_data[pid]["components"].append({
                         "tcgplayer_id": row["comp_tcg_id"],
                         "product_name": row["comp_name"],
@@ -2242,6 +2270,8 @@ def shopify_session_store_check(session_id):
                         "market_price": float(row["comp_price"] or 0),
                         "store_price": store_price,
                         "in_store": in_store,
+                        "has_breakdown": child_bd_val > 0,
+                        "child_bd_value": round(child_bd_val, 2) if child_bd_val > 0 else None,
                     })
                     if in_store:
                         breakdown_data[pid]["components_in_store_count"] += 1
@@ -2268,6 +2298,23 @@ def shopify_session_store_check(session_id):
                     if len(comp_store_vals) < len(comps):
                         store_total = None  # partial — don't use for margin math
 
+            # Compute deep value (if children have their own recipes)
+            deep_value = 0.0
+            has_deep = False
+            for c in comps:
+                qty = c.get("quantity_per_parent") or 1
+                if c.get("child_bd_value") and c["child_bd_value"] > 0:
+                    deep_value += c["child_bd_value"] * qty
+                    has_deep = True
+                elif c.get("store_price") and c["store_price"] > 0:
+                    deep_value += c["store_price"] * qty
+                elif c.get("market_price") and c["market_price"] > 0:
+                    deep_value += c["market_price"] * qty
+                else:
+                    deep_value = 0.0
+                    has_deep = False
+                    break
+
             item["breakdown"] = {
                 "best_variant_market": bd["best_variant_market"],
                 "best_variant_store": store_total,
@@ -2278,6 +2325,7 @@ def shopify_session_store_check(session_id):
                 "all_components_in_store": bd["all_components_in_store"],
                 "components_in_store_count": bd["components_in_store_count"],
                 "total_components": len(bd["components"]),
+                "deep_bd_value": round(deep_value, 2) if has_deep and deep_value > 0 else None,
             }
         else:
             item["breakdown"] = None
@@ -2320,6 +2368,18 @@ def get_breakdown_cache_intake(tcgplayer_id):
     result = _get_full_breakdown(tcgplayer_id)
     if not result:
         return jsonify({"found": False, "cache": None})
+
+    # JIT refresh stale component market prices before returning
+    try:
+        from breakdown_helpers import refresh_stale_component_prices
+        variant_ids = [str(v["id"]) for v in result.get("variants", [])]
+        if variant_ids and ppt:
+            updated = refresh_stale_component_prices(variant_ids, db, ppt)
+            if updated:
+                result = _get_full_breakdown(tcgplayer_id)  # re-fetch with fresh prices
+    except Exception as e:
+        app.logger.warning(f"Component price refresh skipped: {e}")
+
     return jsonify({"found": True, "cache": _serialize(result)})
 
 

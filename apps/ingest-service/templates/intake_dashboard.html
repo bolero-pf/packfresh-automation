@@ -2680,7 +2680,9 @@
                                 const valLabel = childStore ? 'store' : 'mkt';
                                 const valStr = displayVal > 0 ? `${valLabel} $${displayVal.toFixed(2)}` : '';
                                 const name = bd.variant_count > 1 ? `${bd.variant_count} configs` : bd.variant_name || 'breakdown';
-                                return `<br><small style="color:${bdNoteColor};">&#x1F4E6; ${arrow} ${name}${valStr ? ': ' + valStr : ''}${bd.variant_notes ? ' &middot; <em>' + bd.variant_notes + '</em>' : ''}</small>`;
+                                const deepVal = bd.deep_bd_value ? parseFloat(bd.deep_bd_value) : 0;
+                                const deepStr = deepVal > 0 && deepVal !== displayVal ? ` &middot; <span style="color:var(--accent);" title="Value if children are also broken down">Deep: $${deepVal.toFixed(2)}</span>` : '';
+                                return `<br><small style="color:${bdNoteColor};">&#x1F4E6; ${arrow} ${name}${valStr ? ': ' + valStr : ''}${deepStr}${bd.variant_notes ? ' &middot; <em>' + bd.variant_notes + '</em>' : ''}</small>`;
                             })() : ''}
                         </td>
                         <td>$${(i.unitOffer||0).toFixed(2)}${i.quantity > 1 ? ' &times; ' + i.quantity : ''}</td>
