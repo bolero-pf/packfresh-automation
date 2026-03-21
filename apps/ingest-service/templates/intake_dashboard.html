@@ -2835,6 +2835,11 @@
 
     // Delegated click handler for Find buttons — survives innerHTML replacement
     document.addEventListener('click', (e) => {
+        // DEBUG: catch any click on something that looks like a Find button
+        const el = e.target;
+        if (el.tagName === 'BUTTON' && el.textContent.includes('Find')) {
+            alert('DEBUG: clicked Find button. class="' + el.className + '" dataset=' + JSON.stringify(el.dataset) + ' hasFinderClass=' + el.classList.contains('find-in-store-btn'));
+        }
         const btn = e.target.closest('.find-in-store-btn');
         if (!btn) return;
         e.preventDefault();
