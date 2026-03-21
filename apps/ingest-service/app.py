@@ -2171,6 +2171,25 @@ def shopify_session_store_check(session_id):
     if all_tcg_ids:
         try:
             ph = ",".join(["%s"] * len(all_tcg_ids))
+
+            # JIT refresh stale component market prices before loading breakdown data
+            try:
+                from breakdown_helpers import refresh_stale_component_prices
+                # Get variant IDs for these products
+                _vids = db.query(f"""
+                    SELECT sbv.id AS variant_id
+                    FROM sealed_breakdown_cache sbc
+                    JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
+                        AND sbv.total_component_market = sbc.best_variant_market
+                    WHERE sbc.tcgplayer_id IN ({ph})
+                """, tuple(all_tcg_ids))
+                if _vids:
+                    refresh_stale_component_prices(
+                        [v["variant_id"] for v in _vids], db, ppt
+                    )
+            except Exception as e:
+                app.logger.warning(f"Component price refresh skipped: {e}")
+
             # Get best variant (highest total) per product for store check display
             bd_rows = db.query(f"""
                 SELECT sbc.tcgplayer_id AS parent_id,
@@ -2370,12 +2389,14 @@ def save_variant_intake(tcgplayer_id):
             db.execute("""
                 INSERT INTO sealed_breakdown_components
                     (variant_id, tcgplayer_id, product_name, set_name,
-                     quantity_per_parent, market_price, notes, display_order)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                     quantity_per_parent, market_price, notes, display_order,
+                     component_type, market_price_updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
             """, (
                 vid, comp.get("tcgplayer_id"), comp["product_name"], comp.get("set_name"),
                 int(comp.get("quantity_per_parent", comp.get("quantity", 1))),
                 Decimal(str(comp.get("market_price", 0))), comp.get("notes"), order,
+                comp.get("component_type", "sealed"),
             ))
 
         # Refresh denorm totals

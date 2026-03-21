@@ -489,8 +489,8 @@ def save_variant(tcgplayer_id: int, product_name: str,
     for order, comp in enumerate(components):
         execute("""
             INSERT INTO sealed_breakdown_components
-                (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, notes, display_order, component_type)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, notes, display_order, component_type, market_price_updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
         """, (
             vid,
             comp.get("tcgplayer_id"),
@@ -659,7 +659,7 @@ def split_then_break_down(item_id: str, qty_to_break: int,
     return result
 
 
-def get_breakdown_summary_for_items(tcg_ids: list[int]) -> dict:
+def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
     """
     Batch lookup: tcg_id -> {variant_count, best_variant_market, variant_names,
                               best_variant_store, parent_store_price,
@@ -695,6 +695,15 @@ def get_breakdown_summary_for_items(tcg_ids: list[int]) -> dict:
 
     # Step 2: get components for those variants
     variant_ids = [r["variant_id"] for r in variant_rows]
+
+    # JIT refresh stale component market prices
+    if ppt and variant_ids:
+        try:
+            import db as _db
+            from breakdown_helpers import refresh_stale_component_prices
+            refresh_stale_component_prices(variant_ids, _db, ppt)
+        except Exception as e:
+            logger.warning(f"Component price refresh skipped: {e}")
     parent_ids  = [r["parent_id"]  for r in variant_rows]
     vph = ",".join(["%s"] * len(variant_ids))
 

@@ -130,6 +130,16 @@ def _build_recommendations():
     # Component child TCGPlayer IDs for low-stock lookup
     if recipe_map:
         variant_ids = [str(r["best_variant_id"]) for r in recipe_map.values()]
+
+        # JIT refresh stale component market prices
+        try:
+            from breakdown_helpers import refresh_stale_component_prices
+            from routes.inventory import _get_ppt_client
+            _ppt = _get_ppt_client()
+            if _ppt:
+                refresh_stale_component_prices(variant_ids, db, _ppt)
+        except Exception as e:
+            logger.warning(f"Component price refresh skipped: {e}")
         vph = ",".join(["%s"] * len(variant_ids))
         components = db.query(f"""
             SELECT sbcomp.tcgplayer_id AS component_tcg_id,
@@ -517,8 +527,8 @@ def save_variant(tcg_id):
 
     for i, comp in enumerate(components):
         db.execute("""INSERT INTO sealed_breakdown_components
-            (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, display_order, component_type)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, display_order, component_type, market_price_updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)""",
             (vid, comp.get("tcgplayer_id"), comp.get("product_name",""),
              comp.get("set_name",""), int(comp.get("quantity_per_parent", comp.get("quantity",1))),
              Decimal(str(comp.get("market_price",0))), i,

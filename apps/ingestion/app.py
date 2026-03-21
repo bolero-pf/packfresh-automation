@@ -1206,7 +1206,7 @@ def breakdown_cache_batch():
     tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
     if not tcg_ids:
         return jsonify({"summaries": {}})
-    summaries = ingest.get_breakdown_summary_for_items(tcg_ids)
+    summaries = ingest.get_breakdown_summary_for_items(tcg_ids, ppt=ppt)
     return jsonify({"summaries": _serialize(summaries)})
 
 
