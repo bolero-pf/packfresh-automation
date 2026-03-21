@@ -638,10 +638,11 @@
                     <div class="form-group" style="margin:0; min-width:140px;">
                         <label style="font-size:0.75rem;">Status</label>
                         <select id="active-filter-status" onchange="loadFilteredActive()" style="font-size:0.85rem; padding:4px 8px;">
-                            <option value="in_progress,offered,accepted">All Active</option>
+                            <option value="in_progress,offered,accepted,partially_ingested">All Active</option>
                             <option value="in_progress">In Progress</option>
                             <option value="offered">Offered</option>
                             <option value="accepted">Accepted (All)</option>
+                            <option value="partially_ingested">Partially Ingested</option>
                         </select>
                     </div>
                     <div class="form-group" style="margin:0; min-width:100px;">
@@ -959,7 +960,7 @@
         const hash = window.location.hash.replace('#', '');
         const validTabs = ['sealed-intake','raw-intake','active-sessions','completed','cancelled'];
         if (hash && validTabs.includes(hash)) { switchTab(hash); }
-        else { loadSessions('in_progress,offered,accepted', 'active-sessions-list'); }
+        else { loadSessions('in_progress,offered,accepted,partially_ingested', 'active-sessions-list'); }
     })();
 
     // ═══════════════════════════════ MODAL HELPERS ═══════════════════════════════
@@ -1364,6 +1365,7 @@
                         'offered': 'background:#2563eb;color:#fff;',
                         'accepted': 'background:#059669;color:#fff;',
                         'received': 'background:#7c3aed;color:#fff;',
+                        'partially_ingested': 'background:#d97706;color:#fff;',
                         'ingested': 'background:#16a34a;color:#fff;',
                         'finalized': 'background:#16a34a;color:#fff;',
                         'rejected': 'background:#dc2626;color:#fff;',
