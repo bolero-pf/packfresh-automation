@@ -247,6 +247,57 @@ header {
 .confirm-ref { font-family: var(--mono); font-size: 1rem; color: var(--dim); margin-bottom: 20px; }
 .confirm-msg { font-size: 0.95rem; color: var(--dim); line-height: 1.6; margin-bottom: 24px; }
 
+/* Confirm modal */
+.confirm-overlay {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,0.7); backdrop-filter: blur(4px);
+  align-items: center; justify-content: center;
+}
+.confirm-overlay.active { display: flex; }
+.confirm-box {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r);
+  padding: 28px; max-width: 360px; width: 90%; text-align: center;
+}
+.confirm-box h3 { margin-bottom: 10px; }
+.confirm-box p { color: var(--dim); font-size: 0.9rem; margin-bottom: 20px; }
+
+/* Filter drawer */
+.filter-bar {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 10px 20px; background: var(--surface);
+  border-bottom: 1px solid var(--border); max-width: 1200px; margin: 0 auto;
+}
+.filter-toggle {
+  background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--r);
+  color: var(--dim); padding: 6px 14px; font-family: var(--sans); font-size: 0.82rem;
+  cursor: pointer; transition: all 0.15s;
+}
+.filter-toggle.active { border-color: var(--accent); color: var(--accent); }
+.filter-drawer {
+  display: none; padding: 12px 20px; background: var(--surface);
+  border-bottom: 1px solid var(--border); max-width: 1200px; margin: 0 auto;
+}
+.filter-drawer.open { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.filter-group { display: flex; flex-direction: column; gap: 4px; }
+.filter-label { font-size: 0.7rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; }
+.filter-select {
+  height: 38px; background: var(--surface2); border: 1.5px solid var(--border);
+  border-radius: 8px; color: var(--text); padding: 0 10px; font-size: 0.82rem;
+  font-family: var(--sans); outline: none; cursor: pointer;
+}
+.cond-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 4px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 600;
+  cursor: pointer; border: 1.5px solid; transition: all 0.15s; user-select: none;
+}
+.cond-toggle.on { opacity: 1; }
+.cond-toggle.off { opacity: 0.3; }
+.price-input {
+  width: 80px; height: 34px; background: var(--surface2); border: 1.5px solid var(--border);
+  border-radius: 8px; color: var(--text); padding: 0 8px; font-size: 0.82rem;
+  font-family: var(--mono); outline: none; text-align: center;
+}
+
 /* Empty / loading */
 .empty { text-align: center; padding: 80px 20px; color: var(--dim); }
 .empty-icon { font-size: 3rem; opacity: 0.2; margin-bottom: 12px; }
@@ -295,6 +346,52 @@ header {
   </div>
 </header>
 
+<!-- Condition pills + filter toggle -->
+<div class="filter-bar">
+  <span class="cond-toggle on" data-cond="NM" onclick="toggleCond(this)" style="border-color:#4ade80;background:rgba(74,222,128,0.15);color:#4ade80;">NM</span>
+  <span class="cond-toggle on" data-cond="LP" onclick="toggleCond(this)" style="border-color:#e8c547;background:rgba(232,197,71,0.15);color:#e8c547;">LP</span>
+  <span class="cond-toggle on" data-cond="MP" onclick="toggleCond(this)" style="border-color:#fb923c;background:rgba(251,146,60,0.15);color:#fb923c;">MP</span>
+  <span class="cond-toggle on" data-cond="HP" onclick="toggleCond(this)" style="border-color:#f87171;background:rgba(248,113,113,0.15);color:#f87171;">HP</span>
+  <span class="cond-toggle on" data-cond="DMG" onclick="toggleCond(this)" style="border-color:#b91c1c;background:rgba(185,28,28,0.15);color:#b91c1c;">DMG</span>
+  <button class="filter-toggle" id="filter-toggle-btn" onclick="toggleFilterDrawer()">⚙ Filters</button>
+  <select class="filter-select" id="sort-select" onchange="doSearch()" style="margin-left:auto;">
+    <option value="name_asc">Name A–Z</option>
+    <option value="price_asc">Price Low–High</option>
+    <option value="price_desc">Price High–Low</option>
+    <option value="newest">Newest</option>
+  </select>
+</div>
+
+<!-- Expandable filter drawer -->
+<div class="filter-drawer" id="filter-drawer">
+  <div class="filter-group">
+    <span class="filter-label">Era</span>
+    <select class="filter-select" id="era-filter" onchange="doSearch()">
+      <option value="">All Eras</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <span class="filter-label">Price Min</span>
+    <input class="price-input" id="price-min" type="number" min="0" step="1" placeholder="$0" onchange="doSearch()">
+  </div>
+  <div class="filter-group">
+    <span class="filter-label">Price Max</span>
+    <input class="price-input" id="price-max" type="number" min="0" step="1" placeholder="∞" onchange="doSearch()">
+  </div>
+</div>
+
+<!-- Confirm dialog -->
+<div class="confirm-overlay" id="confirm-overlay">
+  <div class="confirm-box">
+    <h3 id="confirm-dlg-title"></h3>
+    <p id="confirm-dlg-msg"></p>
+    <div class="btn-row">
+      <button class="btn btn-outline" id="confirm-dlg-cancel">Cancel</button>
+      <button class="btn btn-gold" id="confirm-dlg-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <div class="main">
   <div class="results-info" id="results-info"></div>
   <div id="grid" class="grid"></div>
@@ -314,6 +411,43 @@ header {
 <script>
 const MAX = 20;
 let _cart = [];  // [{card_name, set_name, condition, qty, price, image_url}]
+let _activeConditions = new Set(['NM','LP','MP','HP','DMG']);
+
+// ── Themed Confirm ───────────────────────────────────────────────────────────
+function themedConfirm(title, msg) {
+  return new Promise(resolve => {
+    document.getElementById('confirm-dlg-title').textContent = title;
+    document.getElementById('confirm-dlg-msg').textContent = msg;
+    const overlay = document.getElementById('confirm-overlay');
+    overlay.classList.add('active');
+    const cleanup = (val) => { overlay.classList.remove('active'); resolve(val); };
+    document.getElementById('confirm-dlg-ok').onclick = () => cleanup(true);
+    document.getElementById('confirm-dlg-cancel').onclick = () => cleanup(false);
+  });
+}
+
+// ── Filter Controls ──────────────────────────────────────────────────────────
+function toggleCond(el) {
+  const cond = el.getAttribute('data-cond');
+  if (_activeConditions.has(cond)) {
+    if (_activeConditions.size <= 1) return; // keep at least one
+    _activeConditions.delete(cond);
+    el.classList.remove('on');
+    el.classList.add('off');
+  } else {
+    _activeConditions.add(cond);
+    el.classList.remove('off');
+    el.classList.add('on');
+  }
+  doSearch();
+}
+
+function toggleFilterDrawer() {
+  const d = document.getElementById('filter-drawer');
+  const btn = document.getElementById('filter-toggle-btn');
+  d.classList.toggle('open');
+  btn.classList.toggle('active');
+}
 
 function _saveCart() {
   try { localStorage.setItem('pf_cart', JSON.stringify(_cart)); } catch(e) {}
@@ -332,8 +466,21 @@ let _detail = null;  // current card being viewed
 async function boot() {
   _loadCart();
   updateCartBadge();
-  await loadSets();
+  await Promise.all([loadSets(), loadEras()]);
   doSearch();
+}
+
+async function loadEras() {
+  try {
+    const d = await get('/api/eras');
+    const sel = document.getElementById('era-filter');
+    (d.eras || []).forEach(e => {
+      const o = document.createElement('option');
+      o.value = e.name;
+      o.textContent = `${e.name} (${e.set_count})`;
+      sel.appendChild(o);
+    });
+  } catch(e) {}
 }
 
 async function loadSets() {
@@ -358,7 +505,15 @@ async function doSearch(page) {
   _page = page || 1;
   const q   = document.getElementById('q').value.trim();
   const set = document.getElementById('set-filter').value;
-  const params = new URLSearchParams({ q, set, page: _page });
+  const era = document.getElementById('era-filter')?.value || '';
+  const sort = document.getElementById('sort-select')?.value || 'name_asc';
+  const minP = document.getElementById('price-min')?.value || '';
+  const maxP = document.getElementById('price-max')?.value || '';
+  const conds = [..._activeConditions].join(',');
+  const params = new URLSearchParams({ q, set, page: _page, sort, condition: conds });
+  if (era) params.set('era', era);
+  if (minP) params.set('min_price', minP);
+  if (maxP) params.set('max_price', maxP);
 
   const grid = document.getElementById('grid');
   grid.innerHTML = '<div class="spinner"></div>';
@@ -558,8 +713,9 @@ function removeFromCart(cardName, setName, cond) {
   _saveCart();
 }
 
-function clearCart() {
-  if (!confirm('Clear all picks?')) return;
+async function clearCart() {
+  const ok = await themedConfirm('Clear All Picks?', 'This will remove all cards from your selection.');
+  if (!ok) return;
   _cart = [];
   updateCartBadge();
   _saveCart();

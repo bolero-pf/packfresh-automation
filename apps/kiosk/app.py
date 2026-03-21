@@ -23,7 +23,35 @@ db.init_pool()
 MAX_HOLD_ITEMS = 20
 HOLD_EXPIRY_HOURS = 2
 
-# Inline the HTML so no template file needed
+# Era mapping — groups set names by TCG era for browsing filters
+# Sets are matched by prefix/keyword. If a set doesn't match any era, it goes to "Classic".
+ERA_KEYWORDS = {
+    "Scarlet & Violet": ["Scarlet & Violet", "Paldea", "Obsidian Flames", "151",
+                         "Paradox Rift", "Temporal Forces", "Twilight Masque",
+                         "Shrouded Fable", "Stellar Crown", "Surging Sparks",
+                         "Prismatic Evolutions", "Journey Together", "Destined Rivals"],
+    "Sword & Shield": ["Sword & Shield", "Rebel Clash", "Darkness Ablaze", "Vivid Voltage",
+                        "Battle Styles", "Chilling Reign", "Evolving Skies", "Fusion Strike",
+                        "Brilliant Stars", "Astral Radiance", "Lost Origin", "Silver Tempest",
+                        "Crown Zenith", "Shining Fates", "Champion's Path", "Hidden Fates"],
+    "Sun & Moon": ["Sun & Moon", "Guardians Rising", "Burning Shadows", "Crimson Invasion",
+                   "Ultra Prism", "Forbidden Light", "Celestial Storm", "Lost Thunder",
+                   "Team Up", "Unbroken Bonds", "Unified Minds", "Cosmic Eclipse",
+                   "Detective Pikachu"],
+    "XY": ["XY", "Flashfire", "Furious Fists", "Phantom Forces", "Primal Clash",
+            "Roaring Skies", "Ancient Origins", "BREAKthrough", "BREAKpoint",
+            "Fates Collide", "Steam Siege", "Evolutions", "Generations"],
+}
+
+def _classify_era(set_name: str) -> str:
+    if not set_name:
+        return "Classic"
+    sn = set_name.strip()
+    for era, keywords in ERA_KEYWORDS.items():
+        for kw in keywords:
+            if sn.lower().startswith(kw.lower()) or kw.lower() in sn.lower():
+                return era
+    return "Classic"
 
 
 
@@ -45,10 +73,15 @@ def browse():
 
     Query params: q, set, page (24 per page)
     """
-    q        = (request.args.get("q") or "").strip()
-    set_name = (request.args.get("set") or "").strip()
-    page     = max(1, int(request.args.get("page", 1)))
-    offset   = (page - 1) * 24
+    q          = (request.args.get("q") or "").strip()
+    set_name   = (request.args.get("set") or "").strip()
+    conditions = [c.strip().upper() for c in (request.args.get("condition") or "").split(",") if c.strip()]
+    min_price  = request.args.get("min_price", type=float)
+    max_price  = request.args.get("max_price", type=float)
+    era        = (request.args.get("era") or "").strip()
+    sort       = (request.args.get("sort") or "name_asc").strip()
+    page       = max(1, int(request.args.get("page", 1)))
+    offset     = (page - 1) * 24
 
     filters = ["state = 'STORED'", "current_hold_id IS NULL"]
     params  = []
@@ -59,8 +92,35 @@ def browse():
     if set_name:
         filters.append("set_name ILIKE %s")
         params.append(f"%{set_name}%")
+    if conditions:
+        valid = [c for c in conditions if c in ("NM", "LP", "MP", "HP", "DMG")]
+        if valid:
+            cph = ",".join(["%s"] * len(valid))
+            filters.append(f"condition IN ({cph})")
+            params += valid
+    if min_price is not None:
+        filters.append("current_price >= %s")
+        params.append(min_price)
+    if max_price is not None:
+        filters.append("current_price <= %s")
+        params.append(max_price)
+    if era:
+        era_kws = ERA_KEYWORDS.get(era)
+        if era_kws:
+            era_clauses = " OR ".join(["set_name ILIKE %s"] * len(era_kws))
+            filters.append(f"({era_clauses})")
+            params += [f"%{kw}%" for kw in era_kws]
 
     where = " AND ".join(filters)
+
+    # Sort mapping
+    sort_map = {
+        "name_asc": "card_name ASC",
+        "price_asc": "min_price ASC NULLS LAST",
+        "price_desc": "max_price DESC NULLS LAST",
+        "newest": "MAX(created_at) DESC",
+    }
+    order_by = sort_map.get(sort, "card_name ASC")
 
     # Count distinct cards (not individual copies)
     count_row = db.query_one(f"""
@@ -81,17 +141,19 @@ def browse():
             COUNT(*) AS total_qty,
             MIN(current_price) AS min_price,
             MAX(current_price) AS max_price,
+            MAX(created_at) AS created_at,
             jsonb_object_agg(condition, cond_qty) AS conditions
         FROM (
             SELECT card_name, set_name, tcgplayer_id, image_url,
-                   condition, COUNT(*) AS cond_qty, MIN(current_price) AS current_price
+                   condition, COUNT(*) AS cond_qty, MIN(current_price) AS current_price,
+                   MAX(created_at) AS created_at
             FROM raw_cards
             WHERE {where}
               AND state = 'STORED'
             GROUP BY card_name, set_name, tcgplayer_id, image_url, condition
         ) sub
         GROUP BY card_name, set_name, tcgplayer_id
-        ORDER BY card_name ASC
+        ORDER BY {order_by}
         LIMIT 24 OFFSET %s
     """, tuple(params) + (offset,))
 
@@ -124,6 +186,22 @@ def list_sets():
         ORDER BY set_name ASC LIMIT 200
     """)
     return jsonify({"sets": [r["set_name"] for r in rows]})
+
+
+@app.route("/api/eras")
+def list_eras():
+    """Return available eras based on sets currently in stock."""
+    rows = db.query("""
+        SELECT DISTINCT set_name FROM raw_cards
+        WHERE state = 'STORED' AND set_name IS NOT NULL
+    """)
+    era_counts = {}
+    for r in rows:
+        era = _classify_era(r["set_name"])
+        era_counts[era] = era_counts.get(era, 0) + 1
+    # Return eras sorted by name, with set counts
+    eras = [{"name": k, "set_count": v} for k, v in sorted(era_counts.items())]
+    return jsonify({"eras": eras})
 
 
 @app.route("/api/card")
