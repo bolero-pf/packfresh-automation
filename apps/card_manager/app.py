@@ -304,6 +304,87 @@ def item_decision(hold_id, hold_item_id):
     return jsonify({"success": True, "decision": decision})
 
 
+@app.route("/api/holds/<hold_id>/items/<hold_item_id>/missing", methods=["POST"])
+def mark_item_missing(hold_id, hold_item_id):
+    """Mark a hold item as MISSING — card can't be found during pulling."""
+    item = db.query_one("""
+        SELECT hi.*, rc.id AS card_id FROM hold_items hi
+        JOIN raw_cards rc ON hi.raw_card_id = rc.id
+        WHERE hi.id = %s AND hi.hold_id = %s
+    """, (hold_item_id, hold_id))
+    if not item:
+        return jsonify({"error": "Hold item not found"}), 404
+
+    db.execute("""
+        UPDATE hold_items SET status = 'MISSING', resolved_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+    """, (hold_item_id,))
+    db.execute("""
+        UPDATE raw_cards SET state = 'MISSING', current_hold_id = NULL
+        WHERE id = %s
+    """, (str(item["card_id"]),))
+
+    return jsonify({"success": True, "status": "MISSING"})
+
+
+@app.route("/api/holds/<hold_id>/items/<hold_item_id>/reverse", methods=["POST"])
+def reverse_decision(hold_id, hold_item_id):
+    """
+    Reverse a hold item decision after finalization.
+    - Re-accept a REJECTED card → create Shopify listing
+    - Return an ACCEPTED card → delete Shopify listing, mark PENDING_RETURN
+    """
+    item = db.query_one("""
+        SELECT hi.*, rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.tcgplayer_id, rc.barcode
+        FROM hold_items hi
+        JOIN raw_cards rc ON hi.raw_card_id = rc.id
+        WHERE hi.id = %s AND hi.hold_id = %s
+    """, (hold_item_id, hold_id))
+    if not item:
+        return jsonify({"error": "Hold item not found"}), 404
+
+    action = (request.get_json() or {}).get("action", "").lower()
+
+    if action == "re-accept" and item["status"] == "REJECTED":
+        # Create Shopify listing and mark accepted
+        try:
+            listing = _create_raw_listing(item)
+            db.execute("""
+                UPDATE hold_items
+                SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP,
+                    shopify_product_id = %s, shopify_variant_id = %s
+                WHERE id = %s
+            """, (listing["product_id"], listing["variant_id"], hold_item_id))
+            db.execute("""
+                UPDATE raw_cards SET state = 'PENDING_SALE', current_hold_id = NULL
+                WHERE id = %s
+            """, (str(item["card_id"]),))
+            return jsonify({"success": True, "action": "re-accepted", "product_id": listing["product_id"]})
+        except Exception as e:
+            return jsonify({"error": f"Failed to create listing: {e}"}), 500
+
+    elif action == "return" and item["status"] == "ACCEPTED" and item.get("shopify_product_id"):
+        # Delete Shopify listing and mark for return
+        try:
+            _shopify("DELETE", f"/products/{item['shopify_product_id']}.json")
+        except Exception as e:
+            logger.warning(f"Failed to delete Shopify product {item['shopify_product_id']}: {e}")
+        db.execute("""
+            UPDATE hold_items
+            SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP,
+                shopify_product_id = NULL, shopify_variant_id = NULL
+            WHERE id = %s
+        """, (hold_item_id,))
+        db.execute("""
+            UPDATE raw_cards SET state = 'PENDING_RETURN', current_hold_id = NULL
+            WHERE id = %s
+        """, (str(item["card_id"]),))
+        return jsonify({"success": True, "action": "returned"})
+
+    return jsonify({"error": "Invalid action or item status"}), 400
+
+
 @app.route("/api/holds/<hold_id>/finish", methods=["POST"])
 def finish_hold(hold_id):
     """
@@ -350,6 +431,7 @@ def finish_hold(hold_id):
             errors.append({"barcode": item["barcode"], "error": str(e)})
 
     # Any items still REQUESTED or PULLED (not yet decided) → auto-reject
+    # MISSING items are already resolved — leave them alone
     db.execute("""
         UPDATE raw_cards SET state = 'PENDING_RETURN', current_hold_id = NULL
         WHERE id IN (
@@ -436,15 +518,54 @@ def list_returns():
     return jsonify({"cards": [_ser(dict(r)) for r in rows]})
 
 
+@app.route("/api/missing")
+def list_missing():
+    """All cards in MISSING state."""
+    rows = db.query("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.condition,
+               rc.card_number, rc.image_url, rc.current_price, rc.updated_at,
+               sl.bin_label AS last_bin
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.state = 'MISSING'
+        ORDER BY rc.updated_at DESC NULLS LAST
+    """)
+    return jsonify({"cards": [_ser(dict(r)) for r in rows]})
+
+
+@app.route("/api/missing/<card_id>/gone", methods=["POST"])
+def mark_gone(card_id):
+    """Permanently mark a missing card as GONE (lost/theft)."""
+    card = db.query_one("SELECT id, card_name FROM raw_cards WHERE id::text = %s AND state = 'MISSING'", (card_id,))
+    if not card:
+        return jsonify({"error": "Card not found or not in MISSING state"}), 404
+    db.execute("""
+        UPDATE raw_cards SET state = 'GONE', updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (card_id,))
+    return jsonify({"success": True, "card_name": card["card_name"]})
+
+
 @app.route("/api/returns/scan", methods=["POST"])
 def scan_return():
-    """Verify a card being physically returned — marks it confirmed for return batch."""
+    """Verify a card being physically returned. Also handles re-found MISSING cards."""
     barcode = (request.get_json() or {}).get("barcode", "").strip()
     card = db.query_one("""
         SELECT id, card_name, set_name, condition, state FROM raw_cards WHERE barcode = %s
     """, (barcode,))
     if not card:
         return jsonify({"error": "Barcode not found"}), 404
+
+    # Handle MISSING cards being re-found — treat as a return
+    if card["state"] == "MISSING":
+        return jsonify({
+            "success":   True,
+            "card_name": card["card_name"],
+            "condition": card["condition"],
+            "barcode":   barcode,
+            "was_missing": True,
+        })
+
     if card["state"] != "PENDING_RETURN":
         return jsonify({"error": f"Card is {card['state']}, not PENDING_RETURN", "card_name": card["card_name"]}), 409
 
@@ -473,7 +594,7 @@ def store_returns():
 
     cards = db.query("""
         SELECT id, barcode, card_name
-        FROM raw_cards WHERE barcode = ANY(%s) AND state = 'PENDING_RETURN'
+        FROM raw_cards WHERE barcode = ANY(%s) AND state IN ('PENDING_RETURN', 'MISSING')
     """, (list(barcodes),))
 
     if not cards:

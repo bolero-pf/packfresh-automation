@@ -230,6 +230,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
       ↩ Return Queue
       <span class="nav-badge" id="badge-returns"></span>
     </div>
+    <div class="nav-item" onclick="showView('missing')" id="nav-missing">
+      ⚠ Missing Cards
+      <span class="nav-badge" id="badge-missing"></span>
+    </div>
     <div class="scanner-status">
       <span class="scanner-dot" id="scanner-dot"></span>
       <span id="scanner-label">Scanner ready</span>
@@ -252,6 +256,15 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
     <div class="view" id="view-hold-detail">
       <div class="back-btn" onclick="showView('holds')">← Back to Queue</div>
       <div id="hold-detail-content"></div>
+    </div>
+
+    <!-- Missing Cards -->
+    <div class="view" id="view-missing">
+      <div class="page-title">Missing Cards</div>
+      <div class="page-sub">Cards that couldn't be found during pulling. Scan to re-shelve, or mark as gone.</div>
+      <div id="missing-content">
+        <div class="empty"><div class="spinner"></div></div>
+      </div>
     </div>
 
     <!-- Return Queue -->
@@ -282,6 +295,16 @@ function showView(name) {
   if (name !== 'hold-detail') document.getElementById('nav-' + name)?.classList.add('active');
   if (name === 'holds')   loadHolds();
   if (name === 'returns') loadReturns();
+  if (name === 'missing') loadMissing();
+}
+
+// ── Themed Confirm ──────────────────────────────────────────────────────────
+function themedConfirm(title, msg) {
+  return new Promise(resolve => {
+    const ok = window.confirm(title + '\n\n' + msg);
+    resolve(ok);
+  });
+  // TODO: replace with styled modal when time permits
 }
 
 // ── Hold Queue ────────────────────────────────────────────────────────────────
@@ -353,7 +376,7 @@ function renderHoldDetail(d) {
   const pull  = d.pull_list;
   const el    = document.getElementById('hold-detail-content');
 
-  const allPulled   = items.every(i => ['PULLED','ACCEPTED','REJECTED'].includes(i.item_status));
+  const allPulled   = items.every(i => ['PULLED','ACCEPTED','REJECTED','MISSING'].includes(i.item_status));
   const anyDecided  = items.some(i => ['ACCEPTED','REJECTED'].includes(i.item_status));
   const pulledCount = items.filter(i => i.item_status === 'PULLED').length;
   const totalCount  = items.length;
@@ -380,7 +403,7 @@ function renderHoldDetail(d) {
       const groupItems = items.filter(i =>
         i.tcgplayer_id == group.tcgplayer_id && i.condition === group.condition
       );
-      const pulledInGroup = groupItems.filter(i => ['PULLED','ACCEPTED','REJECTED'].includes(i.item_status)).length;
+      const pulledInGroup = groupItems.filter(i => ['PULLED','ACCEPTED','REJECTED','MISSING'].includes(i.item_status)).length;
       const allGroupPulled = pulledInGroup === groupItems.length;
 
       return `<div class="pull-group ${allGroupPulled ? 'all-pulled' : ''}">
@@ -401,9 +424,11 @@ function renderHoldDetail(d) {
         <div class="scan-items">
           ${groupItems.map(item => `
             <div class="scan-item ${item.item_status.toLowerCase()}" id="scan-item-${item.hold_item_id}">
-              <div class="scan-check">${item.item_status === 'PULLED' || item.item_status === 'ACCEPTED' ? '✓' : item.item_status === 'REJECTED' ? '✕' : ''}</div>
+              <div class="scan-check">${item.item_status === 'PULLED' || item.item_status === 'ACCEPTED' ? '✓' : item.item_status === 'REJECTED' ? '✕' : item.item_status === 'MISSING' ? '⚠' : ''}</div>
               <span style="font-family:var(--mono);font-size:0.72rem;flex:1;">${esc(item.barcode)}</span>
               <span style="font-size:0.75rem;color:var(--dim);">${esc(item.bin_label||'')}</span>
+              ${item.item_status === 'REQUESTED' ? `<button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:2px 8px;" onclick="markMissing('${item.hold_item_id}')">Can't Find</button>` : ''}
+              ${item.item_status === 'MISSING' ? '<span style="font-size:0.68rem;color:var(--red);font-weight:600;">MISSING</span>' : ''}
             </div>
           `).join('')}
         </div>
@@ -427,6 +452,18 @@ function renderHoldDetail(d) {
             <button class="btn btn-sm btn-green" onclick="decide('${item.hold_item_id}','ACCEPTED')">✓ Keep</button>
             <button class="btn btn-sm btn-red" onclick="decide('${item.hold_item_id}','REJECTED')">✕ Return</button>
           </div>
+        ` : item.item_status === 'ACCEPTED' ? `
+          <div style="display:flex;gap:6px;align-items:center;">
+            <span style="font-size:0.78rem;color:var(--green);font-weight:600;">ACCEPTED</span>
+            <button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;border:1px solid var(--border);background:none;color:var(--red);" onclick="reverseDecision('${item.hold_item_id}','return')">↩ Return</button>
+          </div>
+        ` : item.item_status === 'REJECTED' ? `
+          <div style="display:flex;gap:6px;align-items:center;">
+            <span style="font-size:0.78rem;color:var(--red);font-weight:600;">REJECTED</span>
+            <button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;border:1px solid var(--border);background:none;color:var(--green);" onclick="reverseDecision('${item.hold_item_id}','re-accept')">✓ Re-accept</button>
+          </div>
+        ` : item.item_status === 'MISSING' ? `
+          <span style="font-size:0.78rem;color:var(--red);font-weight:600;">MISSING</span>
         ` : `<span style="font-size:0.78rem;color:var(--dim);">${item.item_status}</span>`}
       </div>
     `).join('');
@@ -456,7 +493,7 @@ async function finishHold() {
   const msg = accepted > 0
     ? `Create ${accepted} Shopify listing${accepted>1?'s':''} and close hold? Unchosen cards will be returned.`
     : 'No accepted cards — close hold and return all cards?';
-  if (!confirm(msg)) return;
+  if (!await themedConfirm('Finish Hold', msg)) return;
 
   const btn = document.querySelector('.btn-green[onclick="finishHold()"]');
   if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
@@ -517,10 +554,33 @@ async function handleScan(barcode) {
     // Return scan
     try {
       const d = await post('/api/returns/scan', { barcode });
-      _returnScanned.add(barcode);
-      flash('green');
-      toast(`↩ ${d.card_name} scanned for return`, 'green');
-      renderReturnScanned();
+      if (d.was_missing) {
+        // Missing card found — add to scanned batch for storage
+        _returnScanned.add(barcode);
+        flash('green');
+        toast(`🔍 Found missing card: ${d.card_name}! Scan confirmed.`, 'green');
+        renderReturnScanned();
+      } else {
+        _returnScanned.add(barcode);
+        flash('green');
+        toast(`↩ ${d.card_name} scanned for return`, 'green');
+        renderReturnScanned();
+      }
+    } catch(e) {
+      flash('red');
+      toast(`✕ ${e.message}`, 'red');
+    }
+  } else if (activeView === 'view-missing') {
+    // Missing card scan — treat as return scan
+    try {
+      const d = await post('/api/returns/scan', { barcode });
+      if (d.was_missing || d.success) {
+        _returnScanned.add(barcode);
+        flash('green');
+        toast(`🔍 Found! ${d.card_name} — use Return Queue to store it.`, 'green');
+        // Switch to returns view to complete storage
+        showView('returns');
+      }
     } catch(e) {
       flash('red');
       toast(`✕ ${e.message}`, 'red');
@@ -666,6 +726,71 @@ async function _storeCards(barcodes) {
         </button>
       </div>
     `;
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── Missing Cards ────────────────────────────────────────────────────────────
+async function loadMissing() {
+  try {
+    const d = await get('/api/missing');
+    const cards = d.cards || [];
+    const badge = document.getElementById('badge-missing');
+    badge.textContent = cards.length;
+    badge.classList.toggle('visible', cards.length > 0);
+    renderMissing(cards);
+  } catch(e) {
+    document.getElementById('missing-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderMissing(cards) {
+  const el = document.getElementById('missing-content');
+  if (!cards.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">✅</div><p>No missing cards</p></div>';
+    return;
+  }
+  el.innerHTML = `
+    <div style="font-size:0.82rem;color:var(--dim);margin-bottom:12px;">${cards.length} card${cards.length!==1?'s':''} missing. Scan barcode to return to storage, or mark as gone.</div>
+    ${cards.map(c => `
+      <div class="return-card" style="margin-bottom:6px;">
+        ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:36px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">` : ''}
+        <div style="flex:1;">
+          <div style="font-weight:600;">${esc(c.card_name)}</div>
+          <div style="font-size:0.75rem;color:var(--dim);">${esc(c.condition)} · Last bin: ${esc(c.last_bin||'unknown')} · ${_fmtTime(c.updated_at)}</div>
+        </div>
+        <div style="font-family:var(--mono);font-size:0.72rem;color:var(--dim);">${esc(c.barcode)}</div>
+        <button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:4px 10px;"
+                onclick="markGone('${c.id}','${esc(c.card_name)}')">Mark Gone</button>
+      </div>
+    `).join('')}
+  `;
+}
+
+async function markMissing(holdItemId) {
+  if (!await themedConfirm("Can't Find Card", "Mark this card as missing? It will be flagged for follow-up.")) return;
+  try {
+    await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/missing`, {});
+    toast('Card marked missing', 'amber');
+    await refreshHoldDetail();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function markGone(cardId, cardName) {
+  if (!await themedConfirm('Mark Card Gone', `Permanently mark "${cardName}" as gone? This flags it for audit/review.`)) return;
+  try {
+    await post(`/api/missing/${cardId}/gone`, {});
+    toast('Card marked as gone', 'red');
+    loadMissing();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function reverseDecision(holdItemId, action) {
+  const label = action === 're-accept' ? 'Re-accept this card and create a Shopify listing?' : 'Return this card and delete the Shopify listing?';
+  if (!await themedConfirm('Change Decision', label)) return;
+  try {
+    await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/reverse`, { action });
+    toast(action === 're-accept' ? 'Listing created!' : 'Card returned to queue', 'green');
+    await refreshHoldDetail();
   } catch(e) { toast(e.message, 'red'); }
 }
 
