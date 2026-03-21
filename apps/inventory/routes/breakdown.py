@@ -170,15 +170,30 @@ def _build_recommendations(in_stock_only=True):
             for cr in child_rows:
                 child_qty_map[int(cr["tcgplayer_id"])] = dict(cr)
 
+        # Load ALL variants' components for deep value (not just the best variant)
+        all_variant_comps = db.query(f"""
+            SELECT sbcomp.tcgplayer_id AS comp_tcg_id, sbcomp.quantity_per_parent,
+                   sbcomp.market_price AS comp_market, sbv.id AS variant_id,
+                   sbc.tcgplayer_id AS parent_tcg_id
+            FROM sealed_breakdown_components sbcomp
+            JOIN sealed_breakdown_variants sbv ON sbv.id = sbcomp.variant_id
+            JOIN sealed_breakdown_cache sbc ON sbc.id = sbv.breakdown_id
+            WHERE sbc.tcgplayer_id IN ({ph}) AND sbcomp.tcgplayer_id IS NOT NULL
+        """, tuple(tcg_ids))
+        all_comp_tcg_ids = list(set(
+            [int(c["component_tcg_id"]) for c in components if c["component_tcg_id"]] +
+            [int(c["comp_tcg_id"]) for c in all_variant_comps if c["comp_tcg_id"]]
+        ))
+
         # Nested breakdown lookup: which components have their own recipes?
         child_bd_map = {}
-        if comp_tcg_ids:
-            cph2 = ",".join(["%s"] * len(comp_tcg_ids))
+        if all_comp_tcg_ids:
+            cph2 = ",".join(["%s"] * len(all_comp_tcg_ids))
             child_bd_rows = db.query(f"""
                 SELECT tcgplayer_id, best_variant_market
                 FROM sealed_breakdown_cache
                 WHERE tcgplayer_id IN ({cph2})
-            """, tuple(comp_tcg_ids))
+            """, tuple(all_comp_tcg_ids))
             child_bd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in child_bd_rows}
 
         # Map variant_id → list of component tcg_ids
@@ -277,20 +292,32 @@ def _build_recommendations(in_stock_only=True):
                 "child_bd_value":  round(child_bd_val, 2) if child_bd_val > 0 else None,
             })
 
-        # Compute deep breakdown value (if children themselves can be broken down)
-        deep_bd_value = 0.0
-        can_compute_deep = False
-        for cd in comp_details:
-            qty = cd["qty_per_parent"]
-            if cd.get("child_bd_value") and cd["child_bd_value"] > 0:
-                deep_bd_value += cd["child_bd_value"] * qty
-                can_compute_deep = True
-            elif cd.get("shopify_price") and cd["shopify_price"] > 0:
-                deep_bd_value += cd["shopify_price"] * qty
-            else:
-                deep_bd_value = 0.0
-                can_compute_deep = False
-                break
+        # Compute deep value across ALL variants (not just the best)
+        # Groups all_variant_comps by variant for this parent, picks highest deep value
+        best_deep_value = 0.0
+        _parent_var_comps = {}
+        for avc in all_variant_comps:
+            if int(avc["parent_tcg_id"]) == tid:
+                _parent_var_comps.setdefault(str(avc["variant_id"]), []).append(avc)
+        for _pvid, _pvcomps in _parent_var_comps.items():
+            dv = 0.0
+            dv_has_deep = False
+            for vc in _pvcomps:
+                cid = int(vc["comp_tcg_id"])
+                qty = vc["quantity_per_parent"] or 1
+                cbd = child_bd_map.get(cid, 0)
+                if cbd > 0:
+                    dv += cbd * qty
+                    dv_has_deep = True
+                else:
+                    ci = child_qty_map.get(cid, {})
+                    sp = float(ci.get("shopify_price") or 0) if ci else 0
+                    if sp > 0:
+                        dv += sp * qty
+                    else:
+                        dv += float(vc["comp_market"] or 0) * qty
+            if dv_has_deep and dv > best_deep_value:
+                best_deep_value = dv
 
         results.append({
             "shopify_variant_id": row["shopify_variant_id"],
@@ -315,7 +342,7 @@ def _build_recommendations(in_stock_only=True):
             "score":              round(score, 2),
             "use_count":          recipe["use_count"],
             "components":         comp_details,
-            "deep_bd_value":      round(deep_bd_value, 2) if can_compute_deep and deep_bd_value > 0 else None,
+            "deep_bd_value":      round(best_deep_value, 2) if best_deep_value > 0 else None,
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
