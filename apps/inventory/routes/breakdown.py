@@ -63,7 +63,7 @@ def _ingest_delete(path):
 
 # ─── Recommendation engine ────────────────────────────────────────────────────
 
-def _build_recommendations():
+def _build_recommendations(in_stock_only=True):
     """
     Join inventory_product_cache with sealed_breakdown_cache to find items
     that have a saved recipe. Enrich with:
@@ -74,31 +74,38 @@ def _build_recommendations():
 
     Returns list of dicts sorted by desirability score.
     """
-    # All non-ignored inventory items that have a TCGPlayer ID
-    # Include drafts and zero-qty if they have a breakdown recipe (stub entries)
-    inventory = db.query("""
-        SELECT
-            c.shopify_product_id,
-            c.shopify_variant_id,
-            c.title,
-            c.shopify_price,
-            c.shopify_qty,
-            c.inventory_item_id,
-            c.tcgplayer_id,
-            c.status
-        FROM inventory_product_cache c
-        WHERE c.tcgplayer_id IS NOT NULL
-          AND c.is_damaged = FALSE
-          AND c.tcgplayer_id NOT IN (SELECT tcgplayer_id FROM breakdown_ignore)
-          AND (
-              c.shopify_qty > 0
-              OR EXISTS (
-                  SELECT 1 FROM sealed_breakdown_cache sbc
-                  WHERE sbc.tcgplayer_id = c.tcgplayer_id
+    if in_stock_only:
+        inventory = db.query("""
+            SELECT
+                c.shopify_product_id, c.shopify_variant_id, c.title,
+                c.shopify_price, c.shopify_qty, c.inventory_item_id,
+                c.tcgplayer_id, c.status
+            FROM inventory_product_cache c
+            WHERE c.tcgplayer_id IS NOT NULL
+              AND c.is_damaged = FALSE
+              AND c.shopify_qty > 0
+              AND c.tcgplayer_id NOT IN (SELECT tcgplayer_id FROM breakdown_ignore)
+            ORDER BY c.title
+        """)
+    else:
+        inventory = db.query("""
+            SELECT
+                c.shopify_product_id, c.shopify_variant_id, c.title,
+                c.shopify_price, c.shopify_qty, c.inventory_item_id,
+                c.tcgplayer_id, c.status
+            FROM inventory_product_cache c
+            WHERE c.tcgplayer_id IS NOT NULL
+              AND c.is_damaged = FALSE
+              AND c.tcgplayer_id NOT IN (SELECT tcgplayer_id FROM breakdown_ignore)
+              AND (
+                  c.shopify_qty > 0
+                  OR EXISTS (
+                      SELECT 1 FROM sealed_breakdown_cache sbc
+                      WHERE sbc.tcgplayer_id = c.tcgplayer_id
+                  )
               )
-          )
-        ORDER BY c.title
-    """)
+            ORDER BY c.title
+        """)
 
     if not inventory:
         return []
@@ -163,6 +170,17 @@ def _build_recommendations():
             for cr in child_rows:
                 child_qty_map[int(cr["tcgplayer_id"])] = dict(cr)
 
+        # Nested breakdown lookup: which components have their own recipes?
+        child_bd_map = {}
+        if comp_tcg_ids:
+            cph2 = ",".join(["%s"] * len(comp_tcg_ids))
+            child_bd_rows = db.query(f"""
+                SELECT tcgplayer_id, best_variant_market
+                FROM sealed_breakdown_cache
+                WHERE tcgplayer_id IN ({cph2})
+            """, tuple(comp_tcg_ids))
+            child_bd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in child_bd_rows}
+
         # Map variant_id → list of component tcg_ids
         variant_comp_map = {}
         for c in components:
@@ -174,6 +192,7 @@ def _build_recommendations():
     else:
         child_qty_map = {}
         variant_comp_map = {}
+        child_bd_map = {}
 
     results = []
     for row in inventory:
@@ -246,6 +265,7 @@ def _build_recommendations():
                      "SELECT quantity_per_parent FROM sealed_breakdown_components WHERE variant_id=%s AND tcgplayer_id=%s",
                      (vid, cid))
                  ), 1)
+            child_bd_val = child_bd_map.get(cid, 0)
             comp_details.append({
                 "tcgplayer_id":    cid,
                 "title":           info.get("title", f"TCG#{cid}"),
@@ -253,7 +273,24 @@ def _build_recommendations():
                 "shopify_price":   float(info.get("shopify_price") or 0) if info else None,
                 "qty_per_parent":  qty_per_parent,
                 "in_store":        bool(info),
+                "has_breakdown":   child_bd_val > 0,
+                "child_bd_value":  round(child_bd_val, 2) if child_bd_val > 0 else None,
             })
+
+        # Compute deep breakdown value (if children themselves can be broken down)
+        deep_bd_value = 0.0
+        can_compute_deep = False
+        for cd in comp_details:
+            qty = cd["qty_per_parent"]
+            if cd.get("child_bd_value") and cd["child_bd_value"] > 0:
+                deep_bd_value += cd["child_bd_value"] * qty
+                can_compute_deep = True
+            elif cd.get("shopify_price") and cd["shopify_price"] > 0:
+                deep_bd_value += cd["shopify_price"] * qty
+            else:
+                deep_bd_value = 0.0
+                can_compute_deep = False
+                break
 
         results.append({
             "shopify_variant_id": row["shopify_variant_id"],
@@ -278,6 +315,7 @@ def _build_recommendations():
             "score":              round(score, 2),
             "use_count":          recipe["use_count"],
             "components":         comp_details,
+            "deep_bd_value":      round(deep_bd_value, 2) if can_compute_deep and deep_bd_value > 0 else None,
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -296,7 +334,8 @@ def breakdown_page():
 @requires_auth
 def recommendations():
     try:
-        recs = _build_recommendations()
+        in_stock = request.args.get("in_stock", "true").lower() != "false"
+        recs = _build_recommendations(in_stock_only=in_stock)
         return jsonify({"recommendations": recs})
     except Exception as e:
         logger.exception("recommendations failed")
@@ -831,7 +870,7 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
         <div style="display:flex;gap:6px;align-items:center">
           <label style="font-size:12px;color:var(--text-dim)">Show:</label>
-          <select id="rec-filter" style="width:auto" onchange="renderRecommendations()">
+          <select id="rec-filter" style="width:auto" onchange="saveFilter('bd_rec_filter',this.value);renderRecommendations()">
             <option value="all">All with recipes</option>
             <option value="positive">Positive delta only</option>
             <option value="neutral">Neutral or better (≥−10%)</option>
@@ -839,13 +878,17 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
         </div>
         <div style="display:flex;gap:6px;align-items:center">
           <label style="font-size:12px;color:var(--text-dim)">Sort:</label>
-          <select id="rec-sort" style="width:auto" onchange="renderRecommendations()">
+          <select id="rec-sort" style="width:auto" onchange="saveFilter('bd_rec_sort',this.value);renderRecommendations()">
             <option value="score">Score (delta + low-stock)</option>
             <option value="delta">Value delta %</option>
             <option value="child_qty">Child stock (low first)</option>
             <option value="store_qty">Parent qty (high first)</option>
           </select>
         </div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="rec-in-stock" checked onchange="saveFilter('bd_rec_in_stock',this.checked);loadRecommendations()" style="width:15px;height:15px;accent-color:var(--accent)">
+          In Stock Only
+        </label>
         <button class="btn btn-secondary btn-sm" onclick="loadRecommendations()" style="margin-left:auto">↻ Refresh</button>
       </div>
     </div>
@@ -869,8 +912,19 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
   <div id="tab-recipes" class="tab-pane">
     <div class="card" style="padding:10px 16px;margin-bottom:12px">
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-        <input type="text" id="kr-search" placeholder="Filter by name…" style="width:260px"
+        <input type="text" id="kr-search" placeholder="Filter by name…" style="width:220px"
                oninput="renderKnownRecipes()">
+        <select id="kr-status" style="width:auto" onchange="saveFilter('bd_kr_status',this.value);renderKnownRecipes()">
+          <option value="all">All</option>
+          <option value="in_store">In Store</option>
+          <option value="not_in_store">Not In Store</option>
+        </select>
+        <select id="kr-sort" style="width:auto" onchange="saveFilter('bd_kr_sort',this.value);renderKnownRecipes()">
+          <option value="name">Sort: Name</option>
+          <option value="best_value">Sort: Best Value</option>
+          <option value="store_qty">Sort: Store Qty</option>
+          <option value="use_count">Sort: Use Count</option>
+        </select>
         <span id="kr-count" style="font-size:12px;color:var(--text-dim);margin-left:auto"></span>
       </div>
     </div>
@@ -895,11 +949,20 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
         <input type="text" id="nr-search" placeholder="Filter by name…" style="width:220px"
                oninput="renderNoRecipe()">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-          <input type="checkbox" id="nr-hide-base" onchange="renderNoRecipe()" style="width:15px;height:15px">
+          <input type="checkbox" id="nr-hide-base" checked onchange="saveFilter('bd_nr_hide_base',this.checked);renderNoRecipe()" style="width:15px;height:15px;accent-color:var(--accent)">
           Hide base components
         </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="nr-in-stock" checked onchange="saveFilter('bd_nr_in_stock',this.checked);renderNoRecipe()" style="width:15px;height:15px;accent-color:var(--accent)">
+          In Stock Only
+        </label>
+        <select id="nr-sort" style="width:auto" onchange="saveFilter('bd_nr_sort',this.value);renderNoRecipe()">
+          <option value="name">Sort: Name</option>
+          <option value="qty">Sort: Qty (high first)</option>
+          <option value="price">Sort: Price</option>
+        </select>
         <span style="font-size:12px;color:var(--text-dim);margin-left:auto">
-          Items with no breakdown recipe. Mark as <em>base component</em> to suppress permanently.
+          Mark as <em>base component</em> to suppress permanently.
         </span>
       </div>
     </div>
@@ -963,6 +1026,42 @@ function themedConfirm(title, message, {{ confirmText='Confirm', dangerous=false
 }}
 
 // ══════════════════════════════════════════════════════════════════
+// FILTER PERSISTENCE
+// ══════════════════════════════════════════════════════════════════
+function saveFilter(k, v) {{ try {{ localStorage.setItem(k, JSON.stringify(v)); }} catch(e) {{}} }}
+function loadFilter(k, fallback) {{ try {{ const v = localStorage.getItem(k); return v !== null ? JSON.parse(v) : fallback; }} catch(e) {{ return fallback; }} }}
+
+function restoreFilters() {{
+  // Recommendations
+  const recInStock = loadFilter('bd_rec_in_stock', true);
+  const el1 = document.getElementById('rec-in-stock');
+  if (el1) el1.checked = recInStock;
+  const recFilter = loadFilter('bd_rec_filter', 'all');
+  const el2 = document.getElementById('rec-filter');
+  if (el2) el2.value = recFilter;
+  const recSort = loadFilter('bd_rec_sort', 'score');
+  const el3 = document.getElementById('rec-sort');
+  if (el3) el3.value = recSort;
+  // Known Recipes
+  const krStatus = loadFilter('bd_kr_status', 'all');
+  const el4 = document.getElementById('kr-status');
+  if (el4) el4.value = krStatus;
+  const krSort = loadFilter('bd_kr_sort', 'name');
+  const el5 = document.getElementById('kr-sort');
+  if (el5) el5.value = krSort;
+  // No Recipe
+  const nrHideBase = loadFilter('bd_nr_hide_base', true);
+  const el6 = document.getElementById('nr-hide-base');
+  if (el6) el6.checked = nrHideBase;
+  const nrInStock = loadFilter('bd_nr_in_stock', true);
+  const el7 = document.getElementById('nr-in-stock');
+  if (el7) el7.checked = nrInStock;
+  const nrSort = loadFilter('bd_nr_sort', 'name');
+  const el8 = document.getElementById('nr-sort');
+  if (el8) el8.value = nrSort;
+}}
+
+// ══════════════════════════════════════════════════════════════════
 // STATE
 // ══════════════════════════════════════════════════════════════════
 let _allRecs = [];
@@ -1003,7 +1102,8 @@ async function loadRecommendations() {{
   const panel = document.getElementById('rec-panel');
   panel.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
   try {{
-    const r = await fetch('/inventory/breakdown/api/recommendations');
+    const inStock = document.getElementById('rec-in-stock')?.checked ?? true;
+    const r = await fetch(`/inventory/breakdown/api/recommendations?in_stock=${{inStock}}`);
     const d = await r.json();
     if (!r.ok) {{ panel.innerHTML = `<div class="alert alert-error">${{d.error}}</div>`; return; }}
     _allRecs = d.recommendations || [];
@@ -1061,7 +1161,8 @@ function recRow(r) {{
         const col = qty === null ? 'var(--text-dim)' : qty === 0 ? 'var(--red)' : qty < 5 ? 'var(--amber)' : 'var(--green)';
         const qtyStr = qty === null ? '<small style="color:var(--text-dim)">not in store</small>' : `<strong style="color:${{col}}">${{qty}}</strong>`;
         const perParent = comp.qty_per_parent > 1 ? ` <small style="color:var(--text-dim)">×${{comp.qty_per_parent}}/unit</small>` : '';
-        return `<div style="font-size:12px;white-space:nowrap">${{comp.title.length>32?comp.title.slice(0,30)+'…':comp.title}}${{perParent}}: ${{qtyStr}}</div>`;
+        const bdIcon = comp.has_breakdown ? ` <span style="color:var(--accent);font-size:10px" title="Has recipe: $${{comp.child_bd_value?.toFixed(2)}}">📦</span>` : '';
+        return `<div style="font-size:12px;white-space:nowrap">${{comp.title.length>32?comp.title.slice(0,30)+'…':comp.title}}${{perParent}}${{bdIcon}}: ${{qtyStr}}</div>`;
       }}).join('')
     : '<span style="color:var(--text-dim)">—</span>';
 
@@ -1077,7 +1178,7 @@ function recRow(r) {{
     </td>
     <td style="font-weight:600;color:${{r.store_qty > 0 ? 'var(--green)' : 'var(--red)'}}">${{r.store_qty}}</td>
     <td>$${{r.store_price.toFixed(2)}}</td>
-    <td>$${{r.bd_value.toFixed(2)}}<br><small style="color:var(--text-dim)">${{r.best_variant_name}}</small></td>
+    <td>$${{r.bd_value.toFixed(2)}}${{r.deep_bd_value && r.deep_bd_value !== r.bd_value ? `<br><small style="color:var(--accent)" title="Value if children are also broken down">Deep: $${{r.deep_bd_value.toFixed(2)}}</small>` : ''}}<br><small style="color:var(--text-dim)">${{r.best_variant_name}}</small></td>
     <td class="${{deltaClass}}" style="font-weight:600">${{deltaStr}}</td>
     <td>${{childStockStr}}</td>
     <td>
@@ -1848,9 +1949,15 @@ function renderNoRecipe() {{
   const q = (document.getElementById('nr-search')?.value || '').toLowerCase();
   const hideBase = document.getElementById('nr-hide-base')?.checked;
 
-  let items = _noRecipeItems;
+  let items = [..._noRecipeItems];
   if (q) items = items.filter(i => (i.title||'').toLowerCase().includes(q));
   if (hideBase) items = items.filter(i => !i.is_base);
+  const nrInStock = document.getElementById('nr-in-stock')?.checked;
+  if (nrInStock) items = items.filter(i => i.shopify_qty > 0);
+  const nrSort = document.getElementById('nr-sort')?.value || 'name';
+  if (nrSort === 'qty') items.sort((a,b) => (b.shopify_qty||0) - (a.shopify_qty||0));
+  else if (nrSort === 'price') items.sort((a,b) => parseFloat(b.shopify_price||0) - parseFloat(a.shopify_price||0));
+  else items.sort((a,b) => (a.title||'').localeCompare(b.title||''));
 
   const total = items.length;
   const baseCount = _noRecipeItems.filter(i => i.is_base).length;
@@ -1943,6 +2050,7 @@ document.addEventListener('keydown', e => {{
 // ══════════════════════════════════════════════════════════════════
 // INIT
 // ══════════════════════════════════════════════════════════════════
+restoreFilters();
 restoreTab();
 </script>
 
@@ -1969,8 +2077,16 @@ function renderKnownRecipes() {{
   const countEl = document.getElementById('kr-count');
   if (!panel) return;
   const q = (document.getElementById('kr-search')?.value || '').toLowerCase();
-  let recs = _allKnownRecipes;
-  if (q) recs = recs.filter(r => (r.product_name || '').toLowerCase().includes(q));
+  let recs = [..._allKnownRecipes];
+  if (q) recs = recs.filter(r => (r.product_name || '').toLowerCase().includes(q) || (r.store_title || '').toLowerCase().includes(q));
+  const krStatus = document.getElementById('kr-status')?.value || 'all';
+  if (krStatus === 'in_store') recs = recs.filter(r => r.store_qty != null && r.store_qty > 0);
+  if (krStatus === 'not_in_store') recs = recs.filter(r => r.store_qty == null || r.store_qty <= 0);
+  const krSort = document.getElementById('kr-sort')?.value || 'name';
+  if (krSort === 'best_value') recs.sort((a,b) => parseFloat(b.best_variant_market||0) - parseFloat(a.best_variant_market||0));
+  else if (krSort === 'store_qty') recs.sort((a,b) => (b.store_qty||0) - (a.store_qty||0));
+  else if (krSort === 'use_count') recs.sort((a,b) => (b.use_count||0) - (a.use_count||0));
+  else recs.sort((a,b) => (a.store_title||a.product_name||'').localeCompare(b.store_title||b.product_name||''));
   if (countEl) countEl.textContent = `${{recs.length}} recipe${{recs.length !== 1 ? 's' : ''}}`;
   if (!recs.length) {{
     panel.innerHTML = `<div style="color:var(--text-dim);padding:20px;text-align:center">${{
