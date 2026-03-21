@@ -2652,7 +2652,7 @@
                     const bdColor = bdMargin !== null ? (bdMargin > 30 ? 'var(--green)' : bdMargin > 15 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
                     const bdBetterThanStore = bd && found && (bdStoreVal || bdMktVal) > 0 && i.store_price > 0
                         ? (bdStoreVal || bdMktVal) > i.store_price : false;
-                    return `<tr style="${!found && !bd ? 'opacity:0.6;' : ''}">
+                    return `<tr style="">
                         <td>
                             ${i.product_name}
                             ${found && i.store_title !== i.product_name ? '<br><small style="color:var(--text-dim);">Shopify: ' + i.store_title + '</small>' : ''}
@@ -2784,7 +2784,7 @@
                 </div>`;
 
             document.getElementById('fis-go').onclick = () => doSearch(document.getElementById('fis-input').value.trim());
-            document.getElementById('fis-cancel').onclick = () => document.body.removeChild(overlay);
+            document.getElementById('fis-cancel').onclick = () => overlay.parentNode.removeChild(overlay);
             document.getElementById('fis-input').focus();
             if (itemId) {
                 overlay.querySelectorAll('[data-link-idx]').forEach(linkBtn => {
@@ -2807,7 +2807,7 @@
                             });
                             const d = await resp.json();
                             if (!resp.ok) { alert(d.error || 'Link failed'); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; return; }
-                            document.body.removeChild(overlay);
+                            overlay.parentNode.removeChild(overlay);
                             storeCheck(currentSessionId);
                         } catch(e) { alert(e.message); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; }
                     });
@@ -2829,7 +2829,9 @@
 
         // Auto-search with the product name on open
         renderFind(productName, [], true, null);
-        document.body.appendChild(overlay);
+        // Append to session modal (not body) so it renders above the modal's backdrop-filter stacking context
+        const sessionModal = document.getElementById('session-modal');
+        (sessionModal || document.body).appendChild(overlay);
         doSearch(productName);
     }
 
