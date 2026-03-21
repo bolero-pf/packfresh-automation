@@ -1380,7 +1380,7 @@
                     // Accepted details: pickup date or tracking
                     let details = '—';
                     if (s.fulfillment_method === 'pickup' && s.pickup_date) {
-                        details = '🚗 ' + new Date(s.pickup_date).toLocaleDateString();
+                        details = '🚗 ' + s.pickup_date;
                     } else if (s.fulfillment_method === 'mail' && s.tracking_number) {
                         const isUrl = (s.tracking_number || '').startsWith('http');
                         details = isUrl
@@ -1734,7 +1734,7 @@
                             html += '<div style="margin-top:8px; display:flex; align-items:center; gap:8px;">';
                             html += '<span class="badge badge-green">🚗 Pickup</span>';
                             if (s.pickup_date) {
-                                html += '<span style="font-size:0.85rem;">' + new Date(s.pickup_date).toLocaleDateString() + '</span>';
+                                html += '<span style="font-size:0.85rem;">' + s.pickup_date + '</span>';
                             } else {
                                 html += '<span style="font-size:0.85rem;color:var(--text-dim);">No date set</span>';
                             }
@@ -1758,6 +1758,7 @@
                 _restoreScroll();
                 setTimeout(_restoreScroll, 50);
                 setTimeout(_restoreScroll, 150);
+                setTimeout(_restoreScroll, 300);
             }
             // Enrich breakdown summaries inline without full reload
             _enrichIntakeBreakdowns(items, sessionId);
@@ -2449,6 +2450,8 @@
     async function storeCheck(sessionId) {
         const panel = document.getElementById('store-check-results');
         if (!panel) return;
+        const _modal = document.getElementById('session-modal');
+        const _savedScroll = _modal ? _modal.scrollTop : 0;
         panel.innerHTML = '<div class="loading"><span class="spinner"></span> Checking store inventory...</div>';
 
         try {
@@ -2467,6 +2470,11 @@
             _storeCheckData = { items: (d.items || []).map(i => ({...i, id: i.id || i.item_id})), sessionId: sessionId };
             _storeFilter = 'all';
             renderStoreCheck();
+            // Restore scroll after store check re-render
+            if (_savedScroll && _modal) {
+                _modal.scrollTop = _savedScroll;
+                setTimeout(() => { _modal.scrollTop = _savedScroll; }, 50);
+            }
 
             // If cache is currently refreshing in the background, poll and auto-reload when done
             _pollForCacheRefresh(sessionId);
@@ -2507,6 +2515,9 @@
     function renderStoreCheck() {
         const panel = document.getElementById('store-check-results');
         if (!panel || !_storeCheckData) return;
+        // Preserve scroll position of the session modal
+        const _modal = document.getElementById('session-modal');
+        const _savedScroll = _modal ? _modal.scrollTop : 0;
         const items = _storeCheckData.items;
         const sessionId = _storeCheckData.sessionId;
 
@@ -2697,7 +2708,7 @@
                             ${!i.tcgplayer_id
                                 ? '<button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="openMapping(\'' + i.id + '\',\'' + (i.product_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.set_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.product_type||'sealed') + '\',' + (i.market_price||0) + ')" title="Link this item to a TCGPlayer product">&#x1F517; Link</button>'
                                 : ''}
-                            ${!found && i.tcgplayer_id
+                            ${i.tcgplayer_id
                                 ? '<button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="findInStore(this, ' + i.tcgplayer_id + ', \'' + (i.product_name||'').replace(/'/g,'').replace(/"/g,'') + '\', \'' + i.id + '\', ' + (i.offer_price||0) + ', ' + (i.market_price||0) + ')" title="Search your store cache to find this listing">&#x1F50D; Find</button>'
                                 : ''}
                             ${!found && i.tcgplayer_id
@@ -2710,6 +2721,11 @@
             </div>
         `;
         loadCacheStatus();
+        // Restore scroll position after DOM reflow
+        if (_savedScroll && _modal) {
+            _modal.scrollTop = _savedScroll;
+            setTimeout(() => { _modal.scrollTop = _savedScroll; }, 50);
+        }
     }
 
     async function findInStore(btn, tcgplayerId, productName, itemId, offerPrice, marketPrice) {
@@ -4329,20 +4345,22 @@
         let tracking = null;
         let pickupDate = null;
         if (method === 'mail') {
-            tracking = prompt('Tracking number or link (optional — you can add it later):');
+            tracking = await themedPrompt({
+                title: '📬 Accept — Mail',
+                message: 'Customer accepted. They will mail the product.',
+                inputs: [{ type: 'text', label: 'Tracking number or link (optional)', placeholder: 'You can add it later' }],
+                confirmText: 'Confirm Accepted',
+            });
             if (tracking === null) return; // cancelled
         } else if (method === 'pickup') {
-            pickupDate = prompt('Pickup date (e.g. 2026-03-15, or leave blank):');
+            pickupDate = await themedPrompt({
+                title: '🚗 Accept — Pickup',
+                message: 'Customer accepted. You will pick up the product.',
+                inputs: [{ type: 'text', label: 'Pickup date', placeholder: 'e.g. 2026-03-15, or leave blank' }],
+                confirmText: 'Confirm Accepted',
+            });
             if (pickupDate === null) return; // cancelled
         }
-        const ok = await themedConfirm(
-            method === 'pickup' ? '🚗 Accept — Pickup' : '📬 Accept — Mail',
-            method === 'pickup'
-                ? 'Customer accepted. You will pick up the product.' + (pickupDate ? '\nPickup date: ' + pickupDate : '')
-                : 'Customer accepted. They will mail the product.' + (tracking ? '\nTracking: ' + tracking : ''),
-            { confirmText: 'Confirm Accepted' }
-        );
-        if (!ok) return;
         try {
             const body = { fulfillment_method: method };
             if (tracking) body.tracking_number = tracking;
@@ -4368,7 +4386,11 @@
     }
 
     async function editTracking(sessionId, current) {
-        const tracking = prompt('Tracking number or URL:', current || '');
+        const tracking = await themedPrompt({
+            title: 'Edit Tracking',
+            inputs: [{ type: 'text', label: 'Tracking number or URL', default: current || '' }],
+            confirmText: 'Update',
+        });
         if (tracking === null) return;
         try {
             const r = await fetch(`/api/intake/session/${sessionId}/tracking`, {
@@ -4383,7 +4405,11 @@
     }
 
     async function editPickupDate(sessionId, current) {
-        const dateStr = prompt('Pickup date (YYYY-MM-DD):', current || '');
+        const dateStr = await themedPrompt({
+            title: 'Edit Pickup Date',
+            inputs: [{ type: 'text', label: 'Pickup date (YYYY-MM-DD)', default: current || '' }],
+            confirmText: 'Update',
+        });
         if (dateStr === null) return;
         try {
             const r = await fetch(`/api/intake/session/${sessionId}/pickup-date`, {
@@ -4484,6 +4510,7 @@
         fd.append('file', fileInput.files[0]);
         fd.append('customer_name', customerName);
         fd.append('offer_percentage', offerPct);
+        fd.append('force_product_type', 'raw');
         try {
             const r = await fetch('/api/intake/upload-collectr', { method: 'POST', body: fd });
             const d = await r.json();
@@ -4572,6 +4599,7 @@
         fd.append('file', fileInput.files[0]);
         fd.append('customer_name', customerName);
         fd.append('offer_percentage', offerPct);
+        fd.append('force_product_type', 'raw');
         try {
             const r = await fetch('/api/intake/upload-generic-csv', { method: 'POST', body: fd });
             const d = await r.json();

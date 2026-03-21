@@ -156,6 +156,7 @@ def upload_collectr():
         offer_pct = Decimal(request.form.get("offer_percentage", "75"))
     except InvalidOperation:
         return jsonify({"error": "Invalid offer_percentage"}), 400
+    force_product_type = request.form.get("force_product_type")  # 'raw' or 'sealed' or None
 
     # Read file
     try:
@@ -178,7 +179,9 @@ def upload_collectr():
         }), 409
 
     # Determine session type
-    if result.raw_count > 0 and result.sealed_count > 0:
+    if force_product_type in ("raw", "sealed"):
+        session_type = force_product_type
+    elif result.raw_count > 0 and result.sealed_count > 0:
         session_type = "mixed"
     elif result.raw_count > 0:
         session_type = "raw"
@@ -199,21 +202,23 @@ def upload_collectr():
         db.execute("UPDATE intake_sessions SET is_distribution = TRUE WHERE id = %s", (session["id"],))
 
     # Process items: calculate offers and check for cached mappings
+    effective_product_type = force_product_type or None
     processed = []
     for item in result.items:
+        product_type = effective_product_type or item.product_type
         offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
         unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
 
         # Check for cached tcgplayer_id mapping and/or shopify link
-        tcgplayer_id = intake.get_cached_mapping(item.product_name, item.product_type)
-        shopify_link = intake.get_cached_shopify_link(item.product_name, item.product_type)
+        tcgplayer_id = intake.get_cached_mapping(item.product_name, product_type)
+        shopify_link = intake.get_cached_shopify_link(item.product_name, product_type)
         # If shopify link has a tcgplayer_id that our mapping table missed, use it
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
             tcgplayer_id = shopify_link["tcgplayer_id"]
 
         processed.append({
             "product_name": item.product_name,
-            "product_type": item.product_type,
+            "product_type": product_type,
             "set_name": item.set_name,
             "card_number": item.card_number,
             "condition": item.condition,
@@ -406,6 +411,7 @@ def upload_generic_csv():
         offer_pct = Decimal(request.form.get("offer_percentage", "75"))
     except InvalidOperation:
         return jsonify({"error": "Invalid offer_percentage"}), 400
+    force_product_type = request.form.get("force_product_type")  # 'raw' or 'sealed' or None
 
     # Get column overrides from form (JSON string)
     column_overrides = None
@@ -443,7 +449,9 @@ def upload_generic_csv():
         }), 409
 
     # Determine session type
-    if result.raw_count > 0 and result.sealed_count > 0:
+    if force_product_type in ("raw", "sealed"):
+        session_type = force_product_type
+    elif result.raw_count > 0 and result.sealed_count > 0:
         session_type = "mixed"
     elif result.raw_count > 0:
         session_type = "raw"
@@ -464,20 +472,22 @@ def upload_generic_csv():
         db.execute("UPDATE intake_sessions SET is_distribution = TRUE WHERE id = %s", (session["id"],))
 
     # Process items
+    effective_product_type = force_product_type or None
     processed = []
     for item in result.items:
+        product_type = effective_product_type or item.product_type
         offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
         unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
 
         # Check for cached tcgplayer_id mapping (or use the one from CSV)
-        tcgplayer_id = item.tcgplayer_id or intake.get_cached_mapping(item.product_name, item.product_type)
-        shopify_link = intake.get_cached_shopify_link(item.product_name, item.product_type)
+        tcgplayer_id = item.tcgplayer_id or intake.get_cached_mapping(item.product_name, product_type)
+        shopify_link = intake.get_cached_shopify_link(item.product_name, product_type)
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
             tcgplayer_id = shopify_link["tcgplayer_id"]
 
         processed.append({
             "product_name": item.product_name,
-            "product_type": item.product_type,
+            "product_type": product_type,
             "set_name": item.set_name,
             "card_number": item.card_number,
             "condition": item.condition,
