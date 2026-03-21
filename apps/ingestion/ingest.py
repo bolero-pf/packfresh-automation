@@ -729,6 +729,16 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
     else:
         store_map = {}
 
+    # Nested breakdown lookup: which components have their own recipes?
+    child_bd_map = {}
+    if comp_tcg_ids:
+        cbp = ",".join(["%s"] * len(comp_tcg_ids))
+        child_bd_rows = query(
+            f"SELECT tcgplayer_id, best_variant_market FROM sealed_breakdown_cache WHERE tcgplayer_id IN ({cbp})",
+            tuple(comp_tcg_ids)
+        )
+        child_bd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in child_bd_rows}
+
     # Step 4: assemble results
     # Index comp_rows by variant_id
     comps_by_variant = {}
@@ -767,6 +777,30 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
         all_comps_in_store = (comps_with_store == total_components and total_components > 0)
         any_comps_in_store = comps_with_store > 0
 
+        # Compute deep value (if children have their own recipes)
+        deep_value = 0.0
+        has_deep = False
+        for c in comps:
+            qty = c["quantity_per_parent"] or 1
+            cid = c["comp_tcg_id"]
+            child_bd = child_bd_map.get(cid, 0)
+            if child_bd > 0:
+                deep_value += child_bd * qty
+                has_deep = True
+            else:
+                cs = store_map.get(cid)
+                sp = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else 0
+                if sp > 0:
+                    deep_value += sp * qty
+                else:
+                    mkt = float(c["comp_market"] or 0)
+                    if mkt > 0:
+                        deep_value += mkt * qty
+                    else:
+                        deep_value = 0.0
+                        has_deep = False
+                        break
+
         result[pid] = {
             "variant_count":        vrow["variant_count"],
             "best_variant_market":  float(vrow["best_variant_market"] or 0),
@@ -777,6 +811,7 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
             "best_variant_store_partial": any_comps_in_store and not all_comps_in_store,
             "components_in_store":  comps_with_store,
             "total_components":     total_components,
+            "deep_bd_value":        round(deep_value, 2) if has_deep and deep_value > 0 else None,
         }
 
     return result
