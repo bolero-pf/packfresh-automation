@@ -701,7 +701,7 @@ function toggleHideApproved(cb) {
 async function _enrichBreakdownSummaries(items, sessionId, isReceived) {
     if (!isReceived) return;
     const tcgIds = [...new Set(items
-        .filter(i => i.tcgplayer_id && !i.parent_item_id && i.item_status !== 'broken_down')
+        .filter(i => i.tcgplayer_id && i.item_status !== 'broken_down')
         .map(i => i.tcgplayer_id))];
     if (!tcgIds.length) return;
 
@@ -714,7 +714,7 @@ async function _enrichBreakdownSummaries(items, sessionId, isReceived) {
         const summaries = d.summaries || {};
 
         // Update each item row with breakdown info
-        items.filter(i => i.tcgplayer_id && !i.parent_item_id).forEach(item => {
+        items.filter(i => i.tcgplayer_id && i.item_status !== 'broken_down').forEach(item => {
             const bd = summaries[item.tcgplayer_id];
             const cell = document.querySelector(`tr[data-item-id="${item.id}"] td.name-cell`);
             if (!cell) return;
@@ -767,7 +767,9 @@ async function _enrichBreakdownSummaries(items, sessionId, isReceived) {
             badge.className = 'bd-summary-badge';
             badge.style.cssText = `display:block; color:${color}; font-size:0.75rem; margin-top:2px; cursor:default;`;
             badge.title = caseLabel;
-            badge.innerHTML = `📦 ${configLabel}: ${arrow} ${sign}$${Math.abs(diff).toFixed(2)} (${sign}${pct.toFixed(1)}%)`;
+            const deepVal = bd.deep_bd_value ? parseFloat(bd.deep_bd_value) : 0;
+            const deepStr = deepVal > 0 && deepVal !== sellBroken ? ` · <span style="color:var(--accent);" title="Value if children are also broken down">Deep: $${deepVal.toFixed(2)}</span>` : '';
+            badge.innerHTML = `📦 ${configLabel}: ${arrow} ${sign}$${Math.abs(diff).toFixed(2)} (${sign}${pct.toFixed(1)}%)${deepStr}`;
             cell.appendChild(badge);
         });
     } catch(e) { /* silently ignore */ }
