@@ -14,7 +14,7 @@ load_dotenv()
 FLOW_SECRET = os.environ.get("VIP_FLOW_SECRET", "")
 
 # Paths that don't require auth (health checks)
-SAFE_PATHS = set()
+SAFE_PATHS = {"/vip/ping", "/screening/ping"}
 
 
 def verify_flow_signature(safe_paths=None):
