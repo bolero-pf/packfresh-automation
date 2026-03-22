@@ -702,7 +702,7 @@ def _push_vip_to_klaviyo(gid: str):
     else:
         # lock expired/not set: choose policy
         if new_tier in ("VIP1","VIP2","VIP3"):
-            from .service import rolling_90_lock_for
+            from service import rolling_90_lock_for
             effective_lock = rolling_90_lock_for(new_tier, today)  # seed new window
         else:
             effective_lock = {}
@@ -718,7 +718,7 @@ def _push_vip_to_klaviyo(gid: str):
     cur_tags = set(state.get("tags") or [])
     desired  = _desired_vip_tags(effective_tier, inside_lock(effective_lock or {}, today))
     if _needs_vip_tag_update(cur_tags, desired):
-        from .service import set_vip_tag
+        from service import set_vip_tag
         set_vip_tag(gid, effective_tier)
 
     # --- KLAVIYO PROPS ---
