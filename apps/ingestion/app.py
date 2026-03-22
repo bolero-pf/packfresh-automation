@@ -218,9 +218,31 @@ def get_session(session_id):
     if not session:
         return jsonify({"error": "Session not found"}), 404
     items = ingest.get_session_items(session_id)
+
+    # Enrich items with store prices from inventory_product_cache
+    tcg_ids = list(set(int(i["tcgplayer_id"]) for i in items if i.get("tcgplayer_id")))
+    store_map = {}
+    if tcg_ids:
+        try:
+            ph = ",".join(["%s"] * len(tcg_ids))
+            store_rows = db.query(
+                f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+                tuple(tcg_ids))
+            store_map = {r["tcgplayer_id"]: r for r in store_rows}
+        except Exception:
+            pass
+
+    serialized = []
+    for i in items:
+        d = _serialize(i)
+        sp = store_map.get(i.get("tcgplayer_id"))
+        d["store_price"] = float(sp["shopify_price"]) if sp and sp.get("shopify_price") else None
+        d["store_qty"] = int(sp["shopify_qty"] or 0) if sp else None
+        serialized.append(d)
+
     return jsonify({
         "session": _serialize(session),
-        "items": [_serialize(i) for i in items],
+        "items": serialized,
     })
 
 

@@ -563,7 +563,7 @@ async function viewSession(sessionId, _preserveScroll) {
                 <div style="overflow-x:auto;">
                 <table>
                     <thead><tr>
-                        <th>Product</th><th>Qty</th><th>Status</th><th>Market</th><th>COGS</th>
+                        <th>Product</th><th>Qty</th><th>Status</th><th>Store</th><th>COGS</th>
                         ${isReceived ? '<th>Actions</th>' : ''}
                     </tr></thead>
                     <tbody>`;
@@ -852,7 +852,7 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
         <td class="name-cell">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
         <td>${item.quantity || 1}</td>
         <td><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
-        <td>$${(item.market_price || 0).toFixed(2)}</td>
+        <td>${item.store_price != null ? `$${item.store_price.toFixed(2)}` : `<span style="color:var(--dim);" title="Not in store — showing market">$${(item.market_price || 0).toFixed(2)}*</span>`}</td>
         <td>$${(item.offer_price || 0).toFixed(2)}${(item.quantity || 1) > 1 ? '<br><small style="color:var(--text-dim);">$' + ((item.offer_price || 0) / (item.quantity || 1)).toFixed(2) + '/ea</small>' : ''}</td>
         ${isReceived ? '<td>' + actionCell + '</td>' : ''}
     </tr>`;
