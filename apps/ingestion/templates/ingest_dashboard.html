@@ -769,7 +769,7 @@ async function _enrichBreakdownSummaries(items, sessionId, isReceived) {
             badge.style.cssText = `display:block; color:${color}; font-size:0.75rem; margin-top:2px; cursor:default;`;
             badge.title = caseLabel;
             const deepVal = bd.deep_bd_value ? parseFloat(bd.deep_bd_value) : 0;
-            const deepStr = deepVal > 0 && deepVal !== sellBroken ? ` · <span style="color:var(--accent);" title="Value if children are also broken down">Deep: $${deepVal.toFixed(2)}</span>` : '';
+            const deepStr = deepVal > 0 ? ` · <span style="color:var(--accent);" title="Value if children are also broken down">Deep: $${deepVal.toFixed(2)}</span>` : '';
             badge.innerHTML = `📦 ${configLabel}: ${arrow} ${sign}$${Math.abs(diff).toFixed(2)} (${sign}${pct.toFixed(1)}%)${deepStr}`;
             cell.appendChild(badge);
         });

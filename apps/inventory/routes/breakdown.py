@@ -1246,7 +1246,7 @@ function recRow(r) {{
     </td>
     <td style="font-weight:600;color:${{r.store_qty > 0 ? 'var(--green)' : 'var(--red)'}}">${{r.store_qty}}</td>
     <td>$${{r.store_price.toFixed(2)}}</td>
-    <td>$${{r.bd_value.toFixed(2)}}${{r.deep_bd_value && r.deep_bd_value !== r.bd_value ? `<br><small style="color:var(--accent)" title="Value if children are also broken down">Deep: $${{r.deep_bd_value.toFixed(2)}}</small>` : ''}}<br><small style="color:var(--text-dim)">${{r.best_variant_name}}</small></td>
+    <td>$${{r.bd_value.toFixed(2)}}${{r.deep_bd_value ? `<br><small style="color:var(--accent)" title="Value if children are also broken down">Deep: $${{r.deep_bd_value.toFixed(2)}}</small>` : ''}}<br><small style="color:var(--text-dim)">${{r.best_variant_name}}</small></td>
     <td class="${{deltaClass}}" style="font-weight:600">${{deltaStr}}</td>
     <td>${{childStockStr}}</td>
     <td>
