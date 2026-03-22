@@ -21,7 +21,7 @@ import datetime
 from functools import wraps
 
 import db
-from flask import Blueprint, request, redirect, flash, Response, jsonify
+from flask import Blueprint, request, redirect, flash, Response, jsonify, g
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,8 @@ def _authenticate():
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if getattr(g, 'user', None):
+            return f(*args, **kwargs)  # JWT already validated
         auth = request.authorization
         if not auth or not _check_auth(auth.username, auth.password):
             return _authenticate()

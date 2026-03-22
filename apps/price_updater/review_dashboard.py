@@ -325,6 +325,9 @@ def authenticate():
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        from flask import g
+        if getattr(g, 'user', None):
+            return f(*args, **kwargs)  # JWT already validated
         auth = request.authorization
         if not auth or not check_auth(auth.username, auth.password):
             return authenticate()

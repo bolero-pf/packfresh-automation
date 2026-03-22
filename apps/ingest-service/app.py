@@ -43,7 +43,7 @@ import time
 import requests as _requests
 from decimal import Decimal, InvalidOperation
 
-from flask import Flask, request, jsonify, render_template, send_file, Response
+from flask import Flask, request, jsonify, render_template, send_file, Response, g
 from flask_cors import CORS
 from functools import wraps
 
@@ -109,6 +109,8 @@ def authenticate():
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if getattr(g, 'user', None):
+            return f(*args, **kwargs)  # JWT already validated
         auth = request.authorization
         if not auth or not check_auth(auth.username, auth.password):
             return authenticate()
