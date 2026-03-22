@@ -2438,7 +2438,6 @@ def shopify_session_store_check(session_id):
                         sp = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else 0
                         if sp > 0:
                             dv_store += sp * qty
-                            has_deep_store = True  # at least partially store-based
                         else:
                             dv_store += float(vc["market_price"] or 0) * qty
                 if has_deep_mkt and dv_mkt > best_deep_market:

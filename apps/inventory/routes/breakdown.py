@@ -349,13 +349,12 @@ def _build_recommendations(in_stock_only=True):
                 cbd_store = child_bd_store_map.get(cid, 0)
                 if cbd_store > 0:
                     dv += cbd_store * qty
-                    dv_has_deep = True
+                    dv_has_deep = True  # this child has its own recipe
                 else:
                     ci = child_qty_map.get(cid, {})
                     sp = float(ci.get("shopify_price") or 0) if ci else 0
                     if sp > 0:
                         dv += sp * qty
-                        dv_has_deep = True
                     else:
                         dv += float(vc["comp_market"] or 0) * qty
             if dv_has_deep and dv > best_deep_value:

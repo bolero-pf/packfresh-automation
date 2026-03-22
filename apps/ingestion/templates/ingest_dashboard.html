@@ -556,7 +556,7 @@ async function viewSession(sessionId, _preserveScroll) {
                     ${isReceived ? `<div style="display:flex; align-items:center; gap:12px; font-size:0.82rem;">
                         <span id="approve-stats" style="color:var(--text-dim);">0/${activeItems.length} approved</span>
                         <label style="display:flex; align-items:center; gap:6px; color:var(--text-dim); cursor:pointer;">
-                            <input type="checkbox" onchange="toggleHideApproved(this)"> Hide approved
+                            <input type="checkbox" id="hide-approved-cb" onchange="toggleHideApproved(this)" ${_hideApproved ? 'checked' : ''}> Hide approved
                         </label>
                     </div>` : ''}
                 </div>
@@ -640,6 +640,8 @@ async function viewSession(sessionId, _preserveScroll) {
 
         el.innerHTML = html;
         if (scrollY) requestAnimationFrame(() => window.scrollTo(0, scrollY));
+        // Restore hide-approved state after re-render
+        if (_hideApproved) _refreshApprovedVisibility();
         // Enrich items with breakdown summaries after render
         _enrichBreakdownSummaries(items, sessionId, isReceived);
         // Load raw card barcodes for this session (persists across refreshes)
@@ -831,8 +833,12 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
         const approveBtn = isPushed
             ? `<button class="btn btn-sm" style="${approveStyle}" title="Already pushed to Shopify" disabled>✓</button>`
             : `<button class="btn btn-sm" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>`;
+        const childBreakBtn = item.tcgplayer_id
+            ? `<button class="btn btn-sm btn-primary" style="font-size:0.72rem;padding:3px 8px;" onclick="openBreakdown('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button>`
+            : '';
         actionCell = `<div style="display:flex;gap:6px;align-items:center;">
             ${approveBtn}
+            ${childBreakBtn}
             <button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Qty</button>
             <button class="btn btn-sm" style="font-size:0.72rem;padding:3px 8px;color:var(--red);" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕</button>
         </div>`;

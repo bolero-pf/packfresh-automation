@@ -900,13 +900,12 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
                 cbd_store = child_bd_store_map.get(cid, 0)
                 if cbd_store > 0:
                     dv += cbd_store * qty
-                    dv_has = True
+                    dv_has = True  # this child has its own recipe
                 else:
                     cs = store_map.get(cid)
                     sp = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else 0
                     if sp > 0:
                         dv += sp * qty
-                        dv_has = True
                     else:
                         dv += float(vc["comp_market"] or 0) * qty
             if dv_has and dv > best_deep_value:
