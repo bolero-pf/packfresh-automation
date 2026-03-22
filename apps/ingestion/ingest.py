@@ -94,7 +94,7 @@ def get_session(session_id: str) -> Optional[dict]:
 
 def get_session_items(session_id: str) -> list[dict]:
     return query(
-        "SELECT * FROM intake_items WHERE session_id = %s ORDER BY created_at",
+        "SELECT * FROM intake_items WHERE session_id = %s AND item_status NOT IN ('rejected', 'missing') ORDER BY created_at",
         (session_id,)
     )
 
