@@ -6,3 +6,4 @@ python-barcode==0.15.1
 Pillow==11.1.0
 python-dotenv==1.0.1
 gunicorn==23.0.0
+PyJWT==2.10.1

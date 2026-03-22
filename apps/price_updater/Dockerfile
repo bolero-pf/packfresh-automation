@@ -23,7 +23,10 @@ ENV CHROME_BIN=/usr/bin/chromium
 ENV CHROMEDRIVER=/usr/bin/chromedriver
 
 WORKDIR /app
-COPY . /app
+COPY apps/price_updater/ .
+COPY apps/shared/ ./shared/
+
+ENV PYTHONPATH=/app/shared:/app
 
 RUN pip install --no-cache-dir -r requirements.txt
 

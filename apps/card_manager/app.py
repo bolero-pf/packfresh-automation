@@ -60,11 +60,8 @@ def _check_jwt_auth():
     from flask import request as req
     if req.path in ('/health', '/ping', '/favicon.ico') or req.path.startswith('/static'):
         return
-    try:
-        from auth import require_auth
-        return require_auth()
-    except Exception:
-        pass  # ADMIN_JWT_SECRET not set — allow through
+    from auth import require_auth
+    return require_auth()
 
 @app.after_request
 def _add_admin_bar(response):

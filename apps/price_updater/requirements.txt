@@ -7,4 +7,4 @@ python-dotenv
 gunicorn
 apscheduler
 ShopifyAPI
-SQLAlchemy
+SQLAlchemyPyJWT==2.10.1

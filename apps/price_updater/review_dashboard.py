@@ -30,6 +30,32 @@ from screening.routes import bp as screening_bp
 app.register_blueprint(vip_bp)
 app.register_blueprint(inventory_bp)
 app.register_blueprint(screening_bp)
+
+@app.before_request
+def _check_jwt_auth():
+    """Validate JWT cookie from admin portal. Skip webhook endpoints."""
+    if request.path.startswith('/vip/') or request.path.startswith('/screening/'):
+        return  # webhook endpoints use their own auth
+    if request.path in ('/health', '/ping', '/favicon.ico') or request.path.startswith('/static'):
+        return
+    try:
+        from auth import require_auth
+        result = require_auth()
+        if result is None:
+            return None
+    except Exception:
+        pass  # fall through to legacy basic auth
+
+@app.after_request
+def _add_admin_bar(response):
+    try:
+        from auth import inject_admin_bar, get_current_user
+        if get_current_user():
+            return inject_admin_bar(response)
+    except Exception:
+        pass
+    return response
+
 REDDIT_FEED_USER = os.environ["REDDIT_USER_NAME"]
 REDDIT_FEED_PASS = os.environ["REDDIT_USER_PASS"]
 ROOT = Path(__file__).resolve().parent  # == .../price_updater

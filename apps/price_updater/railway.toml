@@ -1,0 +1,8 @@
+[build]
+dockerfilePath = "apps/price_updater/Dockerfile"
+
+[deploy]
+watchPatterns = [
+  "apps/price_updater/**",
+  "apps/shared/**"
+]
