@@ -567,10 +567,11 @@ def get_session(session_id):
     # Attach breakdown summaries to sealed items that have a tcgplayer_id
     tcg_ids = list({int(i["tcgplayer_id"]) for i in items if i.get("tcgplayer_id")})
 
-    # JIT refresh stale component market prices for these items' recipes
+    # JIT refresh stale component market prices in background (don't block response)
     if tcg_ids and ppt:
         try:
             from breakdown_helpers import refresh_stale_component_prices
+            import threading
             _ph = ",".join(["%s"] * len(tcg_ids))
             _vids = db.query(f"""
                 SELECT sbv.id AS variant_id
@@ -579,7 +580,8 @@ def get_session(session_id):
                 WHERE sbc.tcgplayer_id IN ({_ph})
             """, tuple(tcg_ids))
             if _vids:
-                refresh_stale_component_prices([v["variant_id"] for v in _vids], db, ppt)
+                threading.Thread(target=refresh_stale_component_prices,
+                    args=([v["variant_id"] for v in _vids], db, ppt), daemon=True).start()
         except Exception:
             pass
 
@@ -2233,10 +2235,10 @@ def shopify_session_store_check(session_id):
         try:
             ph = ",".join(["%s"] * len(all_tcg_ids))
 
-            # JIT refresh stale component market prices before loading breakdown data
+            # JIT refresh stale component market prices in background
             try:
                 from breakdown_helpers import refresh_stale_component_prices
-                # Get variant IDs for these products
+                import threading
                 _vids = db.query(f"""
                     SELECT sbv.id AS variant_id
                     FROM sealed_breakdown_cache sbc
@@ -2245,9 +2247,8 @@ def shopify_session_store_check(session_id):
                     WHERE sbc.tcgplayer_id IN ({ph})
                 """, tuple(all_tcg_ids))
                 if _vids:
-                    refresh_stale_component_prices(
-                        [v["variant_id"] for v in _vids], db, ppt
-                    )
+                    threading.Thread(target=refresh_stale_component_prices,
+                        args=([v["variant_id"] for v in _vids], db, ppt), daemon=True).start()
             except Exception as e:
                 app.logger.warning(f"Component price refresh skipped: {e}")
 
@@ -2500,14 +2501,14 @@ def get_breakdown_cache_intake(tcgplayer_id):
     if not result:
         return jsonify({"found": False, "cache": None})
 
-    # JIT refresh stale component market prices before returning
+    # JIT refresh stale component market prices in background
     try:
         from breakdown_helpers import refresh_stale_component_prices
+        import threading
         variant_ids = [str(v["id"]) for v in result.get("variants", [])]
         if variant_ids and ppt:
-            updated = refresh_stale_component_prices(variant_ids, db, ppt)
-            if updated:
-                result = _get_full_breakdown(tcgplayer_id)  # re-fetch with fresh prices
+            threading.Thread(target=refresh_stale_component_prices,
+                args=(variant_ids, db, ppt), daemon=True).start()
     except Exception as e:
         app.logger.warning(f"Component price refresh skipped: {e}")
 
