@@ -116,6 +116,29 @@ def requires_auth(f):
     return decorated
 
 
+@app.before_request
+def _check_jwt_auth():
+    """Validate JWT cookie from admin portal."""
+    if request.path in ('/health', '/ping', '/favicon.ico') or request.path.startswith('/static'):
+        return
+    try:
+        from auth import require_auth as jwt_auth
+        result = jwt_auth()
+        if result is None:
+            return None  # JWT valid — skip old basic auth
+    except Exception:
+        pass
+
+@app.after_request
+def _add_admin_bar(response):
+    try:
+        from auth import inject_admin_bar, get_current_user
+        if get_current_user():
+            return inject_admin_bar(response)
+    except Exception:
+        pass
+    return response
+
 # Initialize DB pool on first request
 @app.before_request
 def ensure_db():

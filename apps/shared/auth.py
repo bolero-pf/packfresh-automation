@@ -145,3 +145,35 @@ def clear_auth_cookie(response):
         path="/",
     )
     return response
+
+
+ADMIN_BAR_HTML = """
+<div id="pf-admin-bar" style="position:sticky;top:0;z-index:9999;background:#141720;border-bottom:1px solid #2a2f42;padding:6px 16px;display:flex;align-items:center;gap:12px;font-family:'DM Sans',sans-serif;font-size:0.78rem;">
+  <a href="https://admin.pack-fresh.com" style="color:#4f7df9;text-decoration:none;font-weight:600;">← Console</a>
+  <span style="color:#6b7280;">|</span>
+  <span style="color:#6b7280;" id="pf-admin-user"></span>
+  <a href="https://admin.pack-fresh.com/api/logout" style="color:#6b7280;text-decoration:none;margin-left:auto;font-size:0.72rem;" onclick="document.cookie='pf_auth=;domain=.pack-fresh.com;path=/;max-age=0';">Sign Out</a>
+</div>
+<script>
+try {
+  const t = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('pf_auth='));
+  if (t) {
+    const p = JSON.parse(atob(t.split('.')[1]));
+    const el = document.getElementById('pf-admin-user');
+    if (el) el.textContent = p.name + ' (' + p.role + ')';
+  }
+} catch(e) {}
+</script>
+"""
+
+
+def inject_admin_bar(response):
+    """Inject the admin navigation bar into HTML responses."""
+    if response.content_type and "text/html" in response.content_type:
+        data = response.get_data(as_text=True)
+        # Insert after <body> tag
+        if "<body" in data:
+            import re
+            data = re.sub(r"(<body[^>]*>)", r"\1" + ADMIN_BAR_HTML, data, count=1)
+            response.set_data(data)
+    return response

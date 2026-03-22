@@ -68,15 +68,33 @@ def _make_auth_cookie(response):
     response.set_cookie("ingest_auth", token, max_age=60*60*24*30, httponly=True, samesite="Lax")
     return response
 
+@app.after_request
+def _add_admin_bar(response):
+    try:
+        from auth import inject_admin_bar, get_current_user
+        if get_current_user():
+            return inject_admin_bar(response)
+    except Exception:
+        pass
+    return response
+
 @app.before_request
 def require_auth():
-    """Gate all routes behind password if INGEST_PASSWORD is set."""
-    if not INGEST_PASSWORD:
-        return None
-    # Allow login page, health check, and API through
+    """Gate all routes behind JWT cookie (admin portal) or legacy password."""
     if request.path in ("/login", "/health"):
         return None
     if request.path.startswith("/static"):
+        return None
+    # Try JWT auth first (from admin portal)
+    try:
+        from auth import require_auth as jwt_auth
+        result = jwt_auth()
+        if result is None:
+            return None  # JWT valid — authenticated
+    except Exception:
+        pass
+    # Fall through to legacy auth
+    if not INGEST_PASSWORD:
         return None
     if request.path.startswith("/api/"):
         # API calls: check cookie but also check if referer is from our domain

@@ -42,6 +42,28 @@ ppt_client:     PPTClient     = None
 
 
 @app.before_request
+def _check_jwt_auth():
+    """Validate JWT cookie from admin portal. Skip health checks and static."""
+    from flask import request
+    if request.path in ('/health', '/ping', '/favicon.ico') or request.path.startswith('/static'):
+        return
+    try:
+        from auth import require_auth
+        return require_auth()
+    except Exception:
+        pass  # ADMIN_JWT_SECRET not set — fall through to old auth
+
+@app.after_request
+def _add_admin_bar(response):
+    try:
+        from auth import inject_admin_bar, get_current_user
+        if get_current_user():
+            return inject_admin_bar(response)
+    except Exception:
+        pass
+    return response
+
+@app.before_request
 def _lazy_init():
     global shopify_client, cache_manager, ppt_client
 
