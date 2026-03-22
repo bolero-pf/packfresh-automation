@@ -274,7 +274,8 @@ def _build_recommendations(in_stock_only=True):
 
         # Compute store-based bd value using per-component qtys from recipe
         bd_value_store = 0.0
-        if child_store_vals:
+        # Only use store prices if ALL children are present in the store
+        if child_store_vals and len(child_store_vals) == len(child_tcg_ids):
             # Get quantity_per_parent for each component in this variant
             comp_qty_rows = db.query("""
                 SELECT tcgplayer_id, quantity_per_parent
@@ -1246,7 +1247,7 @@ function recRow(r) {{
     </td>
     <td style="font-weight:600;color:${{r.store_qty > 0 ? 'var(--green)' : 'var(--red)'}}">${{r.store_qty}}</td>
     <td>$${{r.store_price.toFixed(2)}}</td>
-    <td>$${{r.bd_value.toFixed(2)}}${{r.deep_bd_value ? `<br><small style="color:var(--accent)" title="Value if children are also broken down">Deep: $${{r.deep_bd_value.toFixed(2)}}</small>` : ''}}<br><small style="color:var(--text-dim)">${{r.best_variant_name}}</small></td>
+    <td>$${{r.bd_value.toFixed(2)}} <small style="color:var(--text-dim)">${{r.bd_value_label === 'store' ? '(store)' : '(mkt)'}}</small>${{r.deep_bd_value ? `<br><small style="color:var(--accent)" title="Value if children are also broken down">Deep: $${{r.deep_bd_value.toFixed(2)}}</small>` : ''}}<br><small style="color:var(--text-dim)">${{r.best_variant_name}}</small></td>
     <td class="${{deltaClass}}" style="font-weight:600">${{deltaStr}}</td>
     <td>${{childStockStr}}</td>
     <td>
@@ -1290,18 +1291,18 @@ async function openExecuteModal(rec) {{
         </p>
         <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
           ${{variants.map(v => {{
-            const storeTotal = parseFloat(v.total_component_market||0);
-            const delta = rec.store_price > 0 ? ((storeTotal - rec.store_price)/rec.store_price*100) : 0;
+            const mktTotal = parseFloat(v.total_component_market||0);
+            const delta = rec.store_price > 0 ? ((mktTotal - rec.store_price)/rec.store_price*100) : 0;
             const dc = delta >= 0 ? 'var(--green)' : delta >= -10 ? 'var(--amber)' : 'var(--red)';
             return `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer;transition:border-color .15s"
               onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'"
-              onclick="openExecuteWithVariant(${{JSON.stringify(rec).replace(/"/g,'&quot;')}}, '${{v.id}}', '${{v.variant_name.replace(/'/g,'')}}', ${{storeTotal}})">
+              onclick="openExecuteWithVariant(${{JSON.stringify(rec).replace(/"/g,'&quot;')}}, '${{v.id}}', '${{v.variant_name.replace(/'/g,'')}}', ${{mktTotal}})">
               <div style="display:flex;justify-content:space-between;align-items:center">
                 <strong>${{v.variant_name}}</strong>
                 <span style="color:${{dc}};font-weight:600">${{delta>=0?'+':''}}${{delta.toFixed(1)}}%</span>
               </div>
               <div style="font-size:12px;color:var(--text-dim);margin-top:3px">
-                ${{v.component_count}} components · $${{storeTotal.toFixed(2)}} BD value
+                ${{v.component_count}} components · $${{mktTotal.toFixed(2)}} BD value (market)
                 ${{v.notes ? ` · <em>${{v.notes}}</em>` : ''}}
               </div>
             </div>`;
@@ -1314,17 +1315,19 @@ async function openExecuteModal(rec) {{
     return;
   }}
 
-  renderExecuteForm(rec, rec.best_variant_id, rec.best_variant_name, rec.bd_value);
+  // Single-config: fetch fresh store prices and recalculate
+  openExecuteWithVariant(rec, rec.best_variant_id, rec.best_variant_name, rec.bd_value);
 }}
 
-async function openExecuteWithVariant(rec, variantId, variantName, bdValue) {{
+async function openExecuteWithVariant(rec, variantId, variantName, bdValueMarket) {{
   if (typeof rec === 'string') rec = JSON.parse(rec.replace(/&quot;/g, '"'));
-  const delta = rec.store_price > 0 ? (bdValue - rec.store_price) / rec.store_price * 100 : 0;
   const body = document.getElementById('execute-modal-body');
   body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading components...</div>';
 
   // Fetch component details for this specific variant with store qtys
   let components = [];
+  let bdValue = bdValueMarket;
+  let bdLabel = 'market';
   try {{
     const r = await fetch(`/inventory/breakdown/api/cache/${{rec.tcgplayer_id}}`);
     const d = await r.json();
@@ -1346,10 +1349,17 @@ async function openExecuteWithVariant(rec, variantId, variantName, bdValue) {{
         shopify_price: prices[String(c.tcgplayer_id)]?.shopify_price ?? null,
         in_store: !!prices[String(c.tcgplayer_id)],
       }}));
+      // Recompute BD value from fresh store prices (only if ALL components have store prices)
+      const allHaveStore = components.length === tcgIds.length && components.every(c => c.shopify_price > 0);
+      if (allHaveStore) {{
+        bdValue = components.reduce((sum, c) => sum + c.shopify_price * c.qty_per_parent, 0);
+        bdLabel = 'store';
+      }}
     }}
   }} catch(e) {{}}
 
-  renderExecuteForm({{...rec, bd_value: bdValue, delta_pct: delta, bd_value_label: rec.bd_value_label||'market', components}}, variantId, variantName, bdValue);
+  const delta = rec.store_price > 0 ? (bdValue - rec.store_price) / rec.store_price * 100 : 0;
+  renderExecuteForm({{...rec, bd_value: bdValue, delta_pct: delta, bd_value_label: bdLabel, components}}, variantId, variantName, bdValue);
 }}
 
 function renderExecuteForm(rec, variantId, variantName, bdValue) {{
