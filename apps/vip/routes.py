@@ -234,41 +234,6 @@ def order_paid():
         current_app.logger.warning(f"Klaviyo push failed: {e}")
     return jsonify({"ok": True, **result})
 
-@bp.post("/price_update")
-def price_update():
-    try:
-        ROOT   = Path(__file__).resolve().parents[1]
-        SCRIPT = ROOT / "dailyrunner.py"
-        LOG    = ROOT / "run_output.log"
-
-        def launch():
-            LOG.parent.mkdir(parents=True, exist_ok=True)
-            with open(LOG, "a", buffering=1, encoding="utf-8") as f:
-                f.write(f"\n=== RUN {datetime.now().isoformat()} ===\n")
-                # Unbuffered python + tee stdout to both Railway and the file
-                p = subprocess.Popen(
-                    [sys.executable, "-u", str(SCRIPT)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    cwd=str(ROOT),
-                    text=True,
-                    bufsize=1,
-                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
-                )
-                # Stream to Railway AND file
-                for line in p.stdout:
-                    print(line, end="")       # -> Railway
-                    f.write(line)             # -> run_output.log
-                p.wait()
-                f.write(f"=== EXIT code={p.returncode} at {datetime.now().isoformat()} ===\n")
-
-        threading.Thread(target=launch, daemon=True).start()
-        return jsonify({"ok": True, "started": True}), 200
-
-    except Exception as e:
-        current_app.logger.exception("price_update failed")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
 @bp.post("/refund_created")
 def refund_created():
     payload = request.get_json(force=True)

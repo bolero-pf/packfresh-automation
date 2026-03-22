@@ -40,6 +40,37 @@ UNTOUCHED_CSV = ROOT / "price_updates_untouched.csv"
 RUN_LOG = ROOT / "run_output.log"
 app.secret_key = "something-super-secret-and-unique"
 
+
+@app.post("/price_update")
+def price_update():
+    """Trigger nightly price sync (dailyrunner.py) in background."""
+    try:
+        SCRIPT = ROOT / "dailyrunner.py"
+        LOG = ROOT / "run_output.log"
+
+        def launch():
+            LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(LOG, "a", buffering=1, encoding="utf-8") as f:
+                f.write(f"\n=== RUN {__import__('datetime').datetime.now().isoformat()} ===\n")
+                p = subprocess.Popen(
+                    [sys.executable, "-u", str(SCRIPT)],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    cwd=str(ROOT), text=True, bufsize=1,
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                )
+                for line in p.stdout:
+                    print(line, end="")
+                    f.write(line)
+                p.wait()
+                f.write(f"=== EXIT code={p.returncode} at {__import__('datetime').datetime.now().isoformat()} ===\n")
+
+        threading.Thread(target=launch, daemon=True).start()
+        from flask import jsonify
+        return jsonify({"ok": True, "started": True}), 200
+    except Exception as e:
+        from flask import jsonify
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 FEED_COLUMNS = [
     "id",
     "title",
