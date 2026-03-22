@@ -1,0 +1,8 @@
+[build]
+dockerfilePath = "apps/screening/Dockerfile"
+
+[deploy]
+watchPatterns = [
+  "apps/screening/**",
+  "apps/shared/**"
+]
