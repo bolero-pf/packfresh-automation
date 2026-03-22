@@ -89,13 +89,22 @@ async function loadUsers() {
       <tbody>${users.map(u => {
         const active = u.is_active !== false;
         const login = u.last_login_at ? new Date(u.last_login_at).toLocaleDateString() : 'Never';
+        const esc = s => (s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
         return `<tr class="${active ? '' : 'inactive'}">
           <td><strong>${u.name}</strong></td>
           <td style="color:var(--dim);">${u.email}</td>
-          <td><span class="role-badge role-${u.role}">${u.role}</span></td>
-          <td style="color:var(--dim);font-size:0.78rem;">${login}</td>
           <td>
-            <button class="btn-sm" onclick="toggleActive('${u.id}',${!active})">${active ? 'Deactivate' : 'Activate'}</button>
+            <select class="form-select" style="height:28px;font-size:0.72rem;padding:0 6px;" onchange="changeRole('${u.id}',this.value)">
+              <option value="associate" ${u.role==='associate'?'selected':''}>Associate</option>
+              <option value="manager" ${u.role==='manager'?'selected':''}>Manager</option>
+              <option value="owner" ${u.role==='owner'?'selected':''}>Owner</option>
+            </select>
+          </td>
+          <td style="color:var(--dim);font-size:0.78rem;">${login}</td>
+          <td style="white-space:nowrap;">
+            <button class="btn-sm" onclick="editName('${u.id}','${esc(u.name)}')">✏️</button>
+            <button class="btn-sm" onclick="resetPassword('${u.id}','${esc(u.name)}')">🔑</button>
+            <button class="btn-sm" onclick="toggleActive('${u.id}',${!active})">${active ? '🚫' : '✅'}</button>
           </td>
         </tr>`;
       }).join('')}</tbody>
@@ -126,6 +135,45 @@ async function addUser() {
     document.getElementById('new-pass').value = '';
     loadUsers();
   } catch(e) { errEl.textContent = e.message; }
+}
+
+async function editName(id, currentName) {
+  const name = prompt('New name:', currentName);
+  if (!name || name === currentName) return;
+  try {
+    const r = await fetch(`/api/users/${id}`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) { const d = await r.json(); alert(d.error); return; }
+    toast('Name updated');
+    loadUsers();
+  } catch(e) { alert(e.message); }
+}
+
+async function resetPassword(id, name) {
+  const pw = prompt(`New password for ${name} (min 8 chars):`);
+  if (!pw) return;
+  if (pw.length < 8) { alert('Password must be at least 8 characters'); return; }
+  try {
+    const r = await fetch(`/api/users/${id}`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ password: pw }),
+    });
+    if (!r.ok) { const d = await r.json(); alert(d.error); return; }
+    toast('Password reset');
+  } catch(e) { alert(e.message); }
+}
+
+async function changeRole(id, role) {
+  try {
+    const r = await fetch(`/api/users/${id}`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ role }),
+    });
+    if (!r.ok) { const d = await r.json(); alert(d.error); loadUsers(); return; }
+    toast('Role updated');
+  } catch(e) { alert(e.message); }
 }
 
 async function toggleActive(id, activate) {
