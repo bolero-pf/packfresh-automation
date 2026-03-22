@@ -749,6 +749,136 @@ def store_prices_local():
     return jsonify({"prices": prices})
 
 
+@bp.route("/api/variant-values/<int:tcg_id>")
+@requires_auth
+def variant_values(tcg_id):
+    """Compute store-based and deep store-based BD value for every variant of a product."""
+    cache_row = db.query_one("SELECT id FROM sealed_breakdown_cache WHERE tcgplayer_id=%s", (tcg_id,))
+    if not cache_row:
+        return jsonify({"variants": {}})
+
+    variants = db.query(
+        "SELECT id, total_component_market FROM sealed_breakdown_variants WHERE breakdown_id=%s",
+        (cache_row["id"],)
+    )
+    # Load all components across all variants
+    var_ids = [v["id"] for v in variants]
+    if not var_ids:
+        return jsonify({"variants": {}})
+    vph = ",".join(["%s"] * len(var_ids))
+    all_comps = db.query(f"""
+        SELECT variant_id, tcgplayer_id, quantity_per_parent, market_price
+        FROM sealed_breakdown_components WHERE variant_id IN ({vph}) AND tcgplayer_id IS NOT NULL
+    """, tuple(var_ids))
+
+    # Fetch store prices for all components
+    comp_ids = list({int(c["tcgplayer_id"]) for c in all_comps if c["tcgplayer_id"]})
+    store_map = {}
+    if comp_ids:
+        cph = ",".join(["%s"] * len(comp_ids))
+        rows = db.query(
+            f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({cph}) AND is_damaged = FALSE",
+            tuple(comp_ids)
+        )
+        store_map = {int(r["tcgplayer_id"]): float(r["shopify_price"] or 0) for r in rows}
+
+    # Check which components have their own breakdown recipes (for deep value)
+    child_bd_map = {}
+    if comp_ids:
+        cph = ",".join(["%s"] * len(comp_ids))
+        bd_rows = db.query(f"SELECT tcgplayer_id, best_variant_market FROM sealed_breakdown_cache WHERE tcgplayer_id IN ({cph})", tuple(comp_ids))
+        child_bd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in bd_rows}
+
+    # Compute grandchild store prices for deep value
+    child_bd_store_map = {}
+    if child_bd_map:
+        child_tcg_list = list(child_bd_map.keys())
+        gcph = ",".join(["%s"] * len(child_tcg_list))
+        try:
+            gc_rows = db.query(f"""
+                SELECT sbc.tcgplayer_id AS child_tcg_id,
+                       sbco.tcgplayer_id AS gc_tcg_id,
+                       sbco.quantity_per_parent
+                FROM sealed_breakdown_cache sbc
+                JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
+                    AND sbv.total_component_market = sbc.best_variant_market
+                LEFT JOIN sealed_breakdown_components sbco ON sbco.variant_id = sbv.id
+                WHERE sbc.tcgplayer_id IN ({gcph}) AND sbco.tcgplayer_id IS NOT NULL
+            """, tuple(child_tcg_list))
+            gc_ids = list(set(r["gc_tcg_id"] for r in gc_rows if r["gc_tcg_id"]))
+            gc_store = {}
+            if gc_ids:
+                gcp = ",".join(["%s"] * len(gc_ids))
+                gc_sp = db.query(
+                    f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE",
+                    tuple(gc_ids))
+                gc_store = {int(r["tcgplayer_id"]): float(r["shopify_price"] or 0) for r in gc_sp}
+            _gc_by_child = {}
+            for r in gc_rows:
+                _gc_by_child.setdefault(int(r["child_tcg_id"]), []).append(r)
+            for ctid, gcs in _gc_by_child.items():
+                sv = 0.0
+                all_have = True
+                for gc in gcs:
+                    sp = gc_store.get(int(gc["gc_tcg_id"]), 0)
+                    if sp > 0:
+                        sv += sp * (gc["quantity_per_parent"] or 1)
+                    else:
+                        all_have = False
+                if all_have and sv > 0:
+                    child_bd_store_map[ctid] = sv
+        except Exception:
+            pass
+
+    # Group components by variant
+    comps_by_var = {}
+    for c in all_comps:
+        comps_by_var.setdefault(c["variant_id"], []).append(c)
+
+    result = {}
+    for v in variants:
+        vid = v["id"]
+        comps = comps_by_var.get(vid, [])
+        mkt_total = float(v["total_component_market"] or 0)
+
+        # Store-based BD value
+        store_total = 0.0
+        all_have_store = len(comps) > 0
+        for c in comps:
+            cid = int(c["tcgplayer_id"])
+            sp = store_map.get(cid, 0)
+            qty = int(c["quantity_per_parent"] or 1)
+            if sp > 0:
+                store_total += sp * qty
+            else:
+                all_have_store = False
+
+        # Deep store value: prefer grandchild store BD, fallback to store price, then market
+        deep_val = 0.0
+        has_deep = False
+        for c in comps:
+            cid = int(c["tcgplayer_id"])
+            qty = int(c["quantity_per_parent"] or 1)
+            cbd_store = child_bd_store_map.get(cid, 0)
+            if cbd_store > 0:
+                deep_val += cbd_store * qty
+                has_deep = True
+            else:
+                sp = store_map.get(cid, 0)
+                if sp > 0:
+                    deep_val += sp * qty
+                else:
+                    deep_val += float(c["market_price"] or 0) * qty
+
+        result[str(vid)] = {
+            "store_value": round(store_total, 2) if all_have_store else None,
+            "market_value": round(mkt_total, 2),
+            "deep_store_value": round(deep_val, 2) if has_deep else None,
+        }
+
+    return jsonify({"variants": result})
+
+
 @bp.route("/api/inventory-search")
 @requires_auth
 def inventory_search():
@@ -1284,6 +1414,12 @@ async function openExecuteModal(rec) {{
       const r = await fetch(`/inventory/breakdown/api/cache/${{rec.tcgplayer_id}}`);
       const d = await r.json();
       const variants = d.cache?.variants || [];
+
+      // Fetch store + deep values for all variants from backend
+      const vr = await fetch(`/inventory/breakdown/api/variant-values/${{rec.tcgplayer_id}}`);
+      const vd = await vr.json();
+      const variantValues = vd.variants || {{}};
+
       body.innerHTML = `
         <div style="font-size:15px;font-weight:600;margin-bottom:4px">${{rec.title}}</div>
         <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">
@@ -1291,9 +1427,15 @@ async function openExecuteModal(rec) {{
         </p>
         <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
           ${{variants.map(v => {{
-            const mktTotal = parseFloat(v.total_component_market||0);
-            const delta = rec.store_price > 0 ? ((mktTotal - rec.store_price)/rec.store_price*100) : 0;
+            const vals = variantValues[String(v.id)] || {{}};
+            const mktTotal = vals.market_value || parseFloat(v.total_component_market||0);
+            const storeTotal = vals.store_value;
+            const deepStore = vals.deep_store_value;
+            const bdVal = storeTotal != null ? storeTotal : mktTotal;
+            const bdSrc = storeTotal != null ? 'store' : 'mkt';
+            const delta = rec.store_price > 0 ? ((bdVal - rec.store_price)/rec.store_price*100) : 0;
             const dc = delta >= 0 ? 'var(--green)' : delta >= -10 ? 'var(--amber)' : 'var(--red)';
+            const deepLine = deepStore ? ` · <span style="color:var(--accent)">Deep: $${{deepStore.toFixed(2)}}</span>` : '';
             return `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer;transition:border-color .15s"
               onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'"
               onclick="openExecuteWithVariant(${{JSON.stringify(rec).replace(/"/g,'&quot;')}}, '${{v.id}}', '${{v.variant_name.replace(/'/g,'')}}', ${{mktTotal}})">
@@ -1302,7 +1444,7 @@ async function openExecuteModal(rec) {{
                 <span style="color:${{dc}};font-weight:600">${{delta>=0?'+':''}}${{delta.toFixed(1)}}%</span>
               </div>
               <div style="font-size:12px;color:var(--text-dim);margin-top:3px">
-                ${{v.component_count}} components · $${{mktTotal.toFixed(2)}} BD value (market)
+                ${{v.component_count}} components · $${{bdVal.toFixed(2)}} (${{bdSrc}})${{deepLine}}
                 ${{v.notes ? ` · <em>${{v.notes}}</em>` : ''}}
               </div>
             </div>`;
@@ -1472,6 +1614,8 @@ async function confirmExecute(parentVariantId, parentInvItemId, parentTcgId, var
     }}
     result.innerHTML = html;
     btn.textContent = '✓ Done';
+    btn.disabled = false;
+    btn.onclick = () => document.getElementById('execute-modal').classList.remove('active');
 
     // Update rec in-place
     const idx = _allRecs.findIndex(r => r.shopify_variant_id === parentVariantId);
