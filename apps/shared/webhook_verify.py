@@ -16,6 +16,9 @@ FLOW_SECRET = os.environ.get("VIP_FLOW_SECRET", "")
 # Paths that don't require auth (health checks)
 SAFE_PATHS = {"/vip/ping", "/screening/ping"}
 
+# Paths that require auth but don't need order_id in payload
+NO_ORDER_ID_PATHS = {"/vip/sweep_kick", "/vip/sweep_vips", "/vip/backfill", "/vip/retag_only"}
+
 
 def verify_flow_signature(safe_paths=None):
     """
@@ -30,7 +33,8 @@ def verify_flow_signature(safe_paths=None):
     token = request.headers.get("X-Flow-Secret", "")
     if not FLOW_SECRET or token != FLOW_SECRET:
         abort(401)
-    # Minimal payload sanity — require order_id GID on all POST endpoints
-    data = request.get_json(silent=True) or {}
-    if not (isinstance(data.get("order_id"), str) and data["order_id"].startswith("gid://shopify/Order/")):
-        abort(400)
+    # Minimal payload sanity — require order_id GID on most POST endpoints
+    if request.path not in NO_ORDER_ID_PATHS:
+        data = request.get_json(silent=True) or {}
+        if not (isinstance(data.get("order_id"), str) and data["order_id"].startswith("gid://shopify/Order/")):
+            abort(400)
