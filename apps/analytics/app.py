@@ -20,6 +20,30 @@ app = Flask(__name__)
 db.init_pool()
 
 
+@app.before_request
+def _check_auth():
+    """JWT auth for browser UI, skip API/webhook endpoints."""
+    if request.path in ('/ping', '/health', '/run', '/run/backfill'):
+        return  # webhooks + health checks
+    if request.path.startswith('/api/'):
+        return  # API calls from other services
+    try:
+        from auth import require_auth
+        return require_auth(roles=["owner"])
+    except Exception:
+        pass
+
+@app.after_request
+def _add_admin_bar(response):
+    try:
+        from auth import inject_admin_bar, get_current_user
+        if get_current_user():
+            return inject_admin_bar(response)
+    except Exception:
+        pass
+    return response
+
+
 @app.route("/")
 def index():
     return render_template_string(DASHBOARD_HTML)

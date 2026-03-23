@@ -28,12 +28,14 @@ query Orders($first:Int!, $after:String, $query:String!) {
         id
         createdAt
         displayFinancialStatus
+        tags
         lineItems(first:100) {
           edges {
             node {
               variant { id }
               quantity
               originalTotalSet { shopMoney { amount } }
+              product { tags }
             }
           }
         }
@@ -43,6 +45,9 @@ query Orders($first:Int!, $after:String, $query:String!) {
   }
 }
 """
+
+# Tags that indicate a drop item — exclude from velocity calculations
+DROP_TAG_PATTERNS = {"drop", "unavailable-"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -68,6 +73,7 @@ def ingest_orders(since_date: str = None, full_backfill: bool = False):
     query_filter = f'financial_status:paid created_at:>="{since}"'
     cursor = None
     total_orders = 0
+    drop_skipped = 0
     daily_sales = {}  # (date_str, variant_id) -> {units, revenue}
 
     while True:
@@ -94,6 +100,16 @@ def ingest_orders(since_date: str = None, full_backfill: bool = False):
                 li = li_edge["node"]
                 variant = li.get("variant")
                 if not variant or not variant.get("id"):
+                    continue
+
+                # Skip drop items — they skew velocity with artificial spikes
+                product_tags = [t.lower() for t in (li.get("product", {}) or {}).get("tags", [])]
+                is_drop = any(
+                    tag == "drop" or tag.startswith("unavailable-")
+                    for tag in product_tags
+                )
+                if is_drop:
+                    drop_skipped += 1
                     continue
 
                 variant_id = int(gid_numeric(variant["id"]))
@@ -131,8 +147,8 @@ def ingest_orders(since_date: str = None, full_backfill: bool = False):
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
     """, (now,))
 
-    logger.info(f"Ingested {total_orders} orders → {written} daily sales records")
-    return {"orders": total_orders, "records": written}
+    logger.info(f"Ingested {total_orders} orders → {written} daily sales records ({drop_skipped} drop line items skipped)")
+    return {"orders": total_orders, "records": written, "drops_skipped": drop_skipped}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -197,15 +213,13 @@ def recompute_analytics():
         # Average days to sell (rough: 90 / units_sold gives avg interval between sales)
         avg_days = 90.0 / units_90d if units_90d > 0 else None
 
-        # Out of stock days: estimate from daily sales gaps where we had 0 qty
-        # Simple heuristic: if we sold units but current_qty is 0, we're out
-        # More accurate: count days with no sales AND no stock (requires inventory snapshots)
-        # For now: estimate based on sell-through rate
-        oos_days = 0
-        if units_90d > 0 and current_qty == 0:
-            oos_days = 15  # conservative estimate if currently OOS with sales history
-        elif units_90d == 0 and current_qty == 0:
-            oos_days = 90  # no sales and no stock = been OOS the whole time
+        # Out of stock days: count days at qty=0 from daily inventory snapshots
+        oos_row = db.query_one("""
+            SELECT COUNT(*) AS oos_days
+            FROM sku_daily_inventory
+            WHERE shopify_variant_id = %s AND snapshot_date >= %s AND qty = 0
+        """, (vid, d90))
+        oos_days = int(oos_row["oos_days"]) if oos_row else 0
 
         # Velocity score
         daily_rate = units_30d / 30.0
@@ -256,9 +270,48 @@ def recompute_analytics():
     return {"updated": updated}
 
 
+def snapshot_inventory():
+    """
+    Take a daily snapshot of inventory levels from inventory_product_cache.
+    Used to compute accurate out-of-stock days.
+    """
+    today = date.today()
+
+    # Check if we already have a snapshot for today
+    existing = db.query_one(
+        "SELECT 1 FROM sku_daily_inventory WHERE snapshot_date = %s LIMIT 1",
+        (today,)
+    )
+    if existing:
+        logger.info(f"Inventory snapshot for {today} already exists, skipping")
+        return {"date": str(today), "skipped": True}
+
+    # Snapshot current quantities from the product cache
+    rows = db.query("""
+        SELECT shopify_variant_id, shopify_qty
+        FROM inventory_product_cache
+        WHERE shopify_variant_id IS NOT NULL
+    """)
+
+    count = 0
+    for r in rows:
+        db.execute("""
+            INSERT INTO sku_daily_inventory (snapshot_date, shopify_variant_id, qty)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (snapshot_date, shopify_variant_id) DO NOTHING
+        """, (today, r["shopify_variant_id"], int(r["shopify_qty"] or 0)))
+        count += 1
+
+    logger.info(f"Inventory snapshot: {count} variants captured for {today}")
+    return {"date": str(today), "variants": count}
+
+
 def run_full_pipeline():
-    """Run the complete pipeline: ingest orders + recompute metrics."""
-    # Check last run
+    """Run the complete pipeline: snapshot inventory + ingest orders + recompute metrics."""
+    # 1. Snapshot today's inventory levels (for OOS tracking)
+    snapshot_inventory()
+
+    # 2. Ingest orders
     meta = db.query_one("SELECT value FROM analytics_meta WHERE key = 'last_order_ingest'")
     if meta and meta["value"]:
         # Incremental: pull from day before last run to catch any stragglers
@@ -269,5 +322,6 @@ def run_full_pipeline():
         # First run: full 90-day backfill
         ingest_result = ingest_orders(full_backfill=True)
 
+    # 3. Recompute velocity metrics
     compute_result = recompute_analytics()
     return {**ingest_result, **compute_result}

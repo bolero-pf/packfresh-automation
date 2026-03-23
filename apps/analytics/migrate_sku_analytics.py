@@ -89,6 +89,23 @@ if not table_exists("sku_daily_sales"):
 else:
     print("  sku_daily_sales already exists")
 
+# Daily inventory snapshots for OOS tracking
+if not table_exists("sku_daily_inventory"):
+    cur.execute("""
+        CREATE TABLE sku_daily_inventory (
+            id                  SERIAL PRIMARY KEY,
+            snapshot_date       DATE NOT NULL,
+            shopify_variant_id  BIGINT NOT NULL,
+            qty                 INTEGER DEFAULT 0,
+            UNIQUE(snapshot_date, shopify_variant_id)
+        )
+    """)
+    cur.execute("CREATE INDEX idx_daily_inv_variant ON sku_daily_inventory(shopify_variant_id)")
+    cur.execute("CREATE INDEX idx_daily_inv_date ON sku_daily_inventory(snapshot_date)")
+    print("  Created sku_daily_inventory table")
+else:
+    print("  sku_daily_inventory already exists")
+
 # Metadata table for tracking last run
 if not table_exists("analytics_meta"):
     cur.execute("""
