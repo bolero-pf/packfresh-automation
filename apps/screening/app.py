@@ -1,11 +1,11 @@
 """
 screening — screening.pack-fresh.com
-Order screening microservice: fraud detection, verification, combine shipping, signature.
+Order screening + review console: verification queue, combine shipping queue.
 """
 
 import os
 import logging
-from flask import Flask
+from flask import Flask, request, jsonify, render_template_string
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -15,9 +15,325 @@ from routes import bp as screening_bp
 app.register_blueprint(screening_bp)
 
 
+@app.before_request
+def _check_auth():
+    # Skip webhook endpoints
+    if request.path.startswith('/screening/'):
+        return
+    if request.path in ('/ping', '/health'):
+        return
+    try:
+        from auth import require_auth
+        return require_auth(roles=["owner", "manager"])
+    except Exception:
+        pass
+
+@app.after_request
+def _add_admin_bar(response):
+    try:
+        from auth import inject_admin_bar, get_current_user
+        if get_current_user():
+            return inject_admin_bar(response)
+    except Exception:
+        pass
+    return response
+
+
 @app.route("/")
 def index():
-    return {"service": "screening", "status": "ok"}
+    return render_template_string(CONSOLE_HTML)
+
+
+@app.route("/api/held-orders")
+def api_held_orders():
+    """Fetch all orders with hold-for-review tag."""
+    from shopify_graphql import shopify_gql, gid_numeric
+
+    data = shopify_gql("""
+        query($first:Int!, $q:String!) {
+          orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true) {
+            edges {
+              node {
+                id
+                name
+                createdAt
+                tags
+                note
+                currentTotalPriceSet { shopMoney { amount } }
+                displayFulfillmentStatus
+                customer {
+                  id email firstName lastName
+                }
+                shippingAddress { firstName lastName address1 city province zip }
+                lineItems(first:20) {
+                  edges { node { title quantity } }
+                }
+              }
+            }
+          }
+        }
+    """, {"first": 50, "q": 'tag:"hold-for-review" fulfillment_status:unfulfilled'})
+
+    verification = []
+    combine = []
+
+    for edge in data.get("data", {}).get("orders", {}).get("edges", []):
+        o = edge["node"]
+        tags = [t.lower() for t in (o.get("tags") or [])]
+        customer = o.get("customer") or {}
+        addr = o.get("shippingAddress") or {}
+        items = [{"title": e["node"]["title"], "qty": e["node"]["quantity"]}
+                 for e in o.get("lineItems", {}).get("edges", [])]
+        note = o.get("note") or ""
+
+        order_data = {
+            "id": o["id"],
+            "numeric_id": gid_numeric(o["id"]),
+            "name": o["name"],
+            "created_at": o["createdAt"],
+            "total": float(o.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0)),
+            "fulfillment_status": o.get("displayFulfillmentStatus"),
+            "customer_name": f"{customer.get('firstName', '')} {customer.get('lastName', '')}".strip(),
+            "customer_email": customer.get("email", ""),
+            "customer_id": customer.get("id"),
+            "shipping_address": f"{addr.get('address1', '')}, {addr.get('city', '')} {addr.get('province', '')} {addr.get('zip', '')}",
+            "tags": o.get("tags", []),
+            "note": note,
+            "items": items,
+        }
+
+        # Determine type based on tags
+        is_verification = any(t in tags for t in [
+            "high-value-tier1", "high-value-tier2", "spend-spike-review",
+            "fraud-medium", "firsttime5-review"
+        ])
+        is_combine = "combine" in note.lower() if note else False
+
+        if is_verification:
+            # Determine specific type
+            if "high-value-tier2" in tags:
+                order_data["check_type"] = "ID + Selfie ($1000+)"
+            elif "high-value-tier1" in tags:
+                order_data["check_type"] = "ID Verification ($700+)"
+            elif "spend-spike-review" in tags:
+                order_data["check_type"] = "Spend Spike"
+            elif "fraud-medium" in tags:
+                order_data["check_type"] = "Medium Fraud"
+            elif "firsttime5-review" in tags:
+                order_data["check_type"] = "FIRSTTIME5 Abuse"
+            else:
+                order_data["check_type"] = "Review"
+            verification.append(order_data)
+        elif is_combine:
+            order_data["check_type"] = "Combine Shipping"
+            combine.append(order_data)
+        else:
+            order_data["check_type"] = "Other Hold"
+            verification.append(order_data)
+
+    # Group combine orders by customer
+    combine_groups = {}
+    for o in combine:
+        key = o["customer_email"] or o["customer_name"]
+        if key not in combine_groups:
+            combine_groups[key] = {
+                "customer_name": o["customer_name"],
+                "customer_email": o["customer_email"],
+                "shipping_address": o["shipping_address"],
+                "orders": [],
+                "total_value": 0,
+                "all_items": [],
+            }
+        combine_groups[key]["orders"].append(o)
+        combine_groups[key]["total_value"] += o["total"]
+        combine_groups[key]["all_items"].extend(o["items"])
+
+    return jsonify({
+        "verification": verification,
+        "combine_groups": list(combine_groups.values()),
+    })
+
+
+@app.route("/api/release-hold", methods=["POST"])
+def api_release_hold():
+    """Release a held order: remove tags, release fulfillment holds."""
+    data = request.get_json(silent=True) or {}
+    order_gid = data.get("order_id")
+    if not order_gid:
+        return jsonify({"error": "order_id required"}), 400
+
+    from service import on_order_fulfilled
+    result = on_order_fulfilled(order_gid)
+    return jsonify({"ok": True, **result})
+
+
+CONSOLE_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pack Fresh — Screening Console</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+:root { --bg:#0a0c10; --surface:#141720; --s2:#1c2030; --border:#2a2f42; --accent:#4f7df9; --green:#34d058; --amber:#f6ad55; --red:#fc5c5c; --text:#e8eaf0; --dim:#6b7280; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif; font-size:14px; }
+.header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:16px; }
+.header h1 { font-size:1.3rem; }
+.main { max-width:1000px; margin:0 auto; padding:20px; }
+.section-title { font-size:0.75rem; color:var(--dim); text-transform:uppercase; letter-spacing:0.1em; margin:24px 0 12px; display:flex; align-items:center; gap:8px; }
+.section-title:first-child { margin-top:0; }
+.count-badge { background:var(--red); color:#fff; border-radius:10px; padding:1px 8px; font-size:0.7rem; }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:10px; }
+.order-header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:8px; }
+.order-name { font-weight:700; font-size:1rem; }
+.badge { display:inline-block; padding:3px 10px; border-radius:10px; font-size:0.68rem; font-weight:700; }
+.badge-amber { background:rgba(246,173,85,0.15); color:var(--amber); }
+.badge-red { background:rgba(252,92,92,0.15); color:var(--red); }
+.badge-blue { background:rgba(79,125,249,0.15); color:var(--accent); }
+.order-meta { font-size:0.8rem; color:var(--dim); line-height:1.5; }
+.items-list { font-size:0.8rem; color:var(--dim); margin-top:6px; padding:8px 12px; background:var(--s2); border-radius:6px; }
+.btn { height:34px; padding:0 16px; border:none; border-radius:8px; font-family:inherit; font-size:0.82rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
+.btn-green { background:var(--green); color:#000; }
+.btn-sm { height:28px; padding:0 10px; font-size:0.75rem; }
+.btn-secondary { background:var(--s2); border:1px solid var(--border); color:var(--text); }
+.combine-group { background:var(--surface); border:2px solid var(--accent); border-radius:12px; padding:18px; margin-bottom:14px; }
+.combine-header { font-weight:700; font-size:1rem; margin-bottom:4px; }
+.combine-orders { display:flex; flex-direction:column; gap:8px; margin:10px 0; }
+.combine-order { background:var(--s2); border-radius:8px; padding:10px 14px; }
+.toast { position:fixed; bottom:20px; right:20px; background:var(--green); color:#000; padding:10px 20px; border-radius:8px; font-weight:600; font-size:0.85rem; display:none; z-index:100; }
+.spinner { width:24px; height:24px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; margin:30px auto; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.empty { color:var(--dim); text-align:center; padding:30px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🛡️ Screening Console</h1>
+  <button class="btn btn-secondary btn-sm" onclick="loadOrders()" style="margin-left:auto;">↻ Refresh</button>
+</div>
+
+<div class="main">
+  <div id="content"><div class="spinner"></div></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+function toast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
+
+async function loadOrders() {
+  const el = document.getElementById('content');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/held-orders');
+    const d = await r.json();
+    renderOrders(d.verification || [], d.combine_groups || []);
+  } catch(e) { el.innerHTML = `<div class="empty">${e.message}</div>`; }
+}
+
+function renderOrders(verification, combineGroups) {
+  const el = document.getElementById('content');
+  let html = '';
+
+  // Verification Queue
+  html += `<div class="section-title">Verification Queue <span class="count-badge">${verification.length}</span></div>`;
+  if (!verification.length) {
+    html += '<div class="empty">No orders awaiting verification</div>';
+  } else {
+    html += verification.map(o => `
+      <div class="card">
+        <div class="order-header">
+          <span class="order-name">${o.name}</span>
+          <span class="badge badge-amber">${o.check_type}</span>
+          <span style="font-weight:700;">$${o.total.toFixed(2)}</span>
+          <button class="btn btn-green btn-sm" onclick="releaseHold('${o.id}','${o.name}')" style="margin-left:auto;">✓ Verify & Release</button>
+        </div>
+        <div class="order-meta">
+          <strong>${o.customer_name}</strong> · ${o.customer_email}<br>
+          ${o.shipping_address}<br>
+          ${o.note ? '<em>' + o.note + '</em>' : ''}
+        </div>
+        <div class="items-list">${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}</div>
+      </div>
+    `).join('');
+  }
+
+  // Combine Shipping Queue
+  html += `<div class="section-title">Combine Shipping <span class="count-badge">${combineGroups.length}</span></div>`;
+  if (!combineGroups.length) {
+    html += '<div class="empty">No orders to combine</div>';
+  } else {
+    html += combineGroups.map(g => `
+      <div class="combine-group">
+        <div class="combine-header">${g.customer_name} · ${g.orders.length} orders · $${g.total_value.toFixed(2)}</div>
+        <div style="font-size:0.8rem;color:var(--dim);">${g.customer_email} · ${g.shipping_address}</div>
+        <div class="combine-orders">
+          ${g.orders.map(o => `
+            <div class="combine-order">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong>${o.name}</strong>
+                <span>$${o.total.toFixed(2)}</span>
+              </div>
+              <div style="font-size:0.78rem;color:var(--dim);margin-top:4px;">
+                ${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div style="font-size:0.78rem;font-weight:600;margin:8px 0 4px;">Combined Packing List:</div>
+        <div class="items-list">
+          ${g.all_items.map(i => '<strong>' + i.qty + '×</strong> ' + i.title).join('<br>')}
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+          ${g.orders.map(o => `
+            <a href="https://admin.shopify.com/store/pack-fresh/orders/${o.numeric_id}" target="_blank" class="btn btn-secondary btn-sm">
+              ${o.name} → Admin ↗
+            </a>
+          `).join('')}
+          <button class="btn btn-green btn-sm" onclick="releaseGroup(${JSON.stringify(g.orders.map(o=>o.id)).replace(/"/g,'&quot;')})">✓ Release All</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  el.innerHTML = html;
+}
+
+async function releaseHold(orderId, orderName) {
+  if (!confirm('Release hold on ' + orderName + '?')) return;
+  try {
+    const r = await fetch('/api/release-hold', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ order_id: orderId }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    toast('Released: ' + orderName);
+    loadOrders();
+  } catch(e) { alert(e.message); }
+}
+
+async function releaseGroup(orderIds) {
+  if (!confirm('Release holds on ' + orderIds.length + ' combined orders?')) return;
+  for (const id of orderIds) {
+    try {
+      await fetch('/api/release-hold', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ order_id: id }),
+      });
+    } catch(e) {}
+  }
+  toast('Released ' + orderIds.length + ' orders');
+  loadOrders();
+}
+
+loadOrders();
+</script>
+</body>
+</html>
+"""
 
 
 if __name__ == "__main__":
