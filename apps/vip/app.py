@@ -581,11 +581,12 @@ tr:hover { background:var(--s2); }
     <div class="modal-box" style="max-width:480px;">
       <h3>Recalculate Tier & Lock</h3>
       <div id="recalc-content"><div class="spinner"></div></div>
-      <div id="recalc-actions" style="display:none;margin-top:20px;">
-        <div style="display:flex;gap:10px;">
+      <div style="margin-top:20px;">
+        <div id="recalc-actions" style="display:none;display:flex;gap:10px;">
           <button class="btn" style="flex:1;background:var(--s2);border:1px solid var(--border);color:var(--text);" onclick="closeRecalcModal()">Cancel</button>
-          <button class="btn btn-green" style="flex:1;" id="recalc-apply-btn" onclick="applyRecalc()">Accept & Apply</button>
+          <button class="btn btn-green" style="flex:1;" onclick="applyRecalc()">Accept & Apply</button>
         </div>
+        <button class="btn" id="recalc-close-btn" style="display:none;width:100%;background:var(--s2);border:1px solid var(--border);color:var(--text);" onclick="closeRecalcModal()">Close</button>
       </div>
     </div>
   </div>
@@ -628,9 +629,12 @@ async function loadStats() {
 function filterTier(t) { _tier = t; loadStats(); loadCustomers(); }
 function debounce() { clearTimeout(_timer); _timer = setTimeout(loadCustomers, 400); }
 
-async function loadCustomers(cursor) {
+async function loadCustomers(cursor, append) {
   const el = document.getElementById('customer-list');
-  el.innerHTML = '<div class="spinner"></div>';
+  if (!append) {
+    el.innerHTML = '<div class="spinner"></div>';
+    _allCustomers = [];
+  }
   const q = document.getElementById('search').value.trim();
   const params = new URLSearchParams({ tier: _tier, limit: 50 });
   if (q) params.set('q', q);
@@ -638,7 +642,7 @@ async function loadCustomers(cursor) {
   try {
     const r = await fetch('/api/vip/customers?' + params);
     const d = await r.json();
-    _allCustomers = d.customers || [];
+    _allCustomers = _allCustomers.concat(d.customers || []);
     _hasNext = d.has_next;
     _cursor = d.next_cursor;
     sortAndRender();
@@ -699,7 +703,9 @@ function renderCustomers(custs) {
   </table>`;
   // Pagination
   const pg = document.getElementById('pagination');
-  pg.innerHTML = _hasNext ? '<button class="btn btn-secondary" onclick="loadCustomers(_cursor)">Load More →</button>' : '';
+  pg.innerHTML = _hasNext
+    ? '<button class="btn btn-secondary" onclick="loadCustomers(_cursor, true)">Load More (' + _allCustomers.length + ' loaded) →</button>'
+    : (_allCustomers.length > 50 ? '<span style="color:var(--dim);font-size:0.8rem;">All ' + _allCustomers.length + ' loaded</span>' : '');
 }
 
 // Tier modal
@@ -765,7 +771,8 @@ async function recalculate(gid, name) {
       ${p.reason ? '<div style="margin-top:12px;font-size:0.82rem;color:var(--dim);font-style:italic;">' + p.reason + '</div>' : ''}
       ${!changed ? '<div style="color:var(--green);margin-top:12px;font-weight:600;">✓ No changes needed — current state is correct.</div>' : '<div style="color:var(--amber);margin-top:12px;font-weight:600;">⚠ Changes detected — review and apply below.</div>'}
     `;
-    document.getElementById('recalc-actions').style.display = changed ? '' : 'none';
+    document.getElementById('recalc-actions').style.display = changed ? 'flex' : 'none';
+    document.getElementById('recalc-close-btn').style.display = changed ? 'none' : '';
   } catch(e) { document.getElementById('recalc-content').innerHTML = '<div style="color:var(--red);">' + e.message + '</div>'; }
 }
 async function applyRecalc() {
@@ -877,6 +884,10 @@ function renderDetail(d) {
 
   el.innerHTML = html;
 }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { closeTierModal(); closeRecalcModal(); }
+});
 
 loadStats();
 loadCustomers();
