@@ -167,6 +167,44 @@ def api_release_hold():
     return jsonify({"ok": True, **result})
 
 
+@app.route("/api/cancel-order", methods=["POST"])
+def api_cancel_order():
+    """Cancel + full refund a held order, then clean up tags."""
+    data = request.get_json(silent=True) or {}
+    order_gid = data.get("order_id")
+    if not order_gid:
+        return jsonify({"error": "order_id required"}), 400
+
+    from shopify_graphql import shopify_gql
+    # Cancel with full refund
+    try:
+        shopify_gql("""
+            mutation OrderCancel($orderId:ID!, $reason:OrderCancelReason!, $refund:Boolean!, $restock:Boolean!, $notifyCustomer:Boolean, $staffNote:String) {
+              orderCancel(orderId:$orderId, reason:$reason, refund:$refund, restock:$restock, notifyCustomer:$notifyCustomer, staffNote:$staffNote) {
+                orderCancelUserErrors { field message code }
+              }
+            }
+        """, {
+            "orderId": order_gid,
+            "reason": "OTHER",
+            "refund": True,
+            "restock": True,
+            "notifyCustomer": True,
+            "staffNote": "Cancelled from screening console",
+        })
+    except Exception as e:
+        return jsonify({"error": f"Cancel failed: {e}"}), 500
+
+    # Clean up tags
+    from service import on_order_fulfilled
+    try:
+        on_order_fulfilled(order_gid)
+    except Exception:
+        pass
+
+    return jsonify({"ok": True})
+
+
 CONSOLE_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -203,6 +241,11 @@ body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif
 .combine-orders { display:flex; flex-direction:column; gap:8px; margin:10px 0; }
 .combine-order { background:var(--s2); border-radius:8px; padding:10px 14px; }
 .toast { position:fixed; bottom:20px; right:20px; background:var(--green); color:#000; padding:10px 20px; border-radius:8px; font-weight:600; font-size:0.85rem; display:none; z-index:100; }
+.tab { background:none; border:none; padding:10px 18px; color:var(--dim); cursor:pointer; font-size:0.88rem; font-weight:500; border-bottom:2px solid transparent; font-family:inherit; }
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+.pane { display:none; }
+.pane.active { display:block; }
 .spinner { width:24px; height:24px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; margin:30px auto; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .empty { color:var(--dim); text-align:center; padding:30px; }
@@ -215,90 +258,120 @@ body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif
 </div>
 
 <div class="main">
-  <div id="content"><div class="spinner"></div></div>
+  <div style="display:flex;gap:2px;margin-bottom:20px;border-bottom:1px solid var(--border);">
+    <button class="tab active" id="tab-verify" onclick="switchTab('verify')">🔍 Verification Queue</button>
+    <button class="tab" id="tab-combine" onclick="switchTab('combine')">📦 Combine Shipping</button>
+  </div>
+  <div id="pane-verify" class="pane active"><div class="spinner"></div></div>
+  <div id="pane-combine" class="pane"><div class="spinner"></div></div>
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
+let _data = null;
 function toast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
 
-async function loadOrders() {
-  const el = document.getElementById('content');
-  el.innerHTML = '<div class="spinner"></div>';
-  try {
-    const r = await fetch('/api/held-orders');
-    const d = await r.json();
-    renderOrders(d.verification || [], d.combine_groups || []);
-  } catch(e) { el.innerHTML = `<div class="empty">${e.message}</div>`; }
+function switchTab(id) {
+  document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('pane-' + id).classList.add('active');
+  document.getElementById('tab-' + id).classList.add('active');
+  if (_data) renderAll();
 }
 
-function renderOrders(verification, combineGroups) {
-  const el = document.getElementById('content');
-  let html = '';
-
-  // Verification Queue
-  html += `<div class="section-title">Verification Queue <span class="count-badge">${verification.length}</span></div>`;
-  if (!verification.length) {
-    html += '<div class="empty">No orders awaiting verification</div>';
-  } else {
-    html += verification.map(o => `
-      <div class="card">
-        <div class="order-header">
-          <span class="order-name">${o.name}</span>
-          <span class="badge badge-amber">${o.check_type}</span>
-          <span style="font-weight:700;">$${o.total.toFixed(2)}</span>
-          <button class="btn btn-green btn-sm" onclick="releaseHold('${o.id}','${o.name}')" style="margin-left:auto;">✓ Verify & Release</button>
-        </div>
-        <div class="order-meta">
-          <strong>${o.customer_name}</strong> · ${o.customer_email}<br>
-          ${o.shipping_address}<br>
-          ${o.note ? '<em>' + o.note + '</em>' : ''}
-        </div>
-        <div class="items-list">${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}</div>
-      </div>
-    `).join('');
+async function loadOrders() {
+  document.getElementById('pane-verify').innerHTML = '<div class="spinner"></div>';
+  document.getElementById('pane-combine').innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/held-orders');
+    _data = await r.json();
+    renderAll();
+  } catch(e) {
+    document.getElementById('pane-verify').innerHTML = `<div class="empty">${e.message}</div>`;
   }
+}
 
-  // Combine Shipping Queue
-  html += `<div class="section-title">Combine Shipping <span class="count-badge">${combineGroups.length}</span></div>`;
-  if (!combineGroups.length) {
-    html += '<div class="empty">No orders to combine</div>';
-  } else {
-    html += combineGroups.map(g => `
-      <div class="combine-group">
-        <div class="combine-header">${g.customer_name} · ${g.orders.length} orders · $${g.total_value.toFixed(2)}</div>
-        <div style="font-size:0.8rem;color:var(--dim);">${g.customer_email} · ${g.shipping_address}</div>
-        <div class="combine-orders">
-          ${g.orders.map(o => `
-            <div class="combine-order">
-              <div style="display:flex;justify-content:space-between;align-items:center;">
-                <strong>${o.name}</strong>
-                <span>$${o.total.toFixed(2)}</span>
-              </div>
-              <div style="font-size:0.78rem;color:var(--dim);margin-top:4px;">
-                ${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}
-              </div>
+function renderAll() {
+  renderVerification(_data.verification || []);
+  renderCombine(_data.combine_groups || []);
+  // Update tab badges
+  document.getElementById('tab-verify').textContent = '🔍 Verification (' + (_data.verification||[]).length + ')';
+  document.getElementById('tab-combine').textContent = '📦 Combine (' + (_data.combine_groups||[]).length + ')';
+}
+
+function renderVerification(orders) {
+  const el = document.getElementById('pane-verify');
+  if (!orders.length) { el.innerHTML = '<div class="empty">✅ No orders awaiting verification</div>'; return; }
+  el.innerHTML = orders.map(o => `
+    <div class="card">
+      <div class="order-header">
+        <span class="order-name">${o.name}</span>
+        <span class="badge badge-amber">${o.check_type}</span>
+        <span style="font-weight:700;">$${o.total.toFixed(2)}</span>
+        <div style="margin-left:auto;display:flex;gap:6px;">
+          <button class="btn btn-green btn-sm" onclick="releaseHold('${o.id}','${o.name}')">✓ Verify & Release</button>
+          <button class="btn btn-sm" style="background:var(--red);color:#fff;" onclick="cancelOrder('${o.id}','${o.name}')">✕ Cancel & Refund</button>
+        </div>
+      </div>
+      <div class="order-meta">
+        <strong>${o.customer_name}</strong> · ${o.customer_email}<br>
+        ${o.shipping_address}<br>
+        ${o.note ? '<em style="color:var(--amber);">' + o.note + '</em>' : ''}
+      </div>
+      <div class="items-list">${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}</div>
+    </div>
+  `).join('');
+}
+
+function renderCombine(groups) {
+  const el = document.getElementById('pane-combine');
+  if (!groups.length) { el.innerHTML = '<div class="empty">✅ No orders to combine</div>'; return; }
+  el.innerHTML = groups.map(g => `
+    <div class="combine-group">
+      <div class="combine-header">${g.customer_name} · ${g.orders.length} orders · $${g.total_value.toFixed(2)}</div>
+      <div style="font-size:0.8rem;color:var(--dim);">${g.customer_email} · ${g.shipping_address}</div>
+      <div class="combine-orders">
+        ${g.orders.map(o => `
+          <div class="combine-order">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <strong>${o.name}</strong>
+              <span>$${o.total.toFixed(2)}</span>
             </div>
-          `).join('')}
-        </div>
-        <div style="font-size:0.78rem;font-weight:600;margin:8px 0 4px;">Combined Packing List:</div>
-        <div class="items-list">
-          ${g.all_items.map(i => '<strong>' + i.qty + '×</strong> ' + i.title).join('<br>')}
-        </div>
-        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
-          ${g.orders.map(o => `
-            <a href="https://admin.shopify.com/store/pack-fresh/orders/${o.numeric_id}" target="_blank" class="btn btn-secondary btn-sm">
-              ${o.name} → Admin ↗
-            </a>
-          `).join('')}
-          <button class="btn btn-green btn-sm" onclick="releaseGroup(${JSON.stringify(g.orders.map(o=>o.id)).replace(/"/g,'&quot;')})">✓ Release All</button>
-        </div>
+            <div style="font-size:0.78rem;color:var(--dim);margin-top:4px;">
+              ${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}
+            </div>
+          </div>
+        `).join('')}
       </div>
-    `).join('');
-  }
+      <div style="font-size:0.78rem;font-weight:600;margin:8px 0 4px;">Combined Packing List:</div>
+      <div class="items-list">
+        ${g.all_items.map(i => '<strong>' + i.qty + '×</strong> ' + i.title).join('<br>')}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+        ${g.orders.map(o => `
+          <a href="https://admin.shopify.com/store/pack-fresh/orders/${o.numeric_id}" target="_blank" class="btn btn-secondary btn-sm">
+            ${o.name} → Admin ↗
+          </a>
+        `).join('')}
+        <button class="btn btn-green btn-sm" onclick="releaseGroup(${JSON.stringify(g.orders.map(o=>o.id)).replace(/"/g,'&quot;')})">✓ Release All</button>
+      </div>
+    </div>
+  `).join('');
+}
 
-  el.innerHTML = html;
+async function cancelOrder(orderId, orderName) {
+  if (!confirm('Cancel ' + orderName + ' and issue full refund?')) return;
+  try {
+    const r = await fetch('/api/cancel-order', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ order_id: orderId }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    toast('Cancelled + refunded: ' + orderName);
+    loadOrders();
+  } catch(e) { alert(e.message); }
 }
 
 async function releaseHold(orderId, orderName) {
