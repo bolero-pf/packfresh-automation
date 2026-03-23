@@ -106,6 +106,25 @@ if not table_exists("sku_daily_inventory"):
 else:
     print("  sku_daily_inventory already exists")
 
+# Drop events — populated by future drop planner, used to exclude drop-day sales from velocity
+if not table_exists("drop_events"):
+    cur.execute("""
+        CREATE TABLE drop_events (
+            id                  SERIAL PRIMARY KEY,
+            shopify_variant_id  BIGINT NOT NULL,
+            drop_date           DATE NOT NULL,
+            qty_offered         INTEGER,
+            drop_name           TEXT,
+            created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(shopify_variant_id, drop_date)
+        )
+    """)
+    cur.execute("CREATE INDEX idx_drop_events_variant ON drop_events(shopify_variant_id)")
+    cur.execute("CREATE INDEX idx_drop_events_date ON drop_events(drop_date)")
+    print("  Created drop_events table")
+else:
+    print("  drop_events already exists")
+
 # Metadata table for tracking last run
 if not table_exists("analytics_meta"):
     cur.execute("""
