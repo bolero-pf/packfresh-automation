@@ -127,6 +127,112 @@ def api_extend_lock():
     return jsonify({"ok": True, "lock": new_lock})
 
 
+@app.route("/api/vip/customer/<path:customer_gid>")
+def api_customer_detail(customer_gid):
+    """Full customer detail: state, orders, tier analysis."""
+    from service import get_customer_state, compute_rolling_90d_spend
+    from shopify_graphql import shopify_gql, gid_numeric
+    import json
+
+    # Ensure full GID format
+    if not customer_gid.startswith("gid://"):
+        customer_gid = f"gid://shopify/Customer/{customer_gid}"
+
+    # Get VIP state
+    state = get_customer_state(customer_gid)
+
+    # Get customer details + recent orders
+    data = shopify_gql("""
+        query($id:ID!) {
+          customer(id:$id) {
+            id email firstName lastName phone numberOfOrders
+            createdAt
+            tags
+            defaultAddress { address1 city province zip }
+            orders(first:20, sortKey:CREATED_AT, reverse:true) {
+              edges {
+                node {
+                  id name createdAt
+                  displayFulfillmentStatus
+                  displayFinancialStatus
+                  currentTotalPriceSet { shopMoney { amount } }
+                  totalRefundedSet { shopMoney { amount } }
+                }
+              }
+            }
+          }
+        }
+    """, {"id": customer_gid})
+
+    customer = data.get("data", {}).get("customer", {})
+    if not customer:
+        return jsonify({"error": "Customer not found"}), 404
+
+    orders = []
+    for edge in customer.get("orders", {}).get("edges", []):
+        o = edge["node"]
+        total = float(o.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+        refunded = float(o.get("totalRefundedSet", {}).get("shopMoney", {}).get("amount", 0))
+        orders.append({
+            "id": o["id"],
+            "name": o["name"],
+            "created_at": o["createdAt"],
+            "total": total,
+            "refunded": refunded,
+            "net": round(total - refunded, 2),
+            "fulfillment": o.get("displayFulfillmentStatus"),
+            "financial": o.get("displayFinancialStatus"),
+        })
+
+    # Tier analysis
+    tier = state.get("tier", "VIP0")
+    rolling = float(state.get("rolling") or 0)
+    lock = state.get("lock") or {}
+    thresholds = {"VIP0": 0, "VIP1": 500, "VIP2": 1250, "VIP3": 2500}
+    tier_order = ["VIP0", "VIP1", "VIP2", "VIP3"]
+    idx = tier_order.index(tier) if tier in tier_order else 0
+    next_tier = tier_order[idx + 1] if idx < 3 else None
+
+    from datetime import date
+    lock_end = lock.get("end")
+    lock_days = 0
+    if lock_end:
+        try:
+            lock_days = max(0, (date.fromisoformat(lock_end) - date.today()).days)
+        except Exception:
+            pass
+
+    addr = customer.get("defaultAddress") or {}
+
+    return jsonify({
+        "customer": {
+            "id": customer["id"],
+            "numeric_id": gid_numeric(customer["id"]),
+            "email": customer.get("email"),
+            "first_name": customer.get("firstName"),
+            "last_name": customer.get("lastName"),
+            "name": f"{customer.get('firstName', '')} {customer.get('lastName', '')}".strip(),
+            "phone": customer.get("phone"),
+            "created_at": customer.get("createdAt"),
+            "orders_count": customer.get("numberOfOrders", 0),
+            "tags": customer.get("tags", []),
+            "address": f"{addr.get('address1', '')}, {addr.get('city', '')} {addr.get('province', '')} {addr.get('zip', '')}",
+        },
+        "vip": {
+            "tier": tier,
+            "rolling_spend": round(rolling, 2),
+            "lock": lock,
+            "lock_days_remaining": lock_days,
+            "gap_to_next": round(max(0, thresholds.get(next_tier, 0) - rolling), 2) if next_tier else 0,
+            "gap_to_maintain": round(max(0, thresholds.get(tier, 0) - rolling), 2),
+            "next_tier": next_tier,
+            "threshold": thresholds.get(tier, 0),
+            "next_threshold": thresholds.get(next_tier, 0) if next_tier else None,
+        },
+        "orders": orders,
+    })
+
+
 @app.route("/api/vip/customers")
 def api_customers():
     """List VIP customers by tier with cursor pagination."""
@@ -347,8 +453,15 @@ tr:hover { background:var(--s2); }
     </select>
   </div>
 
-  <div id="customer-list"><div class="spinner"></div></div>
-  <div id="pagination" style="display:flex;gap:8px;justify-content:center;margin-top:16px;"></div>
+  <div id="list-view">
+    <div id="customer-list"><div class="spinner"></div></div>
+    <div id="pagination" style="display:flex;gap:8px;justify-content:center;margin-top:16px;"></div>
+  </div>
+
+  <div id="detail-view" style="display:none;">
+    <button class="btn" style="background:var(--s2);border:1px solid var(--border);color:var(--text);margin-bottom:16px;" onclick="closeDetail()">← Back to List</button>
+    <div id="detail-content"><div class="spinner"></div></div>
+  </div>
 
   <!-- Set Tier Modal -->
   <div id="tier-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;align-items:center;justify-content:center;">
@@ -463,7 +576,7 @@ function renderCustomers(custs) {
       const progress = nextThresh > 0 ? Math.min(1, c.rolling_spend / nextThresh) : 1;
       const pctColor = c.tier === 'VIP3' ? 'var(--vip3)' : c.tier === 'VIP2' ? 'var(--vip2)' : 'var(--vip1)';
       const esc = s => (s||'').replace(/'/g,"\\\\'").replace(/"/g,'&quot;');
-      return `<tr>
+      return `<tr style="cursor:pointer;" onclick="openDetail('${c.id}')">
         <td>
           <strong>${c.name || c.email || '—'}</strong>
           <br><small style="color:var(--dim);">${c.email || ''}</small>
@@ -526,6 +639,99 @@ async function extendLock(gid, name) {
     toast('Lock extended for ' + name);
     loadCustomers();
   } catch(e) { alert(e.message); }
+}
+
+// Detail view
+async function openDetail(gid) {
+  document.getElementById('list-view').style.display = 'none';
+  document.getElementById('detail-view').style.display = '';
+  const el = document.getElementById('detail-content');
+  el.innerHTML = '<div class="spinner"></div>';
+  // Pass numeric ID or full GID
+  const id = gid.includes('/') ? gid.split('/').pop() : gid;
+  try {
+    const r = await fetch('/api/vip/customer/' + id);
+    const d = await r.json();
+    if (!r.ok) { el.innerHTML = '<div style="color:var(--red);">' + (d.error||'Error') + '</div>'; return; }
+    renderDetail(d);
+  } catch(e) { el.innerHTML = '<div style="color:var(--red);">' + e.message + '</div>'; }
+}
+
+function closeDetail() {
+  document.getElementById('detail-view').style.display = 'none';
+  document.getElementById('list-view').style.display = '';
+}
+
+function renderDetail(d) {
+  const c = d.customer;
+  const v = d.vip;
+  const orders = d.orders || [];
+  const el = document.getElementById('detail-content');
+
+  const tierCls = v.tier.toLowerCase();
+  const lockStr = v.lock_days_remaining > 0 ? v.lock_days_remaining + ' days left (expires ' + (v.lock?.end||'') + ')' : 'No active lock';
+  const nextThresh = v.next_threshold || v.threshold;
+  const progress = nextThresh > 0 ? Math.min(1, v.rolling_spend / nextThresh) : 1;
+  const pctColor = v.tier === 'VIP3' ? 'var(--vip3)' : v.tier === 'VIP2' ? 'var(--vip2)' : 'var(--vip1)';
+  const memberSince = c.created_at ? new Date(c.created_at).toLocaleDateString() : '—';
+
+  let html = `
+    <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:24px;">
+      <div style="flex:1;min-width:280px;">
+        <div style="font-size:1.4rem;font-weight:700;margin-bottom:4px;">${c.name || c.email}</div>
+        <div style="color:var(--dim);font-size:0.85rem;line-height:1.6;">
+          ${c.email ? '✉ ' + c.email + '<br>' : ''}
+          ${c.phone ? '📱 ' + c.phone + '<br>' : ''}
+          ${c.address && c.address !== ', ' ? '📍 ' + c.address + '<br>' : ''}
+          Member since ${memberSince} · ${c.orders_count} orders
+        </div>
+        <div style="margin-top:12px;display:flex;gap:6px;">
+          <button class="btn-action" onclick="openTierModal('${c.id}','${(c.name||'').replace(/'/g,"\\\\'")}','${v.tier}')" title="Set tier">✎ Set Tier</button>
+          <button class="btn-action" onclick="extendLock('${c.id}','${(c.name||'').replace(/'/g,"\\\\'")}')">🔒+ Extend Lock</button>
+        </div>
+      </div>
+      <div style="flex:1;min-width:280px;">
+        <div class="card" style="margin:0;">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+            <span class="badge badge-${tierCls}" style="font-size:0.85rem;padding:6px 14px;">${v.tier} ${TIER_NAMES[v.tier]||''}</span>
+          </div>
+          <div style="font-size:0.82rem;line-height:1.8;">
+            <strong>90-Day Spend:</strong> $${v.rolling_spend.toFixed(2)}
+            <div class="progress-bar" style="width:200px;"><div class="progress-fill" style="width:${(progress*100).toFixed(0)}%;background:${pctColor};"></div></div>
+            <br>
+            ${v.next_tier ? '<strong>To ' + v.next_tier + ':</strong> $' + v.gap_to_next.toFixed(2) + ' more<br>' : '<strong>Top tier!</strong><br>'}
+            <strong>To maintain ${v.tier}:</strong> ${v.gap_to_maintain > 0 ? '$' + v.gap_to_maintain.toFixed(2) + ' more' : '✓ Qualified'}
+            <br>
+            <strong>Lock:</strong> ${lockStr}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="font-size:0.75rem;color:var(--dim);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Recent Orders (${orders.length})</div>
+    ${orders.length ? '<table><thead><tr><th>Order</th><th>Date</th><th>Total</th><th>Refunded</th><th>Net</th><th>Status</th><th>Fulfillment</th></tr></thead><tbody>' +
+      orders.map(o => {
+        const dt = new Date(o.created_at).toLocaleDateString();
+        const fin = o.financial || '—';
+        const ful = o.fulfillment || '—';
+        return '<tr>' +
+          '<td><strong>' + o.name + '</strong></td>' +
+          '<td style="color:var(--dim);">' + dt + '</td>' +
+          '<td>$' + o.total.toFixed(2) + '</td>' +
+          '<td style="color:' + (o.refunded > 0 ? 'var(--red)' : 'var(--dim)') + ';">$' + o.refunded.toFixed(2) + '</td>' +
+          '<td style="font-weight:600;">$' + o.net.toFixed(2) + '</td>' +
+          '<td>' + fin + '</td>' +
+          '<td>' + ful + '</td>' +
+        '</tr>';
+      }).join('') +
+      '</tbody></table>' : '<div style="color:var(--dim);">No orders found</div>'}
+
+    <div style="margin-top:12px;font-size:0.78rem;color:var(--dim);">
+      Tags: ${(c.tags||[]).join(', ') || 'none'}
+    </div>
+  `;
+
+  el.innerHTML = html;
 }
 
 loadStats();
