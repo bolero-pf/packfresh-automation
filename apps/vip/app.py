@@ -106,65 +106,101 @@ def api_recalculate():
     from shopify_graphql import shopify_gql, gid_numeric
     from datetime import date, timedelta
 
-    # Get current state for comparison
+    # Get current state
     current_state = get_customer_state(customer_gid)
+    current_tier = current_state.get("tier", "VIP0")
+    current_lock = current_state.get("lock") or {}
 
     # Compute fresh rolling spend
     rolling = compute_rolling_90d_spend(customer_gid)
 
-    # Determine correct tier from spend
+    # Determine tier from current spend
     thresholds = [("VIP3", 2500), ("VIP2", 1250), ("VIP1", 500), ("VIP0", 0)]
-    computed_tier = "VIP0"
+    spend_tier = "VIP0"
     for tier, thresh in thresholds:
         if rolling >= thresh:
-            computed_tier = tier
+            spend_tier = tier
             break
 
-    # Determine lock: should be 90 days from the order that qualified them for this tier
-    # Walk through recent orders to find when they crossed the threshold
-    numeric_id = gid_numeric(customer_gid)
-    since = (date.today() - timedelta(days=90)).isoformat()
-    order_data = shopify_gql("""
-        query($first:Int!, $q:String!) {
-          orders(first:$first, query:$q, sortKey:CREATED_AT) {
-            edges { node { createdAt currentTotalPriceSet { shopMoney { amount } } totalRefundedSet { shopMoney { amount } } } }
-          }
-        }
-    """, {"first": 100, "q": f'customer_id:{numeric_id} financial_status:paid created_at:>="{since}"'})
+    # Check if current lock is still active
+    lock_active = False
+    lock_end_date = None
+    if current_lock.get("end"):
+        try:
+            lock_end_date = date.fromisoformat(current_lock["end"])
+            lock_active = lock_end_date >= date.today()
+        except Exception:
+            pass
 
-    # Replay orders chronologically to find when threshold was crossed
-    running_total = 0.0
-    qualified_date = None
-    tier_thresh = dict(thresholds).get(computed_tier, 0)
+    # Decision logic:
+    # 1. If lock is active and current tier is HIGHER than spend tier → keep current tier (lock protects)
+    # 2. If lock is active and spend tier is HIGHER → promote (spend exceeds locked tier)
+    # 3. If lock expired → use spend tier
+    tier_rank = {"VIP0": 0, "VIP1": 1, "VIP2": 2, "VIP3": 3}
 
-    for edge in order_data.get("data", {}).get("orders", {}).get("edges", []):
-        o = edge["node"]
-        amount = float(o.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
-        refund = float(o.get("totalRefundedSet", {}).get("shopMoney", {}).get("amount", 0))
-        running_total += max(0, amount - refund)
-        if running_total >= tier_thresh and not qualified_date:
-            qualified_date = o["createdAt"][:10]
+    if lock_active:
+        locked_tier = current_lock.get("tier", current_tier)
+        if tier_rank.get(spend_tier, 0) >= tier_rank.get(locked_tier, 0):
+            # Spend qualifies for same or higher tier — propose spend tier with fresh lock
+            computed_tier = spend_tier
+            proposed_lock = {"start": date.today().isoformat(), "end": (date.today() + timedelta(days=90)).isoformat(), "tier": computed_tier}
+            reason = f"Spend qualifies for {spend_tier} (${rolling:.2f}) — refreshing lock"
+        else:
+            # Lock protects higher tier despite lower spend
+            computed_tier = locked_tier
+            proposed_lock = current_lock  # keep existing lock
+            reason = f"Lock active until {current_lock['end']} — tier protected despite ${rolling:.2f} spend"
+    else:
+        # No active lock — tier is purely based on spend
+        computed_tier = spend_tier
+        if computed_tier != "VIP0":
+            # Find the most recent qualifying order for lock start
+            numeric_id = gid_numeric(customer_gid)
+            since = (date.today() - timedelta(days=180)).isoformat()  # look back further
+            order_data = shopify_gql("""
+                query($first:Int!, $q:String!) {
+                  orders(first:$first, query:$q, sortKey:CREATED_AT, reverse:true) {
+                    edges { node { createdAt currentTotalPriceSet { shopMoney { amount } } totalRefundedSet { shopMoney { amount } } } }
+                  }
+                }
+            """, {"first": 100, "q": f'customer_id:{numeric_id} financial_status:paid created_at:>="{since}"'})
 
-    # Lock: 90 days from qualification date
-    proposed_lock = None
-    if qualified_date and computed_tier != "VIP0":
-        lock_start = qualified_date
-        lock_end = (date.fromisoformat(qualified_date) + timedelta(days=90)).isoformat()
-        proposed_lock = {"start": lock_start, "end": lock_end, "tier": computed_tier}
+            # Find the last order that was within the qualification window
+            last_order_date = None
+            for edge in order_data.get("data", {}).get("orders", {}).get("edges", []):
+                o = edge["node"]
+                amt = float(o.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+                ref = float(o.get("totalRefundedSet", {}).get("shopMoney", {}).get("amount", 0))
+                if max(0, amt - ref) > 0:
+                    last_order_date = o["createdAt"][:10]
+                    break  # most recent paid order (reverse sorted)
+
+            if last_order_date:
+                proposed_lock = {"start": last_order_date, "end": (date.fromisoformat(last_order_date) + timedelta(days=90)).isoformat(), "tier": computed_tier}
+            else:
+                proposed_lock = None
+            reason = f"Lock expired — recalculated from ${rolling:.2f} spend"
+        else:
+            proposed_lock = None
+            reason = f"Below all thresholds (${rolling:.2f})"
+
+    changed = (computed_tier != current_tier or
+               round(rolling, 2) != round(float(current_state.get("rolling") or 0), 2) or
+               (proposed_lock or {}).get("end") != current_lock.get("end"))
 
     return jsonify({
         "current": {
-            "tier": current_state.get("tier", "VIP0"),
+            "tier": current_tier,
             "rolling": float(current_state.get("rolling") or 0),
-            "lock": current_state.get("lock"),
+            "lock": current_lock,
         },
         "proposed": {
             "tier": computed_tier,
             "rolling": round(rolling, 2),
             "lock": proposed_lock,
-            "qualified_date": qualified_date,
+            "reason": reason,
         },
-        "changed": computed_tier != current_state.get("tier") or round(rolling, 2) != round(float(current_state.get("rolling") or 0), 2),
+        "changed": changed,
     })
 
 
@@ -726,7 +762,7 @@ async function recalculate(gid, name) {
         <span class="recalc-label">Lock</span>
         <span>${p.lock ? p.lock.start + ' → ' + p.lock.end : 'No lock'}</span>
       </div>
-      ${p.qualified_date ? '<div class="recalc-row"><span class="recalc-label">Qualified On</span><span>' + p.qualified_date + '</span></div>' : ''}
+      ${p.reason ? '<div style="margin-top:12px;font-size:0.82rem;color:var(--dim);font-style:italic;">' + p.reason + '</div>' : ''}
       ${!changed ? '<div style="color:var(--green);margin-top:12px;font-weight:600;">✓ No changes needed — current state is correct.</div>' : '<div style="color:var(--amber);margin-top:12px;font-weight:600;">⚠ Changes detected — review and apply below.</div>'}
     `;
     document.getElementById('recalc-actions').style.display = changed ? '' : 'none';
