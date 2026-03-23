@@ -44,6 +44,8 @@ cols = {
     "shopify_product_id": "BIGINT",
     "title":              "TEXT",
     "release_time":       "TIME DEFAULT '11:00:00'",
+    "limit_qty":          "INTEGER",                         # limit-X tag value
+    "revenue":            "DECIMAL(10,2)",                   # total revenue from the drop
 }
 
 for col, typedef in cols.items():

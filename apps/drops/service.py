@@ -226,11 +226,11 @@ def publish_to_all(product_gid: str):
 
 def setup_drop(product_gid: str, variant_gid: str, drop_date: str,
                drop_price: float, drop_type: str = "weekly",
-               vip_price_cents: int = None):
+               vip_price_cents: int = None, limit_qty: int = None):
     """
     Full drop setup:
     1. Set drop price
-    2. Add unavailable + drop tags (+ vip-drop for VIP type)
+    2. Add unavailable + drop + weekly-deals tags (+ vip-drop for VIP, + limit-X)
     3. Remove from non-Online Store channels
     4. Set VIP metafield if VIP drop
     """
@@ -245,9 +245,11 @@ def setup_drop(product_gid: str, variant_gid: str, drop_date: str,
     set_drop_price(product_gid, variant_gid, drop_price)
 
     # 2. Tags
-    tags = [unavail_tag, "drop"]
+    tags = [unavail_tag, "drop", "weekly-deals"]
     if drop_type == "vip":
         tags.append("vip-drop")
+    if limit_qty:
+        tags.append(f"limit-{limit_qty}")
     add_tags(product_gid, tags)
 
     # 3. Remove from non-Online channels
@@ -268,7 +270,10 @@ def release_drop(product_gid: str):
     3. Publish to all channels
     """
     tags = get_product_tags(product_gid)
-    to_remove = [t for t in tags if t.lower().startswith("unavailable-") or t.lower() == "drop"]
+    to_remove = [t for t in tags if (
+        t.lower().startswith("unavailable-")
+        or t.lower() == "drop"
+    )]
     if to_remove:
         remove_tags(product_gid, to_remove)
     publish_to_all(product_gid)

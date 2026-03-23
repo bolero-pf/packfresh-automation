@@ -114,6 +114,7 @@ def create_drop():
             product_gid, variant_gid, drop_date, float(drop_price),
             drop_type=drop_type,
             vip_price_cents=int(vip_price_cents) if vip_price_cents else None,
+            limit_qty=int(qty_offered) if qty_offered else None,
         )
     except Exception as e:
         return jsonify({"error": f"Shopify setup failed: {e}"}), 500
@@ -122,11 +123,12 @@ def create_drop():
     db.execute("""
         INSERT INTO drop_events
             (shopify_variant_id, shopify_product_id, drop_date, drop_name,
-             qty_offered, status, drop_type, original_price, drop_price, title)
-        VALUES (%s, %s, %s, %s, %s, 'scheduled', %s, %s, %s, %s)
+             qty_offered, limit_qty, status, drop_type, original_price, drop_price, title)
+        VALUES (%s, %s, %s, %s, %s, %s, 'scheduled', %s, %s, %s, %s)
         ON CONFLICT (shopify_variant_id, drop_date) DO UPDATE SET
             drop_name = EXCLUDED.drop_name,
             qty_offered = EXCLUDED.qty_offered,
+            limit_qty = EXCLUDED.limit_qty,
             drop_type = EXCLUDED.drop_type,
             original_price = EXCLUDED.original_price,
             drop_price = EXCLUDED.drop_price,
@@ -138,6 +140,7 @@ def create_drop():
         drop_date,
         title,
         qty_offered,
+        qty_offered,  # limit_qty = same as qty_offered
         drop_type,
         original_price,
         float(drop_price),
@@ -360,8 +363,8 @@ td { padding:8px; border-bottom:1px solid var(--border); }
             </select>
           </div>
           <div class="form-group">
-            <span class="form-label">Qty Offered (optional)</span>
-            <input class="form-input" id="drop-qty" type="number">
+            <span class="form-label">Limit (sets limit-X tag)</span>
+            <input class="form-input" id="drop-qty" type="number" placeholder="e.g. 72">
           </div>
           <div class="form-group" id="vip-cents-group" style="display:none;">
             <span class="form-label">VIP Price (cents)</span>
