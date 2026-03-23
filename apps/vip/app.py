@@ -44,11 +44,95 @@ def index():
     return render_template_string(CONSOLE_HTML)
 
 
+@app.route("/api/vip/set-tier", methods=["POST"])
+def api_set_tier():
+    """Manually set a customer's VIP tier + lock window."""
+    data = request.get_json(silent=True) or {}
+    customer_gid = data.get("customer_id")
+    new_tier = data.get("tier", "").upper()
+    lock_days = int(data.get("lock_days", 90))
+
+    if not customer_gid or new_tier not in ("VIP0", "VIP1", "VIP2", "VIP3"):
+        return jsonify({"error": "customer_id and valid tier (VIP0-VIP3) required"}), 400
+
+    from service import shopify_gql, shopify_metafields_set
+    from shopify_graphql import gid_numeric
+    import json
+    from datetime import date, timedelta
+
+    # Set tier metafield
+    lock_start = date.today().isoformat()
+    lock_end = (date.today() + timedelta(days=lock_days)).isoformat()
+    lock_obj = {"start": lock_start, "end": lock_end, "tier": new_tier}
+
+    try:
+        shopify_metafields_set([
+            {"ownerId": customer_gid, "namespace": "custom", "key": "loyalty_vip_tier", "value": new_tier, "type": "single_line_text_field"},
+            {"ownerId": customer_gid, "namespace": "custom", "key": "loyalty_lock_window", "value": json.dumps(lock_obj), "type": "json"},
+        ])
+    except Exception as e:
+        return jsonify({"error": f"Metafield update failed: {e}"}), 500
+
+    # Update tags — remove old VIP tags, add new one
+    try:
+        old_tags = ["VIP0", "VIP1", "VIP2", "VIP3", "VIP1-risk", "VIP2-risk", "VIP3-risk", "VIP1-hopeful", "VIP2-hopeful", "VIP3-hopeful"]
+        shopify_gql("""
+            mutation($id:ID!,$tags:[String!]!) { tagsRemove(id:$id,tags:$tags) { userErrors{message} } }
+        """, {"id": customer_gid, "tags": old_tags})
+        shopify_gql("""
+            mutation($id:ID!,$tags:[String!]!) { tagsAdd(id:$id,tags:$tags) { userErrors{message} } }
+        """, {"id": customer_gid, "tags": [new_tier]})
+    except Exception as e:
+        return jsonify({"error": f"Tag update failed: {e}"}), 500
+
+    return jsonify({"ok": True, "tier": new_tier, "lock": lock_obj})
+
+
+@app.route("/api/vip/extend-lock", methods=["POST"])
+def api_extend_lock():
+    """Extend a customer's lock window."""
+    data = request.get_json(silent=True) or {}
+    customer_gid = data.get("customer_id")
+    extra_days = int(data.get("days", 90))
+
+    if not customer_gid:
+        return jsonify({"error": "customer_id required"}), 400
+
+    from service import get_customer_state, shopify_metafields_set
+    import json
+    from datetime import date, timedelta
+
+    state = get_customer_state(customer_gid)
+    lock = state.get("lock") or {}
+    current_end = lock.get("end", date.today().isoformat())
+
+    try:
+        new_end = (date.fromisoformat(current_end) + timedelta(days=extra_days)).isoformat()
+    except Exception:
+        new_end = (date.today() + timedelta(days=extra_days)).isoformat()
+
+    new_lock = {
+        "start": lock.get("start", date.today().isoformat()),
+        "end": new_end,
+        "tier": state.get("tier", "VIP0"),
+    }
+
+    try:
+        shopify_metafields_set([
+            {"ownerId": customer_gid, "namespace": "custom", "key": "loyalty_lock_window", "value": json.dumps(new_lock), "type": "json"},
+        ])
+    except Exception as e:
+        return jsonify({"error": f"Lock extension failed: {e}"}), 500
+
+    return jsonify({"ok": True, "lock": new_lock})
+
+
 @app.route("/api/vip/customers")
 def api_customers():
-    """List VIP customers by tier."""
+    """List VIP customers by tier with cursor pagination."""
     tier = request.args.get("tier", "").upper()
     page_size = int(request.args.get("limit", 50))
+    cursor = request.args.get("cursor")
 
     from shopify_graphql import shopify_gql
 
@@ -61,9 +145,13 @@ def api_customers():
     if q:
         query_str = f'({query_str}) AND ({q})'
 
+    variables = {"first": page_size, "q": query_str}
+    if cursor:
+        variables["after"] = cursor
+
     data = shopify_gql("""
-        query($first:Int!, $q:String!) {
-          customers(first:$first, query:$q, sortKey:UPDATED_AT, reverse:true) {
+        query($first:Int!, $after:String, $q:String!) {
+          customers(first:$first, after:$after, query:$q, sortKey:UPDATED_AT, reverse:true) {
             edges {
               node {
                 id
@@ -77,9 +165,12 @@ def api_customers():
                 }
               }
             }
+            pageInfo { hasNextPage endCursor }
           }
         }
-    """, {"first": page_size, "q": query_str})
+    """, variables)
+
+    page_info = data.get("data", {}).get("customers", {}).get("pageInfo", {})
 
     customers = []
     for edge in data.get("data", {}).get("customers", {}).get("edges", []):
@@ -145,7 +236,11 @@ def api_customers():
             "gap_to_maintain": round(gap_maintain, 2),
         })
 
-    return jsonify({"customers": customers})
+    return jsonify({
+        "customers": customers,
+        "has_next": page_info.get("hasNextPage", False),
+        "next_cursor": page_info.get("endCursor"),
+    })
 
 
 @app.route("/api/vip/stats")
@@ -224,6 +319,9 @@ tr:hover { background:var(--s2); }
 .badge-vip3 { background:rgba(245,158,11,0.15); color:var(--vip3); }
 .progress-bar { height:6px; background:var(--s2); border-radius:3px; overflow:hidden; width:100px; display:inline-block; vertical-align:middle; margin-left:6px; }
 .progress-fill { height:100%; border-radius:3px; }
+.btn-action { background:none; border:1px solid var(--border); color:var(--dim); width:30px; height:30px; border-radius:6px; cursor:pointer; font-size:0.8rem; display:inline-flex; align-items:center; justify-content:center; }
+.btn-action:hover { border-color:var(--accent); color:var(--text); }
+.btn-green { background:var(--green); color:#000; }
 .spinner { width:24px; height:24px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; margin:30px auto; }
 @keyframes spin { to { transform:rotate(360deg); } }
 </style>
@@ -238,15 +336,51 @@ tr:hover { background:var(--s2); }
 
   <div class="controls">
     <input type="text" id="search" placeholder="Search by name or email..." oninput="debounce()">
+    <select id="sort-select" onchange="sortAndRender()" style="height:38px;background:var(--s2);border:1.5px solid var(--border);border-radius:8px;color:var(--text);padding:0 12px;font-size:0.85rem;font-family:inherit;">
+      <option value="spend_desc">90d Spend (high)</option>
+      <option value="spend_asc">90d Spend (low)</option>
+      <option value="gap_next_asc">Gap to Next (close)</option>
+      <option value="gap_maintain_asc">Gap to Maintain (at risk)</option>
+      <option value="orders_desc">Orders (most)</option>
+      <option value="lock_asc">Lock Expiry (soonest)</option>
+      <option value="name_asc">Name A-Z</option>
+    </select>
   </div>
 
   <div id="customer-list"><div class="spinner"></div></div>
+  <div id="pagination" style="display:flex;gap:8px;justify-content:center;margin-top:16px;"></div>
+
+  <!-- Set Tier Modal -->
+  <div id="tier-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;align-items:center;justify-content:center;">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;width:380px;max-width:90vw;">
+      <h3 style="margin-bottom:16px;" id="tier-modal-title">Set VIP Tier</h3>
+      <div style="margin-bottom:12px;">
+        <span style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;">Tier</span>
+        <select id="modal-tier" style="width:100%;height:38px;background:var(--s2);border:1.5px solid var(--border);border-radius:8px;color:var(--text);padding:0 12px;font-family:inherit;margin-top:4px;">
+          <option value="VIP0">VIP0 (None)</option>
+          <option value="VIP1">VIP1 Adventurer</option>
+          <option value="VIP2">VIP2 Guardian</option>
+          <option value="VIP3">VIP3 Champion</option>
+        </select>
+      </div>
+      <div style="margin-bottom:16px;">
+        <span style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;">Lock Duration (days)</span>
+        <input id="modal-lock-days" type="number" value="90" style="width:100%;height:38px;background:var(--s2);border:1.5px solid var(--border);border-radius:8px;color:var(--text);padding:0 12px;font-family:inherit;margin-top:4px;">
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn" style="flex:1;background:var(--s2);border:1px solid var(--border);color:var(--text);" onclick="closeTierModal()">Cancel</button>
+        <button class="btn btn-green" style="flex:1;" onclick="submitTierChange()">Apply</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
-let _tier = '', _timer = null;
+let _tier = '', _timer = null, _allCustomers = [], _cursor = null, _hasNext = false, _modalGid = null;
 const TIER_NAMES = {VIP1:'Adventurer', VIP2:'Guardian', VIP3:'Champion'};
 const TIER_THRESH = {VIP0:0, VIP1:500, VIP2:1250, VIP3:2500};
+
+function toast(msg) { /* simple toast */ const d=document.createElement('div'); d.style.cssText='position:fixed;bottom:20px;right:20px;background:var(--green);color:#000;padding:10px 20px;border-radius:8px;font-weight:600;z-index:200;'; d.textContent=msg; document.body.appendChild(d); setTimeout(()=>d.remove(),3000); }
 
 async function loadStats() {
   try {
@@ -281,45 +415,117 @@ async function loadStats() {
 function filterTier(t) { _tier = t; loadStats(); loadCustomers(); }
 function debounce() { clearTimeout(_timer); _timer = setTimeout(loadCustomers, 400); }
 
-async function loadCustomers() {
+async function loadCustomers(cursor) {
   const el = document.getElementById('customer-list');
   el.innerHTML = '<div class="spinner"></div>';
   const q = document.getElementById('search').value.trim();
   const params = new URLSearchParams({ tier: _tier, limit: 50 });
   if (q) params.set('q', q);
+  if (cursor) params.set('cursor', cursor);
   try {
     const r = await fetch('/api/vip/customers?' + params);
     const d = await r.json();
-    const custs = d.customers || [];
-    if (!custs.length) { el.innerHTML = '<div style="color:var(--dim);text-align:center;padding:30px;">No customers found</div>'; return; }
-    el.innerHTML = `<table>
-      <thead><tr><th>Customer</th><th>Tier</th><th>90d Spend</th><th>Gap to Next</th><th>To Maintain</th><th>Orders</th><th>Lock</th></tr></thead>
-      <tbody>${custs.map(c => {
-        const tierCls = c.tier.toLowerCase();
-        const lockEnd = c.lock?.end || '';
-        const lockDays = lockEnd ? Math.max(0, Math.ceil((new Date(lockEnd) - new Date()) / 86400000)) : 0;
-        const lockStr = lockEnd ? lockDays + 'd left' : '—';
-        const nextThresh = TIER_THRESH[{VIP0:'VIP1',VIP1:'VIP2',VIP2:'VIP3',VIP3:'VIP3'}[c.tier]] || 0;
-        const progress = nextThresh > 0 ? Math.min(1, c.rolling_spend / nextThresh) : 1;
-        const pctColor = c.tier === 'VIP3' ? 'var(--vip3)' : c.tier === 'VIP2' ? 'var(--vip2)' : 'var(--vip1)';
-        return `<tr>
-          <td>
-            <strong>${c.name || c.email || '—'}</strong>
-            <br><small style="color:var(--dim);">${c.email || ''}</small>
-          </td>
-          <td><span class="badge badge-${tierCls}">${c.tier} ${TIER_NAMES[c.tier]||''}</span></td>
-          <td>
-            $${c.rolling_spend.toFixed(2)}
-            <div class="progress-bar"><div class="progress-fill" style="width:${(progress*100).toFixed(0)}%;background:${pctColor};"></div></div>
-          </td>
-          <td style="color:${c.gap_to_next > 0 ? 'var(--amber)' : 'var(--green)'};">${c.gap_to_next > 0 ? '$'+c.gap_to_next.toFixed(2) : '—'}</td>
-          <td style="color:${c.gap_to_maintain > 0 ? 'var(--red)' : 'var(--green)'};">${c.gap_to_maintain > 0 ? '$'+c.gap_to_maintain.toFixed(2) : '✓'}</td>
-          <td>${c.orders||0}</td>
-          <td style="color:${lockDays > 0 ? 'var(--green)' : 'var(--dim)'};">${lockStr}</td>
-        </tr>`;
-      }).join('')}</tbody>
-    </table>`;
+    _allCustomers = d.customers || [];
+    _hasNext = d.has_next;
+    _cursor = d.next_cursor;
+    sortAndRender();
   } catch(e) { el.innerHTML = `<div style="color:var(--red);">${e.message}</div>`; }
+}
+
+function sortAndRender() {
+  const sort = document.getElementById('sort-select').value;
+  let custs = [..._allCustomers];
+  if (sort === 'spend_desc') custs.sort((a,b) => b.rolling_spend - a.rolling_spend);
+  else if (sort === 'spend_asc') custs.sort((a,b) => a.rolling_spend - b.rolling_spend);
+  else if (sort === 'gap_next_asc') custs.sort((a,b) => (a.gap_to_next||9999) - (b.gap_to_next||9999));
+  else if (sort === 'gap_maintain_asc') custs.sort((a,b) => (b.gap_to_maintain||0) - (a.gap_to_maintain||0));
+  else if (sort === 'orders_desc') custs.sort((a,b) => (b.orders||0) - (a.orders||0));
+  else if (sort === 'lock_asc') custs.sort((a,b) => {
+    const da = a.lock?.end ? new Date(a.lock.end).getTime() : Infinity;
+    const db = b.lock?.end ? new Date(b.lock.end).getTime() : Infinity;
+    return da - db;
+  });
+  else if (sort === 'name_asc') custs.sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  renderCustomers(custs);
+}
+
+function renderCustomers(custs) {
+  const el = document.getElementById('customer-list');
+  if (!custs.length) { el.innerHTML = '<div style="color:var(--dim);text-align:center;padding:30px;">No customers found</div>'; return; }
+  el.innerHTML = `<table>
+    <thead><tr><th>Customer</th><th>Tier</th><th>90d Spend</th><th>Gap to Next</th><th>To Maintain</th><th>Orders</th><th>Lock</th><th></th></tr></thead>
+    <tbody>${custs.map(c => {
+      const tierCls = c.tier.toLowerCase();
+      const lockEnd = c.lock?.end || '';
+      const lockDays = lockEnd ? Math.max(0, Math.ceil((new Date(lockEnd) - new Date()) / 86400000)) : 0;
+      const lockStr = lockEnd ? lockDays + 'd left' : '—';
+      const nextThresh = TIER_THRESH[{VIP0:'VIP1',VIP1:'VIP2',VIP2:'VIP3',VIP3:'VIP3'}[c.tier]] || 0;
+      const progress = nextThresh > 0 ? Math.min(1, c.rolling_spend / nextThresh) : 1;
+      const pctColor = c.tier === 'VIP3' ? 'var(--vip3)' : c.tier === 'VIP2' ? 'var(--vip2)' : 'var(--vip1)';
+      const esc = s => (s||'').replace(/'/g,"\\\\'").replace(/"/g,'&quot;');
+      return `<tr>
+        <td>
+          <strong>${c.name || c.email || '—'}</strong>
+          <br><small style="color:var(--dim);">${c.email || ''}</small>
+        </td>
+        <td><span class="badge badge-${tierCls}">${c.tier} ${TIER_NAMES[c.tier]||''}</span></td>
+        <td>
+          $${c.rolling_spend.toFixed(2)}
+          <div class="progress-bar"><div class="progress-fill" style="width:${(progress*100).toFixed(0)}%;background:${pctColor};"></div></div>
+        </td>
+        <td style="color:${c.gap_to_next > 0 ? 'var(--amber)' : 'var(--green)'};">${c.gap_to_next > 0 ? '$'+c.gap_to_next.toFixed(2) : '—'}</td>
+        <td style="color:${c.gap_to_maintain > 0 ? 'var(--red)' : 'var(--green)'};">${c.gap_to_maintain > 0 ? '$'+c.gap_to_maintain.toFixed(2) : '✓'}</td>
+        <td>${c.orders||0}</td>
+        <td style="color:${lockDays > 0 ? 'var(--green)' : 'var(--dim)'};">${lockStr}</td>
+        <td style="white-space:nowrap;">
+          <button class="btn-action" onclick="openTierModal('${c.id}','${esc(c.name)}','${c.tier}')" title="Set tier">✎</button>
+          ${lockEnd ? '<button class="btn-action" onclick="extendLock(\\'' + c.id + '\\',\\'' + esc(c.name) + '\\')" title="Extend lock +90d">🔒+</button>' : ''}
+        </td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
+  // Pagination
+  const pg = document.getElementById('pagination');
+  pg.innerHTML = _hasNext ? '<button class="btn btn-secondary" onclick="loadCustomers(_cursor)">Load More →</button>' : '';
+}
+
+// Tier modal
+function openTierModal(gid, name, currentTier) {
+  _modalGid = gid;
+  document.getElementById('tier-modal-title').textContent = 'Set Tier: ' + name;
+  document.getElementById('modal-tier').value = currentTier;
+  document.getElementById('tier-modal').style.display = 'flex';
+}
+function closeTierModal() { document.getElementById('tier-modal').style.display = 'none'; _modalGid = null; }
+async function submitTierChange() {
+  if (!_modalGid) return;
+  const tier = document.getElementById('modal-tier').value;
+  const days = parseInt(document.getElementById('modal-lock-days').value) || 90;
+  try {
+    const r = await fetch('/api/vip/set-tier', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ customer_id: _modalGid, tier, lock_days: days }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    toast('Tier set to ' + tier + ' with ' + days + ' day lock');
+    closeTierModal();
+    loadCustomers();
+  } catch(e) { alert(e.message); }
+}
+async function extendLock(gid, name) {
+  const days = prompt('Extend lock by how many days?', '90');
+  if (!days) return;
+  try {
+    const r = await fetch('/api/vip/extend-lock', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ customer_id: gid, days: parseInt(days) }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    toast('Lock extended for ' + name);
+    loadCustomers();
+  } catch(e) { alert(e.message); }
 }
 
 loadStats();
