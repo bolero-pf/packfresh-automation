@@ -48,7 +48,7 @@ def _check_jwt_auth():
     if request.path in ('/health', '/ping', '/favicon.ico') or request.path.startswith('/static'):
         return
     from auth import require_auth
-    return require_auth()
+    return require_auth(roles=["manager", "owner"])
 
 @app.after_request
 def _add_admin_bar(response):

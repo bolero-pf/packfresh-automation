@@ -93,6 +93,37 @@ def api_logout():
     return resp
 
 
+@app.route("/api/change-password", methods=["POST"])
+def change_password():
+    """Any logged-in user can change their own password."""
+    token = request.cookies.get(JWT_COOKIE_NAME)
+    payload = decode_token(token) if token else None
+    if not payload:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    data = request.get_json(silent=True) or {}
+    current = data.get("current_password", "")
+    new_pass = data.get("new_password", "")
+
+    if not current or not new_pass:
+        return jsonify({"error": "Current and new password required"}), 400
+    if len(new_pass) < 8:
+        return jsonify({"error": "New password must be at least 8 characters"}), 400
+
+    user = db.query_one(
+        "SELECT * FROM admin_users WHERE id::text = %s AND is_active = TRUE",
+        (payload["sub"],)
+    )
+    if not user or not _check_password(current, user["password_hash"]):
+        return jsonify({"error": "Current password is incorrect"}), 401
+
+    db.execute(
+        "UPDATE admin_users SET password_hash = %s WHERE id::text = %s",
+        (_hash_password(new_pass), payload["sub"])
+    )
+    return jsonify({"ok": True})
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Dashboard (requires auth)
 # ═══════════════════════════════════════════════════════════════════════════════

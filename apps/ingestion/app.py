@@ -88,7 +88,7 @@ def require_auth():
     # Try JWT auth first (from admin portal)
     try:
         from auth import require_auth as jwt_auth
-        result = jwt_auth()
+        result = jwt_auth(roles=["manager", "owner"])
         if result is None:
             return None  # JWT valid — authenticated
     except Exception:

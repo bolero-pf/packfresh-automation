@@ -40,7 +40,7 @@ def _check_jwt_auth():
         return
     try:
         from auth import require_auth
-        result = require_auth()
+        result = require_auth(roles=["owner"])
         if result is None:
             return None
     except Exception:
