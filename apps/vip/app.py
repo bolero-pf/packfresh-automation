@@ -140,16 +140,19 @@ def api_recalculate():
 
     if lock_active:
         locked_tier = current_lock.get("tier", current_tier)
-        if tier_rank.get(spend_tier, 0) >= tier_rank.get(locked_tier, 0):
-            # Spend qualifies for same or higher tier — propose spend tier with fresh lock
+        if tier_rank.get(spend_tier, 0) > tier_rank.get(locked_tier, 0):
+            # Spend qualifies for HIGHER tier — promote with fresh lock
             computed_tier = spend_tier
             proposed_lock = {"start": date.today().isoformat(), "end": (date.today() + timedelta(days=90)).isoformat(), "tier": computed_tier}
-            reason = f"Spend qualifies for {spend_tier} (${rolling:.2f}) — refreshing lock"
+            reason = f"Promotion! Spend qualifies for {spend_tier} (${rolling:.2f}) — new lock from today"
         else:
-            # Lock protects higher tier despite lower spend
+            # Same or lower tier — keep existing lock as-is
             computed_tier = locked_tier
-            proposed_lock = current_lock  # keep existing lock
-            reason = f"Lock active until {current_lock['end']} — tier protected despite ${rolling:.2f} spend"
+            proposed_lock = current_lock
+            if tier_rank.get(spend_tier, 0) >= tier_rank.get(locked_tier, 0):
+                reason = f"Lock active until {current_lock['end']} — tier and lock correct (${rolling:.2f} spend)"
+            else:
+                reason = f"Lock active until {current_lock['end']} — tier protected despite ${rolling:.2f} spend"
     else:
         # No active lock — tier is purely based on spend
         computed_tier = spend_tier
