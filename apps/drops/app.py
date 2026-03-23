@@ -310,7 +310,6 @@ td { padding:8px; border-bottom:1px solid var(--border); }
 </head>
 <body>
 <div class="header">
-  <a href="https://admin.pack-fresh.com" style="color:var(--accent);text-decoration:none;font-weight:600;font-size:0.85rem;">← Console</a>
   <h1>🎯 Drop Planner</h1>
   <button class="btn btn-green btn-sm" onclick="manualRelease()" style="margin-left:auto;">🚀 Release Now</button>
 </div>

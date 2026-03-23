@@ -274,7 +274,6 @@ td { padding:8px; border-bottom:1px solid var(--border); }
 </head>
 <body>
 <div class="header">
-  <a href="https://admin.pack-fresh.com" style="color:var(--accent);text-decoration:none;font-weight:600;font-size:0.85rem;">← Console</a>
   <h1>SKU Analytics</h1>
   <button class="btn btn-secondary btn-sm" onclick="runPipeline()" id="run-btn">▶ Run Now</button>
   <button class="btn btn-secondary btn-sm" onclick="runBackfill()" id="bf-btn">↻ Full Backfill</button>
