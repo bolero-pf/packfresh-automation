@@ -84,21 +84,39 @@ def api_customers():
     customers = []
     for edge in data.get("data", {}).get("customers", {}).get("edges", []):
         c = edge["node"]
+        # Parse metafields — key might be "loyalty_vip_tier" or "custom.loyalty_vip_tier"
         mf = {}
-        for me in c.get("metafields", {}).get("edges", []):
-            mf[me["node"]["key"]] = me["node"]["value"]
+        for me in (c.get("metafields") or {}).get("edges", []):
+            node = me["node"]
+            key = node["key"]
+            # Strip namespace prefix if present
+            if "." in key:
+                key = key.split(".", 1)[1]
+            mf[key] = node["value"]
 
-        tier_val = mf.get("loyalty_vip_tier", "VIP0")
+        # Also try to determine tier from tags if metafield is missing
+        tags = [t.upper() for t in (c.get("tags") or [])]
+        tier_from_tags = "VIP0"
+        if "VIP3" in tags:
+            tier_from_tags = "VIP3"
+        elif "VIP2" in tags:
+            tier_from_tags = "VIP2"
+        elif "VIP1" in tags:
+            tier_from_tags = "VIP1"
+
+        tier_val = mf.get("loyalty_vip_tier") or tier_from_tags
         rolling = 0
         try:
-            rolling = float(mf.get("loyalty_rolling_spend_90d", 0))
+            rolling = float(mf.get("loyalty_rolling_spend_90d") or 0)
         except (ValueError, TypeError):
             pass
 
         lock = {}
         try:
             import json
-            lock = json.loads(mf.get("loyalty_lock_window", "{}"))
+            raw_lock = mf.get("loyalty_lock_window", "")
+            if raw_lock:
+                lock = json.loads(raw_lock)
         except Exception:
             pass
 
@@ -132,15 +150,43 @@ def api_customers():
 
 @app.route("/api/vip/stats")
 def api_stats():
-    """Aggregate VIP tier stats."""
+    """Aggregate VIP tier stats by counting tagged customers."""
     from shopify_graphql import shopify_gql
-    stats = {}
-    for tier in ("VIP1", "VIP2", "VIP3"):
+    # Fetch a page of all VIP-tagged customers and count by tier from tags
+    # More reliable than customersCount which may not support tag queries
+    stats = {"VIP1": 0, "VIP2": 0, "VIP3": 0}
+    cursor = None
+    total_fetched = 0
+    while True:
+        variables = {"first": 250, "q": 'tag:"VIP1" OR tag:"VIP2" OR tag:"VIP3"'}
+        if cursor:
+            variables["after"] = cursor
         data = shopify_gql("""
-            query($q:String!) { customersCount(query:$q) { count } }
-        """, {"q": f'tag:"{tier}"'})
-        stats[tier] = data.get("data", {}).get("customersCount", {}).get("count", 0)
-    return jsonify({"stats": stats})
+            query($first:Int!, $after:String, $q:String!) {
+              customers(first:$first, after:$after, query:$q, sortKey:ID) {
+                edges { node { id tags } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+        """, variables)
+        edges = data.get("data", {}).get("customers", {}).get("edges", [])
+        for edge in edges:
+            tags = [t.upper() for t in (edge["node"].get("tags") or [])]
+            # Count highest tier only
+            if "VIP3" in tags:
+                stats["VIP3"] += 1
+            elif "VIP2" in tags:
+                stats["VIP2"] += 1
+            elif "VIP1" in tags:
+                stats["VIP1"] += 1
+            total_fetched += 1
+        page_info = data.get("data", {}).get("customers", {}).get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        if total_fetched > 5000:
+            break  # safety cap
+    return jsonify({"stats": stats, "total": sum(stats.values())})
 
 
 CONSOLE_HTML = """
