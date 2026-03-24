@@ -825,12 +825,14 @@
             <!-- Price comparison panel (hidden until Link & Compare is clicked) -->
             <div id="price-comparison" style="display:none;"></div>
 
-            <div class="divider">or try auto-match</div>
+            <div class="divider">or search PPT</div>
 
-            <div class="form-group">
-                <button class="btn btn-secondary" onclick="fuzzySearch()" style="width:100%;">
-                    Search PPT for Matches
-                </button>
+            <div class="form-group" style="margin-bottom:8px;">
+                <div style="display:flex; gap:8px;">
+                    <input type="text" id="map-search-query" placeholder="Search PPT by name..." style="flex:1;"
+                           onkeydown="if(event.key==='Enter') fuzzySearch()">
+                    <button class="btn btn-secondary btn-sm" onclick="fuzzySearch()">Search</button>
+                </div>
             </div>
             <div id="fuzzy-results"></div>
         </div>
@@ -1787,6 +1789,7 @@
         document.getElementById('map-set-name').textContent = setName || 'N/A';
         document.getElementById('map-collectr-price').textContent = `$${currentMapCollectrPrice.toFixed(2)}`;
         document.getElementById('map-tcgplayer-id').value = '';
+        document.getElementById('map-search-query').value = productName;
         document.getElementById('fuzzy-results').innerHTML = '';
         document.getElementById('price-comparison').style.display = 'none';
         document.getElementById('price-comparison').innerHTML = '';
@@ -1979,18 +1982,13 @@
     }
 
     async function fuzzySearch() {
-        const productName = document.getElementById('map-product-name').textContent;
-        const setName = document.getElementById('map-set-name').textContent;
+        const searchQuery = (document.getElementById('map-search-query').value || '').trim();
+        if (!searchQuery) { return; }
         const container = document.getElementById('fuzzy-results');
         container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
 
-        // Choose endpoint based on product type
         const endpoint = currentMapProductType === 'raw' ? '/api/ppt/search-cards' : '/api/ppt/search-sealed';
-
-        // PPT's `set` param expects set ID slugs (like "sv08-surging-sparks"),
-        // not display names (like "SV: 151"), so don't pass it.
-        // The product name from Collectr already has enough context.
-        const body = { query: productName };
+        const body = { query: searchQuery };
 
         try {
             const r = await fetch(endpoint, {
@@ -2015,7 +2013,7 @@
             if (!results.length) {
                 container.innerHTML = `
                     <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:8px;">
-                        <div style="font-size:0.85rem;color:var(--amber);font-weight:600;margin-bottom:10px;">⚠ No PPT match found for "${productName}"</div>
+                        <div style="font-size:0.85rem;color:var(--amber);font-weight:600;margin-bottom:10px;">⚠ No PPT match found for "${searchQuery}"</div>
                         <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:12px;">You can link to a store product instead, or accept the Collectr price with no TCGPlayer link.</div>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;">
                             <button class="btn btn-secondary" onclick="mappingSearchStore()">🏪 Search Store Products</button>
