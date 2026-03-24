@@ -849,7 +849,23 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
 
     const approvedStyle = _approvedItems.has(item.id) ? 'opacity:0.5;' : '';
     return `<tr style="${rowStyle}${approvedStyle}" data-item-id="${item.id}" data-item-status="${st}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${(item.product_name||'').replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
-        <td class="name-cell">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
+        <td class="name-cell">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}${(() => {
+            const v = item.velocity;
+            if (!v) return '';
+            const sold = v.units_sold_90d || 0;
+            const doi = v.velocity_score || 9999;
+            const qty = v.current_qty || 0;
+            const oos = v.out_of_stock_days || 0;
+            let label, color;
+            if (sold === 0) { label = 'No Sales'; color = 'var(--text-dim)'; }
+            else if (qty === 0) { label = 'OOS'; color = 'var(--red)'; }
+            else if (doi <= 7) { label = '~' + Math.round(doi) + 'd left'; color = 'var(--green)'; }
+            else if (doi <= 14) { label = '~' + Math.round(doi) + 'd left'; color = 'var(--green)'; }
+            else if (doi <= 30) { label = '~' + Math.round(doi) + 'd left'; color = 'var(--amber)'; }
+            else { label = doi < 9999 ? '~' + Math.round(doi) + 'd left' : '90d+'; color = 'var(--text-dim)'; }
+            const conf = oos > 0 ? '' : ' ⚠';
+            return '<br><small style="color:' + color + ';">📊 ' + sold + ' sold · ' + qty + ' stock · ' + label + conf + '</small>';
+        })()}</td>
         <td>${item.quantity || 1}</td>
         <td><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
         <td>${item.store_price != null ? `$${item.store_price.toFixed(2)}` : `<span style="color:var(--dim);" title="Not in store — showing market">$${(item.market_price || 0).toFixed(2)}*</span>`}</td>

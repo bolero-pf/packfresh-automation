@@ -250,12 +250,28 @@ def get_session(session_id):
         except Exception:
             pass
 
+    # Enrich with velocity data
+    velocity_map = {}
+    if tcg_ids:
+        try:
+            vph = ",".join(["%s"] * len(tcg_ids))
+            vel_rows = db.query(f"""
+                SELECT tcgplayer_id, units_sold_90d, units_sold_30d, units_sold_7d,
+                       velocity_score, current_qty, avg_days_to_sell, out_of_stock_days
+                FROM sku_analytics WHERE tcgplayer_id IN ({vph})
+            """, tuple(tcg_ids))
+            velocity_map = {r["tcgplayer_id"]: dict(r) for r in vel_rows}
+        except Exception:
+            pass
+
     serialized = []
     for i in items:
         d = _serialize(i)
         sp = store_map.get(i.get("tcgplayer_id"))
         d["store_price"] = float(sp["shopify_price"]) if sp and sp.get("shopify_price") else None
         d["store_qty"] = int(sp["shopify_qty"] or 0) if sp else None
+        vel = velocity_map.get(i.get("tcgplayer_id"))
+        d["velocity"] = _serialize(vel) if vel else None
         serialized.append(d)
 
     return jsonify({

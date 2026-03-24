@@ -671,11 +671,28 @@ def get_session(session_id):
         except Exception:
             pass  # breakdown table may not exist yet
 
+    # Attach velocity data from sku_analytics
+    velocity_map = {}
+    if tcg_ids:
+        try:
+            vph = ",".join(["%s"] * len(tcg_ids))
+            vel_rows = db.query(f"""
+                SELECT tcgplayer_id, units_sold_90d, units_sold_30d, units_sold_7d,
+                       velocity_score, current_qty, current_price, avg_days_to_sell,
+                       out_of_stock_days, price_trend_pct, computed_at
+                FROM sku_analytics WHERE tcgplayer_id IN ({vph})
+            """, tuple(tcg_ids))
+            velocity_map = {r["tcgplayer_id"]: dict(r) for r in vel_rows}
+        except Exception:
+            pass
+
     serialized = []
     for i in items:
         item_dict = _serialize(i)
         tcg = i.get("tcgplayer_id")
         item_dict["breakdown_summary"] = _serialize(bd_map.get(int(tcg))) if tcg and int(tcg) in bd_map else None
+        vel = velocity_map.get(int(tcg)) if tcg else None
+        item_dict["velocity"] = _serialize(vel) if vel else None
         serialized.append(item_dict)
 
     return jsonify({
