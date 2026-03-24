@@ -574,7 +574,7 @@ def screen_every_order(order_gid: str) -> dict:
             else:
                 desc = "photo ID + shipping address confirmation"
 
-            note_text = f"Waiting on ID Verification (${cumulative_total:.2f})"
+            note_text = f"🪪 Waiting on ID Verification (${cumulative_total:.2f})"
 
             order_count = int(customer.get("numberOfOrders", 0) or 0)
             _apply_verification(order_gid, order_name, customer, tier, cumulative_total, note_text,
@@ -601,7 +601,7 @@ def screen_every_order(order_gid: str) -> dict:
         spike_ceiling = order_total * SPIKE_RATIO
         if max_previous_total < spike_ceiling:
             email = (customer.get("email") or "").strip()
-            note_text = f"Waiting on ID Verification (${order_total:.2f})"
+            note_text = f"🪪 Waiting on ID Verification (${order_total:.2f})"
 
             try:
                 shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["spend-spike-review", "hold-for-review"]})
@@ -656,8 +656,9 @@ def screen_every_order(order_gid: str) -> dict:
         sibling_names = ", ".join(s["order_name"] for s in unfulfilled_siblings)
         sibling_details = "; ".join(f"{s['order_name']} (${s['total']:.2f})" for s in unfulfilled_siblings)
 
-        note_text = f"Combine Order ({sibling_names})"
+        note_text = f"📦 Combine Order ({sibling_names})"
 
+        # Hold the current order
         try:
             _hold_fulfillment(order_gid, f"Combine with {sibling_names} — same customer")
         except Exception as e:
@@ -668,10 +669,15 @@ def screen_every_order(order_gid: str) -> dict:
         except Exception as e:
             print(f"[screening] Failed to add combine note to {order_gid}: {e}", flush=True)
 
+        # Hold ALL siblings too — prevent fulfillment until combined
         for s in unfulfilled_siblings:
             try:
+                _hold_fulfillment(s["order_gid"], f"Combine with {order_name} — same customer")
+            except Exception as e:
+                print(f"[screening] Failed to hold sibling {s['order_gid']}: {e}", flush=True)
+            try:
                 _add_order_note(s["order_gid"],
-                    f"Combine Order ({order_name})")
+                    f"📦 Combine Order ({order_name})")
             except Exception as e:
                 print(f"[screening] Failed to note sibling {s['order_gid']}: {e}", flush=True)
 
@@ -711,7 +717,7 @@ def _check_signature(order_gid, order_total, combined_total=None, siblings=None)
         return {"flagged": False, "reason": "below_signature_threshold",
                 "order_total": order_total, "combined_total": combined_total}
 
-    note = "Signature Required"
+    note = "✍️ Signature Required"
 
     try:
         _add_order_note(order_gid, note)
@@ -721,7 +727,7 @@ def _check_signature(order_gid, order_total, combined_total=None, siblings=None)
     if combined_sig and siblings:
         for s in siblings:
             try:
-                _add_order_note(s["order_gid"], "Signature Required")
+                _add_order_note(s["order_gid"], "✍️ Signature Required")
             except Exception as e:
                 print(f"[screening] Failed to note sibling signature {s['order_gid']}: {e}", flush=True)
 
@@ -764,7 +770,7 @@ def check_fraud_risk(order_gid: str) -> dict:
     total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
 
     if risk_level == "HIGH":
-        note_text = "High Fraud Risk — Auto-cancelled"
+        note_text = "🚨 High Fraud Risk — Auto-cancelled"
         try: shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["fraud-high", "auto-cancelled"]})
         except Exception as e: print(f"[screening] Tag failed: {e}", flush=True)
         if customer_gid:
@@ -778,7 +784,7 @@ def check_fraud_risk(order_gid: str) -> dict:
                 "risk_level": risk_level, "order_name": order_name, "note": note_text}
 
     # MEDIUM
-    note_text = "Medium Fraud Verification"
+    note_text = "🚨 Medium Fraud Verification"
     try: shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["fraud-medium", "hold-for-review"]})
     except Exception as e: print(f"[screening] Tag failed: {e}", flush=True)
     if customer_gid:
