@@ -324,14 +324,16 @@ async function doSearch(page) {
 }
 
 function velBadge(doi, units, qty) {
-  // doi = days of inventory (velocity_score), units = units_sold_90d, qty = current_qty
   if (!units || units === 0) return '<span class="badge badge-dim">No Sales</span>';
-  if (qty === 0) return '<span class="badge badge-red">OOS</span>';
-  if (doi <= 7) return '<span class="badge badge-green">Very Fast</span> <small style="color:var(--dim);">' + doi + 'd</small>';
-  if (doi <= 14) return '<span class="badge badge-green">Fast</span> <small style="color:var(--dim);">' + doi + 'd</small>';
-  if (doi <= 30) return '<span class="badge badge-amber">Medium</span> <small style="color:var(--dim);">' + doi + 'd</small>';
-  if (doi <= 90) return '<span class="badge badge-red">Slow</span> <small style="color:var(--dim);">' + doi + 'd</small>';
-  return '<span class="badge badge-red">Very Slow</span> <small style="color:var(--dim);">' + doi + 'd</small>';
+  const daily = (units / 90).toFixed(1);
+  let label, cls;
+  if (daily >= 5) { label = 'Very Fast'; cls = 'badge-green'; }
+  else if (daily >= 1) { label = 'Fast'; cls = 'badge-green'; }
+  else if (daily >= 0.3) { label = 'Medium'; cls = 'badge-amber'; }
+  else if (daily >= 0.1) { label = 'Slow'; cls = 'badge-red'; }
+  else { label = 'Very Slow'; cls = 'badge-red'; }
+  const stockStr = qty === 0 ? ' · <span style="color:var(--red);">OOS</span>' : doi < 9999 ? ' · ' + Math.round(doi) + 'd stock' : '';
+  return '<span class="badge ' + cls + '">' + label + '</span> <small style="color:var(--dim);">' + daily + '/day' + stockStr + '</small>';
 }
 
 function renderTable(items, total, page, pages) {

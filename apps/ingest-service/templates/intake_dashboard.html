@@ -1623,16 +1623,19 @@
                                 const qty = vel.current_qty || 0;
                                 const oos = vel.out_of_stock_days || 0;
                                 const hasOosData = oos > 0;
-                                let velLabel, velColor;
-                                if (sold === 0) { velLabel = 'No Sales'; velColor = 'var(--text-dim)'; }
-                                else if (qty === 0) { velLabel = 'OOS'; velColor = 'var(--red)'; }
-                                else if (doi <= 7) { velLabel = `~${Math.round(doi)}d left`; velColor = 'var(--green)'; }
-                                else if (doi <= 14) { velLabel = `~${Math.round(doi)}d left`; velColor = 'var(--green)'; }
-                                else if (doi <= 30) { velLabel = `~${Math.round(doi)}d left`; velColor = 'var(--amber)'; }
-                                else if (doi <= 90) { velLabel = `~${Math.round(doi)}d left`; velColor = 'var(--text-dim)'; }
-                                else { velLabel = '90d+'; velColor = 'var(--text-dim)'; }
-                                const confidence = hasOosData ? '' : ' <span title="Limited data — accuracy improves over time">⚠</span>';
-                                velNote = `<br><small style="color:${velColor};">📊 ${sold} sold · ${qty} in stock · ${velLabel}${confidence}</small>`;
+                                const daysActive = vel.avg_days_to_sell ? Math.min(90, 90) : 90;
+                                const dailyRate = sold > 0 ? (sold / Math.max(1, daysActive)).toFixed(1) : 0;
+                                let rateLabel, rateColor;
+                                if (sold === 0) { rateLabel = 'No Sales'; rateColor = 'var(--text-dim)'; }
+                                else if (dailyRate >= 5) { rateLabel = 'Very Fast'; rateColor = 'var(--green)'; }
+                                else if (dailyRate >= 1) { rateLabel = 'Fast'; rateColor = 'var(--green)'; }
+                                else if (dailyRate >= 0.3) { rateLabel = 'Medium'; rateColor = 'var(--amber)'; }
+                                else if (dailyRate >= 0.1) { rateLabel = 'Slow'; rateColor = 'var(--text-dim)'; }
+                                else { rateLabel = 'Very Slow'; rateColor = 'var(--text-dim)'; }
+                                const stockInfo = qty > 0 ? (doi < 9999 ? `${qty} stock (${Math.round(doi)}d)` : `${qty} stock`) : 'OOS';
+                                const stockColor = qty === 0 ? 'var(--red)' : doi <= 14 ? 'var(--amber)' : 'var(--text-dim)';
+                                const confidence = hasOosData ? '' : ' ⚠';
+                                velNote = `<br><small>📊 <span style="color:${rateColor};">${sold} sold · ${rateLabel}</span> · <span style="color:${stockColor};">${stockInfo}</span>${confidence}</small>`;
                             }
                             return `<tr style="${rowStyle}" data-item-id="${i.id}">
                                 <td class="name-cell">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}${velNote}</td>

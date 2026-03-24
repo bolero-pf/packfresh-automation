@@ -856,15 +856,18 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
             const doi = v.velocity_score || 9999;
             const qty = v.current_qty || 0;
             const oos = v.out_of_stock_days || 0;
-            let label, color;
-            if (sold === 0) { label = 'No Sales'; color = 'var(--text-dim)'; }
-            else if (qty === 0) { label = 'OOS'; color = 'var(--red)'; }
-            else if (doi <= 7) { label = '~' + Math.round(doi) + 'd left'; color = 'var(--green)'; }
-            else if (doi <= 14) { label = '~' + Math.round(doi) + 'd left'; color = 'var(--green)'; }
-            else if (doi <= 30) { label = '~' + Math.round(doi) + 'd left'; color = 'var(--amber)'; }
-            else { label = doi < 9999 ? '~' + Math.round(doi) + 'd left' : '90d+'; color = 'var(--text-dim)'; }
+            const dailyRate = sold > 0 ? (sold / 90).toFixed(1) : 0;
+            let rateLabel, rateColor;
+            if (sold === 0) { rateLabel = 'No Sales'; rateColor = 'var(--text-dim)'; }
+            else if (dailyRate >= 5) { rateLabel = 'Very Fast'; rateColor = 'var(--green)'; }
+            else if (dailyRate >= 1) { rateLabel = 'Fast'; rateColor = 'var(--green)'; }
+            else if (dailyRate >= 0.3) { rateLabel = 'Medium'; rateColor = 'var(--amber)'; }
+            else if (dailyRate >= 0.1) { rateLabel = 'Slow'; rateColor = 'var(--text-dim)'; }
+            else { rateLabel = 'Very Slow'; rateColor = 'var(--text-dim)'; }
+            const stockInfo = qty > 0 ? (doi < 9999 ? qty + ' stock (' + Math.round(doi) + 'd)' : qty + ' stock') : 'OOS';
+            const stockColor = qty === 0 ? 'var(--red)' : doi <= 14 ? 'var(--amber)' : 'var(--text-dim)';
             const conf = oos > 0 ? '' : ' ⚠';
-            return '<br><small style="color:' + color + ';">📊 ' + sold + ' sold · ' + qty + ' stock · ' + label + conf + '</small>';
+            return '<br><small>📊 <span style="color:' + rateColor + ';">' + sold + ' sold · ' + rateLabel + '</span> · <span style="color:' + stockColor + ';">' + stockInfo + '</span>' + conf + '</small>';
         })()}</td>
         <td>${item.quantity || 1}</td>
         <td><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
