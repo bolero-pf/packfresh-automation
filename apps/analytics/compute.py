@@ -204,24 +204,6 @@ def recompute_analytics():
         # Average sale price
         avg_sale_price = revenue_90d / units_90d if units_90d > 0 else current_price
 
-        # Days active: how long has this item been selling? (capped at 90)
-        # Use first_sale_date to avoid penalizing new items
-        if first_sale:
-            days_active = max(1, (today - first_sale).days)
-        else:
-            days_active = 90
-        days_active = min(days_active, 90)
-
-        # Actual daily sell rate based on active window, not fixed 30/90 days
-        daily_rate = units_90d / days_active if days_active > 0 else 0
-
-        # Days of inventory: how long until current stock sells out at this rate?
-        # This is the core velocity metric — relative to stock level
-        days_of_inventory = current_qty / daily_rate if daily_rate > 0 else 9999
-
-        # avg_days_to_sell: average interval between sales
-        avg_days = days_active / units_90d if units_90d > 0 else None
-
         # Out of stock days: count days at qty=0 from daily inventory snapshots
         oos_row = db.query_one("""
             SELECT COUNT(*) AS oos_days
@@ -230,9 +212,27 @@ def recompute_analytics():
         """, (vid, d90))
         oos_days = int(oos_row["oos_days"]) if oos_row else 0
 
-        # Velocity score = days of inventory (lower = faster selling)
-        # Stored as negative so higher score = faster (for sorting)
-        # But we'll store days_of_inventory directly — UI interprets
+        # Days active: how long has this item been selling? (capped at 90)
+        if first_sale:
+            days_active = max(1, (today - first_sale).days)
+        else:
+            days_active = 90
+        days_active = min(days_active, 90)
+
+        # Selling days: subtract OOS days to get TRUE rate when in stock
+        # If OOS data hasn't accumulated yet (oos_days=0), use days_active as-is
+        selling_days = max(1, days_active - oos_days)
+
+        # Actual daily sell rate based on days we had stock, not calendar days
+        daily_rate = units_90d / selling_days if selling_days > 0 else 0
+
+        # Days of inventory: how long until current stock sells out at this rate?
+        days_of_inventory = current_qty / daily_rate if daily_rate > 0 else 9999
+
+        # avg_days_to_sell: average interval between sales (when in stock)
+        avg_days = selling_days / units_90d if units_90d > 0 else None
+
+        # Velocity score = days of inventory (lower = faster)
         velocity = round(days_of_inventory, 1)
 
         # Price trend: compare avg sale price to current price
