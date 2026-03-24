@@ -8,31 +8,25 @@
 - **db.py** — Database connection pool
 
 ## Drop Types
-- **weekly**: set price, add `unavailable-{month}-{day}` + `drop` tags, remove from channels
+- **weekly**: set price, add `unavailable-{month}-{day}` + `drop` + `weekly-deals` + `limit-X` tags, remove from non-Online channels
 - **vip**: everything above + add `vip-drop` tag (permanent) + set `custom.vip_price_cents` metafield
 
-## Flow
-1. Search for product → select it
-2. Set drop date, price, type (weekly/vip), qty offered
-3. System: sets Shopify price, adds tags, removes from non-Online channels, records in drop_events
-4. At 11 AM on drop date: `/release` removes unavailable + drop tags, publishes to all channels
-5. `vip-drop` tag is NEVER auto-removed (controls VIP early access in Liquid theme)
+## Tag Lifecycle
+- **Setup adds**: unavailable-*, drop, weekly-deals, limit-X (+ vip-drop for VIP)
+- **Release removes**: unavailable-* and drop ONLY
+- **Persistent**: weekly-deals, limit-X, vip-drop (never auto-removed)
 
-## Endpoints
-- `POST /api/drops` — create a new drop
-- `POST /release` — release today's scheduled drops (called by Flow at 11 AM CST)
-- `GET /api/drops` — list drops (filter by status)
-- `POST /api/drops/backfill` — record a past drop for analytics exclusion
-- `GET /api/candidates` — high-inventory items sorted by qty (deal finder)
-- `GET /api/search` — search Shopify products by name
-- `DELETE /api/drops/<id>` — remove a drop record
+## Flow
+1. Search product → set date, price, type, limit
+2. System: sets Shopify price, adds tags, removes from non-Online channels, records in drop_events
+3. At 11 AM: /release removes unavailable + drop tags, publishes to all channels
+4. Analytics service excludes drop dates from velocity calculations
 
 ## Analytics Integration
-- `drop_events` table is checked by analytics service during velocity computation
-- Sales on drop dates are excluded from velocity calculations
-- Backfill past drops to clean historical analytics data
+- `drop_events` table checked by analytics during velocity computation
+- `NOT EXISTS (SELECT 1 FROM drop_events WHERE variant_id AND date)` excludes drop-day sales
+- Backfill past drops to clean historical velocity data
 
-## VIP Price Metafield
-- `custom.vip_price_cents` — integer, price in cents (e.g., 4599 = $45.99)
-- Displayed in Shopify Liquid: yellow for VIP members, locked with upsell for non-VIP
-- VIP3: 24h early access, VIP2: 1h early access, VIP1: same as drop time
+## Auth
+- JWT cookie (owner only) for UI
+- /release accepts Flow secret for daily trigger

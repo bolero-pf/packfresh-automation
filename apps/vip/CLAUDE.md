@@ -1,38 +1,40 @@
 # VIP Service (vip/)
-> VIP tier management system (vip.pack-fresh.com)
+> VIP tier management + console (vip.pack-fresh.com)
 
 ## Key Files
-- **app.py** — Flask app entry point
+- **app.py** — Flask app: console UI (customer list, detail view, tier management), webhook routes via blueprint
 - **service.py** — VIP logic (~950 lines): rolling spend, tier calc, Shopify metafields, Klaviyo sync
 - **routes.py** — Webhook endpoints + admin API (~16K)
 - **update_tags.py** — CLI tool for bulk retagging
 
+## Console UI (vip.pack-fresh.com/)
+- **Customer list**: filterable by tier, searchable, sortable (spend, gap to next, lock expiry, orders)
+- **Customer detail**: click row → full profile, order history, VIP status with progress bar
+- **Set Tier**: modal to manually assign any tier + lock duration (for partners/advertisers)
+- **Recalculate**: replays order history, respects active locks, proposes correct tier/lock
+  - If lock active + tier matches spend → no change
+  - If lock active + spend exceeds → promote with fresh lock
+  - If lock expired → recalculate from current spend
+- **Pagination**: cursor-based, accumulates across pages, sorts full loaded list
+
 ## VIP Tiers
-| Tier | Min 90-day Spend |
-|------|-----------------|
-| VIP0 | $0 |
-| VIP1 | $500 |
-| VIP2 | $1,250 |
-| VIP3 | $2,500 |
+| Tier | Name | Min 90-day Spend |
+|------|------|-----------------|
+| VIP0 | (none) | $0 |
+| VIP1 | Adventurer | $500 |
+| VIP2 | Guardian | $1,250 |
+| VIP3 | Champion | $2,500 |
 
-## Webhook Endpoints
-- POST /vip/order_paid — Recalculate tier on payment
-- POST /vip/refund_created — Recalculate tier on refund
+## Lock Window
+- Protects tier for 90 days from qualifying purchase
+- Prevents downgrades during lock period even if spend drops
+- Recalculate respects active locks — only changes on promotion or expiry
 
-## Admin Endpoints
-- POST /vip/backfill — Batch tier backfill
-- POST /vip/sweep_vips — Bulk tier update
-- POST /vip/retag_only — Tag normalization
-- GET /vip/state — Customer state query
+## Auth
+- JWT cookie (owner + manager) for console UI
+- Webhook endpoints (/vip/*) use X-Flow-Secret header (Shopify Flows)
 
 ## Dependencies
-- `shared/shopify_graphql.py` — Shopify Admin GraphQL client (with local debug/dry-run wrapper)
-- `shared/klaviyo.py` — Klaviyo profile upsert for tier transitions
-- `shared/webhook_verify.py` — X-Flow-Secret validation
-
-## Key Patterns
-- Rolling 90-day spend calculated from Shopify order history
-- Tier stored in customer metafields (custom.loyalty_vip_tier)
-- Lock window prevents downgrades during grace period
-- Shopify tags set for discount eligibility (VIP1, VIP2, VIP3)
-- VIP_DRY_RUN mode skips all Shopify mutations
+- shared/shopify_graphql.py (with local debug/dry-run wrapper)
+- shared/klaviyo.py for tier transition emails
+- shared/webhook_verify.py for Flow signature validation

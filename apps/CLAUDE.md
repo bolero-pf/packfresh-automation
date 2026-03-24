@@ -11,12 +11,14 @@
 3. **ingestion/** - Data ingestion / warehouse processing (ingest.pack-fresh.com)
 4. **inventory/** - Inventory + Breakdown Engine (inventory.pack-fresh.com)
 5. **price_updater/** - Nightly sealed SKU price sync (prices.pack-fresh.com) — NO LONGER hosts VIP or screening
-6. **screening/** - Order fraud detection + verification (screening.pack-fresh.com) — standalone, was under price_updater
-7. **vip/** - VIP tier management (vip.pack-fresh.com) — standalone, was under price_updater
+6. **screening/** - Order fraud detection + verification console (screening.pack-fresh.com)
+7. **vip/** - VIP tier management + customer console (vip.pack-fresh.com)
 8. **kiosk/** - Customer-facing card browser (kiosk.pack-fresh.com) — public, no auth
 9. **card_manager/** - Staff card hold processing (cards.pack-fresh.com)
-10. **frontpage_update/** - Front page randomizer cron job
-11. **shared/** - Components shared by all services (auth, Shopify GQL, Klaviyo, PPT client, breakdown helpers, etc.)
+10. **analytics/** - SKU sell-through velocity metrics (analytics.pack-fresh.com) — daily order ingestion + per-variant velocity
+11. **drops/** - Drop planner + scheduling (drops.pack-fresh.com) — weekly + VIP drops, deal candidates
+12. **frontpage_update/** - Front page randomizer cron job
+13. **shared/** - Components shared by all services (auth, Shopify GQL, Klaviyo, PPT client, breakdown helpers, sku_analytics, etc.)
 
 ## Authentication
 - **JWT cookie** (`pf_auth`) scoped to `.pack-fresh.com` — issued by admin service, validated by all staff services

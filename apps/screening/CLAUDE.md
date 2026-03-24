@@ -1,10 +1,25 @@
 # Screening Service (screening/)
-> Order fraud detection + verification system (screening.pack-fresh.com)
+> Order fraud detection + review console (screening.pack-fresh.com)
 
 ## Key Files
-- **app.py** — Flask app entry point
+- **app.py** — Flask app: console UI (verification queue, combine shipping), webhook routes via blueprint
 - **service.py** — All screening logic (940 lines): abuse detection, verification, combine, signature, fraud
 - **routes.py** — 5 webhook endpoints from Shopify Flows
+
+## Console UI (screening.pack-fresh.com/)
+Two tabs:
+
+### Verification Queue
+- Orders with hold-for-review tag needing identity/fraud verification
+- Shows: order #, customer, email, amount, check type, order note, items
+- **Verify & Release**: clears tags, releases fulfillment holds, clears Klaviyo flags
+- **Cancel & Refund**: full refund + restock + notify customer + cleanup tags
+
+### Combine Shipping
+- Orders grouped by customer that ship together
+- Combined packing list across all orders in group
+- Links to Shopify admin for each order (buy labels)
+- **Release All**: releases holds on all grouped orders
 
 ## Webhook Endpoints
 | Endpoint | Trigger | Checks |
@@ -15,14 +30,6 @@
 | POST /screening/order_cancelled | Cancelled w/ FIRSTTIME5 tag | Abuse confirmation |
 | POST /screening/order_fulfilled | Fulfilled w/ hold tag | Tag/hold cleanup |
 
-## Dependencies
-- `shared/shopify_graphql.py` — Shopify Admin GraphQL client
-- `shared/klaviyo.py` — Klaviyo profile upsert
-- `shared/webhook_verify.py` — X-Flow-Secret validation
-
-## Key Patterns
-- Stateless — no database, all state in Shopify (tags, notes, holds, metafields)
-- All Shopify mutations via GraphQL (not REST)
-- Klaviyo properties trigger email flows
-- Pre-orders skip combine + signature checks
-- Multi-violation priority: $1000 verification > $700 > medium fraud (single email)
+## Auth
+- JWT cookie (owner + manager) for console UI
+- Webhook endpoints use X-Flow-Secret header
