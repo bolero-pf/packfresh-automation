@@ -81,25 +81,27 @@ def compute_offer_adjustment(analytics_data: dict, target_pct: float = 80.0) -> 
             items.append({"tcgplayer_id": tcg_id, "adjustment": 0, "reasons": reasons, "value": item_value})
             continue
 
-        velocity = float(a.get("velocity_score") or 0)
+        # velocity_score is now days_of_inventory (lower = faster)
+        days_of_inv = float(a.get("velocity_score") or 9999)
         units_90d = int(a.get("units_sold_90d") or 0)
         oos_days = int(a.get("out_of_stock_days") or 0)
         current_qty = int(a.get("current_qty") or 0)
         price_trend = float(a.get("price_trend_pct") or 0)
         avg_days = float(a.get("avg_days_to_sell") or 999)
 
-        # Velocity adjustment
-        daily_rate = units_90d / 90.0
-        if daily_rate > 1.0:
-            adj += 5; reasons.append("very fast seller")
-        elif daily_rate > 0.5:
-            adj += 3; reasons.append("fast seller")
-        elif daily_rate > 0.15:
+        # Velocity adjustment based on days of inventory
+        if units_90d == 0:
+            adj -= 5; reasons.append("no sales in 90d")
+        elif days_of_inv <= 7:
+            adj += 5; reasons.append(f"sells out in ~{days_of_inv:.0f}d")
+        elif days_of_inv <= 14:
+            adj += 3; reasons.append(f"sells out in ~{days_of_inv:.0f}d")
+        elif days_of_inv <= 30:
             pass  # baseline
-        elif daily_rate > 0.05:
-            adj -= 3; reasons.append("slow seller")
+        elif days_of_inv <= 90:
+            adj -= 3; reasons.append(f"~{days_of_inv:.0f}d of inventory")
         else:
-            adj -= 5; reasons.append("very slow seller")
+            adj -= 5; reasons.append(f"~{days_of_inv:.0f}d+ of inventory")
 
         # Out of stock bonus
         if oos_days > 30:

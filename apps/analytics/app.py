@@ -291,7 +291,7 @@ td { padding:8px; border-bottom:1px solid var(--border); }
       <option value="stale">No Sales (90d)</option>
     </select>
     <select id="sort-select" onchange="doSearch()">
-      <option value="velocity_desc">Velocity (high first)</option>
+      <option value="velocity_asc">Fastest Selling (fewest days left)</option>
       <option value="sold_desc">Units Sold (high)</option>
       <option value="sold_asc">Units Sold (low)</option>
       <option value="days_asc">Avg Days to Sell (fast)</option>
@@ -323,14 +323,15 @@ async function doSearch(page) {
   } catch(e) { el.innerHTML = `<div class="empty">${e.message}</div>`; }
 }
 
-function velBadge(v, units) {
+function velBadge(doi, units, qty) {
+  // doi = days of inventory (velocity_score), units = units_sold_90d, qty = current_qty
   if (!units || units === 0) return '<span class="badge badge-dim">No Sales</span>';
-  const daily = units / 90;
-  if (daily > 1) return '<span class="badge badge-green">Very Fast</span>';
-  if (daily > 0.5) return '<span class="badge badge-green">Fast</span>';
-  if (daily > 0.15) return '<span class="badge badge-amber">Medium</span>';
-  if (daily > 0.05) return '<span class="badge badge-red">Slow</span>';
-  return '<span class="badge badge-red">Very Slow</span>';
+  if (qty === 0) return '<span class="badge badge-red">OOS</span>';
+  if (doi <= 7) return '<span class="badge badge-green">Very Fast</span> <small style="color:var(--dim);">' + doi + 'd</small>';
+  if (doi <= 14) return '<span class="badge badge-green">Fast</span> <small style="color:var(--dim);">' + doi + 'd</small>';
+  if (doi <= 30) return '<span class="badge badge-amber">Medium</span> <small style="color:var(--dim);">' + doi + 'd</small>';
+  if (doi <= 90) return '<span class="badge badge-red">Slow</span> <small style="color:var(--dim);">' + doi + 'd</small>';
+  return '<span class="badge badge-red">Very Slow</span> <small style="color:var(--dim);">' + doi + 'd</small>';
 }
 
 function renderTable(items, total, page, pages) {
@@ -352,7 +353,7 @@ function renderTable(items, total, page, pages) {
           '<td><strong>' + (i.title||'—') + '</strong>' +
             (i.tcgplayer_id ? '<br><small style="color:var(--dim)">TCG#' + i.tcgplayer_id + '</small>' : '') +
           '</td>' +
-          '<td>' + velBadge(i.velocity_score, i.units_sold_90d) + '</td>' +
+          '<td>' + velBadge(i.velocity_score, i.units_sold_90d, i.current_qty) + '</td>' +
           '<td style="font-weight:600;">' + (i.units_sold_90d||0) + '</td>' +
           '<td>' + (i.units_sold_30d||0) + '</td>' +
           '<td>' + (i.units_sold_7d||0) + '</td>' +

@@ -162,6 +162,7 @@ def recompute_analytics():
             SUM(CASE WHEN s.sale_date >= %s THEN s.units_sold ELSE 0 END) AS units_30d,
             SUM(CASE WHEN s.sale_date >= %s THEN s.units_sold ELSE 0 END) AS units_7d,
             SUM(CASE WHEN s.sale_date >= %s THEN s.revenue ELSE 0 END) AS revenue_90d,
+            MIN(s.sale_date) AS first_sale_date,
             MAX(s.sale_date) AS last_sale_date
         FROM sku_daily_sales s
         WHERE s.sale_date >= %s
@@ -196,14 +197,30 @@ def recompute_analytics():
         revenue_90d = float(row["revenue_90d"] or 0)
         last_sale = row["last_sale_date"]
 
+        first_sale = row["first_sale_date"]
         current_qty = int(cache.get("shopify_qty") or 0)
         current_price = float(cache.get("shopify_price") or 0)
 
         # Average sale price
         avg_sale_price = revenue_90d / units_90d if units_90d > 0 else current_price
 
-        # Average days to sell (rough: 90 / units_sold gives avg interval between sales)
-        avg_days = 90.0 / units_90d if units_90d > 0 else None
+        # Days active: how long has this item been selling? (capped at 90)
+        # Use first_sale_date to avoid penalizing new items
+        if first_sale:
+            days_active = max(1, (today - first_sale).days)
+        else:
+            days_active = 90
+        days_active = min(days_active, 90)
+
+        # Actual daily sell rate based on active window, not fixed 30/90 days
+        daily_rate = units_90d / days_active if days_active > 0 else 0
+
+        # Days of inventory: how long until current stock sells out at this rate?
+        # This is the core velocity metric — relative to stock level
+        days_of_inventory = current_qty / daily_rate if daily_rate > 0 else 9999
+
+        # avg_days_to_sell: average interval between sales
+        avg_days = days_active / units_90d if units_90d > 0 else None
 
         # Out of stock days: count days at qty=0 from daily inventory snapshots
         oos_row = db.query_one("""
@@ -213,11 +230,10 @@ def recompute_analytics():
         """, (vid, d90))
         oos_days = int(oos_row["oos_days"]) if oos_row else 0
 
-        # Velocity score
-        daily_rate = units_30d / 30.0
-        demand_bonus = min(oos_days / 90.0, 1.0) * 2.0
-        stock_penalty = min(current_qty / 10.0, 1.0) * -0.5
-        velocity = round(daily_rate + demand_bonus + stock_penalty, 2)
+        # Velocity score = days of inventory (lower = faster selling)
+        # Stored as negative so higher score = faster (for sorting)
+        # But we'll store days_of_inventory directly — UI interprets
+        velocity = round(days_of_inventory, 1)
 
         # Price trend: compare avg sale price to current price
         price_trend = 0.0
