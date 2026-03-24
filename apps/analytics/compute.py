@@ -204,13 +204,20 @@ def recompute_analytics():
         # Average sale price
         avg_sale_price = revenue_90d / units_90d if units_90d > 0 else current_price
 
-        # Out of stock days: count days at qty=0 from daily inventory snapshots
+        # Out of stock days: best available estimate
+        # 1. Use daily inventory snapshots if we have them (most accurate)
+        # 2. Proxy: if current qty=0 and we have a last sale date, days since last sale = OOS days
         oos_row = db.query_one("""
             SELECT COUNT(*) AS oos_days
             FROM sku_daily_inventory
             WHERE shopify_variant_id = %s AND snapshot_date >= %s AND qty = 0
         """, (vid, d90))
         oos_days = int(oos_row["oos_days"]) if oos_row else 0
+
+        # Proxy for items with no/limited snapshot data
+        if oos_days == 0 and current_qty == 0 and last_sale:
+            days_since_last_sale = max(0, (today - last_sale).days)
+            oos_days = min(days_since_last_sale, 90)  # cap at 90
 
         # Days active: how long has this item been selling? (capped at 90)
         if first_sale:
