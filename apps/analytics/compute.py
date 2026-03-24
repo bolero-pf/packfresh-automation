@@ -162,17 +162,17 @@ def recompute_analytics():
             SUM(CASE WHEN s.sale_date >= %s THEN s.units_sold ELSE 0 END) AS units_30d,
             SUM(CASE WHEN s.sale_date >= %s THEN s.units_sold ELSE 0 END) AS units_7d,
             SUM(CASE WHEN s.sale_date >= %s THEN s.revenue ELSE 0 END) AS revenue_90d,
+            SUM(s.units_sold) AS total_sold_all_time,
             MIN(s.sale_date) AS first_sale_date,
             MAX(s.sale_date) AS last_sale_date
         FROM sku_daily_sales s
-        WHERE s.sale_date >= %s
-          AND NOT EXISTS (
+        WHERE NOT EXISTS (
               SELECT 1 FROM drop_events de
               WHERE de.shopify_variant_id = s.shopify_variant_id
                 AND de.drop_date = s.sale_date
           )
         GROUP BY s.shopify_variant_id
-    """, (d90, d30, d7, d90, d90))
+    """, (d90, d30, d7, d90))
 
     if not rows:
         logger.info("No sales data found")
@@ -195,6 +195,8 @@ def recompute_analytics():
         units_30d = int(row["units_30d"] or 0)
         units_7d = int(row["units_7d"] or 0)
         revenue_90d = float(row["revenue_90d"] or 0)
+        total_all_time = int(row["total_sold_all_time"] or 0)
+        first_sale = row["first_sale_date"]
         last_sale = row["last_sale_date"]
 
         first_sale = row["first_sale_date"]
@@ -216,8 +218,15 @@ def recompute_analytics():
 
         # Proxy for items with no/limited snapshot data
         if oos_days == 0 and current_qty == 0 and last_sale:
+            # Currently OOS: days since last sale = minimum OOS estimate
             days_since_last_sale = max(0, (today - last_sale).days)
-            oos_days = min(days_since_last_sale, 90)  # cap at 90
+            oos_days = min(days_since_last_sale, 90)
+
+        # If item was first seen (first sale) within the 90d window,
+        # it didn't exist before that — those days are effectively OOS
+        if first_sale and first_sale > d90:
+            days_before_first_sale = max(0, (first_sale - d90).days)
+            oos_days = max(oos_days, days_before_first_sale)
 
         # Days active: how long has this item been selling? (capped at 90)
         if first_sale:
@@ -250,11 +259,11 @@ def recompute_analytics():
         db.execute("""
             INSERT INTO sku_analytics (
                 shopify_variant_id, shopify_product_id, tcgplayer_id, title,
-                units_sold_90d, units_sold_30d, units_sold_7d,
-                avg_days_to_sell, out_of_stock_days,
+                units_sold_90d, units_sold_30d, units_sold_7d, total_sold_all_time,
+                avg_days_to_sell, out_of_stock_days, first_seen_date,
                 current_qty, current_price, avg_sale_price,
                 price_trend_pct, last_sale_at, velocity_score, computed_at
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
             ON CONFLICT (shopify_variant_id) DO UPDATE SET
                 shopify_product_id = EXCLUDED.shopify_product_id,
                 tcgplayer_id = EXCLUDED.tcgplayer_id,
@@ -262,8 +271,10 @@ def recompute_analytics():
                 units_sold_90d = EXCLUDED.units_sold_90d,
                 units_sold_30d = EXCLUDED.units_sold_30d,
                 units_sold_7d = EXCLUDED.units_sold_7d,
+                total_sold_all_time = EXCLUDED.total_sold_all_time,
                 avg_days_to_sell = EXCLUDED.avg_days_to_sell,
                 out_of_stock_days = EXCLUDED.out_of_stock_days,
+                first_seen_date = EXCLUDED.first_seen_date,
                 current_qty = EXCLUDED.current_qty,
                 current_price = EXCLUDED.current_price,
                 avg_sale_price = EXCLUDED.avg_sale_price,
@@ -274,8 +285,8 @@ def recompute_analytics():
         """, (
             vid, cache.get("shopify_product_id"), cache.get("tcgplayer_id"),
             cache.get("title", ""),
-            units_90d, units_30d, units_7d,
-            avg_days, oos_days,
+            units_90d, units_30d, units_7d, total_all_time,
+            avg_days, oos_days, first_sale,
             current_qty, current_price, round(avg_sale_price, 2),
             price_trend, last_sale, velocity,
         ))

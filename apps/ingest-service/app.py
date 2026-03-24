@@ -678,6 +678,7 @@ def get_session(session_id):
             vph = ",".join(["%s"] * len(tcg_ids))
             vel_rows = db.query(f"""
                 SELECT a.tcgplayer_id, a.units_sold_90d, a.units_sold_30d, a.units_sold_7d,
+                       a.total_sold_all_time, a.first_seen_date,
                        a.velocity_score, a.current_qty, a.current_price, a.avg_days_to_sell,
                        a.out_of_stock_days, a.price_trend_pct, a.computed_at
                 FROM sku_analytics a

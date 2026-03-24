@@ -1619,14 +1619,15 @@
                             let velNote = '';
                             if (vel) {
                                 const sold = vel.units_sold_90d || 0;
+                                const allTime = vel.total_sold_all_time || 0;
                                 const doi = vel.velocity_score || 9999;
                                 const qty = vel.current_qty || 0;
                                 const oos = vel.out_of_stock_days || 0;
                                 const hasOosData = oos > 0;
-                                const daysActive = vel.avg_days_to_sell ? Math.min(90, 90) : 90;
-                                const dailyRate = sold > 0 ? (sold / Math.max(1, daysActive)).toFixed(1) : 0;
+                                const dailyRate = sold > 0 ? (sold / 90).toFixed(1) : 0;
                                 let rateLabel, rateColor;
-                                if (sold === 0) { rateLabel = 'No Sales'; rateColor = 'var(--text-dim)'; }
+                                if (sold === 0 && allTime === 0) { rateLabel = 'No Sales'; rateColor = 'var(--text-dim)'; }
+                                else if (sold === 0) { rateLabel = `${allTime} lifetime`; rateColor = 'var(--accent)'; }
                                 else if (dailyRate >= 5) { rateLabel = 'Very Fast'; rateColor = 'var(--green)'; }
                                 else if (dailyRate >= 1) { rateLabel = 'Fast'; rateColor = 'var(--green)'; }
                                 else if (dailyRate >= 0.3) { rateLabel = 'Medium'; rateColor = 'var(--amber)'; }
