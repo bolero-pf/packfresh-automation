@@ -258,8 +258,33 @@ def recompute_analytics():
         ))
         updated += 1
 
-    logger.info(f"Updated {updated} SKU analytics records")
-    return {"updated": updated}
+    # Zero out SKUs that had all their sales excluded (e.g., drop-only items)
+    # These variants exist in sku_analytics but weren't in the query results
+    updated_vids = {row["shopify_variant_id"] for row in rows}
+    zeroed = 0
+    stale_rows = db.query("""
+        SELECT shopify_variant_id FROM sku_analytics
+        WHERE units_sold_90d > 0 AND shopify_variant_id NOT IN (
+            SELECT DISTINCT shopify_variant_id FROM sku_daily_sales s
+            WHERE s.sale_date >= %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM drop_events de
+                  WHERE de.shopify_variant_id = s.shopify_variant_id AND de.drop_date = s.sale_date
+              )
+        )
+    """, (d90,))
+    for sr in stale_rows:
+        db.execute("""
+            UPDATE sku_analytics SET
+                units_sold_90d = 0, units_sold_30d = 0, units_sold_7d = 0,
+                avg_days_to_sell = NULL, velocity_score = 0, avg_sale_price = NULL,
+                computed_at = CURRENT_TIMESTAMP
+            WHERE shopify_variant_id = %s
+        """, (sr["shopify_variant_id"],))
+        zeroed += 1
+
+    logger.info(f"Updated {updated} SKU analytics records, zeroed {zeroed} drop-only SKUs")
+    return {"updated": updated, "zeroed": zeroed}
 
 
 def snapshot_inventory():
