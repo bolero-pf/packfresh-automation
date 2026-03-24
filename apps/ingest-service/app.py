@@ -671,18 +671,23 @@ def get_session(session_id):
         except Exception:
             pass  # breakdown table may not exist yet
 
-    # Attach velocity data from sku_analytics
+    # Attach velocity data from sku_analytics (prefer non-damaged variant with most sales)
     velocity_map = {}
     if tcg_ids:
         try:
             vph = ",".join(["%s"] * len(tcg_ids))
             vel_rows = db.query(f"""
-                SELECT tcgplayer_id, units_sold_90d, units_sold_30d, units_sold_7d,
-                       velocity_score, current_qty, current_price, avg_days_to_sell,
-                       out_of_stock_days, price_trend_pct, computed_at
-                FROM sku_analytics WHERE tcgplayer_id IN ({vph})
+                SELECT a.tcgplayer_id, a.units_sold_90d, a.units_sold_30d, a.units_sold_7d,
+                       a.velocity_score, a.current_qty, a.current_price, a.avg_days_to_sell,
+                       a.out_of_stock_days, a.price_trend_pct, a.computed_at
+                FROM sku_analytics a
+                JOIN inventory_product_cache c ON c.shopify_variant_id = a.shopify_variant_id
+                WHERE a.tcgplayer_id IN ({vph}) AND c.is_damaged = FALSE
+                ORDER BY a.units_sold_90d DESC
             """, tuple(tcg_ids))
-            velocity_map = {r["tcgplayer_id"]: dict(r) for r in vel_rows}
+            for r in vel_rows:
+                if r["tcgplayer_id"] not in velocity_map:
+                    velocity_map[r["tcgplayer_id"]] = dict(r)
         except Exception:
             pass
 
