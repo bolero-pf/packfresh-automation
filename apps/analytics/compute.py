@@ -223,7 +223,7 @@ def recompute_analytics():
             oos_days = min(days_since_last_sale, 90)
 
         # If item was first seen (first sale) within the 90d window,
-        # it didn't exist before that — those days are effectively OOS
+        # it wasn't available before that — exclude those days from selling window
         if first_sale and first_sale > d90:
             days_before_first_sale = max(0, (first_sale - d90).days)
             oos_days = max(oos_days, days_before_first_sale)
