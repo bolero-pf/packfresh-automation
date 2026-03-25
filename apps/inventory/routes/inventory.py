@@ -246,6 +246,16 @@ def api_record_push():
     return jsonify({"ok": True})
 
 
+@bp.route("/api/cache/invalidate", methods=["POST"])
+def api_cache_invalidate():
+    """Force cache refresh — called by price_updater after pushing new prices."""
+    cm = _get_cache_manager()
+    if cm:
+        reason = (request.get_json(silent=True) or {}).get("reason", "external")
+        cm.invalidate(reason)
+    return jsonify({"ok": True})
+
+
 @bp.route("/api/push", methods=["POST"])
 @requires_auth
 def api_push():

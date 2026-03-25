@@ -585,6 +585,20 @@ def _variant_product_gid_from_graphql(variant_id: str) -> str:
     data = r.json()
     return data["data"]["productVariant"]["product"]["id"]
 
+def _invalidate_inventory_cache():
+    """Notify inventory + intake services that Shopify prices changed."""
+    for name, url_var in [("inventory", "INVENTORY_INTERNAL_URL"), ("intake", "INTAKE_INTERNAL_URL")]:
+        url = os.environ.get(url_var, "")
+        if not url:
+            continue
+        try:
+            requests.post(f"{url}/api/cache/invalidate",
+                          json={"reason": "price_updater"}, timeout=5)
+            print(f"📡 Notified {name} service to refresh cache")
+        except Exception as e:
+            print(f"⚠️ Failed to notify {name} cache: {e}")
+
+
 def upload_reviewed_csv():
     import math
     try:
@@ -629,6 +643,8 @@ def upload_reviewed_csv():
             print(f"✅ Updated {row.get('title')} to ${new_price:.2f}")
         except Exception as e:
             print(f"❌ Failed to update variant {variant_id}: {e}")
+
+    _invalidate_inventory_cache()
 
 def upload_missing_csv():
     import math
@@ -763,6 +779,7 @@ def run_price_sync():
         _write_csv_safe(untouched_rows, UNTOUCHED_CSV)
         _write_csv_safe([{**r, "price_to_upload": ""} for r in missing_rows],
                         MISSING_CSV)
+        _invalidate_inventory_cache()
 
 
 
