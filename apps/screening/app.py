@@ -72,7 +72,7 @@ def api_held_orders():
             }
           }
         }
-    """, {"first": 50, "q": 'tag:"hold-for-review" fulfillment_status:unfulfilled'})
+    """, {"first": 50, "q": 'tag:"hold-for-review" -fulfillment_status:fulfilled'})
 
     verification = []
     combine = []

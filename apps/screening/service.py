@@ -550,8 +550,8 @@ def screen_every_order(order_gid: str) -> dict:
             if nid != order_gid and (tags & {t.lower() for t in VERIFICATION_TAGS}):
                 has_active_verification = True
 
-        # Unfulfilled siblings for combine — must match shipping address
-        if nid != order_gid and status == "UNFULFILLED" and financial not in CANCELLED_STATUSES:
+        # Unfulfilled/on-hold siblings for combine — must match shipping address
+        if nid != order_gid and status in ("UNFULFILLED", "ON_HOLD") and financial not in CANCELLED_STATUSES:
             if not (tags & COMBINE_SKIP_TAGS):
                 sib_ship_addr = _normalize_address(node.get("shippingAddress"))
                 if current_ship_addr and sib_ship_addr and current_ship_addr == sib_ship_addr:
