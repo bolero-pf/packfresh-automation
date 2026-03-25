@@ -247,6 +247,60 @@ def delete_drop(drop_id):
     return jsonify({"ok": True})
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# API: Founders' Picks
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/founders")
+def list_founders_picks():
+    from service import get_founders_picks
+    return jsonify({"picks": get_founders_picks()})
+
+
+@app.route("/api/founders", methods=["POST"])
+def create_founder_pick():
+    data = request.get_json(silent=True) or {}
+    product_gid = data.get("product_gid")
+    founder = data.get("founder", "").strip().lower()
+    note = data.get("note", "").strip()
+
+    if not product_gid or not founder or not note:
+        return jsonify({"error": "product_gid, founder, and note required"}), 400
+
+    from service import set_founder_pick
+    try:
+        result = set_founder_pick(product_gid, founder, note)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Shopify update failed: {e}"}), 500
+
+    return jsonify(result)
+
+
+@app.route("/api/founders/remove", methods=["POST"])
+def remove_founders_picks():
+    """Bulk remove founder's pick status from products."""
+    data = request.get_json(silent=True) or {}
+    product_gids = data.get("product_gids", [])
+
+    if not product_gids:
+        return jsonify({"error": "product_gids required"}), 400
+
+    from service import remove_founder_pick
+    removed = []
+    errors = []
+    for gid in product_gids:
+        try:
+            remove_founder_pick(gid)
+            removed.append(gid)
+        except Exception as e:
+            logger.error(f"Failed to remove founder pick {gid}: {e}")
+            errors.append({"gid": gid, "error": str(e)})
+
+    return jsonify({"ok": True, "removed": len(removed), "errors": errors})
+
+
 def _ser(d):
     out = {}
     for k, v in dict(d).items():
@@ -324,6 +378,7 @@ td { padding:8px; border-bottom:1px solid var(--border); }
     <button class="tab" onclick="switchTab('history',this)">📜 History</button>
     <button class="tab" onclick="switchTab('candidates',this)">🔍 Deal Candidates</button>
     <button class="tab" onclick="switchTab('backfill',this)">↩ Backfill</button>
+    <button class="tab" onclick="switchTab('founders',this)">Founders' Picks</button>
   </div>
 
   <!-- CREATE DROP -->
@@ -396,6 +451,52 @@ td { padding:8px; border-bottom:1px solid var(--border); }
     <div id="candidates-list"></div>
   </div>
 
+  <!-- FOUNDERS' PICKS -->
+  <div class="pane" id="pane-founders">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <span style="font-weight:700;">Current Founders' Picks</span>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-sm btn-secondary" onclick="selectAllFounders()">Select All</button>
+          <button class="btn btn-sm btn-red" onclick="bulkRemoveFounders()">Remove Selected</button>
+          <button class="btn btn-sm btn-secondary" onclick="loadFoundersPicks()">Refresh</button>
+        </div>
+      </div>
+      <div id="founders-list"><div class="spinner"></div></div>
+    </div>
+    <div class="card">
+      <span style="font-weight:700;display:block;margin-bottom:12px;">Add Founder's Pick</span>
+      <div class="form-row">
+        <div class="form-group" style="flex:3;">
+          <span class="form-label">Search Product</span>
+          <input class="form-input" id="fp-search" placeholder="Type product name..." oninput="debounceFpSearch()">
+        </div>
+      </div>
+      <div id="fp-search-results"></div>
+      <div id="fp-form" style="display:none;">
+        <div style="font-weight:600;margin:12px 0 8px;" id="fp-title"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <span class="form-label">Founder</span>
+            <select class="form-select" id="fp-founder">
+              <option value="sean">Sean</option>
+              <option value="stuart">Stuart</option>
+              <option value="kayla">Kayla</option>
+              <option value="hayley">Hayley</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="flex:1;">
+            <span class="form-label">Note (why they love this item)</span>
+            <textarea class="form-input" id="fp-note" rows="3" placeholder="Write the founder's note here..." style="height:80px;padding:10px;resize:vertical;"></textarea>
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="submitFounderPick()">Add Founder's Pick</button>
+      </div>
+    </div>
+  </div>
+
   <!-- BACKFILL -->
   <div class="pane" id="pane-backfill">
     <div class="card">
@@ -446,6 +547,7 @@ function switchTab(id, btn) {
   btn.classList.add('active');
   if (id === 'scheduled') loadDrops('scheduled');
   if (id === 'history') loadDrops('history');
+  if (id === 'founders') loadFoundersPicks();
 }
 
 function toast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
@@ -614,6 +716,119 @@ async function submitBackfill() {
     toast('Past drop recorded: ' + _bfSelected.title);
     document.getElementById('bf-form').style.display = 'none';
     _bfSelected = null;
+  } catch(e) { alert(e.message); }
+}
+
+// Founders' Picks
+let _fpSelected = null;
+let _fpTimer = null;
+
+function debounceFpSearch() { clearTimeout(_fpTimer); _fpTimer = setTimeout(doFpSearch, 400); }
+async function doFpSearch() {
+  const q = document.getElementById('fp-search').value.trim();
+  const el = document.getElementById('fp-search-results');
+  if (q.length < 2) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+    const d = await r.json();
+    el.innerHTML = (d.results||[]).map(p => {
+      const v = p.variants[0]||{};
+      const img = p.image_url ? `<img src="${p.image_url}">` : '';
+      return `<div class="search-result" onclick='selectFpProduct(${JSON.stringify({product_gid:p.id,title:p.title,price:v.price,image_url:p.image_url}).replace(/'/g,"&#39;")})'>
+        ${img}
+        <div style="flex:1;"><strong>${p.title}</strong> <span style="color:var(--dim);">· $${v.price?.toFixed(2)||'?'}</span></div>
+      </div>`;
+    }).join('') || '<div style="color:var(--dim);padding:10px;">No results</div>';
+  } catch(e) { el.innerHTML = `<div style="color:var(--red);">${e.message}</div>`; }
+}
+
+function selectFpProduct(p) {
+  _fpSelected = p;
+  document.getElementById('fp-title').textContent = p.title;
+  document.getElementById('fp-form').style.display = '';
+  document.getElementById('fp-search-results').innerHTML = '';
+}
+
+async function submitFounderPick() {
+  if (!_fpSelected) return;
+  const founder = document.getElementById('fp-founder').value;
+  const note = document.getElementById('fp-note').value.trim();
+  if (!note) { alert('Note is required'); return; }
+  try {
+    const r = await fetch('/api/founders', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ product_gid: _fpSelected.product_gid, founder, note })
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    toast(founder.charAt(0).toUpperCase()+founder.slice(1)+"'s pick added: "+_fpSelected.title);
+    document.getElementById('fp-form').style.display = 'none';
+    document.getElementById('fp-note').value = '';
+    _fpSelected = null;
+    loadFoundersPicks();
+  } catch(e) { alert(e.message); }
+}
+
+async function loadFoundersPicks() {
+  const el = document.getElementById('founders-list');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/founders');
+    const d = await r.json();
+    const picks = d.picks||[];
+    if (!picks.length) { el.innerHTML = '<div style="color:var(--dim);text-align:center;padding:20px;">No founders\\'s picks set</div>'; return; }
+    const colors = {sean:'var(--accent)',stuart:'var(--green)',kayla:'var(--amber)',hayley:'#e879f9'};
+    el.innerHTML = picks.map(p => {
+      const c = colors[p.founder.toLowerCase()]||'var(--dim)';
+      const img = p.image_url ? `<img src="${p.image_url}" style="width:48px;height:48px;object-fit:contain;border-radius:4px;">` : '';
+      return `<div style="display:flex;align-items:start;gap:12px;padding:10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
+        <input type="checkbox" class="fp-check" value="${p.product_gid}" style="margin-top:4px;">
+        ${img}
+        <div style="flex:1;">
+          <div style="font-weight:600;">${p.title}</div>
+          <div style="margin-top:4px;"><span style="color:${c};font-weight:700;font-size:0.8rem;text-transform:capitalize;">${p.founder}</span> <span style="color:var(--dim);font-size:0.78rem;">· $${p.price?.toFixed(2)||'?'} · qty ${p.total_inventory}</span></div>
+          <div style="color:var(--dim);font-size:0.78rem;margin-top:4px;white-space:pre-line;">${p.founder_note||''}</div>
+        </div>
+        <button class="btn btn-sm btn-secondary" onclick="removeSingleFounder('${p.product_gid}')">✕</button>
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = `<div style="color:var(--red);">${e.message}</div>`; }
+}
+
+function selectAllFounders() {
+  const checks = document.querySelectorAll('.fp-check');
+  const allChecked = [...checks].every(c => c.checked);
+  checks.forEach(c => c.checked = !allChecked);
+}
+
+async function bulkRemoveFounders() {
+  const gids = [...document.querySelectorAll('.fp-check:checked')].map(c => c.value);
+  if (!gids.length) { alert('Select items to remove'); return; }
+  if (!confirm('Remove ' + gids.length + ' founder\\'s pick(s)?')) return;
+  try {
+    const r = await fetch('/api/founders/remove', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ product_gids: gids })
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    toast('Removed ' + d.removed + ' founder\\'s pick(s)');
+    loadFoundersPicks();
+  } catch(e) { alert(e.message); }
+}
+
+async function removeSingleFounder(gid) {
+  if (!confirm('Remove this founder\\'s pick?')) return;
+  try {
+    const r = await fetch('/api/founders/remove', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ product_gids: [gid] })
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    toast('Founder\\'s pick removed');
+    loadFoundersPicks();
   } catch(e) { alert(e.message); }
 }
 

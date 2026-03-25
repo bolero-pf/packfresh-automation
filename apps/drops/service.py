@@ -113,6 +113,43 @@ query ProductTags($id: ID!) {
 }
 """
 
+FOUNDERS_PICKS_Q = """
+query FoundersPicks($query: String!, $first: Int!) {
+  products(first: $first, query: $query) {
+    edges {
+      node {
+        id
+        title
+        tags
+        totalInventory
+        metafields(first: 10, namespace: "custom") {
+          edges {
+            node { key value }
+          }
+        }
+        featuredMedia {
+          preview { image { url } }
+        }
+        variants(first: 1) {
+          edges {
+            node { id price }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+METAFIELDS_DELETE = """
+mutation MetafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
+  metafieldsDelete(metafields: $metafields) {
+    deletedMetafields { ownerId namespace key }
+    userErrors { field message }
+  }
+}
+"""
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Operations
@@ -260,6 +297,108 @@ def setup_drop(product_gid: str, variant_gid: str, drop_date: str,
         set_vip_price_cents(product_gid, vip_price_cents)
 
     return {"unavail_tag": unavail_tag, "tags_added": tags}
+
+
+FOUNDERS = ["sean", "stuart", "kayla", "hayley"]
+
+
+def get_founders_picks() -> list:
+    """Fetch all products currently tagged as a founder's pick."""
+    query_str = " OR ".join(f"tag:{f}" for f in FOUNDERS)
+    data = shopify_gql(FOUNDERS_PICKS_Q, {"query": query_str, "first": 100})
+    results = []
+    for edge in data.get("data", {}).get("products", {}).get("edges", []):
+        node = edge["node"]
+        # Only include if product actually has a founder tag
+        tags_lower = [t.lower() for t in node.get("tags", [])]
+        founder = None
+        for f in FOUNDERS:
+            if f in tags_lower:
+                founder = f
+                break
+        if not founder:
+            continue
+
+        # Extract metafields
+        mf_founder = None
+        mf_note = None
+        for me in node.get("metafields", {}).get("edges", []):
+            mn = me["node"]
+            if mn["key"] == "founder":
+                mf_founder = mn["value"]
+            elif mn["key"] == "founder_note":
+                mf_note = mn["value"]
+
+        img = None
+        if node.get("featuredMedia", {}) and node["featuredMedia"].get("preview", {}).get("image"):
+            img = node["featuredMedia"]["preview"]["image"]["url"]
+
+        v = {}
+        for ve in node.get("variants", {}).get("edges", []):
+            v = ve["node"]
+            break
+
+        results.append({
+            "product_gid": node["id"],
+            "numeric_id": int(gid_numeric(node["id"])),
+            "title": node["title"],
+            "tags": node.get("tags", []),
+            "total_inventory": node.get("totalInventory", 0),
+            "founder": mf_founder or founder,
+            "founder_note": mf_note or "",
+            "image_url": img,
+            "price": float(v.get("price", 0)) if v else 0,
+        })
+    return results
+
+
+def set_founder_pick(product_gid: str, founder: str, note: str):
+    """Make a product a founder's pick: add tag + set metafields."""
+    founder = founder.lower().strip()
+    if founder not in FOUNDERS:
+        raise ValueError(f"Invalid founder: {founder}. Must be one of {FOUNDERS}")
+
+    # 1. Add founder name tag
+    add_tags(product_gid, [founder])
+
+    # 2. Set metafields
+    shopify_gql(METAFIELD_SET, {"metafields": [
+        {
+            "ownerId": product_gid,
+            "namespace": "custom",
+            "key": "founder",
+            "value": founder,
+            "type": "single_line_text_field",
+        },
+        {
+            "ownerId": product_gid,
+            "namespace": "custom",
+            "key": "founder_note",
+            "value": note,
+            "type": "multi_line_text_field",
+        },
+    ]})
+    return {"ok": True, "founder": founder}
+
+
+def remove_founder_pick(product_gid: str):
+    """Remove founder's pick status: remove founder tags + delete metafields."""
+    # 1. Get current tags and remove any founder tags
+    tags = get_product_tags(product_gid)
+    founder_tags = [t for t in tags if t.lower() in FOUNDERS]
+    if founder_tags:
+        remove_tags(product_gid, founder_tags)
+
+    # 2. Delete founder metafields
+    data = shopify_gql(METAFIELDS_DELETE, {"metafields": [
+        {"ownerId": product_gid, "namespace": "custom", "key": "founder"},
+        {"ownerId": product_gid, "namespace": "custom", "key": "founder_note"},
+    ]})
+    errs = data.get("data", {}).get("metafieldsDelete", {}).get("userErrors", [])
+    if errs:
+        logger.warning(f"Metafield delete warnings for {product_gid}: {errs}")
+
+    return {"ok": True, "tags_removed": founder_tags}
 
 
 def release_drop(product_gid: str):
