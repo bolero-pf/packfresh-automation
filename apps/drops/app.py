@@ -75,9 +75,11 @@ def deal_candidates():
     rows = db.query("""
         SELECT c.shopify_variant_id, c.shopify_product_id, c.title,
                c.shopify_qty, c.shopify_price, c.tcgplayer_id,
-               a.velocity_score, a.units_sold_90d, a.avg_days_to_sell
+               a.velocity_score, a.units_sold_90d, a.avg_days_to_sell,
+               sc.avg_cogs
         FROM inventory_product_cache c
         LEFT JOIN sku_analytics a ON a.shopify_variant_id = c.shopify_variant_id
+        LEFT JOIN sealed_cogs sc ON sc.shopify_variant_id = c.shopify_variant_id
         WHERE c.shopify_qty >= %s AND c.is_damaged = FALSE
         ORDER BY c.shopify_qty DESC
         LIMIT %s
@@ -465,11 +467,24 @@ td { padding:8px; border-bottom:1px solid var(--border); }
       <div id="founders-list"><div class="spinner"></div></div>
     </div>
     <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <span style="font-weight:700;">Pick Candidates</span>
+        <div class="form-row" style="margin-bottom:0;gap:8px;flex-wrap:nowrap;">
+          <div class="form-group" style="min-width:80px;flex:0;">
+            <span class="form-label">Min Qty</span>
+            <input class="form-input" id="fp-cand-min" type="number" value="4" style="width:80px;">
+          </div>
+          <button class="btn btn-sm btn-primary" onclick="loadFpCandidates()" style="align-self:end;">Load</button>
+        </div>
+      </div>
+      <div id="fp-candidates-list" style="color:var(--dim);font-size:0.82rem;padding:8px;">Click Load to find items with enough stock</div>
+    </div>
+    <div class="card">
       <span style="font-weight:700;display:block;margin-bottom:12px;">Add Founder's Pick</span>
       <div class="form-row">
         <div class="form-group" style="flex:3;">
           <span class="form-label">Search Product</span>
-          <input class="form-input" id="fp-search" placeholder="Type product name..." oninput="debounceFpSearch()">
+          <input class="form-input" id="fp-search" placeholder="Type product name or select from candidates above..." oninput="debounceFpSearch()">
         </div>
       </div>
       <div id="fp-search-results"></div>
@@ -658,13 +673,17 @@ async function loadCandidates() {
     const items = d.candidates||[];
     if (!items.length) { el.innerHTML = '<div style="color:var(--dim);padding:20px;">No items with qty >= '+min+'</div>'; return; }
     el.innerHTML = `<table><thead><tr>
-      <th>Product</th><th>Qty</th><th>Price</th><th>Velocity</th><th>Sold 90d</th>
+      <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Velocity</th><th>Sold 90d</th>
     </tr></thead><tbody>${items.map(i => {
       const vel = i.velocity_score ? (i.velocity_score > 1 ? '🟢' : i.velocity_score > 0.3 ? '🟡' : '🔴') : '—';
+      const cogs = i.avg_cogs ? '$'+i.avg_cogs.toFixed(2) : '—';
+      const margin = (i.avg_cogs && i.shopify_price) ? ((1 - i.avg_cogs/i.shopify_price)*100).toFixed(0)+'%' : '—';
       return `<tr>
         <td><strong>${i.title||'—'}</strong></td>
         <td style="font-weight:700;">${i.shopify_qty}</td>
         <td>$${(i.shopify_price||0).toFixed(2)}</td>
+        <td>${cogs}</td>
+        <td>${margin}</td>
         <td>${vel} ${i.velocity_score?.toFixed(2)||''}</td>
         <td>${i.units_sold_90d||0}</td>
       </tr>`;
@@ -768,6 +787,42 @@ async function submitFounderPick() {
     _fpSelected = null;
     loadFoundersPicks();
   } catch(e) { alert(e.message); }
+}
+
+async function loadFpCandidates() {
+  const el = document.getElementById('fp-candidates-list');
+  const min = document.getElementById('fp-cand-min').value || 4;
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/candidates?min_qty='+min+'&limit=80');
+    const d = await r.json();
+    const items = d.candidates||[];
+    if (!items.length) { el.innerHTML = '<div style="color:var(--dim);padding:8px;">No items with qty >= '+min+'</div>'; return; }
+    el.innerHTML = `<table><thead><tr>
+      <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Velocity</th><th></th>
+    </tr></thead><tbody>${items.map(i => {
+      const vel = i.velocity_score ? (i.velocity_score > 1 ? '🟢' : i.velocity_score > 0.3 ? '🟡' : '🔴') : '—';
+      const cogs = i.avg_cogs ? '$'+i.avg_cogs.toFixed(2) : '—';
+      const margin = (i.avg_cogs && i.shopify_price) ? ((1 - i.avg_cogs/i.shopify_price)*100).toFixed(0)+'%' : '—';
+      const gid = 'gid://shopify/Product/'+i.shopify_product_id;
+      return `<tr>
+        <td><strong>${i.title||'—'}</strong></td>
+        <td style="font-weight:700;">${i.shopify_qty}</td>
+        <td>$${(i.shopify_price||0).toFixed(2)}</td>
+        <td>${cogs}</td>
+        <td>${margin}</td>
+        <td>${vel} ${i.velocity_score?.toFixed(2)||''}</td>
+        <td><button class="btn btn-sm btn-primary" onclick="pickFromCandidate('${gid}','${(i.title||'').replace(/'/g,"\\'")}')">Pick</button></td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
+  } catch(e) { el.innerHTML = `<div style="color:var(--red);">${e.message}</div>`; }
+}
+
+function pickFromCandidate(gid, title) {
+  _fpSelected = { product_gid: gid, title: title };
+  document.getElementById('fp-title').textContent = title;
+  document.getElementById('fp-form').style.display = '';
+  document.getElementById('fp-form').scrollIntoView({behavior:'smooth'});
 }
 
 async function loadFoundersPicks() {
