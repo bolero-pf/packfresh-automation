@@ -1594,12 +1594,15 @@
                         <tbody>${items.map(i => {
                             const status = i.item_status || 'good';
                             const isDead = status === 'missing' || status === 'rejected';
+                            const isBrokenDown = status === 'broken_down';
                             const isDamaged = status === 'damaged';
-                            const rowStyle = isDead ? 'opacity:0.45; text-decoration:line-through;' : isDamaged ? 'background:rgba(255,170,0,0.08);' : '';
-                            const statusBadge = status === 'good' 
+                            const isChild = !!i.parent_item_id;
+                            const rowStyle = isDead ? 'opacity:0.45; text-decoration:line-through;' : isBrokenDown ? 'opacity:0.35; text-decoration:line-through;' : isDamaged ? 'background:rgba(255,170,0,0.08);' : '';
+                            const statusBadge = status === 'good'
                                 ? (i.is_mapped ? `<span class="badge badge-green">Linked</span><br><small style="color:var(--text-dim);">TCG#${i.tcgplayer_id}</small>` : '<span class="badge badge-amber">Needs Link</span>')
                                 : status === 'damaged' ? `<span class="badge" style="background:#b45309;color:#fff;">Damaged</span>${i.is_mapped ? '<br><small style="color:var(--text-dim);">TCG#'+i.tcgplayer_id+'</small>' : ''}`
                                 : status === 'missing' ? '<span class="badge" style="background:#666;color:#fff;">Missing</span>'
+                                : isBrokenDown ? '<span class="badge" style="background:var(--surface-2);color:var(--text-dim);">Broken Down</span>'
                                 : '<span class="badge" style="background:#666;color:#fff;">Rejected</span>';
                             const overrideNote = i.price_override_note ? `<br><small style="color:var(--accent);" title="${(i.price_override_note||'').replace(/"/g,'&quot;')}">⚡ ${i.price_override_note}</small>` : '';
                             const parentNote = i.parent_item_id ? '<br><small style="color:var(--text-dim);">↳ split from above</small>' : '';
@@ -1719,12 +1722,19 @@
                 ` : ''}
 
                 ${(() => {
-                    const activeItems = items.filter(i => (i.item_status || 'good') === 'good' || i.item_status === 'damaged');
+                    const activeItems = items.filter(i => {
+                        const st = i.item_status || 'good';
+                        return st === 'good' || st === 'damaged';
+                    });
                     const unmappedActive = activeItems.filter(i => !i.is_mapped);
                     const excluded = items.filter(i => i.item_status === 'missing' || i.item_status === 'rejected');
+                    const brokenDown = items.filter(i => i.item_status === 'broken_down');
                     let html = '';
                     if (excluded.length > 0) {
                         html += '<div style="margin-top:12px;color:var(--text-dim);font-size:0.85rem;">' + excluded.length + ' item(s) excluded (missing/rejected)</div>';
+                    }
+                    if (brokenDown.length > 0) {
+                        html += '<div style="margin-top:4px;color:var(--text-dim);font-size:0.85rem;">' + brokenDown.length + ' item(s) broken down into components</div>';
                     }
                     const timestamps = [];
                     if (s.offered_at) timestamps.push('Offered: ' + new Date(s.offered_at).toLocaleString());
