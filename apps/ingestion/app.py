@@ -432,6 +432,22 @@ def ppt_search_sealed():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/ppt/search-cards", methods=["POST"])
+def ppt_search_cards():
+    """Search cards by name via PPT /v2/cards — used by promo search in breakdown."""
+    data = request.get_json(silent=True) or {}
+    q = data.get("query", "").strip()
+    set_name = data.get("set_name", "").strip() or None
+    if not q:
+        return jsonify({"error": "No query"}), 400
+    try:
+        limit = int(data.get("limit", 8))
+        results = ppt.search_cards(q, set_name=set_name, limit=limit)
+        return jsonify({"results": results})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ═══════════════════════════════════════════════════════════════════
 # PUSH LIVE TO SHOPIFY
 # ═══════════════════════════════════════════════════════════════════

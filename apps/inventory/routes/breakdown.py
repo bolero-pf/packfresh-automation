@@ -139,12 +139,14 @@ def _build_recommendations(in_stock_only=True):
         variant_ids = [str(r["best_variant_id"]) for r in recipe_map.values()]
 
         # JIT refresh stale component market prices
+        # Use 24h staleness for recommendations (advisory view) to avoid PPT rate limits.
+        # Actual breakdown execution uses 4h threshold.
         try:
             from breakdown_helpers import refresh_stale_component_prices
             from routes.inventory import _get_ppt_client
             _ppt = _get_ppt_client()
             if _ppt:
-                refresh_stale_component_prices(variant_ids, db, _ppt)
+                refresh_stale_component_prices(variant_ids, db, _ppt, max_age_hours=24)
         except Exception as e:
             logger.warning(f"Component price refresh skipped: {e}")
         vph = ",".join(["%s"] * len(variant_ids))
@@ -272,16 +274,17 @@ def _build_recommendations(in_stock_only=True):
                 # qty_per_parent comes from components lookup — need per-component qty
                 child_store_vals.append((cid, sp))
 
+        # Get quantity_per_parent for each component in this variant (one query, reused below)
+        comp_qty_rows = db.query("""
+            SELECT tcgplayer_id, quantity_per_parent
+            FROM sealed_breakdown_components WHERE variant_id = %s
+        """, (vid,))
+        comp_qty_map = {int(r["tcgplayer_id"]): int(r["quantity_per_parent"]) for r in comp_qty_rows}
+
         # Compute store-based bd value using per-component qtys from recipe
         bd_value_store = 0.0
         # Only use store prices if ALL children are present in the store
         if child_store_vals and len(child_store_vals) == len(child_tcg_ids):
-            # Get quantity_per_parent for each component in this variant
-            comp_qty_rows = db.query("""
-                SELECT tcgplayer_id, quantity_per_parent
-                FROM sealed_breakdown_components WHERE variant_id = %s
-            """, (vid,))
-            comp_qty_map = {int(r["tcgplayer_id"]): int(r["quantity_per_parent"]) for r in comp_qty_rows}
             all_have_store = True
             for cid, sp in child_store_vals:
                 if sp > 0:
@@ -315,13 +318,7 @@ def _build_recommendations(in_stock_only=True):
         comp_details = []
         for cid in child_tcg_ids:
             info = child_qty_map.get(cid, {})
-            # get quantity_per_parent from components query
-            qty_per_parent = next(
-                (int(comp.get("quantity_per_parent", 1))
-                 for comp in db.query(
-                     "SELECT quantity_per_parent FROM sealed_breakdown_components WHERE variant_id=%s AND tcgplayer_id=%s",
-                     (vid, cid))
-                 ), 1)
+            qty_per_parent = comp_qty_map.get(cid, 1)
             child_bd_val = child_bd_map.get(cid, 0)
             comp_details.append({
                 "tcgplayer_id":    cid,
@@ -1636,21 +1633,17 @@ async function searchInventory() {{
   panel.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
 
   try {{
-    const r = await fetch('/inventory/breakdown/api/recommendations');
-    const d = await r.json();
-    const all = d.recommendations || [];
-
-    // Also need to search items WITHOUT recipes
-    const r2 = await fetch('/inventory/api/all-items');
+    // Search inventory locally (no PPT calls) and use cached recommendations if available
+    const r2 = await fetch('/inventory/breakdown/api/inventory-search?q=' + encodeURIComponent(q));
     const d2 = await r2.json();
-    const allItems = d2.items || [];
-
-    const filtered = allItems.filter(i => i.title.toLowerCase().includes(q));
+    const filtered = d2.items || [];
     if (!filtered.length) {{ panel.innerHTML = '<div class="alert alert-warning">No items found.</div>'; return; }}
 
-    // Merge recipe data into results
+    // Use already-loaded recommendations for BD values (from Recommendations tab)
     const recMap = {{}};
-    all.forEach(r => recMap[r.tcgplayer_id] = r);
+    if (typeof _allRecs !== 'undefined' && _allRecs) {{
+      _allRecs.forEach(r => recMap[r.tcgplayer_id] = r);
+    }}
 
     panel.innerHTML = `<div style="overflow-x:auto"><table>
       <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>BD Value</th><th></th></tr></thead>
