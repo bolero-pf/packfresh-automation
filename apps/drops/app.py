@@ -79,7 +79,7 @@ def deal_candidates():
                sc.avg_cogs
         FROM inventory_product_cache c
         LEFT JOIN sku_analytics a ON a.shopify_variant_id = c.shopify_variant_id
-        LEFT JOIN sealed_cogs sc ON sc.shopify_variant_id = c.shopify_variant_id
+        LEFT JOIN sealed_cogs sc ON sc.tcgplayer_id = c.tcgplayer_id
         WHERE c.shopify_qty >= %s AND c.is_damaged = FALSE
         ORDER BY c.shopify_qty DESC
         LIMIT %s
@@ -555,6 +555,15 @@ let _selected = null; // {product_gid, variant_gid, variant_id, product_id, titl
 let _bfSelected = null;
 let _timer = null, _bfTimer = null;
 
+// velocity_score = days of inventory remaining (lower = selling faster)
+function velBadge(v) {
+  if (!v || v >= 9999) return '<span style="color:var(--dim);">—</span>';
+  const d = Math.round(v);
+  if (d <= 30) return '<span style="color:var(--green);">' + d + 'd</span>';
+  if (d <= 90) return '<span style="color:var(--amber);">' + d + 'd</span>';
+  return '<span style="color:var(--red);">' + d + 'd</span>';
+}
+
 function switchTab(id, btn) {
   document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -673,9 +682,8 @@ async function loadCandidates() {
     const items = d.candidates||[];
     if (!items.length) { el.innerHTML = '<div style="color:var(--dim);padding:20px;">No items with qty >= '+min+'</div>'; return; }
     el.innerHTML = `<table><thead><tr>
-      <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Velocity</th><th>Sold 90d</th>
+      <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Sold 90d</th><th>Days to Sell</th>
     </tr></thead><tbody>${items.map(i => {
-      const vel = i.velocity_score ? (i.velocity_score > 1 ? '🟢' : i.velocity_score > 0.3 ? '🟡' : '🔴') : '—';
       const cogs = i.avg_cogs ? '$'+i.avg_cogs.toFixed(2) : '—';
       const margin = (i.avg_cogs && i.shopify_price) ? ((1 - i.avg_cogs/i.shopify_price)*100).toFixed(0)+'%' : '—';
       return `<tr>
@@ -684,8 +692,8 @@ async function loadCandidates() {
         <td>$${(i.shopify_price||0).toFixed(2)}</td>
         <td>${cogs}</td>
         <td>${margin}</td>
-        <td>${vel} ${i.velocity_score?.toFixed(2)||''}</td>
         <td>${i.units_sold_90d||0}</td>
+        <td>${velBadge(i.velocity_score)}</td>
       </tr>`;
     }).join('')}</tbody></table>`;
   } catch(e) { el.innerHTML = `<div style="color:var(--red);">${e.message}</div>`; }
@@ -799,9 +807,8 @@ async function loadFpCandidates() {
     const items = d.candidates||[];
     if (!items.length) { el.innerHTML = '<div style="color:var(--dim);padding:8px;">No items with qty >= '+min+'</div>'; return; }
     el.innerHTML = `<table><thead><tr>
-      <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Velocity</th><th></th>
+      <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Sold 90d</th><th>Days to Sell</th><th></th>
     </tr></thead><tbody>${items.map(i => {
-      const vel = i.velocity_score ? (i.velocity_score > 1 ? '🟢' : i.velocity_score > 0.3 ? '🟡' : '🔴') : '—';
       const cogs = i.avg_cogs ? '$'+i.avg_cogs.toFixed(2) : '—';
       const margin = (i.avg_cogs && i.shopify_price) ? ((1 - i.avg_cogs/i.shopify_price)*100).toFixed(0)+'%' : '—';
       const gid = 'gid://shopify/Product/'+i.shopify_product_id;
@@ -811,7 +818,8 @@ async function loadFpCandidates() {
         <td>$${(i.shopify_price||0).toFixed(2)}</td>
         <td>${cogs}</td>
         <td>${margin}</td>
-        <td>${vel} ${i.velocity_score?.toFixed(2)||''}</td>
+        <td>${i.units_sold_90d||0}</td>
+        <td>${velBadge(i.velocity_score)}</td>
         <td><button class="btn btn-sm btn-primary" onclick="pickFromCandidate('${gid}','${(i.title||'').replace(/'/g,"\\'")}')">Pick</button></td>
       </tr>`;
     }).join('')}</tbody></table>`;
