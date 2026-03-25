@@ -296,7 +296,7 @@ def api_push():
 
     cm = _get_cache_manager()
     if cm and pushed > 0 and not DRY_RUN:
-        cm.invalidate("push_from_inventory")
+        cm.record_tool_push()
 
     return jsonify({
         "pushed": pushed,
@@ -496,7 +496,7 @@ def create_listing():
     if DRY_RUN: return jsonify({"dry_run": True, "product_name": ppt_item.get("name"), "price": price}), 200
     summary = enrichment.create_draft_listing(ppt_item, price=float(price), quantity=quantity)
     cm = _get_cache_manager()
-    if cm: cm.invalidate("new_listing_created")
+    if cm: cm.record_tool_push()
     return jsonify(summary)
 
 @bp.route("/api/stub/create", methods=["POST"])
@@ -517,7 +517,7 @@ def create_stub():
         if qty > 0 and LOCATION_ID and inv_item_id:
             _update_shopify_qty(int(inv_item_id), int(variant_id), qty)
         cm = _get_cache_manager()
-        if cm: cm.invalidate("stub_created")
+        if cm: cm.record_tool_push()
         return jsonify({"product_id": product_id, "variant_id": variant_id, "title": name})
     except Exception as e:
         logger.error(f"Stub create failed: {e}")
