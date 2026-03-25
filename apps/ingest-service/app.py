@@ -1580,7 +1580,26 @@ def receive_session(session_id):
         return jsonify({"error": "Session not found"}), 404
     if session["status"] not in ("accepted",):
         return jsonify({"error": f"Cannot receive — session is '{session['status']}'"}), 400
-    db.execute("UPDATE intake_sessions SET status = 'received', received_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
+
+    # Snapshot items + offer at receive time for adjustment tracking in ingest
+    items = intake.get_session_items(session_id)
+    snapshot = json.dumps([{
+        "id": str(i["id"]),
+        "product_name": i.get("product_name"),
+        "tcgplayer_id": i.get("tcgplayer_id"),
+        "quantity": i.get("quantity", 1),
+        "market_price": float(i.get("market_price", 0)),
+        "offer_price": float(i.get("offer_price", 0)),
+        "item_status": i.get("item_status", "good"),
+    } for i in items if i.get("item_status") in ("good", "damaged")])
+
+    db.execute("""
+        UPDATE intake_sessions
+        SET status = 'received', received_at = CURRENT_TIMESTAMP,
+            original_offer_amount = total_offer_amount,
+            received_items_snapshot = %s
+        WHERE id = %s
+    """, (snapshot, session_id))
     return jsonify({"success": True, "status": "received"})
 
 

@@ -291,6 +291,14 @@
     </div>
 </div>
 
+<!-- Add Item Modal -->
+<div id="add-item-modal" class="modal-overlay">
+    <div class="modal" style="max-width:600px;">
+        <button class="modal-close-sticky" onclick="closeAddItem()">×</button>
+        <div id="add-item-body"></div>
+    </div>
+</div>
+
 <!-- Confirm Dialog -->
 <div id="confirm-overlay">
     <div class="confirm-box">
@@ -550,9 +558,14 @@ async function viewSession(sessionId, _preserveScroll) {
                 </div>
             </div>
 
+            <div id="offer-adjustment-card"></div>
+
             <div class="card">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
-                    <h2 style="margin:0;">📦 Items</h2>
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <h2 style="margin:0;">📦 Items</h2>
+                        ${isReceived ? `<button class="btn btn-sm btn-secondary" style="font-size:0.78rem;padding:3px 10px;" onclick="openAddItem('${sessionId}')">➕ Add Item</button>` : ''}
+                    </div>
                     ${isReceived ? `<div style="display:flex; align-items:center; gap:12px; font-size:0.82rem;">
                         <span id="approve-stats" style="color:var(--text-dim);">0/${activeItems.length} approved</span>
                         <label style="display:flex; align-items:center; gap:6px; color:var(--text-dim); cursor:pointer;">
@@ -646,6 +659,8 @@ async function viewSession(sessionId, _preserveScroll) {
         _enrichBreakdownSummaries(items, sessionId, isReceived);
         // Load raw card barcodes for this session (persists across refreshes)
         _loadSessionBarcodes(sessionId);
+        // Load offer adjustment summary (if changes exist)
+        if (isReceived) _loadOfferAdjustment(sessionId);
     } catch(err) {
         el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
@@ -670,10 +685,29 @@ function _refreshApprovedVisibility() {
     document.querySelectorAll('tr[data-item-id]').forEach(row => {
         const id = row.dataset.itemId;
         const isBrokenDown = row.dataset.itemStatus === 'broken_down';
-        if (_hideApproved && (_approvedItems.has(id) || isBrokenDown)) {
+        const isPushed = _pushedItemIds.has(id);
+        const isApproved = _approvedItems.has(id);
+
+        // Hide/show for "Hide approved" checkbox
+        if (_hideApproved && (isApproved || isBrokenDown)) {
             row.style.display = 'none';
         } else {
             row.style.display = '';
+        }
+
+        // Update row opacity (skip broken-down rows which have their own styling)
+        if (!isBrokenDown) {
+            row.style.opacity = isApproved ? '0.5' : '';
+        }
+
+        // Update approve button style (skip pushed items — they stay locked)
+        if (!isPushed) {
+            const btn = row.querySelector('button[title="Mark as reviewed"]');
+            if (btn) {
+                btn.style.background = isApproved ? 'var(--green)' : '';
+                btn.style.color = isApproved ? '#000' : 'var(--text-dim)';
+                btn.style.borderColor = isApproved ? 'var(--green)' : 'var(--border)';
+            }
         }
     });
 }
@@ -1050,6 +1084,209 @@ async function relinkManual() {
         viewSession(sid, true);
     } catch(err) { alert(err.message); }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// ADD ITEM
+// ═══════════════════════════════════════════════════════════════════
+
+let _addItemSessionId = null;
+
+function openAddItem(sessionId) {
+    _addItemSessionId = sessionId;
+    document.getElementById('add-item-body').innerHTML = `
+        <h3 style="margin-bottom:12px;">➕ Add Item</h3>
+        <div style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px;">
+            <div style="flex:1;">
+                <label style="font-size:0.85rem; color:var(--text-dim);">Search Products</label>
+                <input type="text" id="add-item-search" placeholder="e.g. Celebrations ETB"
+                       style="width:100%; margin-top:4px;"
+                       onkeydown="if(event.key==='Enter') addItemSearch()">
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="addItemSearch()" style="height:40px;">Search</button>
+        </div>
+        <div id="add-item-search-results"></div>
+        <div style="margin-top:16px; padding-top:12px; border-top:1px solid var(--border);">
+            <h4 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Or enter TCGPlayer ID directly:</h4>
+            <div style="display:flex; gap:8px; align-items:flex-end;">
+                <div style="flex:1;">
+                    <input type="number" id="add-item-manual-tcgid" placeholder="TCGPlayer Product ID" style="width:100%;">
+                </div>
+                <div style="width:80px;">
+                    <label style="font-size:0.75rem; color:var(--text-dim);">Qty</label>
+                    <input type="number" id="add-item-manual-qty" value="1" min="1" style="width:100%; margin-top:2px;">
+                </div>
+                <button class="btn btn-success btn-sm" onclick="addItemManual()" style="height:40px;">Add</button>
+            </div>
+        </div>
+    `;
+    document.getElementById('add-item-modal').classList.add('active');
+    setTimeout(() => document.getElementById('add-item-search').focus(), 100);
+}
+
+function closeAddItem() {
+    document.getElementById('add-item-modal').classList.remove('active');
+    _addItemSessionId = null;
+}
+
+async function addItemSearch() {
+    const query = document.getElementById('add-item-search').value.trim();
+    const resultsDiv = document.getElementById('add-item-search-results');
+    if (!query) { resultsDiv.innerHTML = '<p style="color:var(--text-dim);">Enter a search term</p>'; return; }
+
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+    try {
+        const sr = await fetch('/api/ppt/search-sealed', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query }),
+        });
+        const sd = await sr.json();
+        if (!sr.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${sd.error}</div>`; return; }
+        const results = sd.results || [];
+        if (!results.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No results found</div>'; return; }
+
+        resultsDiv.innerHTML = '<div style="max-height:350px; overflow-y:auto;">' + results.slice(0, 10).map(p => {
+            const name = p.name || p.productName || '';
+            const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || 0;
+            const price = p.unopenedPrice || p.marketPrice || 0;
+            const setName = p.setName || p.set_name || '';
+            return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
+                         onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
+                         onclick="addItemSelect(${tcgId}, '${name.replace(/'/g,"\\'")}', ${price}, '${setName.replace(/'/g,"\\'")}')">
+                <div style="font-weight:600;">${name}</div>
+                <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
+            </div>`;
+        }).join('') + '</div>';
+    } catch(err) {
+        resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+async function addItemSelect(tcgId, name, price, setName) {
+    const input = await themedPrompt('Quantity', `How many "${name}"?`, '1');
+    if (input === null) return;
+    const qty = parseInt(input);
+    if (isNaN(qty) || qty < 1) { alert('Quantity must be at least 1'); return; }
+
+    try {
+        const r = await fetch(`/api/ingest/session/${_addItemSessionId}/add-item`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                product_name: name,
+                tcgplayer_id: tcgId,
+                market_price: price,
+                set_name: setName || null,
+                quantity: qty,
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error); return; }
+        const sid = _addItemSessionId;
+        closeAddItem();
+        viewSession(sid, true);
+    } catch(err) { alert(err.message); }
+}
+
+async function addItemManual() {
+    const tcgId = document.getElementById('add-item-manual-tcgid').value.trim();
+    const qty = parseInt(document.getElementById('add-item-manual-qty').value) || 1;
+    if (!tcgId) { alert('Enter a TCGPlayer ID'); return; }
+
+    try {
+        // Look up the product first via PPT
+        const sr = await fetch('/api/ppt/search-sealed', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query: tcgId }),
+        });
+        const sd = await sr.json();
+        const match = (sd.results || []).find(p => {
+            const pid = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || p.id;
+            return String(pid) === String(tcgId);
+        });
+
+        const name = match ? (match.name || match.productName || 'Unknown') : 'Unknown';
+        const price = match ? (match.unopenedPrice || match.marketPrice || 0) : 0;
+        const setName = match ? (match.setName || match.set_name || '') : '';
+
+        const r = await fetch(`/api/ingest/session/${_addItemSessionId}/add-item`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                product_name: name,
+                tcgplayer_id: parseInt(tcgId),
+                market_price: price,
+                set_name: setName || null,
+                quantity: qty,
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error); return; }
+        const sid = _addItemSessionId;
+        closeAddItem();
+        viewSession(sid, true);
+    } catch(err) { alert(err.message); }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// OFFER ADJUSTMENT CARD
+// ═══════════════════════════════════════════════════════════════════
+
+async function _loadOfferAdjustment(sessionId) {
+    const card = document.getElementById('offer-adjustment-card');
+    if (!card) return;
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/offer-summary`);
+        const d = await r.json();
+        if (!d.available || (d.delta === 0 && (!d.adjustments || !d.adjustments.length))) {
+            card.innerHTML = '';
+            return;
+        }
+
+        const deltaColor = d.delta < 0 ? 'var(--red)' : d.delta > 0 ? 'var(--green)' : 'var(--text-dim)';
+        const deltaSign = d.delta > 0 ? '+' : '';
+
+        let html = `<div class="card" style="border-color:${d.delta < 0 ? 'var(--amber)' : 'var(--green)'}; background:${d.delta < 0 ? 'rgba(255,170,0,0.04)' : 'rgba(45,212,160,0.04)'};">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+                <h2 style="margin:0;">📋 Offer Adjustment</h2>
+                <span style="font-size:1.1rem; font-weight:700; color:${deltaColor};">${deltaSign}$${d.delta.toFixed(2)}</span>
+            </div>
+            <div class="stats" style="margin-bottom:12px;">
+                <div class="stat">
+                    <div class="stat-label">Original Offer</div>
+                    <div class="stat-value">$${d.original_offer.toFixed(2)}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Adjusted Offer</div>
+                    <div class="stat-value" style="color:${deltaColor};">$${d.adjusted_offer.toFixed(2)}</div>
+                </div>
+            </div>`;
+
+        if (d.adjustments && d.adjustments.length) {
+            html += `<details style="font-size:0.85rem;">
+                <summary style="cursor:pointer; color:var(--text-dim); margin-bottom:8px;">${d.adjustments.length} change(s) — click to expand</summary>
+                <div style="display:flex; flex-direction:column; gap:4px;">`;
+            d.adjustments.forEach(a => {
+                const icon = a.type === 'damaged' ? '⚠️' : a.type === 'removed' ? '🗑' : a.type === 'added' ? '➕' : a.type === 'relinked' ? '🔗' : a.type === 'qty_changed' ? '✏️' : '💲';
+                const amtColor = a.amount < 0 ? 'var(--red)' : a.amount > 0 ? 'var(--green)' : 'var(--text-dim)';
+                const amtSign = a.amount > 0 ? '+' : '';
+                html += `<div style="display:flex; justify-content:space-between; align-items:center; padding:4px 8px; background:var(--surface-2); border-radius:4px;">
+                    <span>${icon} ${a.description}</span>
+                    <span style="color:${amtColor}; font-weight:600; font-family:monospace;">${amtSign}$${a.amount.toFixed(2)}</span>
+                </div>`;
+            });
+            html += '</div></details>';
+        }
+
+        html += '</div>';
+        card.innerHTML = html;
+    } catch(err) {
+        card.innerHTML = '';
+    }
+}
+
 
 async function editItemQty(itemId, sessionId, currentQty) {
     const input = await themedPrompt('Change Quantity', `Current quantity: ${currentQty}`, currentQty);
@@ -1710,6 +1947,48 @@ async function forceIngested(sessionId) {
     } catch(err) { alert(err.message); }
 }
 
+async function _pollPushJob(jobId, total, panel) {
+    /**
+     * Poll a background push job until it completes.
+     * Shows progress bar in the panel. Returns the final job result or null on error.
+     */
+    const startTime = Date.now();
+    while (true) {
+        await new Promise(r => setTimeout(r, 2000));  // poll every 2s
+        try {
+            const r = await fetch(`/api/ingest/push-job/${jobId}`);
+            const d = await r.json();
+            if (!r.ok) {
+                panel.innerHTML = `<div class="alert alert-error">Lost connection to push job</div>`;
+                return null;
+            }
+
+            if (d.status === 'running') {
+                const pct = total > 0 ? Math.round((d.progress / total) * 100) : 0;
+                const elapsed = Math.round((Date.now() - startTime) / 1000);
+                panel.innerHTML = `
+                    <div style="padding:16px;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:0.85rem;">
+                            <span><span class="spinner" style="display:inline-block;width:14px;height:14px;margin-right:6px;"></span> Pushing to Shopify...</span>
+                            <span style="color:var(--text-dim);">${d.progress}/${total} items · ${elapsed}s</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="fill" style="width:${pct}%;"></div>
+                        </div>
+                    </div>`;
+                continue;
+            }
+
+            // Job complete
+            return d;
+        } catch(err) {
+            panel.innerHTML = `<div class="alert alert-error">Connection lost: ${err.message}</div>`;
+            return null;
+        }
+    }
+}
+
+
 async function pushLive(sessionId) {
     const pendingApproved = [..._approvedItems].filter(id => !_pushedItemIds.has(id));
     const totalRows = document.querySelectorAll('tr[data-item-id]').length;
@@ -1738,20 +2017,29 @@ async function pushLive(sessionId) {
 
     const panel = document.getElementById('push-live-results');
 
-    // ── Step 1: Push sealed + raw items (existing Shopify flow) ───────────────
+    // ── Step 1: Push sealed + raw items (background job with polling) ────────
     if (sealedRawIds.size > 0) {
-        panel.innerHTML = '<div class="loading"><span class="spinner"></span> Pushing sealed/raw items to Shopify...</div>';
+        panel.innerHTML = '<div class="loading"><span class="spinner"></span> Starting push...</div>';
         try {
             const body = JSON.stringify({ item_ids: [...sealedRawIds] });
             const r = await fetch(`/api/ingest/session/${sessionId}/push-live`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
             });
             const d = await r.json();
-            if (!r.ok && !d.results) {
+            if (!r.ok && !d.job_id) {
                 panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`;
                 return;
             }
-            _renderSealedRawResults(d, sessionId, panel);
+
+            // If server returned a job_id, poll for progress
+            if (d.job_id) {
+                const result = await _pollPushJob(d.job_id, d.total || 0, panel);
+                if (!result) return;  // error already shown
+                _renderSealedRawResults(result, sessionId, panel);
+            } else {
+                // Fallback: server returned immediate results (shouldn't happen but safe)
+                _renderSealedRawResults(d, sessionId, panel);
+            }
         } catch(err) {
             panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
             return;

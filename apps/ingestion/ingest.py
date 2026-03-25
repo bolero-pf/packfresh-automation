@@ -8,6 +8,7 @@ Handles:
     - Marking items as damaged during ingest
 """
 
+import json
 import logging
 from decimal import Decimal
 from typing import Optional
@@ -225,12 +226,26 @@ def undo_break_down(item_id: str) -> dict:
     }
 
 
+DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
+
+
 def mark_item_damaged(item_id: str) -> dict:
-    """Mark an entire item as damaged."""
+    """Mark an entire item as damaged and apply damage discount to offer."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    market_price = Decimal(str(item.get("market_price", 0)))
+    qty = item.get("quantity", 1)
+    damaged_offer = (market_price * DAMAGE_DISCOUNT * offer_pct * qty).quantize(Decimal("0.01"))
+
     execute(
-        "UPDATE intake_items SET item_status = 'damaged' WHERE id = %s",
-        (item_id,)
+        "UPDATE intake_items SET item_status = 'damaged', offer_price = %s WHERE id = %s",
+        (damaged_offer, item_id)
     )
+    _recalculate_session_totals(item["session_id"])
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
@@ -254,7 +269,6 @@ def split_damaged(item_id: str, damaged_qty: int) -> dict:
     session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     market_price = Decimal(str(item.get("market_price", 0)))
-    DAMAGE_DISCOUNT = Decimal("0.85")
 
     # Reduce original item qty
     good_qty = total_qty - damaged_qty
@@ -288,11 +302,22 @@ def split_damaged(item_id: str, damaged_qty: int) -> dict:
 
 
 def mark_item_good(item_id: str) -> dict:
-    """Restore an item to good status."""
+    """Restore an item to good status and restore full offer price."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    market_price = Decimal(str(item.get("market_price", 0)))
+    qty = item.get("quantity", 1)
+    full_offer = (market_price * offer_pct * qty).quantize(Decimal("0.01"))
+
     execute(
-        "UPDATE intake_items SET item_status = 'good' WHERE id = %s",
-        (item_id,)
+        "UPDATE intake_items SET item_status = 'good', offer_price = %s WHERE id = %s",
+        (full_offer, item_id)
     )
+    _recalculate_session_totals(item["session_id"])
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
@@ -448,6 +473,200 @@ def _save_mapping(product_name: str, tcgplayer_id: int, product_type: str,
             use_count = product_mappings.use_count + 1
     """, (product_name, tcgplayer_id, product_type, set_name))
 
+
+
+# ==========================================
+# OFFER ADJUSTMENT TRACKING
+# ==========================================
+
+def _ensure_offer_snapshot(session_id: str):
+    """Backfill original_offer_amount and snapshot if missing (pre-migration sessions)."""
+    try:
+        session = query_one("SELECT original_offer_amount, received_items_snapshot FROM intake_sessions WHERE id = %s", (session_id,))
+    except Exception:
+        return  # columns don't exist yet — migration not run
+    if session and session.get("original_offer_amount") is None:
+        current = query_one("SELECT total_offer_amount FROM intake_sessions WHERE id = %s", (session_id,))
+        items = get_session_items(session_id)
+        snapshot = json.dumps([{
+            "id": str(i["id"]),
+            "product_name": i.get("product_name"),
+            "tcgplayer_id": i.get("tcgplayer_id"),
+            "quantity": i.get("quantity", 1),
+            "market_price": float(i.get("market_price") or 0),
+            "offer_price": float(i.get("offer_price") or 0),
+            "item_status": i.get("item_status", "good"),
+        } for i in items if i.get("item_status") in ("good", "damaged")])
+        execute("""
+            UPDATE intake_sessions
+            SET original_offer_amount = total_offer_amount,
+                received_items_snapshot = %s
+            WHERE id = %s AND original_offer_amount IS NULL
+        """, (snapshot, session_id))
+
+
+def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
+    """
+    Compare current session items against the receive-time snapshot.
+    Returns {original_offer, adjusted_offer, delta, adjustments: [{type, description, amount}]}
+    or None if no snapshot is available.
+    """
+    _ensure_offer_snapshot(session_id)
+    try:
+        session = query_one(
+            "SELECT original_offer_amount, total_offer_amount, received_items_snapshot FROM intake_sessions WHERE id = %s",
+            (session_id,)
+        )
+    except Exception:
+        return None  # columns don't exist yet — migration not run
+    if not session or not session.get("received_items_snapshot"):
+        return None
+
+    original_offer = float(session.get("original_offer_amount") or 0)
+    adjusted_offer = float(session.get("total_offer_amount") or 0)
+    snapshot_items = session["received_items_snapshot"]
+    if isinstance(snapshot_items, str):
+        snapshot_items = json.loads(snapshot_items)
+
+    # Build lookup maps
+    snap_by_id = {s["id"]: s for s in snapshot_items}
+
+    # Current items (excluding broken_down parents — they're replaced by children)
+    current_items = get_session_items(session_id)
+    current_active = [i for i in current_items if i.get("item_status") in ("good", "damaged")]
+    curr_by_id = {str(i["id"]): i for i in current_active}
+
+    adjustments = []
+
+    # Items in snapshot but not in current → removed
+    for sid, snap in snap_by_id.items():
+        if sid not in curr_by_id:
+            # Check if this item was broken down (not truly removed)
+            broken = query_one(
+                "SELECT id FROM intake_items WHERE id = %s AND item_status = 'broken_down'",
+                (sid,)
+            )
+            if broken:
+                continue  # breakdown is COGS-neutral, skip
+            amount = -snap["offer_price"]
+            adjustments.append({
+                "type": "removed",
+                "description": f"Removed: {snap['product_name']} (×{snap['quantity']})",
+                "amount": round(amount, 2),
+            })
+
+    # Items in current but not in snapshot → added
+    for cid, curr in curr_by_id.items():
+        if cid not in snap_by_id:
+            # Skip breakdown children (their parent is in snapshot as broken_down)
+            if curr.get("parent_item_id"):
+                continue
+            amount = float(curr.get("offer_price") or 0)
+            adjustments.append({
+                "type": "added",
+                "description": f"Added: {curr.get('product_name')} (×{curr.get('quantity', 1)})",
+                "amount": round(amount, 2),
+            })
+
+    # Items in both → check for changes
+    for sid, snap in snap_by_id.items():
+        if sid not in curr_by_id:
+            continue
+        curr = curr_by_id[sid]
+        curr_offer = float(curr.get("offer_price") or 0)
+        snap_offer = snap["offer_price"]
+
+        # Damaged
+        if curr.get("item_status") == "damaged" and snap.get("item_status") != "damaged":
+            delta = curr_offer - snap_offer
+            adjustments.append({
+                "type": "damaged",
+                "description": f"Damaged: {snap['product_name']} (×{curr.get('quantity', 1)})",
+                "amount": round(delta, 2),
+            })
+            continue
+
+        # Relinked (different product)
+        curr_tcg = curr.get("tcgplayer_id")
+        snap_tcg = snap.get("tcgplayer_id")
+        if curr_tcg and snap_tcg and int(curr_tcg) != int(snap_tcg):
+            delta = curr_offer - snap_offer
+            adjustments.append({
+                "type": "relinked",
+                "description": f"Changed: {snap['product_name']} → {curr.get('product_name')}",
+                "amount": round(delta, 2),
+            })
+            continue
+
+        # Quantity changed
+        if curr.get("quantity", 1) != snap.get("quantity", 1):
+            delta = curr_offer - snap_offer
+            adjustments.append({
+                "type": "qty_changed",
+                "description": f"Qty: {snap['product_name']} ({snap['quantity']} → {curr.get('quantity', 1)})",
+                "amount": round(delta, 2),
+            })
+            continue
+
+        # Price changed for other reasons
+        if abs(curr_offer - snap_offer) > 0.01:
+            delta = curr_offer - snap_offer
+            adjustments.append({
+                "type": "price_changed",
+                "description": f"Price adjusted: {snap['product_name']}",
+                "amount": round(delta, 2),
+            })
+
+    delta = round(adjusted_offer - original_offer, 2)
+    return {
+        "original_offer": round(original_offer, 2),
+        "adjusted_offer": round(adjusted_offer, 2),
+        "delta": delta,
+        "adjustments": adjustments,
+    }
+
+
+# ==========================================
+# ADD ITEM TO SESSION
+# ==========================================
+
+def add_item_to_session(session_id: str, data: dict) -> dict:
+    """Add a new item to an ingest session."""
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,))
+    if not session:
+        raise ValueError("Session not found")
+    if session["status"] not in ("received", "partially_ingested"):
+        raise ValueError(f"Cannot add items — session is '{session['status']}'")
+
+    product_name = data.get("product_name")
+    tcgplayer_id = data.get("tcgplayer_id")
+    market_price = Decimal(str(data.get("market_price", 0)))
+    quantity = int(data.get("quantity", 1))
+    set_name = data.get("set_name")
+    product_type = data.get("product_type", "sealed")
+
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    offer_price = (market_price * offer_pct * quantity).quantize(Decimal("0.01"))
+
+    item_id = str(uuid4())
+    execute("""
+        INSERT INTO intake_items (
+            id, session_id, product_name, set_name, tcgplayer_id,
+            quantity, market_price, offer_price, product_type,
+            is_mapped, item_status
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        item_id, session_id, product_name, set_name,
+        int(tcgplayer_id) if tcgplayer_id else None,
+        quantity, market_price, offer_price, product_type,
+        tcgplayer_id is not None, "good",
+    ))
+
+    if tcgplayer_id and product_name:
+        _save_mapping(product_name, int(tcgplayer_id), product_type, set_name=set_name)
+
+    _recalculate_session_totals(session_id)
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
 # ==========================================

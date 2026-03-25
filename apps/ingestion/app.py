@@ -11,6 +11,8 @@ import json
 import logging
 import hashlib
 import secrets
+import threading
+import uuid as _uuid
 from datetime import datetime, date
 from decimal import Decimal
 from flask import Flask, render_template, request, jsonify, redirect, make_response
@@ -377,6 +379,37 @@ def delete_item(item_id):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# OFFER ADJUSTMENT SUMMARY
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/ingest/session/<session_id>/offer-summary", methods=["GET"])
+def offer_summary(session_id):
+    """Get offer adjustment summary comparing current state to receive-time snapshot."""
+    result = ingest.get_offer_adjustment_summary(session_id)
+    if result is None:
+        return jsonify({"available": False})
+    return jsonify({"available": True, **result})
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ADD ITEM TO SESSION
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/ingest/session/<session_id>/add-item", methods=["POST"])
+def add_item(session_id):
+    """Add a new item to an ingest session."""
+    data = request.get_json(silent=True) or {}
+    try:
+        item = ingest.add_item_to_session(session_id, data)
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Add item failed for session {session_id}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════
 # PPT SEARCH (for break-down modal)
 # ═══════════════════════════════════════════════════════════════════
 
@@ -528,11 +561,23 @@ def push_dry_run(session_id):
 
 
 
+_push_jobs = {}  # {job_id: {status, progress, total, results, errors, ...}}
+
+
+@app.route("/api/ingest/push-job/<job_id>", methods=["GET"])
+def get_push_job(job_id):
+    """Poll background push job status."""
+    job = _push_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
+
+
 @app.route("/api/ingest/session/<session_id>/push-live", methods=["POST"])
 def push_session_live(session_id):
+    """Push a received session to Shopify (runs in background thread)."""
     if cache_mgr:
         cache_mgr.check_and_refresh_if_stale()
-    """Push a received session to Shopify."""
     if not shopify:
         return jsonify({"error": "Shopify not configured"}), 503
 
@@ -546,17 +591,13 @@ def push_session_live(session_id):
     requested_item_ids = set(str(x) for x in (data.get("item_ids") or []))
 
     items = ingest.get_session_items(session_id)
-    # Only push good/damaged mapped items (not broken_down, missing, rejected)
-    # Skip items already pushed (have pushed_at timestamp) — allows retry of just failed items
     active = [i for i in items if i.get("item_status") in ("good", "damaged")
               and i.get("is_mapped") and not i.get("pushed_at")]
 
-    # If caller specified a subset (partial push), filter to just those IDs
     if requested_item_ids:
         active = [i for i in active if str(i["id"]) in requested_item_ids]
 
     if not active:
-        # If nothing to push but there ARE pushed items, everything succeeded — mark ingested
         already_pushed = [i for i in items if i.get("pushed_at")]
         if already_pushed:
             ingest.mark_session_ingested(session_id)
@@ -564,131 +605,176 @@ def push_session_live(session_id):
                             "total": 0, "ingested": True,
                             "message": "All items already pushed. Session marked ingested."})
         return jsonify({"error": "No active mapped items to push"}), 400
+
+    # Serialize items for the background thread (avoid psycopg2 cursor issues)
+    active_dicts = [dict(i) for i in active]
+
+    job_id = str(_uuid.uuid4())
+    _push_jobs[job_id] = {
+        "status": "running",
+        "progress": 0,
+        "total": len(active_dicts),
+        "results": [],
+        "errors": [],
+        "session_id": session_id,
+    }
+
+    thread = threading.Thread(
+        target=_push_session_worker,
+        args=(job_id, session_id, active_dicts),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"job_id": job_id, "status": "running", "total": len(active_dicts)})
+
+
+def _push_session_worker(job_id, session_id, active):
+    """Background worker that processes the actual push to Shopify."""
+    job = _push_jobs[job_id]
     results = []
     errors = []
 
-    # ── Split by product_type — raw cards go to internal DB, sealed go to Shopify ──
-    raw_items    = [i for i in active if i.get("product_type") == "raw" and not i.get("is_graded")]
-    graded_items = [i for i in active if i.get("is_graded")]
-    sealed_items = [i for i in active if i.get("product_type") != "raw" and not i.get("is_graded")]
+    try:
+        # Split by product_type
+        raw_items    = [i for i in active if i.get("product_type") == "raw" and not i.get("is_graded")]
+        graded_items = [i for i in active if i.get("is_graded")]
+        sealed_items = [i for i in active if i.get("product_type") != "raw" and not i.get("is_graded")]
 
-    # ── Graded slabs: surfaced in UI for per-item cert entry, not auto-pushed ─
-    for item in graded_items:
-        results.append({
-            "product_name": item.get("product_name"),
-            "quantity":     item.get("quantity", 1),
-            "action":       "graded_pending_cert",
-            "note":         f"{item.get('grade_company','PSA')} {item.get('grade_value','?')} — use cert entry panel below",
+        # Graded slabs
+        for item in graded_items:
+            results.append({
+                "product_name": item.get("product_name"),
+                "quantity":     item.get("quantity", 1),
+                "action":       "graded_pending_cert",
+                "note":         f"{item.get('grade_company','PSA')} {item.get('grade_value','?')} — use cert entry panel below",
+            })
+            job["progress"] += 1
+
+        # Raw cards
+        for item in raw_items:
+            item_dict = dict(item)
+            item_dict["session_id"] = session_id
+            try:
+                r = _push_raw_item(item_dict)
+                results.append(r)
+                db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
+                           (item["id"],))
+            except Exception as e:
+                logger.exception(f"push_raw_item failed for {item['id']}: {e}")
+                errors.append({"product_name": item.get("product_name"), "action": "error", "error": str(e)})
+            job["progress"] += 1
+
+        # Sealed items: consolidate
+        tcg_ids = list(set(i["tcgplayer_id"] for i in sealed_items if i.get("tcgplayer_id")))
+        normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids) if tcg_ids else ({}, {})
+
+        consolidated = {}
+        for item in sealed_items:
+            tcg_id = item["tcgplayer_id"]
+            is_damaged = item.get("item_status") == "damaged"
+            key = (tcg_id, is_damaged)
+            if key not in consolidated:
+                consolidated[key] = {
+                    "tcg_id": tcg_id,
+                    "is_damaged": is_damaged,
+                    "total_qty": 0,
+                    "items": [],
+                    "product_name": item.get("product_name"),
+                }
+            consolidated[key]["total_qty"] += item.get("quantity", 1)
+            consolidated[key]["items"].append(item)
+
+        for key, group in consolidated.items():
+            tcg_id, is_damaged = key
+            qty = group["total_qty"]
+            entry = {
+                "product_name": group["product_name"],
+                "tcgplayer_id": tcg_id,
+                "quantity": qty,
+                "is_damaged": is_damaged,
+                "consolidated_from": len(group["items"]),
+            }
+
+            try:
+                if not is_damaged:
+                    entry = _push_normal_item(entry, tcg_id, qty, group["items"][0], normal_cache)
+                else:
+                    entry = _push_damaged_item(entry, tcg_id, qty, group["items"][0], normal_cache, damaged_cache)
+            except Exception as e:
+                entry.update(action="error", error=str(e))
+                errors.append(entry)
+                job["progress"] += len(group["items"])
+                continue
+
+            if entry.get("action") == "error":
+                errors.append(entry)
+            else:
+                results.append(entry)
+                for pushed_item in group["items"]:
+                    db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
+                               (pushed_item["id"],))
+
+            job["progress"] += len(group["items"])
+
+        # Determine final session status
+        all_items_after = ingest.get_session_items(session_id)
+        remaining_unpushed = [i for i in all_items_after
+                              if i.get("item_status") in ("good", "damaged")
+                              and i.get("is_mapped") and not i.get("pushed_at")]
+
+        partially_ingested = False
+        if not errors:
+            if remaining_unpushed:
+                db.execute(
+                    "UPDATE intake_sessions SET status = 'partially_ingested' WHERE id = %s",
+                    (session_id,)
+                )
+                partially_ingested = True
+            else:
+                ingest.mark_session_ingested(session_id)
+
+        # Notify intake cache
+        if not errors:
+            try:
+                import requests as _req
+                intake_url = os.getenv("INTAKE_INTERNAL_URL", "")
+                if intake_url:
+                    _req.post(f"{intake_url}/api/cache/invalidate",
+                              json={"reason": "ingest"},
+                              timeout=3)
+            except Exception:
+                pass
+
+        job.update({
+            "status": "complete",
+            "success": len(errors) == 0,
+            "results": results,
+            "errors": errors,
+            "total": len(active),
+            "incremented": sum(1 for r in results if r.get("action") == "inventory_incremented"),
+            "created_damaged": sum(1 for r in results if r.get("action") == "created_damaged_listing"),
+            "created_listing": sum(1 for r in results if r.get("action") == "created_listing"),
+            "error_count": len(errors),
+            "ingested": not errors and not partially_ingested,
+            "partially_ingested": not errors and partially_ingested,
+            "pushed_count": len(results),
+            "remaining_count": len(remaining_unpushed),
+            "can_retry": len(errors) > 0,
         })
 
-    # ── Raw cards: barcode + bin assignment + raw_cards INSERT ────────────────
-    for item in raw_items:
-        item_dict = dict(item)
-        item_dict["session_id"] = session_id
-        try:
-            r = _push_raw_item(item_dict)
-            results.append(r)
-            db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
-                       (item["id"],))
-        except Exception as e:
-            logger.exception(f"push_raw_item failed for {item['id']}: {e}")
-            errors.append({"product_name": item.get("product_name"), "action": "error", "error": str(e)})
-
-    # ── Sealed items: consolidate and push to Shopify ─────────────────────────
-    tcg_ids = list(set(i["tcgplayer_id"] for i in sealed_items if i.get("tcgplayer_id")))
-    normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
-
-    consolidated = {}  # (tcg_id, is_damaged) -> {total_qty, items[], ...}
-    for item in sealed_items:
-        tcg_id = item["tcgplayer_id"]
-        is_damaged = item.get("item_status") == "damaged"
-        key = (tcg_id, is_damaged)
-        if key not in consolidated:
-            consolidated[key] = {
-                "tcg_id": tcg_id,
-                "is_damaged": is_damaged,
-                "total_qty": 0,
-                "items": [],
-                "product_name": item.get("product_name"),
-            }
-        consolidated[key]["total_qty"] += item.get("quantity", 1)
-        consolidated[key]["items"].append(item)
-
-    for key, group in consolidated.items():
-        tcg_id, is_damaged = key
-        qty = group["total_qty"]
-        entry = {
-            "product_name": group["product_name"],
-            "tcgplayer_id": tcg_id,
-            "quantity": qty,
-            "is_damaged": is_damaged,
-            "consolidated_from": len(group["items"]),
-        }
-
-        try:
-            if not is_damaged:
-                entry = _push_normal_item(entry, tcg_id, qty, group["items"][0], normal_cache)
-            else:
-                entry = _push_damaged_item(entry, tcg_id, qty, group["items"][0], normal_cache, damaged_cache)
-        except Exception as e:
-            entry.update(action="error", error=str(e))
-            errors.append(entry)
-            continue
-
-        if entry.get("action") == "error":
-            errors.append(entry)
-        else:
-            results.append(entry)
-            for pushed_item in group["items"]:
-                db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
-                           (pushed_item["id"],))
-
-    # Determine final session status
-    # Check if any unpushed items remain after this push
-    all_items_after = ingest.get_session_items(session_id)
-    remaining_unpushed = [i for i in all_items_after
-                          if i.get("item_status") in ("good", "damaged")
-                          and i.get("is_mapped") and not i.get("pushed_at")]
-
-    partially_ingested = False
-    if not errors:
-        if remaining_unpushed:
-            # Some items still waiting — mark as partially ingested
-            db.execute(
-                "UPDATE intake_sessions SET status = 'partially_ingested' WHERE id = %s",
-                (session_id,)
-            )
-            partially_ingested = True
-        else:
-            ingest.mark_session_ingested(session_id)
-
-    # Notify intake cache that inventory has changed
-    if not errors:
-        try:
-            import requests as _req
-            intake_url = os.getenv("INTAKE_INTERNAL_URL", "")
-            if intake_url:
-                _req.post(f"{intake_url}/api/cache/invalidate",
-                          json={"reason": "ingest"},
-                          timeout=3)
-        except Exception:
-            pass  # non-fatal — cache will self-heal on next staleness check
-
-    return jsonify({
-        "success": len(errors) == 0,
-        "results": results,
-        "errors": errors,
-        "total": len(active),
-        "incremented": sum(1 for r in results if r.get("action") == "inventory_incremented"),
-        "created_damaged": sum(1 for r in results if r.get("action") == "created_damaged_listing"),
-        "created_listing": sum(1 for r in results if r.get("action") == "created_listing"),
-        "error_count": len(errors),
-        "ingested": not errors and not partially_ingested,
-        "partially_ingested": not errors and partially_ingested,
-        "pushed_count": len(results),
-        "remaining_count": len(remaining_unpushed),
-        "can_retry": len(errors) > 0,
-    })
+    except Exception as e:
+        logger.exception(f"Push worker crashed for session {session_id}: {e}")
+        job.update({
+            "status": "complete",
+            "success": False,
+            "results": results,
+            "errors": errors + [{"action": "error", "error": f"Worker crashed: {str(e)}"}],
+            "error_count": len(errors) + 1,
+            "total": len(active),
+            "pushed_count": len(results),
+            "can_retry": True,
+        })
 
 
 def _compute_weighted_cost(current_cost, current_qty, our_unit_cost, adding_qty):

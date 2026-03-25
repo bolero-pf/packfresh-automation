@@ -414,7 +414,7 @@ def rejuvenate_session(session_id: str) -> dict:
 # ITEM STATUS CHANGES (damage, missing, rejected)
 # ==========================================
 
-DAMAGE_DISCOUNT = Decimal("0.85")  # 85% of offer price for damaged items
+DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
 
 
 def split_damaged(item_id: str, damaged_qty: int) -> dict:
