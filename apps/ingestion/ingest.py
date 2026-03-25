@@ -485,7 +485,7 @@ def _ensure_offer_snapshot(session_id: str):
         session = query_one("SELECT original_offer_amount, received_items_snapshot FROM intake_sessions WHERE id = %s", (session_id,))
     except Exception:
         return  # columns don't exist yet — migration not run
-    if session and session.get("original_offer_amount") is None:
+    if session and (session.get("original_offer_amount") is None or session.get("received_items_snapshot") is None):
         current = query_one("SELECT total_offer_amount FROM intake_sessions WHERE id = %s", (session_id,))
         items = get_session_items(session_id)
         snapshot = json.dumps([{
@@ -499,9 +499,9 @@ def _ensure_offer_snapshot(session_id: str):
         } for i in items if i.get("item_status") in ("good", "damaged")])
         execute("""
             UPDATE intake_sessions
-            SET original_offer_amount = total_offer_amount,
-                received_items_snapshot = %s
-            WHERE id = %s AND original_offer_amount IS NULL
+            SET original_offer_amount = COALESCE(original_offer_amount, total_offer_amount),
+                received_items_snapshot = COALESCE(received_items_snapshot, %s)
+            WHERE id = %s
         """, (snapshot, session_id))
 
 
