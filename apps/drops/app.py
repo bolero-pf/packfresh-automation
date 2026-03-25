@@ -157,11 +157,11 @@ def create_drop():
 @app.route("/release", methods=["POST"])
 def release_drops():
     """Release all scheduled drops for today."""
-    # Optional auth via flow secret
+    # Require flow secret
     secret = request.headers.get("X-Flow-Secret", "")
     flow_secret = os.environ.get("VIP_FLOW_SECRET", "")
-    if flow_secret and secret and secret != flow_secret:
-        return jsonify({"error": "Invalid secret"}), 401
+    if not flow_secret or secret != flow_secret:
+        return jsonify({"error": "Unauthorized"}), 401
 
     today = date.today().isoformat()
     drops = db.query(

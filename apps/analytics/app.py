@@ -61,11 +61,11 @@ def run_analytics():
     Called by Shopify Flow or manually.
     Runs in background thread, returns immediately.
     """
-    # Verify webhook secret if present (optional — also allow manual triggers)
+    # Verify webhook secret — required if VIP_FLOW_SECRET is set
     secret = request.headers.get("X-Flow-Secret", "")
     flow_secret = os.environ.get("VIP_FLOW_SECRET", "")
-    if flow_secret and secret and secret != flow_secret:
-        return jsonify({"error": "Invalid secret"}), 401
+    if not flow_secret or secret != flow_secret:
+        return jsonify({"error": "Unauthorized"}), 401
 
     def _run():
         try:
@@ -82,6 +82,11 @@ def run_analytics():
 @app.route("/run/backfill", methods=["POST"])
 def run_backfill():
     """Force a full 90-day backfill (slower, use sparingly)."""
+    secret = request.headers.get("X-Flow-Secret", "")
+    flow_secret = os.environ.get("VIP_FLOW_SECRET", "")
+    if not flow_secret or secret != flow_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
     def _run():
         try:
             from compute import ingest_orders, recompute_analytics
