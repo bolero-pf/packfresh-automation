@@ -114,7 +114,7 @@ def _update_shopify_price(variant_id: int, price: float) -> bool:
         logger.info(f"[DRY_RUN] Would set price variant_id={variant_id} → {price:.2f}")
         return True
     try:
-        sc._rest_update_variant_price(variant_id, price)
+        sc.update_variant_price(variant_id, price)
         return True
     except Exception as e:
         logger.error(f"Price update failed for variant {variant_id}: {e}")
@@ -129,7 +129,7 @@ def _update_shopify_qty(inventory_item_id: int, new_qty: int) -> bool:
         logger.info(f"[DRY_RUN] Would set qty inventory_item_id={inventory_item_id} @ loc={loc_id} → {new_qty}")
         return True
     try:
-        sc._rest_set_inventory(inventory_item_id, int(loc_id), new_qty)
+        sc.set_inventory_level(inventory_item_id, int(loc_id), new_qty)
         return True
     except Exception as e:
         logger.error(f"Qty update failed for inv_item {inventory_item_id}: {e}")
