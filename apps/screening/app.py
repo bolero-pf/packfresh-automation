@@ -41,7 +41,8 @@ def _add_admin_bar(response):
 
 @app.route("/")
 def index():
-    return render_template_string(CONSOLE_HTML)
+    store = os.environ.get("SHOPIFY_STORE", "").replace(".myshopify.com", "")
+    return render_template_string(CONSOLE_HTML, shopify_store=store)
 
 
 @app.route("/api/held-orders")
@@ -399,11 +400,10 @@ function renderCombine(groups) {
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
         ${g.orders.map(o => `
-          <a href="https://admin.shopify.com/store/pack-fresh/orders/${o.numeric_id}" target="_blank" class="btn btn-secondary btn-sm">
+          <a href="https://admin.shopify.com/store/{{ shopify_store }}/orders/${o.numeric_id}" target="_blank" class="btn btn-secondary btn-sm">
             ${o.name} → Admin ↗
           </a>
         `).join('')}
-        <button class="btn btn-green btn-sm" onclick="releaseGroup(${JSON.stringify(g.orders.map(o=>o.id)).replace(/"/g,'&quot;')})">✓ Release All</button>
       </div>
     </div>
   `).join('');
@@ -484,20 +484,6 @@ async function releaseAndFulfillGroup(btn, orderIds) {
   } else {
     toast('✅ All ' + ok + ' orders fulfilled with tracking');
   }
-  loadOrders();
-}
-
-async function releaseGroup(orderIds) {
-  if (!confirm('Release holds on ' + orderIds.length + ' combined orders?')) return;
-  for (const id of orderIds) {
-    try {
-      await fetch('/api/release-hold', {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ order_id: id }),
-      });
-    } catch(e) {}
-  }
-  toast('Released ' + orderIds.length + ' orders');
   loadOrders();
 }
 
