@@ -115,8 +115,11 @@ def _load_inventory() -> list[dict]:
             COALESCE(c.committed, 0)                        AS committed,
             COALESCE(o.physical_count, 0)                   AS physical_count,
             COALESCE(o.notes, '')                           AS notes
+        ,sbc.best_variant_market                          AS bd_value
+        ,sbc.variant_count                                 AS bd_variant_count
         FROM inventory_product_cache c
         LEFT JOIN inventory_overrides o ON o.shopify_variant_id = c.shopify_variant_id
+        LEFT JOIN sealed_breakdown_cache sbc ON sbc.tcgplayer_id = c.tcgplayer_id
         ORDER BY c.title
     """)
     return [dict(r) for r in rows]
@@ -196,11 +199,12 @@ def _apply_filters(rows, *, q=None, in_stock=False, tag_any=None, status="all", 
     return rows
 
 def _sort_rows(rows, sort_col, sort_dir):
-    SORTABLE = {"name", "shopify_qty", "shopify_price", "shopify_value", "physical_count", "notes", "committed"}
+    SORTABLE = {"name", "shopify_qty", "shopify_price", "shopify_value", "physical_count", "notes", "committed", "breakdown"}
     if sort_col not in SORTABLE:
         return rows
+    actual_col = "bd_value" if sort_col == "breakdown" else sort_col
     def key(r):
-        v = r.get(sort_col)
+        v = r.get(actual_col)
         if v is None: return (1, 0, "")
         try:
             return (0, float(v), "")
@@ -562,10 +566,11 @@ def _render_inventory(rows, total_rows, filters, meta, limit):
     def disp(col):
         return {"name": "Name", "shopify_qty": "Shopify Qty", "shopify_price": "Price",
                 "shopify_value": "Value", "physical_count": "Physical",
-                "adjust_delta": "Adjust Δ", "committed": "Committed", "notes": "Notes"}.get(col, col)
+                "adjust_delta": "Adjust Δ", "committed": "Committed", "notes": "Notes",
+                "breakdown": "Breakdown"}.get(col, col)
 
     SHOW_COLS = ["physical_count", "name", "shopify_qty", "committed", "adjust_delta",
-                 "shopify_price", "shopify_value", "notes"]
+                 "shopify_price", "shopify_value", "breakdown", "notes"]
     EDITABLE  = {"shopify_qty", "shopify_price", "physical_count", "notes", "adjust_delta"}
 
     from flask import get_flashed_messages
@@ -631,6 +636,35 @@ def _render_inventory(rows, total_rows, filters, meta, limit):
                 else:
                     cell = f'<input name="cell_{i}_{col}" value="{vs}" {da} class="pf-inp">'
                 tds.append(f"<td>{cell}</td>")
+            elif col == "breakdown":
+                bd_val = row.get("bd_value")
+                tcg_id = row.get("tcgplayer_id")
+                store_price = float(row.get("shopify_price") or 0)
+                if bd_val and tcg_id:
+                    bd_f = float(bd_val)
+                    delta_pct = ((bd_f - store_price) / store_price * 100) if store_price > 0 else 0
+                    delta_cls = "color:#2dd4a0" if delta_pct >= 0 else "color:#f05252" if delta_pct < -10 else "color:#f5a623"
+                    n_variants = row.get("bd_variant_count") or 1
+                    tds.append(
+                        f'<td style="white-space:nowrap;">'
+                        f'<a href="/inventory/breakdown/#recommendations" '
+                        f'style="text-decoration:none;{delta_cls};font-weight:600;" '
+                        f'title="BD Value: ${bd_f:.2f} ({delta_pct:+.1f}%)">'
+                        f'${bd_f:.2f}</a>'
+                        f' <button type="button" class="qty-btn" title="Open recipe" '
+                        f'onclick="window.open(\'/inventory/breakdown/api/recipe-redirect?tcg_id={tcg_id}\',\'_blank\')" '
+                        f'style="font-size:10px;padding:1px 5px;">📋</button>'
+                        f'</td>')
+                elif tcg_id:
+                    tds.append(
+                        f'<td>'
+                        f'<button type="button" class="qty-btn" '
+                        f'onclick="window.open(\'/inventory/breakdown/#recommendations\',\'_blank\')" '
+                        f'title="Create breakdown recipe" '
+                        f'style="font-size:11px;padding:2px 8px;">+ Recipe</button>'
+                        f'</td>')
+                else:
+                    tds.append('<td style="color:var(--muted);">—</td>')
             else:
                 tds.append(f"<td>{vs}</td>")
         body_rows.append(f'<tr data-vid="{vid}">' + "".join(tds) + "</tr>")
