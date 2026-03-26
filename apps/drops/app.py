@@ -159,10 +159,15 @@ def create_drop():
 @app.route("/release", methods=["POST"])
 def release_drops():
     """Release all scheduled drops for today."""
-    # Require flow secret
+    # Allow authenticated owners OR valid Flow secret
     secret = request.headers.get("X-Flow-Secret", "")
     flow_secret = os.environ.get("VIP_FLOW_SECRET", "")
-    if not flow_secret or secret != flow_secret:
+    try:
+        from auth import get_current_user
+        user = get_current_user()
+    except Exception:
+        user = None
+    if not user and (not flow_secret or secret != flow_secret):
         return jsonify({"error": "Unauthorized"}), 401
 
     today = date.today().isoformat()
