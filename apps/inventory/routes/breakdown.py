@@ -2394,19 +2394,30 @@ searchInventory = async function() {{
   const bdTcg = params.get('bd_tcg');
   const bdAction = params.get('bd_action');
   if (!bdTcg) return;
-  // Wait for recommendations to load, then auto-trigger
-  const _origLoad = loadRecommendations;
-  loadRecommendations = async function() {{
-    await _origLoad();
-    const tcgId = parseInt(bdTcg);
-    const rec = _allRecs.find(r => r.tcgplayer_id === tcgId);
-    if (bdAction === 'execute' && rec) {{
-      openExecuteModal(rec);
+  const tcgId = parseInt(bdTcg);
+
+  function _autoOpen() {{
+    if (bdAction === 'execute') {{
+      // Need recommendations loaded to get the rec object
+      const rec = _allRecs.find(r => r.tcgplayer_id === tcgId);
+      if (rec) openExecuteModal(rec);
+      else openRecipeEditor(tcgId, 'Product');
     }} else {{
-      // Open recipe editor for this tcg_id
-      const title = rec ? rec.title : 'Product';
-      openRecipeEditor(tcgId, title);
+      const rec = _allRecs.find(r => r.tcgplayer_id === tcgId);
+      openRecipeEditor(tcgId, rec ? rec.title : 'Product');
     }}
+  }}
+
+  // Fire after whichever tab loads first
+  const _origRecs = loadRecommendations;
+  loadRecommendations = async function() {{
+    await _origRecs();
+    _autoOpen();
+  }};
+  const _origKnown = loadKnownRecipes;
+  loadKnownRecipes = async function() {{
+    await _origKnown();
+    _autoOpen();
   }};
 }})();
 </script>

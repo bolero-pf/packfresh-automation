@@ -944,8 +944,8 @@ td{{padding:6px 9px;vertical-align:middle;}}
 // ── Breakdown popup ──────────────────────────────────────────────
 function openBdModal(tcgId, name, action) {{
   let url = '/inventory/breakdown/?bd_tcg=' + tcgId;
-  if (action === 'recipe') url += '&bd_action=recipe#recipes';
-  else if (action === 'execute') url += '&bd_action=execute#recommendations';
+  if (action === 'recipe') url += '&bd_action=recipe';
+  else if (action === 'execute') url += '&bd_action=execute';
   window.open(url, 'breakdown', 'width=1100,height=800,scrollbars=yes');
 }}
 </script>
