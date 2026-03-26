@@ -7,7 +7,7 @@ Replaces manual tag management + drop_updater cron.
 import os
 import logging
 from datetime import datetime, date, timezone
-from flask import Flask, request, jsonify, render_template_string, make_response
+from flask import Flask, request, jsonify, render_template_string, make_response, g
 
 import db
 
@@ -20,7 +20,18 @@ db.init_pool()
 
 @app.before_request
 def _check_auth():
-    if request.path in ('/ping', '/health', '/release'):
+    if request.path in ('/ping', '/health'):
+        return
+    if request.path == '/release':
+        try:
+            from auth import decode_token
+            token = request.cookies.get("pf_auth", "")
+            if token:
+                payload = decode_token(token)
+                if payload:
+                    g.user = payload
+        except Exception:
+            pass
         return
     if request.path.startswith('/api/'):
         return

@@ -9,7 +9,7 @@ Also exposes /api/analytics for batch lookups from other services.
 import os
 import logging
 import threading
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, g
 
 import db
 
@@ -23,8 +23,20 @@ db.init_pool()
 @app.before_request
 def _check_auth():
     """JWT auth for browser UI, skip API/webhook endpoints."""
-    if request.path in ('/ping', '/health', '/run', '/run/backfill'):
-        return  # webhooks + health checks
+    if request.path in ('/ping', '/health'):
+        return  # health checks
+    if request.path in ('/run', '/run/backfill'):
+        # Try to parse JWT if present, but don't block — endpoint handles its own auth
+        try:
+            from auth import decode_token
+            token = request.cookies.get("pf_auth", "")
+            if token:
+                payload = decode_token(token)
+                if payload:
+                    g.user = payload
+        except Exception:
+            pass
+        return
     if request.path.startswith('/api/'):
         return  # API calls from other services
     try:
