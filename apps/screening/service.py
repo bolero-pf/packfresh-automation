@@ -658,11 +658,15 @@ def screen_every_order(order_gid: str) -> dict:
 
         note_text = f"📦 Combine Order ({sibling_names})"
 
-        # Hold the current order
+        # Hold the current order + tag for screening console
         try:
             _hold_fulfillment(order_gid, f"Combine with {sibling_names} — same customer")
         except Exception as e:
             print(f"[screening] Failed to hold for combine {order_gid}: {e}", flush=True)
+        try:
+            shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["hold-for-review"]})
+        except Exception as e:
+            print(f"[screening] Failed to tag combine {order_gid}: {e}", flush=True)
 
         try:
             _add_order_note(order_gid, note_text)
@@ -675,6 +679,10 @@ def screen_every_order(order_gid: str) -> dict:
                 _hold_fulfillment(s["order_gid"], f"Combine with {order_name} — same customer")
             except Exception as e:
                 print(f"[screening] Failed to hold sibling {s['order_gid']}: {e}", flush=True)
+            try:
+                shopify_gql(ORDER_TAGS_ADD, {"id": s["order_gid"], "tags": ["hold-for-review"]})
+            except Exception as e:
+                print(f"[screening] Failed to tag sibling {s['order_gid']}: {e}", flush=True)
             try:
                 _add_order_note(s["order_gid"],
                     f"📦 Combine Order ({order_name})")
