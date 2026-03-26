@@ -362,10 +362,7 @@ function renderCombine(groups) {
       <div class="combine-header">${g.customer_name} · ${g.orders.length} orders · $${g.total_value.toFixed(2)}</div>
       <div style="font-size:0.8rem;color:var(--dim);">${g.customer_email} · ${g.shipping_address}</div>
       <div class="combine-orders">
-        ${g.orders.map(o => {
-          const noteLines = (o.note || '').split(/\n+/).filter(l => l.trim() && !l.includes('Combine Order'));
-          const hasNotes = noteLines.length > 0;
-          return `
+        ${g.orders.map(o => `
           <div class="combine-order">
             <div style="display:flex;justify-content:space-between;align-items:center;">
               <strong>${o.name}</strong>
@@ -374,9 +371,9 @@ function renderCombine(groups) {
             <div style="font-size:0.78rem;color:var(--dim);margin-top:4px;">
               ${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}
             </div>
-            ${hasNotes ? '<div style="font-size:0.75rem;margin-top:4px;padding:4px 8px;background:rgba(255,170,0,0.08);border-radius:4px;color:var(--amber);">' + noteLines.map(l => '⚠ ' + l.trim()).join('<br>') + '</div>' : ''}
-          </div>`;
-        }).join('')}
+            ${((o.note || '').split(/\\n+/).filter(l => l.trim() && !l.includes('Combine Order')).length > 0) ? '<div style="font-size:0.75rem;margin-top:4px;padding:4px 8px;background:rgba(255,170,0,0.08);border-radius:4px;color:var(--amber);">' + (o.note || '').split(/\\n+/).filter(l => l.trim() && !l.includes('Combine Order')).map(l => '⚠ ' + l.trim()).join('<br>') + '</div>' : ''}
+          </div>
+        `).join('')}
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 4px;">
         <span style="font-size:0.78rem;font-weight:600;">Combined Packing List:</span>
