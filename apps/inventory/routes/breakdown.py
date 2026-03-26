@@ -2387,6 +2387,28 @@ searchInventory = async function() {{
       }}).join('')}}</tbody></table></div>`;
   }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
 }};
+
+// Auto-open recipe/execute when launched from inventory page with bd_tcg param
+(function() {{
+  const params = new URLSearchParams(window.location.search);
+  const bdTcg = params.get('bd_tcg');
+  const bdAction = params.get('bd_action');
+  if (!bdTcg) return;
+  // Wait for recommendations to load, then auto-trigger
+  const _origLoad = loadRecommendations;
+  loadRecommendations = async function() {{
+    await _origLoad();
+    const tcgId = parseInt(bdTcg);
+    const rec = _allRecs.find(r => r.tcgplayer_id === tcgId);
+    if (bdAction === 'execute' && rec) {{
+      openExecuteModal(rec);
+    }} else {{
+      // Open recipe editor for this tcg_id
+      const title = rec ? rec.title : 'Product';
+      openRecipeEditor(tcgId, title);
+    }}
+  }};
+}})();
 </script>
 
 </body>

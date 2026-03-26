@@ -640,26 +640,28 @@ def _render_inventory(rows, total_rows, filters, meta, limit):
                 bd_val = row.get("bd_value")
                 tcg_id = row.get("tcgplayer_id")
                 store_price = float(row.get("shopify_price") or 0)
+                name_esc = _html.escape(str(row.get("name", ""))).replace("'", "\\'")
                 if bd_val and tcg_id:
                     bd_f = float(bd_val)
                     delta_pct = ((bd_f - store_price) / store_price * 100) if store_price > 0 else 0
                     delta_cls = "color:#2dd4a0" if delta_pct >= 0 else "color:#f05252" if delta_pct < -10 else "color:#f5a623"
-                    n_variants = row.get("bd_variant_count") or 1
                     tds.append(
                         f'<td style="white-space:nowrap;">'
-                        f'<a href="/inventory/breakdown/#recommendations" '
-                        f'style="text-decoration:none;{delta_cls};font-weight:600;" '
+                        f'<span style="{delta_cls};font-weight:600;" '
                         f'title="BD Value: ${bd_f:.2f} ({delta_pct:+.1f}%)">'
-                        f'${bd_f:.2f}</a>'
-                        f' <button type="button" class="qty-btn" title="Open recipe" '
-                        f'onclick="window.open(\'/inventory/breakdown/api/recipe-redirect?tcg_id={tcg_id}\',\'_blank\')" '
-                        f'style="font-size:10px;padding:1px 5px;">📋</button>'
+                        f'${bd_f:.2f}</span> '
+                        f'<button type="button" class="qty-btn" title="Edit recipe" '
+                        f'onclick="openBdModal({tcg_id},\'{name_esc}\',\'recipe\')" '
+                        f'style="font-size:10px;padding:1px 5px;">📋</button> '
+                        f'<button type="button" class="qty-btn" title="Break down" '
+                        f'onclick="openBdModal({tcg_id},\'{name_esc}\',\'execute\')" '
+                        f'style="font-size:10px;padding:1px 5px;background:#2dd4a0;color:#000;">▶</button>'
                         f'</td>')
                 elif tcg_id:
                     tds.append(
                         f'<td>'
                         f'<button type="button" class="qty-btn" '
-                        f'onclick="window.open(\'/inventory/breakdown/#recommendations\',\'_blank\')" '
+                        f'onclick="openBdModal({tcg_id},\'{name_esc}\',\'recipe\')" '
                         f'title="Create breakdown recipe" '
                         f'style="font-size:11px;padding:2px 8px;">+ Recipe</button>'
                         f'</td>')
@@ -938,7 +940,34 @@ td{{padding:6px 9px;vertical-align:middle;}}
   }}
   _pollTimer = setTimeout(_pollStatus, 5000);
 }})();
+
+// ── Breakdown modal (iframe overlay) ──────────────────────────────
+function openBdModal(tcgId, name, action) {{
+  let url = '/inventory/breakdown/#';
+  if (action === 'recipe') {{
+    url = '/inventory/breakdown/?bd_tcg=' + tcgId + '&bd_action=recipe#recipes';
+  }} else if (action === 'execute') {{
+    url = '/inventory/breakdown/?bd_tcg=' + tcgId + '&bd_action=execute#recommendations';
+  }}
+  const overlay = document.getElementById('bd-overlay');
+  const frame = document.getElementById('bd-frame');
+  frame.src = url;
+  overlay.style.display = 'flex';
+}}
+function closeBdModal() {{
+  const overlay = document.getElementById('bd-overlay');
+  document.getElementById('bd-frame').src = '';
+  overlay.style.display = 'none';
+}}
 </script>
+
+<div id="bd-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9000;align-items:center;justify-content:center;">
+  <div style="position:relative;width:95vw;max-width:1200px;height:90vh;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;">
+    <button onclick="closeBdModal()" style="position:absolute;top:8px;right:12px;z-index:10;background:var(--muted);color:#fff;border:none;border-radius:50%;width:28px;height:28px;font-size:16px;cursor:pointer;line-height:28px;text-align:center;">×</button>
+    <iframe id="bd-frame" style="width:100%;height:100%;border:none;border-radius:12px;"></iframe>
+  </div>
+</div>
+
 </body>
 </html>"""
 
