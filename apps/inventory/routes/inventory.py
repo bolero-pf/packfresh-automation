@@ -941,32 +941,13 @@ td{{padding:6px 9px;vertical-align:middle;}}
   _pollTimer = setTimeout(_pollStatus, 5000);
 }})();
 
-// ── Breakdown modal (iframe overlay) ──────────────────────────────
+// ── Breakdown popup ──────────────────────────────────────────────
 function openBdModal(tcgId, name, action) {{
-  let url = '/inventory/breakdown/#';
-  if (action === 'recipe') {{
-    url = '/inventory/breakdown/?bd_tcg=' + tcgId + '&bd_action=recipe#recipes';
-  }} else if (action === 'execute') {{
-    url = '/inventory/breakdown/?bd_tcg=' + tcgId + '&bd_action=execute#recommendations';
-  }}
-  const overlay = document.getElementById('bd-overlay');
-  const frame = document.getElementById('bd-frame');
-  frame.src = url;
-  overlay.style.display = 'flex';
+  let url = '/inventory/breakdown/?bd_tcg=' + tcgId;
+  if (action === 'recipe') url += '&bd_action=recipe#recipes';
+  else if (action === 'execute') url += '&bd_action=execute#recommendations';
+  window.open(url, 'breakdown', 'width=1100,height=800,scrollbars=yes');
 }}
-function closeBdModal() {{
-  const overlay = document.getElementById('bd-overlay');
-  document.getElementById('bd-frame').src = '';
-  overlay.style.display = 'none';
-}}
-</script>
-
-<div id="bd-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9000;align-items:center;justify-content:center;">
-  <div style="position:relative;width:95vw;max-width:1200px;height:90vh;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;">
-    <button onclick="closeBdModal()" style="position:absolute;top:8px;right:12px;z-index:10;background:var(--muted);color:#fff;border:none;border-radius:50%;width:28px;height:28px;font-size:16px;cursor:pointer;line-height:28px;text-align:center;">×</button>
-    <iframe id="bd-frame" style="width:100%;height:100%;border:none;border-radius:12px;"></iframe>
-  </div>
-</div>
 
 </body>
 </html>"""
