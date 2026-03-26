@@ -171,6 +171,15 @@ mutation FulfillmentOrderReleaseHold($id: ID!) {
 }
 """
 
+FULFILLMENT_CREATE = """
+mutation FulfillmentCreate($fulfillment: FulfillmentV2Input!) {
+  fulfillmentCreateV2(fulfillment: $fulfillment) {
+    fulfillment { id status trackingInfo { number url company } }
+    userErrors { field message }
+  }
+}
+"""
+
 ORDER_CANCEL = """
 mutation OrderCancel($orderId: ID!, $reason: OrderCancelReason!, $notifyCustomer: Boolean, $refund: Boolean!, $restock: Boolean!, $staffNote: String) {
   orderCancel(orderId: $orderId, reason: $reason, notifyCustomer: $notifyCustomer, refund: $refund, restock: $restock, staffNote: $staffNote) {
@@ -291,6 +300,48 @@ def _release_fulfillment_holds(order_gid: str) -> int:
             except Exception as e:
                 print(f"[screening] Failed to release hold {fo['id']}: {e}", flush=True)
     return released
+
+def release_and_fulfill(order_gid: str, tracking_number: str, tracking_company: str = "USPS") -> dict:
+    """Release holds on an order and create a fulfillment with tracking info."""
+    data = shopify_gql(ORDER_FULFILLMENT_ORDERS_Q, {"id": order_gid})
+    fo_edges = (data.get("data", {}).get("order", {})
+                .get("fulfillmentOrders", {}).get("edges", []))
+
+    fulfillment_order_ids = []
+    for edge in fo_edges:
+        fo = edge["node"]
+        if fo["status"] == "ON_HOLD":
+            try:
+                shopify_gql(FULFILLMENT_ORDER_RELEASE_HOLD, {"id": fo["id"]})
+            except Exception as e:
+                print(f"[screening] Failed to release hold {fo['id']}: {e}", flush=True)
+        # After release, the FO should be OPEN — collect for fulfillment
+        fulfillment_order_ids.append(fo["id"])
+
+    if not fulfillment_order_ids:
+        return {"fulfilled": False, "error": "No fulfillment orders found"}
+
+    # Create fulfillment with tracking
+    try:
+        result = shopify_gql(FULFILLMENT_CREATE, {
+            "fulfillment": {
+                "lineItemsByFulfillmentOrder": [
+                    {"fulfillmentOrderId": fo_id} for fo_id in fulfillment_order_ids
+                ],
+                "trackingInfo": {
+                    "number": tracking_number,
+                    "company": tracking_company,
+                },
+                "notifyCustomer": True,
+            }
+        })
+        errors = result.get("data", {}).get("fulfillmentCreateV2", {}).get("userErrors", [])
+        if errors:
+            return {"fulfilled": False, "error": "; ".join(e["message"] for e in errors)}
+        return {"fulfilled": True}
+    except Exception as e:
+        return {"fulfilled": False, "error": str(e)}
+
 
 def _cancel_order(order_gid: str, staff_note: str, notify_customer: bool = False):
     shopify_gql(ORDER_CANCEL, {

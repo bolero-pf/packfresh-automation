@@ -146,7 +146,14 @@ def api_held_orders():
             }
         combine_groups[key]["orders"].append(o)
         combine_groups[key]["total_value"] += o["total"]
-        combine_groups[key]["all_items"].extend(o["items"])
+        # Consolidate duplicate SKUs in combined packing list
+        for item in o["items"]:
+            existing = next((a for a in combine_groups[key]["all_items"]
+                           if a["title"] == item["title"]), None)
+            if existing:
+                existing["qty"] += item["qty"]
+            else:
+                combine_groups[key]["all_items"].append({**item})
 
     return jsonify({
         "verification": verification,
@@ -165,6 +172,26 @@ def api_release_hold():
     from service import on_order_fulfilled
     result = on_order_fulfilled(order_gid)
     return jsonify({"ok": True, **result})
+
+
+@app.route("/api/release-and-fulfill", methods=["POST"])
+def api_release_and_fulfill():
+    """Release holds and create fulfillment with tracking for an order."""
+    data = request.get_json(silent=True) or {}
+    order_gid = data.get("order_id")
+    tracking = (data.get("tracking_number") or "").strip()
+    company = (data.get("tracking_company") or "USPS").strip()
+    if not order_gid:
+        return jsonify({"error": "order_id required"}), 400
+    if not tracking:
+        return jsonify({"error": "tracking_number required"}), 400
+
+    from service import release_and_fulfill, on_order_fulfilled
+    result = release_and_fulfill(order_gid, tracking, company)
+    if result.get("fulfilled"):
+        # Clean up tags
+        on_order_fulfilled(order_gid)
+    return jsonify(result)
 
 
 @app.route("/api/cancel-order", methods=["POST"])
@@ -332,7 +359,10 @@ function renderCombine(groups) {
       <div class="combine-header">${g.customer_name} · ${g.orders.length} orders · $${g.total_value.toFixed(2)}</div>
       <div style="font-size:0.8rem;color:var(--dim);">${g.customer_email} · ${g.shipping_address}</div>
       <div class="combine-orders">
-        ${g.orders.map(o => `
+        ${g.orders.map(o => {
+          const noteLines = (o.note || '').split(/\n+/).filter(l => l.trim() && !l.includes('Combine Order'));
+          const hasNotes = noteLines.length > 0;
+          return `
           <div class="combine-order">
             <div style="display:flex;justify-content:space-between;align-items:center;">
               <strong>${o.name}</strong>
@@ -341,14 +371,33 @@ function renderCombine(groups) {
             <div style="font-size:0.78rem;color:var(--dim);margin-top:4px;">
               ${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}
             </div>
-          </div>
-        `).join('')}
+            ${hasNotes ? '<div style="font-size:0.75rem;margin-top:4px;padding:4px 8px;background:rgba(255,170,0,0.08);border-radius:4px;color:var(--amber);">' + noteLines.map(l => '⚠ ' + l.trim()).join('<br>') + '</div>' : ''}
+          </div>`;
+        }).join('')}
       </div>
-      <div style="font-size:0.78rem;font-weight:600;margin:8px 0 4px;">Combined Packing List:</div>
-      <div class="items-list">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 4px;">
+        <span style="font-size:0.78rem;font-weight:600;">Combined Packing List:</span>
+        <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;padding:2px 8px;" onclick="printPackingList(this)">🖨 Print</button>
+      </div>
+      <div class="items-list packing-list-content">
         ${g.all_items.map(i => '<strong>' + i.qty + '×</strong> ' + i.title).join('<br>')}
       </div>
-      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div style="flex:1;min-width:200px;">
+          <label style="font-size:0.72rem;color:var(--dim);">Tracking Number</label>
+          <input type="text" class="tracking-input" placeholder="Paste tracking #" style="width:100%;margin-top:2px;padding:6px 10px;background:var(--s2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;">
+        </div>
+        <div style="width:100px;">
+          <label style="font-size:0.72rem;color:var(--dim);">Carrier</label>
+          <select class="carrier-select" style="width:100%;margin-top:2px;padding:6px 10px;background:var(--s2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;">
+            <option value="USPS">USPS</option>
+            <option value="UPS">UPS</option>
+            <option value="FedEx">FedEx</option>
+          </select>
+        </div>
+        <button class="btn btn-green btn-sm" onclick="releaseAndFulfillGroup(this, ${JSON.stringify(g.orders.map(o=>o.id)).replace(/"/g,'&quot;')})">🚀 Release & Ship</button>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
         ${g.orders.map(o => `
           <a href="https://admin.shopify.com/store/pack-fresh/orders/${o.numeric_id}" target="_blank" class="btn btn-secondary btn-sm">
             ${o.name} → Admin ↗
@@ -386,6 +435,56 @@ async function releaseHold(orderId, orderName) {
     toast('Released: ' + orderName);
     loadOrders();
   } catch(e) { alert(e.message); }
+}
+
+function printPackingList(btn) {
+  const group = btn.closest('.combine-group');
+  const header = group.querySelector('.combine-header').textContent;
+  const addr = group.querySelector('.combine-header').nextElementSibling.textContent;
+  const items = group.querySelector('.packing-list-content').innerHTML;
+  const orders = [...group.querySelectorAll('.combine-order')].map(o => o.querySelector('strong').textContent).join(', ');
+  const win = window.open('', '_blank', 'width=400,height=600');
+  win.document.write(`<html><head><title>Packing List</title>
+    <style>body{font-family:-apple-system,sans-serif;padding:20px;font-size:14px;}
+    h2{margin:0 0 4px;font-size:16px;} .addr{color:#666;font-size:12px;margin-bottom:12px;}
+    .orders{color:#666;font-size:12px;margin-bottom:16px;}
+    .items{line-height:1.8;} .items strong{font-size:15px;}
+    @media print{body{padding:10px;}}</style></head>
+    <body><h2>${header}</h2><div class="addr">${addr}</div>
+    <div class="orders">Orders: ${orders}</div>
+    <hr><div class="items">${items}</div></body></html>`);
+  win.document.close();
+  win.print();
+}
+
+async function releaseAndFulfillGroup(btn, orderIds) {
+  const container = btn.parentElement;
+  const tracking = container.querySelector('.tracking-input').value.trim();
+  const company = container.querySelector('.carrier-select').value;
+  if (!tracking) { alert('Enter a tracking number'); return; }
+  if (!confirm('Release holds and fulfill ' + orderIds.length + ' orders with tracking ' + tracking + '?')) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ Fulfilling...';
+  let ok = 0, errors = [];
+  for (const id of orderIds) {
+    try {
+      const r = await fetch('/api/release-and-fulfill', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ order_id: id, tracking_number: tracking, tracking_company: company }),
+      });
+      const d = await r.json();
+      if (d.fulfilled) ok++;
+      else errors.push(d.error || 'Unknown error');
+    } catch(e) { errors.push(e.message); }
+  }
+  btn.disabled = false;
+  btn.textContent = '🚀 Release & Ship';
+  if (errors.length) {
+    toast(ok + ' fulfilled, ' + errors.length + ' failed: ' + errors[0]);
+  } else {
+    toast('✅ All ' + ok + ' orders fulfilled with tracking');
+  }
+  loadOrders();
 }
 
 async function releaseGroup(orderIds) {
