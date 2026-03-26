@@ -67,7 +67,7 @@ def api_held_orders():
                 }
                 shippingAddress { firstName lastName address1 city province zip }
                 lineItems(first:20) {
-                  edges { node { title quantity } }
+                  edges { node { title quantity image { url } } }
                 }
               }
             }
@@ -86,7 +86,8 @@ def api_held_orders():
         tags = [t.lower() for t in (o.get("tags") or [])]
         customer = o.get("customer") or {}
         addr = o.get("shippingAddress") or {}
-        items = [{"title": e["node"]["title"], "qty": e["node"]["quantity"]}
+        items = [{"title": e["node"]["title"], "qty": e["node"]["quantity"],
+                  "image": (e["node"].get("image") or {}).get("url", "")}
                  for e in o.get("lineItems", {}).get("edges", [])]
         note = o.get("note") or ""
 
@@ -358,7 +359,10 @@ function renderVerification(orders) {
 function renderCombine(groups) {
   const el = document.getElementById('pane-combine');
   if (!groups.length) { el.innerHTML = '<div class="empty">✅ No orders to combine</div>'; return; }
-  el.innerHTML = groups.map(g => `
+  const printAllBtn = groups.length > 1
+    ? '<div style="margin-bottom:14px;"><button class="btn btn-secondary btn-sm" onclick="printAllPackingLists()">🖨 Print All Packing Lists (' + groups.length + ')</button></div>'
+    : '';
+  el.innerHTML = printAllBtn + groups.map(g => `
     <div class="combine-group">
       <div class="combine-header">${g.customer_name} · ${g.orders.length} orders · $${g.total_value.toFixed(2)}</div>
       <div style="font-size:0.8rem;color:var(--dim);">${g.customer_email} · ${g.shipping_address}</div>
@@ -381,7 +385,7 @@ function renderCombine(groups) {
         <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;padding:2px 8px;" onclick="printPackingList(this)">🖨 Print</button>
       </div>
       <div class="items-list packing-list-content">
-        ${g.all_items.map(i => '<strong>' + i.qty + '×</strong> ' + i.title).join('<br>')}
+        ${g.all_items.map(i => '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' + (i.image ? '<img src="' + i.image + '" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">' : '') + '<span><strong>' + i.qty + '×</strong> ' + i.title + '</span></div>').join('')}
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
         <div style="flex:1;min-width:200px;">
@@ -437,22 +441,38 @@ async function releaseHold(orderId, orderName) {
   } catch(e) { alert(e.message); }
 }
 
-function printPackingList(btn) {
-  const group = btn.closest('.combine-group');
+const _slipStyle = '<style>body{font-family:-apple-system,sans-serif;padding:24px;font-size:18px;}'
+  + 'h2{margin:0 0 6px;font-size:22px;} .addr{color:#666;font-size:15px;margin-bottom:14px;}'
+  + '.orders{color:#666;font-size:14px;margin-bottom:18px;}'
+  + '.item-row{display:flex;align-items:center;gap:12px;margin-bottom:10px;}'
+  + '.item-row img{width:60px;height:60px;object-fit:cover;border-radius:6px;border:1px solid #ddd;}'
+  + '.item-row strong{font-size:20px;} .item-row span{font-size:17px;}'
+  + '.slip{margin-bottom:24px;}'
+  + '@media print{body{padding:12px;} .slip{page-break-after:always;} .slip:last-child{page-break-after:auto;}}</style>';
+
+function _packingSlipHtml(group) {
   const header = group.querySelector('.combine-header').textContent;
   const addr = group.querySelector('.combine-header').nextElementSibling.textContent;
-  const items = group.querySelector('.packing-list-content').innerHTML;
   const orders = [...group.querySelectorAll('.combine-order')].map(o => o.querySelector('strong').textContent).join(', ');
-  const win = window.open('', '_blank', 'width=400,height=600');
-  win.document.write(`<html><head><title>Packing List</title>
-    <style>body{font-family:-apple-system,sans-serif;padding:20px;font-size:14px;}
-    h2{margin:0 0 4px;font-size:16px;} .addr{color:#666;font-size:12px;margin-bottom:12px;}
-    .orders{color:#666;font-size:12px;margin-bottom:16px;}
-    .items{line-height:1.8;} .items strong{font-size:15px;}
-    @media print{body{padding:10px;}}</style></head>
-    <body><h2>${header}</h2><div class="addr">${addr}</div>
-    <div class="orders">Orders: ${orders}</div>
-    <hr><div class="items">${items}</div></body></html>`);
+  const itemEls = group.querySelectorAll('.packing-list-content .item-row, .packing-list-content div[style]');
+  let itemsHtml = '';
+  itemEls.forEach(el => { itemsHtml += '<div class="item-row">' + el.innerHTML + '</div>'; });
+  return '<div class="slip"><h2>' + header + '</h2><div class="addr">' + addr + '</div><div class="orders">Orders: ' + orders + '</div><hr>' + itemsHtml + '</div>';
+}
+
+function printPackingList(btn) {
+  const group = btn.closest('.combine-group');
+  const win = window.open('', '_blank', 'width=500,height=700');
+  win.document.write('<html><head><title>Packing List</title>' + _slipStyle + '</head><body>' + _packingSlipHtml(group) + '</body></html>');
+  win.document.close();
+  win.print();
+}
+
+function printAllPackingLists() {
+  const groups = document.querySelectorAll('.combine-group');
+  const slips = [...groups].map(g => _packingSlipHtml(g)).join('');
+  const win = window.open('', '_blank', 'width=500,height=700');
+  win.document.write('<html><head><title>All Packing Lists</title>' + _slipStyle + '</head><body>' + slips + '</body></html>');
   win.document.close();
   win.print();
 }
