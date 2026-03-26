@@ -222,18 +222,15 @@ def recompute_analytics():
             days_since_last_sale = max(0, (today - last_sale).days)
             oos_days = min(days_since_last_sale, 90)
 
-        # If item was first seen (first sale) within the 90d window,
-        # it wasn't available before that — exclude those days from selling window
-        if first_sale and first_sale > d90:
-            days_before_first_sale = max(0, (first_sale - d90).days)
-            oos_days = max(oos_days, days_before_first_sale)
-
         # Days active: how long has this item been selling? (capped at 90)
         if first_sale:
             days_active = max(1, (today - first_sale).days)
         else:
             days_active = 90
         days_active = min(days_active, 90)
+
+        # OOS days can't exceed days_active (snapshot data could span before first_sale)
+        oos_days = min(oos_days, days_active - 1)
 
         # Selling days: subtract OOS days to get TRUE rate when in stock
         # If OOS data hasn't accumulated yet (oos_days=0), use days_active as-is

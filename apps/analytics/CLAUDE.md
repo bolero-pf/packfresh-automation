@@ -21,7 +21,7 @@ daily_rate = units_sold_90d / selling_days
 days_of_inventory = current_qty / daily_rate
 ```
 - days_active: first_sale_date to today (capped at 90)
-- oos_days: from sku_daily_inventory snapshots (accumulates over time)
+- oos_days: from sku_daily_inventory snapshots (accumulates over time), capped at days_active - 1
 - Sell rate labels: Very Fast (5+/day), Fast (1+), Medium (0.3+), Slow (0.1+), Very Slow
 
 ## Known Issues
