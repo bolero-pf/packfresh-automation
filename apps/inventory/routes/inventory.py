@@ -948,7 +948,7 @@ function openBdModal(tcgId, name, action) {{
   else if (action === 'execute') url += '&bd_action=execute#recommendations';
   window.open(url, 'breakdown', 'width=1100,height=800,scrollbars=yes');
 }}
-
+</script>
 </body>
 </html>"""
 
