@@ -72,13 +72,16 @@ def api_held_orders():
             }
           }
         }
-    """, {"first": 50, "q": 'tag:"hold-for-review" -fulfillment_status:fulfilled'})
+    """, {"first": 50, "q": 'tag:"hold-for-review"'})
 
     verification = []
     combine = []
 
     for edge in data.get("data", {}).get("orders", {}).get("edges", []):
         o = edge["node"]
+        # Skip fulfilled orders — they've already been shipped
+        if o.get("displayFulfillmentStatus") in ("FULFILLED", "PARTIALLY_FULFILLED"):
+            continue
         tags = [t.lower() for t in (o.get("tags") or [])]
         customer = o.get("customer") or {}
         addr = o.get("shippingAddress") or {}
