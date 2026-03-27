@@ -2,12 +2,12 @@
 > Order fraud detection + review console (screening.pack-fresh.com)
 
 ## Key Files
-- **app.py** — Flask app: console UI (verification queue, combine shipping), webhook routes via blueprint
-- **service.py** — All screening logic (940 lines): abuse detection, verification, combine, signature, fraud
+- **app.py** — Flask app: console UI (verification queue, combine shipping, customer notes), API endpoints, DB init
+- **service.py** — All screening logic: abuse detection, verification, combine, signature, fraud, customer notes
 - **routes.py** — 5 webhook endpoints from Shopify Flows
 
 ## Console UI (screening.pack-fresh.com/)
-Two tabs:
+Three tabs:
 
 ### Verification Queue
 - Orders with hold-for-review tag needing identity/fraud verification
@@ -21,11 +21,22 @@ Two tabs:
 - Links to Shopify admin for each order (buy labels)
 - **Release All**: releases holds on all grouped orders
 
+### Customer Notes
+- Per-customer notes/rules that auto-apply to incoming orders
+- **Note type**: appends text to Shopify order note (e.g., address warnings)
+- **Hold type**: holds every order from customer + appends note (shows as "Customer Hold" in verification queue)
+- Stored in `customer_notes` DB table, matched by email
+- Applied in `screen_every_order()` before other checks
+
+## Database
+- Uses shared/db.py (PostgreSQL via DATABASE_URL)
+- Table: `customer_notes` (auto-created on startup)
+
 ## Webhook Endpoints
 | Endpoint | Trigger | Checks |
 |----------|---------|--------|
 | POST /screening/order_created | First-time orders | FIRSTTIME5 abuse |
-| POST /screening/order_combine | Every order | Verification, spend spike, combine, signature |
+| POST /screening/order_combine | Every order | Customer notes, verification, spend spike, combine, signature |
 | POST /screening/fraud_risk | Medium/high fraud | Hold or auto-cancel |
 | POST /screening/order_cancelled | Cancelled w/ FIRSTTIME5 tag | Abuse confirmation |
 | POST /screening/order_fulfilled | Fulfilled w/ hold tag | Tag/hold cleanup |

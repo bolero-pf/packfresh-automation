@@ -532,6 +532,47 @@ COMBINE_SKIP_TAGS = {"pre-order", "preorder", "pre_order"}
 VERIFICATION_TAGS = {"high-value-tier1", "high-value-tier2"}
 CANCELLED_STATUSES = {"VOIDED", "REFUNDED", "EXPIRED"}
 
+
+def _apply_customer_notes(order_gid: str, order_name: str, customer_email: str) -> dict | None:
+    """Check for customer notes/holds and apply them to the order."""
+    try:
+        from db import query
+        notes = query(
+            "SELECT id, note_type, note_text FROM customer_notes WHERE customer_email = %s AND active = true",
+            (customer_email.lower(),),
+        )
+    except Exception as e:
+        print(f"[screening] customer_notes lookup failed: {e}", flush=True)
+        return None
+
+    if not notes:
+        return None
+
+    applied = []
+    held = False
+    for note in notes:
+        note_text = note["note_text"]
+        note_type = note["note_type"]
+
+        # Append note to order
+        _add_order_note(order_gid, f"📋 {note_text}")
+
+        if note_type == "hold":
+            if not held:
+                # Tag + hold the order
+                try:
+                    shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["hold-for-review", "customer-hold"]})
+                    _hold_fulfillment(order_gid, f"Customer hold: {note_text}")
+                    held = True
+                except Exception as e:
+                    print(f"[screening] customer hold failed for {order_name}: {e}", flush=True)
+
+        applied.append({"type": note_type, "text": note_text})
+
+    print(f"[screening] Applied {len(applied)} customer note(s) to {order_name} ({customer_email})", flush=True)
+    return {"applied": applied, "held": held}
+
+
 def screen_every_order(order_gid: str) -> dict:
     """
     Master function for every-order checks. Fetches order + customer history
@@ -552,7 +593,13 @@ def screen_every_order(order_gid: str) -> dict:
         "spend_spike": None,
         "combine": None,
         "signature": None,
+        "customer_notes": None,
     }
+
+    # 1b. Check for customer notes/holds
+    customer_email = (customer.get("email") or "").strip().lower()
+    if customer_email:
+        results["customer_notes"] = _apply_customer_notes(order_gid, order_name, customer_email)
 
     if not customer_gid:
         # No customer (guest?) — just check signature on this order alone
@@ -936,6 +983,7 @@ SCREENING_ORDER_TAGS = [
     "hold-for-review", "FIRSTTIME5-review",
     "high-value-tier1", "high-value-tier2",
     "spend-spike-review", "fraud-medium",
+    "customer-hold",
 ]
 
 def on_order_fulfilled(order_gid: str) -> dict:
