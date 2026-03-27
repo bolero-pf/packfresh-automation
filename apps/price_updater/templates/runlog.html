@@ -2,25 +2,22 @@
 <html>
 <head>
     <title>Live Log Stream</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
     <style>
-        #log {
-            white-space: pre-wrap;
-            font-family: monospace;
-            background-color: #111;
-            color: #0f0;
-            padding: 1em;
-            height: 90vh;
-            overflow-y: scroll;
-        }
+        body { padding: 24px; }
+        h1 { font-size: 1.3rem; margin-bottom: 12px; }
+        #log { white-space: pre-wrap; background: #0a0a0a; color: #4ade80; font-family: var(--font-mono); padding: 1em; height: 90vh; overflow-y: scroll; border-radius: 8px; border: 1px solid var(--border); }
     </style>
 </head>
 <body>
-    <h1>🚀 Live Script Log</h1>
+    <h1>Live Script Log</h1>
     <div id="log"></div>
 
     <script>
         const logEl = document.getElementById("log");
-        const eventSource = new EventSource("/run-live/standard");  // or /run-live/upload
+        const eventSource = new EventSource("/run-live/standard");
 
         eventSource.onmessage = function(event) {
             logEl.textContent += event.data + "\n";

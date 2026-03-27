@@ -3,7 +3,7 @@ import sys
 from functools import wraps
 import subprocess
 import threading
-from flask import Flask, render_template, render_template_string, request, redirect, url_for, Response
+from flask import Flask, render_template, request, redirect, url_for, Response
 from apscheduler.schedulers.background import BackgroundScheduler
 import time
 import os
@@ -24,37 +24,14 @@ from dailyrunner import get_shopify_products, get_shopify_products_for_feed
 
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
-from vip.routes import bp as vip_bp
 from inventory.routes import bp as inventory_bp
-from screening.routes import bp as screening_bp
-app.register_blueprint(vip_bp)
 app.register_blueprint(inventory_bp)
-app.register_blueprint(screening_bp)
 
-@app.before_request
-def _check_jwt_auth():
-    """Validate JWT cookie from admin portal. Skip webhook endpoints."""
-    if request.path.startswith('/vip/') or request.path.startswith('/screening/'):
-        return  # webhook endpoints use their own auth
-    if request.path in ('/health', '/ping', '/favicon.ico') or request.path.startswith('/static'):
-        return
-    try:
-        from auth import require_auth
-        result = require_auth(roles=["owner"])
-        if result is None:
-            return None
-    except Exception:
-        pass  # fall through to legacy basic auth
-
-@app.after_request
-def _add_admin_bar(response):
-    try:
-        from auth import inject_admin_bar, get_current_user
-        if get_current_user():
-            return inject_admin_bar(response)
-    except Exception:
-        pass
-    return response
+from auth import register_auth_hooks
+register_auth_hooks(app, roles=["owner"],
+                    public_paths=('/health', '/ping', '/favicon.ico', '/reddit-feed.csv'),
+                    public_prefixes=('/static', '/pf-static'),
+                    skip_jwt_prefixes=('/price_update',))
 
 REDDIT_FEED_USER = os.environ["REDDIT_USER_NAME"]
 REDDIT_FEED_PASS = os.environ["REDDIT_USER_PASS"]
@@ -64,7 +41,7 @@ PUSHED_CSV    = ROOT / "price_updates_pushed.csv"
 MISSING_CSV   = ROOT / "price_updates_missing_listing.csv"
 UNTOUCHED_CSV = ROOT / "price_updates_untouched.csv"
 RUN_LOG = ROOT / "run_output.log"
-app.secret_key = "something-super-secret-and-unique"
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "price-updater-fallback-key")
 
 
 @app.post("/price_update")
@@ -169,170 +146,7 @@ if os.environ.get("ENABLE_CRON", "").lower() == "true":
     scheduler.add_job(call_dailyrunner, "cron", hour=3)  # UTC
     scheduler.start()
     print("✅ Scheduler started — /run-dailyrunner will fire daily at 3 AM UTC")
-TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Pack Fresh | Price Review Dashboard</title>
-  <style>
-    body {
-        font-family: 'Segoe UI', sans-serif;
-        background-color: #fcf7e1;
-        color: #2a361c;
-        padding: 40px;
-    }
-    h1, h2 {
-        color: #616d39;
-    }
-    .nav a {
-        margin-right: 20px;
-        text-decoration: none;
-        color: #2a361c;
-        font-weight: bold;
-    }
-    .nav {
-        margin-bottom: 20px;
-    }
-    table {
-        border-collapse: collapse;
-        width: 100%;
-        font-size: 14px;
-        margin-top: 10px;
-    }
-    th, td {
-        border: 1px solid #ba6b29;
-        padding: 8px;
-        text-align: left;
-    }
-    th {
-        background-color: #dfa260;
-        color: #000;
-        cursor: pointer;
-    }
-    tr:nth-child(even) {
-        background-color: #fff9ef;
-    }
-    tr:hover {
-        background-color: #ffeacc;
-    }
-    input[type="text"] {
-        width: 80px;
-        padding: 4px;
-    }
-    button {
-        background-color: #616d39;
-        color: white;
-        padding: 8px 12px;
-        border: none;
-        cursor: pointer;
-        font-weight: bold;
-    }
-    button:hover {
-        background-color: #2a361c;
-    }
-    #log {
-        white-space: pre-wrap;
-        background: #111;
-        color: #0f0;
-        padding: 1em;
-        margin-top: 1em;
-        height: 40vh;
-        overflow-y: auto;
-    }
-  </style>
-</head>
-<body>
 
-  <h1>📊 Pack Fresh Price Sync Dashboard</h1>
-
-  <div class="nav">
-      <a href="{{ url_for('dashboard', view='review') }}">Needs Review</a>
-      <a href="{{ url_for('dashboard', view='pushed') }}">Auto-Updated</a>
-      <a href="{{ url_for('dashboard', view='missing') }}">Missing Listings</a>
-      <a href="{{ url_for('dashboard', view='untouched') }}">Untouched</a>
-  </div>
-
-  <h2>{{ title }}</h2>
-
-  {% if df.empty %}
-    <p>No entries found.</p>
-  {% else %}
-  <form method="post" action="{{ url_for('save_csv', view=view) }}">
-    <table>
-      <thead>
-        <tr>
-          {% for col in df.columns %}
-            <th>{{ col.replace('_', ' ').title() }}</th>
-          {% endfor %}
-          {% if view in ['review', 'missing'] %}
-            <th>Edit</th>
-          {% endif %}
-        </tr>
-      </thead>
-      <tbody>
-        {% for i, row in df.iterrows() %}
-        <tr>
-          {% for col in df.columns %}
-            {% if col == 'tcgplayer_id' %}
-              <td><a href="https://www.tcgplayer.com/product/{{ row[col] }}?Language=English" target="_blank">{{ row[col] }}</a></td>
-            {% else %}
-              <td>{{ row[col] }}</td>
-            {% endif %}
-          {% endfor %}
-          <td>DEBUG: {{ row.get('suggested_price') }}</td>
-          {% if view in ['review', 'missing'] %}
-            <td>
-              <input type="text" name="price_to_upload_{{ i }}" value="{{ row.get('price_to_upload', '') }}" id="price_input_{{ i }}">
-              {% if row.get('suggested_price') is not none %}
-                <button type="button" onclick="document.getElementById('price_input_{{ i }}').value = '{{ row.get('suggested_price') }}'">✔ Accept</button>
-              {% endif %}
-            </td>
-          {% endif %}
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-
-    {% if view in ['review', 'missing'] %}
-      <br>
-      <button type="submit">💾 Save Changes</button>
-    {% endif %}
-  </form>
-
-  <form method="POST" action="/run" style="margin-top:10px;">
-    <input type="hidden" name="action" value="upload">
-    <input type="hidden" name="source" value="{{ view }}">
-    <button type="submit">🚀 Push Reviewed Prices to Shopify</button>
-  </form>
-
-  <div id="log"></div>
-  {% endif %}
-</body>
-</html>
-"""
-USERNAME = os.environ.get("DASHBOARD_USER", "admin")
-PASSWORD = os.environ.get("DASHBOARD_PASS", "secret")
-
-def check_auth(user, pwd):
-    return user == USERNAME and pwd == PASSWORD
-
-def authenticate():
-    return Response(
-        "🚫 Access Denied. You must provide valid credentials.", 401,
-        {"WWW-Authenticate": 'Basic realm="Login Required"'}
-    )
-
-def requires_auth(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        from flask import g
-        if getattr(g, 'user', None):
-            return f(*args, **kwargs)  # JWT already validated
-        auth = request.authorization
-        if not auth or not check_auth(auth.username, auth.password):
-            return authenticate()
-        return f(*args, **kwargs)
-    return decorated
 def load_csv(path):
     if not os.path.exists(path):
         return pd.DataFrame()
@@ -357,18 +171,15 @@ def requires_reddit_auth(f):
         return f(*args, **kwargs)
     return wrapper
 @app.route("/")
-@requires_auth
 def home():
     return redirect("/dashboard/review")
 
 @app.route("/dashboard/runlog")
-@requires_auth
 def runlog():
     return render_template("runlog.html")
 
 
 @app.route('/run-dailyrunner', methods=["GET", "POST"])
-@requires_auth
 def run_dailyrunner():
     def launch_script():
         with open(RUN_LOG, "w") as f:
@@ -402,7 +213,6 @@ def stream_log():
     return Response(generate(), mimetype="text/event-stream")
 
 @app.route("/dashboard/<view>")
-@requires_auth
 def dashboard(view):
     files = {
         "review": REVIEW_CSV,
@@ -440,7 +250,6 @@ def dashboard(view):
 
 
 @app.route("/save/<view>", methods=["POST"], endpoint='save_csv')
-@requires_auth
 def save_csv(view):
     file_map = {
         "review": REVIEW_CSV,
@@ -459,7 +268,6 @@ def save_csv(view):
     return redirect(f"/dashboard/{view}")
 
 @app.route("/run", methods=["POST"])
-@requires_auth
 def run():
     action = request.form.get("action")
     source = request.form.get("source", "review")  # default to review
@@ -477,7 +285,6 @@ def run():
     return redirect(f"/dashboard/{source}")
 
 @app.route("/ignore", methods=["POST"])
-@requires_auth
 def ignore_sku():
     sku = request.form.get("sku")
     if not sku:
@@ -488,7 +295,6 @@ def ignore_sku():
 
     return "OK", 200
 @app.route("/run-live/upload")
-@requires_auth
 def run_live_upload():
     def generate():
         process = subprocess.Popen(

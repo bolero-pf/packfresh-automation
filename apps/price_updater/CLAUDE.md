@@ -1,8 +1,5 @@
 # Price Updater (price_updater/)
 > Nightly sealed SKU price sync (prices.pack-fresh.com)
-> NOTE: VIP and Screening have been extracted to standalone services (apps/vip/, apps/screening/).
-> The old vip/ and screening/ subdirectories still exist here but are no longer registered as blueprints.
-> They will be deleted once the standalone services are fully verified.
 
 ## Key Files
 - **review_dashboard.py** — Main Flask app: price review dashboard, CSV management, nightly run trigger
@@ -11,13 +8,18 @@
 - **inventory/routes.py** — Inventory sub-routes (still active)
 
 ## Auth
-- JWT cookie from admin portal (shared/auth.py) — primary auth
-- HTTP Basic Auth as fallback (DASHBOARD_USER/DASHBOARD_PASS)
-- /price_update endpoint now lives on this service directly (was under /vip/ before)
+- JWT cookie via `register_auth_hooks()` from shared/auth.py — owner role required
+- Public prefixes: /static, /pf-static, /reddit-feed.csv (reddit feed has its own basic auth)
+- JWT-skipped prefixes: /price_update (server-triggered POST)
+- No more HTTP Basic Auth fallback for dashboard routes (removed legacy @requires_auth)
+- Reddit feed still uses its own basic auth (REDDIT_USER_NAME/REDDIT_USER_PASS)
+
+## Theme
+- Uses shared dark theme: pf_theme.css + pf_ui.js (as of 2026-03-27)
+- Templates: review.html, runlog.html, index.html, merge_preview.html
 
 ## Legacy Subdirectories (pending removal)
-- **vip/** — Migrated to apps/vip/ (vip.pack-fresh.com)
-- **screening/** — Migrated to apps/screening/ (screening.pack-fresh.com)
+- **vip/** — Migrated to apps/vip/ (vip.pack-fresh.com) — blueprints no longer registered
+- **screening/** — Migrated to apps/screening/ (screening.pack-fresh.com) — blueprints no longer registered
 - **integrations/klaviyo.py** — Migrated to shared/klaviyo.py
-- These are still present but blueprints are still registered for backward compatibility
-- Once standalone services are verified, these directories will be deleted
+- These directories can be deleted

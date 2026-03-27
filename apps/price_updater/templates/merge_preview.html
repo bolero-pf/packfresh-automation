@@ -3,83 +3,30 @@
 <head>
     <meta charset="UTF-8">
     <title>Merge Preview</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
     <style>
-      body {
-        font-family: 'Segoe UI', sans-serif;
-        background-color: #fcf7e1;
-        color: #2a361c;
-        padding: 40px;
-    }
-
-    h1, h2 {
-        color: #616d39;
-    }
-
-    .nav a {
-        margin-right: 15px;
-        text-decoration: none;
-        color: #2a361c;
-        font-weight: bold;
-    }
-
-    table {
-        border-collapse: collapse;
-        width: 100%;
-        font-size: 14px;
-        margin-top: 20px;
-    }
-
-    th, td {
-        border: 1px solid #ba6b29;
-        padding: 8px;
-        text-align: left;
-    }
-
-    th {
-        background-color: #dfa260;
-        color: #000;
-        cursor: pointer;
-    }
-
-    tr:nth-child(even) {
-        background-color: #fff9ef;
-    }
-
-    tr:hover {
-        background-color: #ffeacc;
-    }
-
-    input[type=text] {
-        width: 80px;
-        padding: 4px;
-    }
-
-    button {
-        background-color: #616d39;
-        color: white;
-        padding: 8px 12px;
-        border: none;
-        cursor: pointer;
-        font-weight: bold;
-    }
-
-    button:hover {
-        background-color: #2a361c;
-    }
+        body { padding: 24px; max-width: 900px; margin: 0 auto; }
+        h2 { font-size: 1.1rem; color: var(--text-dim); margin-bottom: 16px; }
+        .merge-actions { display: flex; gap: 12px; margin-top: 16px; }
+        .merge-actions button { padding: 10px 18px; border: none; border-radius: 6px; cursor: pointer; font-family: var(--font-sans); font-weight: 600; font-size: 0.85rem; color: #fff; }
+        .btn-keep-left { background: #22c55e; }
+        .btn-keep-left:hover { opacity: 0.9; }
+        .btn-keep-right { background: var(--accent); }
+        .btn-keep-right:hover { opacity: 0.9; }
     </style>
 </head>
-<body class="p-4">
-    <div class="container">
-        <h2 class="mb-4">🧬 Merge Preview</h2>
-       <form method="post" action="/commit_merge?q={{ search }}">
-            <input type="hidden" name="row1_index" value="{{ row1_index }}">
-            <input type="hidden" name="row2_index" value="{{ row2_index }}">
+<body>
+    <h2>Merge Preview</h2>
+    <form method="post" action="/commit_merge?q={{ search }}">
+        <input type="hidden" name="row1_index" value="{{ row1_index }}">
+        <input type="hidden" name="row2_index" value="{{ row2_index }}">
 
-            <button name="keep" value="left" class="btn btn-success">✅ Keep Left ({{ row1["name"] }})</button>
-            <button name="keep" value="right" class="btn btn-primary">✅ Keep Right ({{ row2["name"] }})</button>
-        </form>
-
-    </div>
+        <div class="merge-actions">
+            <button name="keep" value="left" class="btn-keep-left">Keep Left ({{ row1["name"] }})</button>
+            <button name="keep" value="right" class="btn-keep-right">Keep Right ({{ row2["name"] }})</button>
+        </div>
+    </form>
 </body>
 </html>
