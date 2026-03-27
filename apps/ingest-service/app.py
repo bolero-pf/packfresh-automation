@@ -1889,7 +1889,7 @@ def ppt_search_sealed():
     if not q:
         return jsonify({"error": "No query"}), 400
     try:
-        results = ppt.search_sealed_products(q, limit=10)
+        results = ppt.search_sealed_products(q, limit=5)
         for r in results:
             if not r.get("tcgplayer_id"):
                 tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
