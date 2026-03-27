@@ -4,7 +4,6 @@ COPY apps/card_manager/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY apps/card_manager/app.py .
 COPY apps/card_manager/templates/ ./templates/
-COPY apps/ingestion/db.py .
 COPY apps/shared/ ./shared/
 ENV PYTHONPATH=/app/shared:/app
 EXPOSE 8080
