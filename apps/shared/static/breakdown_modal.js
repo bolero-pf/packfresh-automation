@@ -126,11 +126,34 @@
             .then(function(data) {
                 _cacheData = data.found ? data.cache : null;
                 _renderEditor();
+                // Fetch parent store price even if editor is collapsed
+                if (_opts.tcgplayerId && !_opts.parentStore) {
+                    _fetchParentStorePrice();
+                }
             })
             .catch(function() {
                 _cacheData = null;
                 _renderEditor();
             });
+    }
+
+    function _fetchParentStorePrice() {
+        if (!_opts.tcgplayerId) return;
+        fetch(_opts.apiBase + '/store-prices', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tcgplayer_ids: [_opts.tcgplayerId] })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var prices = data.prices || {};
+            var ps = prices[_opts.tcgplayerId];
+            if (ps && ps.shopify_price) {
+                _opts.parentStore = parseFloat(ps.shopify_price);
+                _renderParentInfo();
+            }
+        })
+        .catch(function() {});
     }
 
     function _fetchStorePrices() {

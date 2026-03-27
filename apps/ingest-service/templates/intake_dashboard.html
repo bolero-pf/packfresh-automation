@@ -1662,7 +1662,7 @@
                                             }
                                             
                                             if (s.session_type !== 'raw' && i.tcgplayer_id) {
-                                                btns += `<hr><button onclick="openIntakeBreakdown(${i.tcgplayer_id}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}')">📦 Breakdown Recipe</button>`;
+                                                btns += `<hr><button onclick="openIntakeBreakdown(${i.tcgplayer_id}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}', ${i.market_price||0})">📦 Breakdown Recipe</button>`;
                                                 if (bd && bdVal > 0) {
                                                     btns += `<button onclick="applyBreakdownPriceWithQty('${i.id}','${sessionId}',${bdVal},'${(bd.variant_names||'breakdown').replace(/'/g,'')}',${i.quantity})">💲 Price as Breakdown ($${bdVal.toFixed(2)})</button>`;
                                                 }
@@ -2718,7 +2718,7 @@
                                 ? '<a href="https://' + (window.__shopifyStore || '') + '/products/' + i.store_handle + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px;">View &#x2197;</a>'
                                 : ''}
                             <button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;"
-                                onclick="openIntakeBreakdown(${i.tcgplayer_id||'null'}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}')">
+                                onclick="openIntakeBreakdown(${i.tcgplayer_id||'null'}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}', ${i.market_price||0})">
                                 ${bd ? '&#x1F4E6; Recipe' : '+ Recipe'}
                             </button>
                             ${found && i.shopify_variant_id
@@ -4724,10 +4724,11 @@
     // INTAKE BREAKDOWN — SHARED MODAL WRAPPER
     // ═══════════════════════════════════════════════════════════════
 
-    function openIntakeBreakdown(tcgId, productName) {
+    function openIntakeBreakdown(tcgId, productName, marketPrice) {
         openBreakdownModal({
             tcgplayerId: tcgId || null,
             productName: productName || '',
+            parentMarket: parseFloat(marketPrice) || 0,
             apiBase: '/api/breakdown-cache',
             priceMode: 'best',
             onExecute: null,  // intake is recipe-only, no execution
