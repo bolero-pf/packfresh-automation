@@ -1356,6 +1356,27 @@ def enrich_page():
     return render_template("enrich_preview.html", shopify_store_handle=store_handle)
 
 
+@app.route("/api/ppt/search-sealed", methods=["POST"])
+def ppt_search_sealed():
+    """Search PPT for sealed products by name."""
+    if not ppt:
+        return jsonify({"error": "PPT API not configured"}), 503
+    data = request.get_json(silent=True) or {}
+    q = data.get("query", "").strip()
+    if not q:
+        return jsonify({"error": "No query"}), 400
+    try:
+        results = ppt.search_sealed_products(q, limit=10)
+        for r in results:
+            if not r.get("tcgplayer_id"):
+                tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
+                if tcg_id:
+                    r["tcgplayer_id"] = int(tcg_id)
+        return jsonify({"results": results})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ppt/sealed/<int:tcgplayer_id>")
 def ppt_sealed_lookup(tcgplayer_id):
     """Fetch a sealed product from PPT by TCGPlayer ID — used by the preview page."""

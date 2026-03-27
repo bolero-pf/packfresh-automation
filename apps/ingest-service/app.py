@@ -1879,7 +1879,48 @@ def debug_sealed(tcgplayer_id):
     return jsonify(results)
 
 
-# PPT search-sealed + search-cards now served by shared breakdown blueprint
+@app.route("/api/ppt/search-sealed", methods=["POST"])
+def ppt_search_sealed():
+    """Search PPT for sealed products by name."""
+    if not ppt:
+        return jsonify({"error": "PPT API not configured"}), 503
+    data = request.get_json(silent=True) or {}
+    q = data.get("query", "").strip()
+    if not q:
+        return jsonify({"error": "No query"}), 400
+    try:
+        results = ppt.search_sealed_products(q, limit=10)
+        for r in results:
+            if not r.get("tcgplayer_id"):
+                tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
+                if tcg_id:
+                    r["tcgplayer_id"] = int(tcg_id)
+        return jsonify({"results": results})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ppt/search-cards", methods=["POST"])
+def ppt_search_cards():
+    """Search PPT for individual cards by name."""
+    if not ppt:
+        return jsonify({"error": "PPT API not configured"}), 503
+    data = request.get_json(silent=True) or {}
+    q = data.get("query", "").strip()
+    if not q:
+        return jsonify({"error": "No query"}), 400
+    try:
+        set_name = data.get("set_name") or None
+        limit = data.get("limit", 8)
+        results = ppt.search_cards(q, set_name=set_name, limit=limit)
+        for r in (results or []):
+            if not r.get("market_price"):
+                conds = (r.get("prices") or {}).get("conditions") or {}
+                nm = conds.get("Near Mint") or conds.get("NM") or {}
+                r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
+        return jsonify({"results": results or []})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/ppt/parse-title", methods=["POST"])
