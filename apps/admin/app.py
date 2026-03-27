@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timezone
 
 import bcrypt
-from flask import Flask, request, jsonify, redirect, render_template, make_response
+from flask import Blueprint, Flask, request, jsonify, redirect, render_template, make_response
 
 import db
 from auth import (
@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
 db.init_pool()
+
+# Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
+app.register_blueprint(Blueprint(
+    "pf_static", __name__,
+    static_folder=os.path.join(os.path.dirname(__file__), "..", "shared", "static"),
+    static_url_path="/pf-static",
+))
 
 VALID_ROLES = ("owner", "manager", "associate")
 

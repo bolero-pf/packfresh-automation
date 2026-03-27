@@ -225,34 +225,24 @@ CONSOLE_HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pack Fresh — Screening Console</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root { --bg:#0a0c10; --surface:#141720; --s2:#1c2030; --border:#2a2f42; --accent:#4f7df9; --green:#34d058; --amber:#f6ad55; --red:#fc5c5c; --text:#e8eaf0; --dim:#6b7280; }
-* { box-sizing:border-box; margin:0; padding:0; }
-body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif; font-size:14px; }
 .header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:16px; }
 .header h1 { font-size:1.3rem; }
 .main { max-width:1000px; margin:0 auto; padding:20px; }
 .section-title { font-size:0.75rem; color:var(--dim); text-transform:uppercase; letter-spacing:0.1em; margin:24px 0 12px; display:flex; align-items:center; gap:8px; }
 .section-title:first-child { margin-top:0; }
 .count-badge { background:var(--red); color:#fff; border-radius:10px; padding:1px 8px; font-size:0.7rem; }
-.card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:10px; }
 .order-header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:8px; }
 .order-name { font-weight:700; font-size:1rem; }
-.badge { display:inline-block; padding:3px 10px; border-radius:10px; font-size:0.68rem; font-weight:700; }
-.badge-amber { background:rgba(246,173,85,0.15); color:var(--amber); }
-.badge-red { background:rgba(252,92,92,0.15); color:var(--red); }
-.badge-blue { background:rgba(79,125,249,0.15); color:var(--accent); }
 .order-meta { font-size:0.8rem; color:var(--dim); line-height:1.5; }
 .items-list { font-size:0.8rem; color:var(--dim); margin-top:6px; padding:8px 12px; background:var(--s2); border-radius:6px; }
-.btn { height:34px; padding:0 16px; border:none; border-radius:8px; font-family:inherit; font-size:0.82rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
 .btn-green { background:var(--green); color:#000; }
-.btn-sm { height:28px; padding:0 10px; font-size:0.75rem; }
-.btn-secondary { background:var(--s2); border:1px solid var(--border); color:var(--text); }
 .combine-group { background:var(--surface); border:2px solid var(--accent); border-radius:12px; padding:18px; margin-bottom:14px; }
 .combine-header { font-weight:700; font-size:1rem; margin-bottom:4px; }
 .combine-orders { display:flex; flex-direction:column; gap:8px; margin:10px 0; }
 .combine-order { background:var(--s2); border-radius:8px; padding:10px 14px; }
-.toast { position:fixed; bottom:20px; right:20px; background:var(--green); color:#000; padding:10px 20px; border-radius:8px; font-weight:600; font-size:0.85rem; display:none; z-index:100; }
 .tab { background:none; border:none; padding:10px 18px; color:var(--dim); cursor:pointer; font-size:0.88rem; font-weight:500; border-bottom:2px solid transparent; font-family:inherit; }
 .tab:hover { color:var(--text); }
 .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
@@ -278,11 +268,8 @@ body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif
   <div id="pane-combine" class="pane"><div class="spinner"></div></div>
 </div>
 
-<div class="toast" id="toast"></div>
-
 <script>
 let _data = null;
-function toast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
 
 function switchTab(id) {
   document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
@@ -402,7 +389,7 @@ async function cancelOrder(orderId, orderName) {
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    toast('Cancelled + refunded: ' + orderName);
+    toast('Cancelled + refunded: ' + orderName, 'green');
     loadOrders();
   } catch(e) { alert(e.message); }
 }
@@ -416,7 +403,7 @@ async function releaseHold(orderId, orderName) {
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    toast('Released: ' + orderName);
+    toast('Released: ' + orderName, 'green');
     loadOrders();
   } catch(e) { alert(e.message); }
 }
@@ -480,9 +467,9 @@ async function releaseAndFulfillGroup(btn, orderIds) {
   btn.disabled = false;
   btn.textContent = '🚀 Release & Ship';
   if (errors.length) {
-    toast(ok + ' fulfilled, ' + errors.length + ' failed: ' + errors[0]);
+    toast(ok + ' fulfilled, ' + errors.length + ' failed: ' + errors[0], 'red');
   } else {
-    toast('✅ All ' + ok + ' orders fulfilled with tracking');
+    toast('All ' + ok + ' orders fulfilled with tracking', 'green');
   }
   loadOrders();
 }

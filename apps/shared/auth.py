@@ -23,7 +23,7 @@ from functools import wraps
 from datetime import datetime, timezone, timedelta
 
 import jwt
-from flask import request, redirect, g, jsonify
+from flask import Blueprint, request, redirect, g, jsonify
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +183,7 @@ def register_auth_hooks(app, roles=None, public_paths=('/health', '/ping', '/fav
     def _check_auth():
         if request.path in public_paths:
             return
-        for prefix in public_prefixes:
+        for prefix in (*public_prefixes, '/pf-static'):
             if request.path.startswith(prefix):
                 return
         for prefix in skip_jwt_prefixes:
@@ -199,6 +199,14 @@ def register_auth_hooks(app, roles=None, public_paths=('/health', '/ping', '/fav
                     pass
                 return
         return require_auth(roles=roles)
+
+    # Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
+    pf_static = Blueprint(
+        "pf_static", __name__,
+        static_folder=os.path.join(os.path.dirname(__file__), "static"),
+        static_url_path="/pf-static",
+    )
+    app.register_blueprint(pf_static)
 
     @app.after_request
     def _add_admin_bar(response):

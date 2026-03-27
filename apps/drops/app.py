@@ -314,42 +314,29 @@ DASHBOARD_HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pack Fresh — Drop Planner</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root { --bg:#0a0c10; --surface:#141720; --s2:#1c2030; --border:#2a2f42; --accent:#4f7df9; --green:#34d058; --amber:#f6ad55; --red:#fc5c5c; --text:#e8eaf0; --dim:#6b7280; }
-* { box-sizing:border-box; margin:0; padding:0; }
-body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif; font-size:14px; }
 .header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
 .header h1 { font-size:1.3rem; }
 .main { max-width:900px; margin:0 auto; padding:20px; }
 .tabs { display:flex; gap:2px; margin-bottom:20px; border-bottom:1px solid var(--border); }
-.tab { background:none; border:none; padding:10px 18px; color:var(--dim); cursor:pointer; font-size:0.88rem; font-weight:500; border-bottom:2px solid transparent; }
+.tab { background:none; border:none; padding:10px 18px; color:var(--text-dim); cursor:pointer; font-size:0.88rem; font-weight:500; border-bottom:2px solid transparent; }
 .tab:hover { color:var(--text); }
 .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
-.card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:18px; margin-bottom:14px; }
 .form-row { display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap; align-items:end; }
 .form-group { display:flex; flex-direction:column; gap:4px; flex:1; min-width:140px; }
-.form-label { font-size:0.7rem; color:var(--dim); text-transform:uppercase; letter-spacing:0.06em; }
-.form-input, .form-select { height:38px; background:var(--s2); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 12px; font-size:0.85rem; font-family:inherit; outline:none; width:100%; }
+.form-label { font-size:0.7rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em; }
+.form-input, .form-select { height:38px; background:var(--surface-2); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 12px; font-size:0.85rem; font-family:inherit; outline:none; width:100%; }
 .form-input:focus { border-color:var(--accent); }
-.btn { height:38px; padding:0 18px; border:none; border-radius:8px; font-family:inherit; font-size:0.85rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
-.btn-primary { background:var(--accent); color:#fff; }
-.btn-green { background:var(--green); color:#000; }
-.btn-red { background:var(--red); color:#fff; }
-.btn-secondary { background:var(--s2); border:1px solid var(--border); color:var(--text); }
-.btn-sm { height:30px; padding:0 10px; font-size:0.75rem; }
-table { width:100%; border-collapse:collapse; font-size:0.82rem; }
-th { text-align:left; color:var(--dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.06em; padding:8px; border-bottom:1px solid var(--border); }
-td { padding:8px; border-bottom:1px solid var(--border); }
-.badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.68rem; font-weight:700; }
 .badge-scheduled { background:rgba(79,125,249,0.15); color:var(--accent); }
 .badge-active { background:rgba(52,208,88,0.15); color:var(--green); }
-.badge-completed { background:var(--s2); color:var(--dim); }
+.badge-completed { background:var(--surface-2); color:var(--text-dim); }
 .pane { display:none; }
 .pane.active { display:block; }
 .search-result { display:flex; align-items:center; gap:12px; padding:10px; border:1px solid var(--border); border-radius:8px; margin-bottom:6px; cursor:pointer; transition:border-color 0.15s; }
 .search-result:hover { border-color:var(--accent); }
 .search-result img { width:48px; height:48px; object-fit:contain; border-radius:4px; }
-.toast { position:fixed; bottom:20px; right:20px; background:var(--green); color:#000; padding:10px 20px; border-radius:8px; font-weight:600; font-size:0.85rem; display:none; z-index:100; }
 .spinner { width:24px; height:24px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; margin:20px auto; }
 @keyframes spin { to { transform:rotate(360deg); } }
 </style>
@@ -535,8 +522,6 @@ td { padding:8px; border-bottom:1px solid var(--border); }
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
-
 <script>
 let _selected = null; // {product_gid, variant_gid, variant_id, product_id, title, price}
 let _bfSelected = null;
@@ -560,8 +545,6 @@ function switchTab(id, btn) {
   if (id === 'history') loadDrops('history');
   if (id === 'founders') loadFoundersPicks();
 }
-
-function toast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',3000); }
 
 // Search
 function debounceSearch() { clearTimeout(_timer); _timer = setTimeout(doSearch, 400); }
@@ -620,7 +603,7 @@ async function submitDrop() {
     const r = await fetch('/api/drops', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    toast('Drop scheduled! ' + _selected.title);
+    toast('Drop scheduled! ' + _selected.title, 'green');
     document.getElementById('drop-form').style.display = 'none';
     _selected = null;
   } catch(e) { alert(e.message); }
@@ -654,7 +637,7 @@ async function loadDrops(tab) {
 async function deleteDrop(id) {
   if (!confirm('Delete this drop record?')) return;
   await fetch('/api/drops/'+id, {method:'DELETE'});
-  toast('Deleted');
+  toast('Deleted', 'green');
   loadDrops('scheduled'); loadDrops('history');
 }
 
@@ -727,7 +710,7 @@ async function submitBackfill() {
     const r = await fetch('/api/drops/backfill', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    toast('Past drop recorded: ' + _bfSelected.title);
+    toast('Past drop recorded: ' + _bfSelected.title, 'green');
     document.getElementById('bf-form').style.display = 'none';
     _bfSelected = null;
   } catch(e) { alert(e.message); }
@@ -776,7 +759,7 @@ async function submitFounderPick() {
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    toast(founder.charAt(0).toUpperCase()+founder.slice(1)+"'s pick added: "+_fpSelected.title);
+    toast(founder.charAt(0).toUpperCase()+founder.slice(1)+"'s pick added: "+_fpSelected.title, 'green');
     document.getElementById('fp-form').style.display = 'none';
     document.getElementById('fp-note').value = '';
     _fpSelected = null;
@@ -863,7 +846,7 @@ async function bulkRemoveFounders() {
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    toast('Removed ' + d.removed + ' founder\\'s pick(s)');
+    toast('Removed ' + d.removed + ' founder\\'s pick(s)', 'green');
     loadFoundersPicks();
   } catch(e) { alert(e.message); }
 }
@@ -877,7 +860,7 @@ async function removeSingleFounder(gid) {
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    toast('Founder\\'s pick removed');
+    toast('Founder\\'s pick removed', 'green');
     loadFoundersPicks();
   } catch(e) { alert(e.message); }
 }
@@ -888,7 +871,7 @@ async function manualRelease() {
   try {
     const r = await fetch('/release', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     const d = await r.json();
-    toast('Released ' + (d.released||0) + ' drops');
+    toast('Released ' + (d.released||0) + ' drops', 'green');
   } catch(e) { alert(e.message); }
 }
 </script>

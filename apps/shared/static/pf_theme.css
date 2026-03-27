@@ -1,0 +1,278 @@
+/* ───────────────────────────────────────────────────────────
+   Pack Fresh — Shared Design Tokens & Component Styles
+   Single source of truth for all dark-theme staff services.
+   Rebrand: change :root vars here → every service updates.
+   ─────────────────────────────────────────────────────────── */
+
+/* ── Tokens ─────────────────────────────────────────────── */
+:root {
+  /* Backgrounds */
+  --bg:        #0d0f14;
+  --surface:   #141720;
+  --surface-2: #1c2030;
+
+  /* Borders & lines */
+  --border:    #2a2f42;
+
+  /* Text */
+  --text:      #e8eaf0;
+  --text-dim:  #6b7280;
+
+  /* Accent */
+  --accent:       #4f7df9;
+  --accent-hover: #3b6ae8;
+  --accent-bg:    rgba(79,125,249,0.12);
+
+  /* Semantic colors */
+  --green:    #34d058;
+  --green-bg: rgba(52,208,88,0.12);
+  --amber:    #f6ad55;
+  --amber-bg: rgba(246,173,85,0.12);
+  --red:      #fc5c5c;
+  --red-bg:   rgba(252,92,92,0.10);
+
+  /* Typography */
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'DM Mono', ui-monospace, monospace;
+
+  /* Radii */
+  --radius:    10px;
+  --radius-sm: 6px;
+
+  /* Aliases (short names used by some services) */
+  --s1:  var(--surface);
+  --s2:  var(--surface-2);
+  --dim: var(--text-dim);
+  --sans: var(--font-sans);
+  --mono: var(--font-mono);
+}
+
+
+/* ── Reset ──────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+
+/* ── Buttons ────────────────────────────────────────────── */
+.btn {
+  padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer;
+  font-family: var(--font-sans); font-size: 0.85rem; font-weight: 600;
+  transition: opacity 0.15s, transform 0.1s;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:active  { transform: scale(0.97); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary   { background: var(--accent); color: #fff; }
+.btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.btn-success,
+.btn-green     { background: var(--green); color: #000; }
+.btn-danger,
+.btn-red       { background: var(--red); color: #fff; }
+.btn-amber     { background: var(--amber); color: #000; }
+.btn-ghost     { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.btn-sm        { padding: 5px 10px; font-size: 0.78rem; border-radius: var(--radius-sm); }
+.btn-row       { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+
+
+/* ── Badges ─────────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  font-size: 0.68rem; font-weight: 700;
+  padding: 3px 9px; border-radius: 12px;
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+.badge-green   { background: var(--green-bg);  color: var(--green); }
+.badge-amber   { background: var(--amber-bg);  color: var(--amber); }
+.badge-blue    { background: var(--accent-bg);  color: var(--accent); }
+.badge-red     { background: var(--red-bg);     color: var(--red); }
+.badge-dim     { background: var(--surface-2);  color: var(--text-dim); }
+
+/* Domain-specific badge aliases */
+.badge-pending  { background: var(--amber-bg); color: var(--amber); }
+.badge-pulling  { background: var(--accent-bg); color: var(--accent); }
+.badge-ready    { background: var(--green-bg); color: var(--green); }
+.badge-accepted { background: var(--green-bg); color: var(--green); }
+.badge-returned { background: rgba(107,114,128,0.15); color: var(--text-dim); }
+
+/* Condition pills (card grading) */
+.cond-pill { font-size: 0.68rem; font-weight: 700; padding: 2px 7px; border-radius: 20px; letter-spacing: 0.04em; }
+.cond-NM   { background: rgba(52,208,88,0.15);  color: var(--green); }
+.cond-LP   { background: rgba(246,173,85,0.15);  color: var(--amber); }
+.cond-MP   { background: rgba(251,146,60,0.15);  color: #fb923c; }
+.cond-HP   { background: rgba(252,92,92,0.15);   color: var(--red); }
+.cond-DMG  { background: rgba(252,92,92,0.25);   color: var(--red); }
+
+
+/* ── Alerts ─────────────────────────────────────────────── */
+.alert {
+  padding: 12px 16px; border-radius: 8px; font-size: 0.85rem;
+  border: 1px solid transparent; margin-bottom: 12px;
+}
+.alert-success { background: var(--green-bg); color: var(--green); border-color: rgba(52,208,88,0.25); }
+.alert-warning { background: var(--amber-bg); color: var(--amber); border-color: rgba(246,173,85,0.25); }
+.alert-error   { background: var(--red-bg);   color: var(--red);   border-color: rgba(252,92,92,0.25); }
+.alert-info    { background: var(--accent-bg); color: var(--accent); border-color: rgba(79,125,249,0.25); }
+
+
+/* ── Forms ──────────────────────────────────────────────── */
+input, select, textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 0.88rem;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.15s;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+}
+input::placeholder, textarea::placeholder {
+  color: var(--text-dim);
+}
+label {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+
+/* ── Cards (content panels) ─────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 10px;
+}
+
+
+/* ── Tables ─────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+thead th {
+  background: var(--surface);
+  color: var(--text-dim);
+  text-align: left;
+  padding: 10px 12px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+}
+tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+tbody tr:hover { background: rgba(79,125,249,0.04); }
+
+
+/* ── Modal Overlay ──────────────────────────────────────── */
+.modal-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.65);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.active { display: flex; }
+
+.modal-content {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 560px;
+  width: 90vw;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.modal-title {
+  font-size: 1.1rem; font-weight: 700; margin-bottom: 8px;
+}
+.modal-body {
+  font-size: 0.88rem; color: var(--text-dim); margin-bottom: 20px;
+}
+
+
+/* ── Toast ──────────────────────────────────────────────── */
+.pf-toast {
+  position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 18px; font-size: 0.88rem;
+  display: flex; align-items: center; gap: 10px;
+  animation: pfToastIn 0.2s ease; max-width: 360px;
+  pointer-events: none;
+}
+@keyframes pfToastIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+
+/* ── Confirm Dialog (injected by pf_ui.js) ──────────────── */
+.pf-confirm-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.65);
+  z-index: 10000;
+  align-items: center;
+  justify-content: center;
+}
+.pf-confirm-overlay.active { display: flex; }
+
+.pf-confirm-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 400px;
+  width: 90vw;
+}
+.pf-confirm-title {
+  font-size: 1.05rem; font-weight: 700; margin-bottom: 8px;
+}
+.pf-confirm-msg {
+  font-size: 0.88rem; color: var(--text-dim); margin-bottom: 20px; line-height: 1.5;
+}
+.pf-confirm-btns {
+  display: flex; gap: 8px; justify-content: flex-end;
+}
+
+
+/* ── Stats bar ──────────────────────────────────────────── */
+.stats-bar  { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.stat-box   { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; flex: 1; min-width: 100px; }
+.stat-label { font-size: 0.68rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+.stat-val   { font-size: 1.5rem; font-weight: 700; font-family: var(--font-mono); }
+
+
+/* ── Progress bar ───────────────────────────────────────── */
+.progress-bar  { height: 4px; background: var(--surface-2); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--green); border-radius: 2px; transition: width 0.3s; }
+
+
+/* ── Page layout helpers ────────────────────────────────── */
+.page-title { font-size: 1.3rem; font-weight: 700; margin-bottom: 4px; }
+.page-sub   { font-size: 0.82rem; color: var(--text-dim); margin-bottom: 20px; }
+
+
+/* ── Scrollbar (Webkit) ─────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }

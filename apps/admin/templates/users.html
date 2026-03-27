@@ -5,35 +5,29 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pack Fresh — User Management</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root { --bg:#0a0c10; --surface:#141720; --s2:#1c2030; --border:#2a2f42; --accent:#4f7df9; --green:#34d058; --amber:#f6ad55; --red:#fc5c5c; --text:#e8eaf0; --dim:#6b7280; }
-* { box-sizing:border-box; margin:0; padding:0; }
-body { min-height:100vh; background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif; }
+body { min-height:100vh; }
 header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:16px; }
 .logo { font-family:'Bebas Neue',sans-serif; font-size:1.6rem; color:var(--accent); }
-.back { color:var(--dim); text-decoration:none; font-size:0.85rem; }
-.back:hover { color:var(--text); }
+.back { color:var(--text-dim); text-decoration:none; font-size:0.85rem; }
+.back:hover { color:var(--text); text-decoration:none; }
 .main { max-width:700px; margin:0 auto; padding:24px; }
-.card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:16px; }
+.card { border-radius:12px; padding:20px; margin-bottom:16px; }
 h2 { font-size:1.1rem; margin-bottom:16px; }
-table { width:100%; border-collapse:collapse; font-size:0.85rem; }
-th { text-align:left; color:var(--dim); font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; padding:8px 10px; border-bottom:1px solid var(--border); }
-td { padding:10px; border-bottom:1px solid var(--border); }
 .role-badge { padding:2px 8px; border-radius:10px; font-size:0.68rem; font-weight:700; text-transform:uppercase; }
 .role-owner { background:rgba(79,125,249,0.2); color:var(--accent); }
 .role-manager { background:rgba(52,208,88,0.2); color:var(--green); }
 .role-associate { background:rgba(246,173,85,0.2); color:var(--amber); }
 .inactive { opacity:0.4; }
 .form-row { display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
-.form-input { height:40px; background:var(--bg); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 12px; font-size:0.85rem; font-family:inherit; outline:none; flex:1; min-width:120px; }
-.form-input:focus { border-color:var(--accent); }
-.form-select { height:40px; background:var(--bg); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 10px; font-size:0.85rem; font-family:inherit; cursor:pointer; }
-.btn { height:40px; padding:0 18px; border:none; border-radius:8px; font-family:inherit; font-size:0.85rem; font-weight:600; cursor:pointer; }
-.btn-primary { background:var(--accent); color:#fff; }
-.btn-sm { height:30px; padding:0 10px; font-size:0.75rem; border-radius:6px; border:1px solid var(--border); background:none; color:var(--dim); cursor:pointer; }
+.form-input { height:40px; border-width:1.5px; border-radius:8px; padding:0 12px; flex:1; min-width:120px; }
+.form-select { height:40px; border-width:1.5px; border-radius:8px; padding:0 10px; cursor:pointer; }
+.btn { height:40px; padding:0 18px; font-size:0.85rem; }
+.btn-sm { height:30px; padding:0 10px; font-size:0.75rem; border-radius:6px; border:1px solid var(--border); background:none; color:var(--text-dim); cursor:pointer; }
 .btn-sm:hover { border-color:var(--text); color:var(--text); }
 .error { color:var(--red); font-size:0.82rem; margin-top:8px; }
-.toast { position:fixed; bottom:20px; right:20px; background:var(--green); color:#000; padding:10px 20px; border-radius:8px; font-size:0.85rem; font-weight:600; display:none; z-index:100; }
 </style>
 </head>
 <body>
@@ -68,14 +62,7 @@ td { padding:10px; border-bottom:1px solid var(--border); }
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
-
 <script>
-function toast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.style.display = 'block';
-  setTimeout(() => t.style.display = 'none', 2500);
-}
 
 async function loadUsers() {
   const el = document.getElementById('users-list');
@@ -129,7 +116,7 @@ async function addUser() {
     });
     const d = await r.json();
     if (!r.ok) { errEl.textContent = d.error; return; }
-    toast('User created!');
+    toast('User created!', 'green');
     document.getElementById('new-name').value = '';
     document.getElementById('new-email').value = '';
     document.getElementById('new-pass').value = '';
@@ -146,7 +133,7 @@ async function editName(id, currentName) {
       body: JSON.stringify({ name }),
     });
     if (!r.ok) { const d = await r.json(); alert(d.error); return; }
-    toast('Name updated');
+    toast('Name updated', 'green');
     loadUsers();
   } catch(e) { alert(e.message); }
 }
@@ -161,7 +148,7 @@ async function resetPassword(id, name) {
       body: JSON.stringify({ password: pw }),
     });
     if (!r.ok) { const d = await r.json(); alert(d.error); return; }
-    toast('Password reset');
+    toast('Password reset', 'green');
   } catch(e) { alert(e.message); }
 }
 
@@ -172,7 +159,7 @@ async function changeRole(id, role) {
       body: JSON.stringify({ role }),
     });
     if (!r.ok) { const d = await r.json(); alert(d.error); loadUsers(); return; }
-    toast('Role updated');
+    toast('Role updated', 'green');
   } catch(e) { alert(e.message); }
 }
 
@@ -182,7 +169,7 @@ async function toggleActive(id, activate) {
       method: 'PATCH', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ is_active: activate }),
     });
-    toast(activate ? 'User activated' : 'User deactivated');
+    toast(activate ? 'User activated' : 'User deactivated', 'green');
     loadUsers();
   } catch(e) { alert(e.message); }
 }

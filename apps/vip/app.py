@@ -458,10 +458,10 @@ CONSOLE_HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pack Fresh — VIP Console</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root { --bg:#0a0c10; --surface:#141720; --s2:#1c2030; --border:#2a2f42; --accent:#4f7df9; --green:#34d058; --amber:#f6ad55; --red:#fc5c5c; --text:#e8eaf0; --dim:#6b7280; --vip1:#e8c547; --vip2:#a78bfa; --vip3:#f59e0b; }
-* { box-sizing:border-box; margin:0; padding:0; }
-body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif; font-size:14px; }
+:root { --vip1:#e8c547; --vip2:#a78bfa; --vip3:#f59e0b; }
 .header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:16px; }
 .header h1 { font-size:1.3rem; }
 .main { max-width:1000px; margin:0 auto; padding:20px; }
@@ -469,37 +469,31 @@ body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif
 .stat { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px 20px; flex:1; min-width:160px; cursor:pointer; transition:border-color 0.15s; }
 .stat:hover { border-color:var(--accent); }
 .stat.active { border-color:var(--accent); border-width:2px; }
-.stat-label { font-size:0.72rem; color:var(--dim); text-transform:uppercase; letter-spacing:0.08em; }
+.stat-label { font-size:0.72rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.08em; }
 .stat-val { font-size:1.8rem; font-weight:700; margin-top:4px; }
 .tier-name { font-size:0.78rem; font-weight:600; margin-top:2px; }
 .controls { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
-.controls input { height:38px; background:var(--s2); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 14px; font-size:0.85rem; font-family:inherit; outline:none; flex:1; min-width:200px; }
+.controls input { height:38px; background:var(--surface-2); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 14px; font-size:0.85rem; font-family:inherit; outline:none; flex:1; min-width:200px; }
 .controls input:focus { border-color:var(--accent); }
-table { width:100%; border-collapse:collapse; font-size:0.82rem; }
-th { text-align:left; color:var(--dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.06em; padding:8px; border-bottom:1px solid var(--border); }
-td { padding:10px 8px; border-bottom:1px solid var(--border); }
-tr:hover { background:var(--s2); }
-.badge { display:inline-block; padding:3px 10px; border-radius:10px; font-size:0.7rem; font-weight:700; }
 .badge-vip1 { background:rgba(232,197,71,0.15); color:var(--vip1); }
 .badge-vip2 { background:rgba(167,139,250,0.15); color:var(--vip2); }
 .badge-vip3 { background:rgba(245,158,11,0.15); color:var(--vip3); }
-.progress-bar { height:6px; background:var(--s2); border-radius:3px; overflow:hidden; width:100px; display:inline-block; vertical-align:middle; margin-left:6px; }
+.progress-bar { height:6px; background:var(--surface-2); border-radius:3px; overflow:hidden; width:100px; display:inline-block; vertical-align:middle; margin-left:6px; }
 .progress-fill { height:100%; border-radius:3px; }
-.btn-action { background:none; border:1px solid var(--border); color:var(--dim); width:30px; height:30px; border-radius:6px; cursor:pointer; font-size:0.8rem; display:inline-flex; align-items:center; justify-content:center; }
+.btn-action { background:none; border:1px solid var(--border); color:var(--text-dim); width:30px; height:30px; border-radius:6px; cursor:pointer; font-size:0.8rem; display:inline-flex; align-items:center; justify-content:center; }
 .btn-action:hover { border-color:var(--accent); color:var(--text); }
 .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; align-items:center; justify-content:center; backdrop-filter:blur(4px); }
 .modal-overlay.active { display:flex; }
 .modal-box { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:28px; width:400px; max-width:92vw; }
 .modal-box h3 { margin-bottom:18px; font-size:1.1rem; }
 .modal-field { margin-bottom:14px; }
-.modal-field label { display:block; font-size:0.72rem; color:var(--dim); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px; }
-.modal-field select, .modal-field input { width:100%; height:42px; background:var(--s2); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 14px; font-size:0.9rem; font-family:inherit; outline:none; }
+.modal-field label { display:block; font-size:0.72rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px; }
+.modal-field select, .modal-field input { width:100%; height:42px; background:var(--surface-2); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 14px; font-size:0.9rem; font-family:inherit; outline:none; }
 .modal-field select:focus, .modal-field input:focus { border-color:var(--accent); }
 .recalc-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border); font-size:0.85rem; }
-.recalc-label { color:var(--dim); }
-.recalc-old { color:var(--dim); text-decoration:line-through; }
+.recalc-label { color:var(--text-dim); }
+.recalc-old { color:var(--text-dim); text-decoration:line-through; }
 .recalc-new { font-weight:700; }
-.btn-green { background:var(--green); color:#000; }
 .spinner { width:24px; height:24px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; margin:30px auto; }
 @keyframes spin { to { transform:rotate(360deg); } }
 </style>
@@ -579,8 +573,6 @@ tr:hover { background:var(--s2); }
 let _tier = '', _timer = null, _allCustomers = [], _cursor = null, _hasNext = false, _modalGid = null;
 const TIER_NAMES = {VIP0:'', VIP1:'Adventurer', VIP2:'Guardian', VIP3:'Champion'};
 const TIER_THRESH = {VIP0:0, VIP1:500, VIP2:1250, VIP3:2500};
-
-function toast(msg) { /* simple toast */ const d=document.createElement('div'); d.style.cssText='position:fixed;bottom:20px;right:20px;background:var(--green);color:#000;padding:10px 20px;border-radius:8px;font-weight:600;z-index:200;'; d.textContent=msg; document.body.appendChild(d); setTimeout(()=>d.remove(),3000); }
 
 async function loadStats() {
   try {
@@ -710,7 +702,7 @@ async function submitTierChange() {
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    toast(TIER_NAMES[tier] + ' set with ' + days + ' day lock');
+    toast(TIER_NAMES[tier] + ' set with ' + days + ' day lock', 'green');
     closeTierModal();
     loadCustomers();
   } catch(e) { alert(e.message); }
@@ -769,7 +761,7 @@ async function applyRecalc() {
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
-    toast('Recalculated: ' + (TIER_NAMES[p.tier]||p.tier));
+    toast('Recalculated: ' + (TIER_NAMES[p.tier]||p.tier), 'green');
     closeRecalcModal();
     loadCustomers();
   } catch(e) { alert(e.message); }

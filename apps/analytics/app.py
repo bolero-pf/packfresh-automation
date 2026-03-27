@@ -227,38 +227,24 @@ DASHBOARD_HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pack Fresh — SKU Analytics</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root { --bg:#0a0c10; --surface:#141720; --s2:#1c2030; --border:#2a2f42; --accent:#4f7df9; --green:#34d058; --amber:#f6ad55; --red:#fc5c5c; --text:#e8eaf0; --dim:#6b7280; }
-* { box-sizing:border-box; margin:0; padding:0; }
-body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif; font-size:14px; }
 .header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
 .header h1 { font-size:1.3rem; }
 .main { max-width:1100px; margin:0 auto; padding:20px; }
 .stats { display:flex; gap:16px; margin-bottom:20px; flex-wrap:wrap; }
 .stat { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 18px; min-width:140px; }
-.stat-label { font-size:0.72rem; color:var(--dim); text-transform:uppercase; letter-spacing:0.08em; }
-.stat-val { font-size:1.4rem; font-weight:700; margin-top:4px; }
 .controls { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
 .controls input, .controls select { height:38px; background:var(--s2); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 12px; font-size:0.85rem; font-family:inherit; outline:none; }
 .controls input:focus { border-color:var(--accent); }
 .controls input { flex:1; min-width:200px; }
-.btn { height:38px; padding:0 16px; border:none; border-radius:8px; font-family:inherit; font-size:0.85rem; font-weight:600; cursor:pointer; }
-.btn-primary { background:var(--accent); color:#fff; }
-.btn-secondary { background:var(--s2); border:1px solid var(--border); color:var(--text); }
-.btn-sm { height:30px; padding:0 10px; font-size:0.75rem; }
-table { width:100%; border-collapse:collapse; font-size:0.82rem; }
-th { text-align:left; color:var(--dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.06em; padding:8px; border-bottom:1px solid var(--border); cursor:pointer; }
+th { cursor:pointer; }
 th:hover { color:var(--text); }
-td { padding:8px; border-bottom:1px solid var(--border); }
 .vel-fast { color:var(--green); font-weight:700; }
 .vel-med { color:var(--amber); font-weight:600; }
 .vel-slow { color:var(--red); }
 .vel-none { color:var(--dim); }
-.badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.68rem; font-weight:700; }
-.badge-green { background:rgba(52,208,88,0.15); color:var(--green); }
-.badge-amber { background:rgba(246,173,85,0.15); color:var(--amber); }
-.badge-red { background:rgba(252,92,92,0.15); color:var(--red); }
-.badge-dim { background:var(--s2); color:var(--dim); }
 .pg { display:flex; gap:4px; justify-content:center; margin-top:16px; }
 .pg button { height:32px; min-width:32px; background:var(--s2); border:1px solid var(--border); border-radius:6px; color:var(--text); cursor:pointer; font-size:0.8rem; }
 .pg button.active { background:var(--accent); border-color:var(--accent); color:#fff; }

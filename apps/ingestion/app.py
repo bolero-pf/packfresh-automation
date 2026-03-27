@@ -15,7 +15,7 @@ import threading
 import uuid as _uuid
 from datetime import datetime, date
 from decimal import Decimal
-from flask import Flask, render_template, request, jsonify, redirect, make_response
+from flask import Flask, Blueprint, render_template, request, jsonify, redirect, make_response
 
 import db
 import ingest
@@ -45,6 +45,14 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
+
+# Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
+pf_static = Blueprint(
+    "pf_static", __name__,
+    static_folder=os.path.join(os.path.dirname(__file__), "..", "shared", "static"),
+    static_url_path="/pf-static",
+)
+app.register_blueprint(pf_static)
 
 # ─── Password gate ───────────────────────────────────────────────
 INGEST_PASSWORD = os.getenv("INGEST_PASSWORD", "")
@@ -85,7 +93,7 @@ def require_auth():
     """Gate all routes behind JWT cookie (admin portal) or legacy password."""
     if request.path in ("/login", "/health"):
         return None
-    if request.path.startswith("/static"):
+    if request.path.startswith(("/static", "/pf-static")):
         return None
     # Try JWT auth first (from admin portal)
     try:

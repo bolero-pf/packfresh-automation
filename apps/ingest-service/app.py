@@ -43,7 +43,7 @@ import time
 import requests as _requests
 from decimal import Decimal, InvalidOperation
 
-from flask import Flask, request, jsonify, render_template, send_file, Response, g
+from flask import Flask, Blueprint, request, jsonify, render_template, send_file, Response, g
 from flask_cors import CORS
 from functools import wraps
 
@@ -94,6 +94,14 @@ cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_produ
 from breakdown_routes import create_breakdown_blueprint
 app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: ppt))
 
+# Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
+_pf_static = Blueprint(
+    "pf_static", __name__,
+    static_folder=os.path.join(os.path.dirname(__file__), "..", "shared", "static"),
+    static_url_path="/pf-static",
+)
+app.register_blueprint(_pf_static)
+
 # Ingest service URL — used to proxy listing creation requests
 INGEST_INTERNAL_URL = os.getenv("INGEST_INTERNAL_URL", "").rstrip("/")
 
@@ -125,7 +133,7 @@ def requires_auth(f):
 @app.before_request
 def _check_jwt_auth():
     """Validate JWT cookie from admin portal."""
-    if request.path in ('/health', '/ping', '/favicon.ico') or request.path.startswith('/static'):
+    if request.path in ('/health', '/ping', '/favicon.ico') or request.path.startswith(('/static', '/pf-static')):
         return
     try:
         from auth import require_auth as jwt_auth

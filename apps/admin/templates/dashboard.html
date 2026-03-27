@@ -5,23 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pack Fresh — Command Console</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
 <style>
-:root { --bg:#0a0c10; --surface:#141720; --s2:#1c2030; --border:#2a2f42; --accent:#4f7df9; --green:#34d058; --amber:#f6ad55; --red:#fc5c5c; --text:#e8eaf0; --dim:#6b7280; }
-* { box-sizing:border-box; margin:0; padding:0; }
-body { min-height:100vh; background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif; }
+body { min-height:100vh; }
 
 header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; }
 .logo { font-family:'Bebas Neue',sans-serif; font-size:2rem; letter-spacing:0.06em; color:var(--accent); }
-.user-info { display:flex; align-items:center; gap:12px; font-size:0.85rem; color:var(--dim); }
+.user-info { display:flex; align-items:center; gap:12px; font-size:0.85rem; color:var(--text-dim); }
 .role-badge { padding:3px 10px; border-radius:12px; font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; }
 .role-owner { background:rgba(79,125,249,0.2); color:var(--accent); }
 .role-manager { background:rgba(52,208,88,0.2); color:var(--green); }
 .role-associate { background:rgba(246,173,85,0.2); color:var(--amber); }
-.logout-btn { background:none; border:1px solid var(--border); color:var(--dim); padding:6px 14px; border-radius:8px; font-size:0.8rem; cursor:pointer; font-family:inherit; }
+.logout-btn { background:none; border:1px solid var(--border); color:var(--text-dim); padding:6px 14px; border-radius:8px; font-size:0.8rem; cursor:pointer; font-family:inherit; }
 .logout-btn:hover { border-color:var(--red); color:var(--red); }
 
 .main { max-width:900px; margin:0 auto; padding:24px; }
-.section-title { font-size:0.72rem; color:var(--dim); text-transform:uppercase; letter-spacing:0.12em; margin:24px 0 12px; }
+.section-title { font-size:0.72rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.12em; margin:24px 0 12px; }
 .section-title:first-child { margin-top:0; }
 
 .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:12px; }
@@ -32,26 +31,19 @@ header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex;
   padding:18px 20px; text-decoration:none; color:var(--text);
   transition:border-color 0.15s, transform 0.1s;
 }
-.app-card:hover { border-color:var(--accent); transform:translateY(-1px); }
+.app-card:hover { border-color:var(--accent); transform:translateY(-1px); text-decoration:none; }
 .app-card.disabled { opacity:0.35; pointer-events:none; }
 .app-icon { font-size:1.8rem; width:44px; text-align:center; flex-shrink:0; }
 .app-info { flex:1; min-width:0; }
 .app-name { font-weight:700; font-size:0.95rem; margin-bottom:2px; }
-.app-desc { font-size:0.78rem; color:var(--dim); line-height:1.3; }
+.app-desc { font-size:0.78rem; color:var(--text-dim); line-height:1.3; }
 
 /* Change password modal */
-.modal-overlay { display:none; position:fixed; inset:0; z-index:100; background:rgba(0,0,0,0.7); align-items:center; justify-content:center; }
-.modal-overlay.active { display:flex; }
-.modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:28px; width:360px; max-width:90vw; }
+.modal { border-radius:12px; padding:28px; width:360px; max-width:90vw; }
 .modal h3 { margin-bottom:16px; }
 .modal .form-group { margin-bottom:12px; }
-.modal .form-label { display:block; font-size:0.72rem; color:var(--dim); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px; }
-.modal .form-input { width:100%; height:40px; background:var(--bg); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 14px; font-size:0.9rem; font-family:inherit; outline:none; }
-.modal .form-input:focus { border-color:var(--accent); }
-.modal .btn-row { display:flex; gap:8px; margin-top:16px; }
-.modal .btn { height:40px; padding:0 18px; border:none; border-radius:8px; font-family:inherit; font-size:0.9rem; font-weight:600; cursor:pointer; }
-.modal .btn-primary { background:var(--accent); color:#fff; }
-.modal .btn-ghost { background:none; border:1px solid var(--border); color:var(--dim); }
+.modal .form-input { width:100%; height:40px; border-width:1.5px; border-radius:8px; padding:0 14px; font-size:0.9rem; }
+.modal .btn { height:40px; padding:0 18px; font-size:0.9rem; }
 .modal .error { color:var(--red); font-size:0.82rem; margin-top:8px; display:none; }
 
 @media (max-width:600px) {

@@ -4,28 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pack Fresh — Intake System</title>
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
     <style>
-        :root {
-            --bg: #0f1117;
-            --surface: #1a1d27;
-            --surface-2: #22263a;
-            --border: #2d3148;
-            --text: #e8eaf0;
-            --text-dim: #8b90a5;
-            --accent: #4f7df9;
-            --accent-hover: #3b6ae8;
-            --green: #2dd4a0;
-            --green-bg: rgba(45, 212, 160, 0.12);
-            --amber: #f5a623;
-            --amber-bg: rgba(245, 166, 35, 0.12);
-            --red: #f05252;
-            --red-bg: rgba(240, 82, 82, 0.1);
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-            background: var(--bg); color: var(--text); line-height: 1.55;
-        }
         .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
 
         /* ─── HEADER ─── */
@@ -63,25 +44,15 @@
         .tab-content.active { display: block; }
         .subtab-content { /* shown/hidden via JS */ }
 
-        /* ─── CARDS ─── */
-        .card {
-            background: var(--surface); border: 1px solid var(--border);
-            border-radius: 10px; padding: 24px; margin-bottom: 20px;
-        }
+        /* ─── CARDS (overrides) ─── */
+        .card { padding: 24px; margin-bottom: 20px; }
         .card h2 { font-size: 1.2rem; font-weight: 600; margin-bottom: 16px; }
 
         /* ─── FORMS ─── */
         .form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px; }
         .form-group { display: flex; flex-direction: column; gap: 6px; }
-        label { font-size: 0.85rem; font-weight: 500; color: var(--text-dim); }
-        input, select, textarea {
-            padding: 10px 12px; background: var(--bg); border: 1px solid var(--border);
-            border-radius: 6px; color: var(--text); font-size: 0.95rem;
-            transition: border-color 0.15s;
-        }
-        input:focus, select:focus, textarea:focus {
-            outline: none; border-color: var(--accent);
-        }
+        label { font-size: 0.85rem; font-weight: 500; text-transform: none; letter-spacing: normal; }
+        input, select, textarea { padding: 10px 12px; font-size: 0.95rem; }
         input[type="file"] { padding: 8px; }
         input[type="file"]::file-selector-button {
             background: var(--accent); color: #fff; border: none;
@@ -89,19 +60,8 @@
             margin-right: 10px; font-size: 0.85rem;
         }
 
-        /* ─── BUTTONS ─── */
-        .btn {
-            padding: 10px 20px; border: none; border-radius: 6px;
-            font-size: 0.9rem; font-weight: 500; cursor: pointer;
-            transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px;
-        }
-        .btn-primary { background: var(--accent); color: #fff; }
-        .btn-primary:hover { background: var(--accent-hover); }
-        .btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
-        .btn-secondary:hover { border-color: var(--accent); }
-        .btn-success { background: var(--green); color: #000; }
-        .btn-danger { background: var(--red); color: #fff; }
-        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        /* ─── BUTTONS (overrides) ─── */
+        .btn { padding: 10px 20px; font-size: 0.9rem; }
         .btn-sm { padding: 6px 12px; font-size: 0.82rem; }
 
         /* ─── STATS ─── */
@@ -113,42 +73,24 @@
         .stat-label { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
         .stat-value { font-size: 1.6rem; font-weight: 700; }
 
-        /* ─── BADGES ─── */
-        .badge {
-            display: inline-block; padding: 3px 10px; border-radius: 10px;
-            font-size: 0.78rem; font-weight: 600;
-        }
-        .badge-green { background: var(--green-bg); color: var(--green); }
-        .badge-amber { background: var(--amber-bg); color: var(--amber); }
-        .badge-blue { background: rgba(79,125,249,0.12); color: var(--accent); }
-        .badge-red { background: var(--red-bg); color: var(--red); }
+        /* ─── BADGES (overrides) ─── */
+        .badge { font-size: 0.78rem; text-transform: none; letter-spacing: normal; }
 
-        /* ─── ALERTS ─── */
-        .alert {
-            padding: 12px 16px; border-radius: 8px; margin-bottom: 16px;
-            font-size: 0.9rem; border: 1px solid;
-        }
-        .alert-success { background: var(--green-bg); border-color: var(--green); color: var(--green); }
-        .alert-warning { background: var(--amber-bg); border-color: var(--amber); color: var(--amber); }
-        .alert-error { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+        /* ─── ALERTS (overrides) ─── */
+        .alert { margin-bottom: 16px; font-size: 0.9rem; }
 
-        /* ─── TABLE ─── */
-        table { width: 100%; border-collapse: collapse; }
-        th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
-        th { font-weight: 600; color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; }
-        tr:hover { background: rgba(255,255,255,0.02); }
+        /* ─── TABLE (overrides) ─── */
+        th, td { font-size: 0.88rem; }
+        th { font-size: 0.8rem; }
         .row-unmapped { background: var(--amber-bg); }
 
-        /* ─── MODAL ─── */
+        /* ─── MODAL (overrides) ─── */
         .modal-overlay {
-            display: none; position: fixed; inset: 0;
-            background: rgba(0,0,0,0.6); z-index: 1000;
-            align-items: flex-start; justify-content: center;
+            align-items: flex-start;
             backdrop-filter: blur(4px);
             padding: 40px 20px;
             overflow-y: auto;
         }
-        .modal-overlay.active { display: flex; }
         /* Mapping modal must stack ABOVE session modal */
         #mapping-modal { z-index: 1100; }
         /* Themed prompt/confirm modal stacks above everything */
