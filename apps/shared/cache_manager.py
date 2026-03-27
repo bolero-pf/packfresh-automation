@@ -64,6 +64,7 @@ class CacheManager:
 
         self._refresh_lock = threading.Lock()
         self._refresh_in_progress = False
+        self._last_refresh_started = None  # UTC timestamp of last refresh start
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
@@ -269,9 +270,16 @@ class CacheManager:
     # ─── Background refresh ───────────────────────────────────────────────────
 
     def _fire_background_refresh(self, reason: str) -> None:
-        if self._refresh_in_progress:
-            logger.info(f"[{self._cache_table}] refresh already running — skipping")
-            return
+        with self._refresh_lock:
+            if self._refresh_in_progress:
+                logger.info(f"[{self._cache_table}] refresh already running — skipping")
+                return
+            # Debounce: skip if a refresh started within the last 30 seconds
+            now = datetime.now(timezone.utc)
+            if self._last_refresh_started and (now - self._last_refresh_started).total_seconds() < 30:
+                logger.info(f"[{self._cache_table}] refresh started recently — skipping")
+                return
+            self._last_refresh_started = now
         t = threading.Thread(target=self._run_refresh, args=(reason,), daemon=True)
         t.start()
 

@@ -711,11 +711,12 @@ body{{padding:14px 18px;}}
 thead th{{position:sticky;top:0;z-index:2;padding:8px 9px;white-space:nowrap;}}
 .sort-link:hover{{color:var(--accent);}}
 tbody tr:nth-child(even){{background:rgba(255,255,255,.025);}}
+tbody tr:hover{{background:rgba(255,255,255,.06);}}
 td{{padding:6px 9px;vertical-align:middle;}}
 /* inputs */
 .pf-inp{{background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:6px;height:30px;font-size:13px;padding:3px 7px;font-family:inherit;}}
 .pf-inp:focus{{outline:none;border-color:var(--accent);}}
-.pf-inp.dirty{{outline:2px solid var(--accent);}}
+.pf-inp.dirty{{outline:2px solid var(--amber);}}
 .qty-wrap{{display:flex;align-items:center;gap:3px;}}
 .qty-btn{{min-width:26px;height:26px;border-radius:6px;background:transparent;color:var(--text);border:1px solid var(--border);cursor:pointer;font-size:13px;line-height:1;}}
 .qty-btn:hover{{border-color:var(--accent);color:var(--accent);}}
