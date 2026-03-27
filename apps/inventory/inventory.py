@@ -674,63 +674,58 @@ def _render_inventory(rows, total_rows, filters, meta, limit):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pack Fresh · Inventory</title>
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root{{
-  --pf-bg:#1a1d27; --pf-panel:#22263a; --pf-text:#e8eaf0;
-  --pf-accent:#dfa260; --pf-muted:#8b90a5; --pf-border:rgba(255,255,255,.12);
-  --pf-border-strong:rgba(255,255,255,.22); --pf-green:#2dd4a0;
-}}
-*{{box-sizing:border-box; margin:0; padding:0;}}
-body{{background:var(--pf-bg);color:var(--pf-text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;padding:16px 20px;}}
 a{{color:inherit;text-decoration:none;}}
+body{{padding:16px 20px;}}
 
 /* Topbar */
 .pf-topbar{{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 16px;flex-wrap:wrap;}}
 .pf-title{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}}
-.pf-badge{{padding:5px 10px;border-radius:999px;font-size:12px;border:1px solid var(--pf-border);background:var(--pf-panel);color:var(--pf-text);}}
+.pf-badge{{padding:5px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);background:var(--surface);color:var(--text);}}
 .pf-actions{{display:flex;gap:8px;flex-wrap:wrap;}}
-.pf-btn{{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;padding:0 14px;border-radius:10px;font-size:13px;white-space:nowrap;cursor:pointer;border:1px solid var(--pf-border-strong);background:transparent;color:var(--pf-text);font-family:inherit;}}
-.pf-btn:hover{{border-color:var(--pf-accent);color:var(--pf-accent);}}
-.pf-btn-primary{{background:var(--pf-accent);color:#1b1b1b;border-color:var(--pf-accent);}}
+.pf-btn{{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;padding:0 14px;border-radius:10px;font-size:13px;white-space:nowrap;cursor:pointer;border:1px solid rgba(255,255,255,.22);background:transparent;color:var(--text);font-family:inherit;}}
+.pf-btn:hover{{border-color:var(--accent);color:var(--accent);}}
+.pf-btn-primary{{background:var(--accent);color:#1b1b1b;border-color:var(--accent);}}
 .pf-btn-primary:hover{{filter:brightness(1.05);}}
-.pf-btn-green{{background:var(--pf-green);color:#0d1117;border-color:var(--pf-green);}}
+.pf-btn-green{{background:var(--green);color:#0d1117;border-color:var(--green);}}
 
 /* Toolbar */
 .pf-toolbar{{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin:0 0 12px;}}
 .pf-search{{flex:1 1 320px;max-width:700px;min-width:220px;}}
-.pf-search input{{width:100%;height:42px;font-size:15px;border-radius:10px;background:var(--pf-panel);color:var(--pf-text);border:1px solid var(--pf-border);padding:9px 13px;font-family:inherit;}}
-.pf-search input::placeholder{{color:var(--pf-muted);}}
-.pf-search input:focus{{outline:none;border-color:var(--pf-accent);}}
-.form-check-input{{width:18px;height:18px;accent-color:var(--pf-accent);}}
+.pf-search input{{width:100%;height:42px;font-size:15px;border-radius:10px;background:var(--surface);color:var(--text);border:1px solid var(--border);padding:9px 13px;font-family:inherit;}}
+.pf-search input:focus{{outline:none;border-color:var(--accent);}}
+.form-check-input{{width:18px;height:18px;accent-color:var(--accent);}}
 
 /* Chips */
 .pf-chips{{display:flex;flex-wrap:wrap;gap:7px;}}
-.pf-chip{{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;background:var(--pf-panel);border:1px solid var(--pf-border);font-size:13px;cursor:pointer;}}
+.pf-chip{{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;background:var(--surface);border:1px solid var(--border);font-size:13px;cursor:pointer;}}
 .pf-chip input[type="radio"]{{display:none;}}
-.pf-chip input[type="radio"]:checked+span,.pf-chip input[type="checkbox"]:checked+.label-text{{border-color:var(--pf-accent);color:var(--pf-accent);}}
+.pf-chip input[type="radio"]:checked+span,.pf-chip input[type="checkbox"]:checked+.label-text{{border-color:var(--accent);color:var(--accent);}}
 .pf-chips-status .pf-chip{{padding:0;border:none;background:none;}}
-.pf-chips-status .pf-chip span{{display:inline-flex;align-items:center;padding:6px 12px;border-radius:999px;background:var(--pf-panel);border:1px solid var(--pf-border);}}
-.pf-chips-status input[type="radio"]:checked+span{{background:var(--pf-accent);color:#1b1b1b;border-color:var(--pf-accent);}}
+.pf-chips-status .pf-chip span{{display:inline-flex;align-items:center;padding:6px 12px;border-radius:999px;background:var(--surface);border:1px solid var(--border);}}
+.pf-chips-status input[type="radio"]:checked+span{{background:var(--accent);color:#1b1b1b;border-color:var(--accent);}}
 
 /* Table */
-.pf-sort{{color:var(--pf-text);text-decoration:none;}}
-.pf-sort:hover{{color:var(--pf-accent);}}
-.table{{width:100%;border-collapse:collapse;font-size:13px;color:var(--pf-text);}}
-.table thead th{{background:var(--pf-panel);position:sticky;top:0;z-index:2;border-bottom:1px solid var(--pf-border);padding:10px 11px;text-align:left;}}
+.pf-sort{{color:var(--text);text-decoration:none;}}
+.pf-sort:hover{{color:var(--accent);}}
+.table{{width:100%;border-collapse:collapse;font-size:13px;color:var(--text);}}
+.table thead th{{background:var(--surface);position:sticky;top:0;z-index:2;border-bottom:1px solid var(--border);padding:10px 11px;text-align:left;}}
 .table tbody tr:nth-child(even){{background:rgba(255,255,255,.04);}}
 .table tbody tr:hover{{background:rgba(255,255,255,.09);}}
 .table td{{padding:8px 11px;vertical-align:middle;}}
 .text-truncate{{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
 
 /* Inputs */
-.pf-input{{background:var(--pf-panel);color:var(--pf-text);border:1px solid var(--pf-border);border-radius:8px;height:34px;font-size:13px;padding:5px 9px;font-family:inherit;}}
-.pf-input:focus{{outline:none;border-color:var(--pf-accent);}}
-.is-warning{{outline:2px solid var(--pf-accent);}}
+.pf-input{{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;height:34px;font-size:13px;padding:5px 9px;font-family:inherit;}}
+.pf-input:focus{{outline:none;border-color:var(--accent);}}
+.is-warning{{outline:2px solid var(--accent);}}
 
 /* Qty cluster */
 .pf-qty-wrap{{display:flex;align-items:center;gap:5px;}}
-.pf-qty-btn{{min-width:30px;height:30px;border-radius:8px;background:transparent;color:var(--pf-text);border:1px solid var(--pf-border);cursor:pointer;font-family:inherit;font-size:14px;}}
-.pf-qty-btn:hover{{border-color:var(--pf-accent);color:var(--pf-accent);}}
+.pf-qty-btn{{min-width:30px;height:30px;border-radius:8px;background:transparent;color:var(--text);border:1px solid var(--border);cursor:pointer;font-family:inherit;font-size:14px;}}
+.pf-qty-btn:hover{{border-color:var(--accent);color:var(--accent);}}
 </style>
 </head>
 <body>
@@ -869,34 +864,25 @@ def _render_add_page():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Add Item · Pack Fresh Inventory</title>
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root{{
-  --bg:#1a1d27; --surface:#22263a; --surface2:#2c3050; --border:rgba(255,255,255,.12);
-  --text:#e8eaf0; --dim:#8b90a5; --accent:#4f7df9; --accent-h:#3b6ae8;
-  --green:#2dd4a0; --green-bg:rgba(45,212,160,.12); --amber:#f5a623; --amber-bg:rgba(245,166,35,.12);
-  --red:#f05252; --red-bg:rgba(240,82,82,.10);
-}}
-*{{box-sizing:border-box;margin:0;padding:0;}}
-body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;}}
 header{{background:var(--surface);border-bottom:1px solid var(--border);padding:0 24px;height:52px;display:flex;align-items:center;gap:12px;}}
 header .logo{{font-weight:700;font-size:1rem;}} header .logo span{{color:var(--green);}}
 header .sub{{color:var(--dim);font-size:.85rem;}}
 header a{{margin-left:auto;color:var(--dim);font-size:.8rem;text-decoration:none;}}
 header a:hover{{color:var(--text);}}
 .container{{max-width:900px;margin:0 auto;padding:32px 24px;}}
-.card{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;margin-bottom:24px;}}
+.card{{padding:28px;margin-bottom:24px;}}
 .card h2{{font-size:1rem;font-weight:600;margin-bottom:6px;}}
 .card p{{color:var(--dim);font-size:.85rem;margin-bottom:18px;}}
 .section-title{{font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:10px;}}
 .row{{display:flex;gap:10px;align-items:flex-end;margin-bottom:10px;}}
 .row input{{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px 14px;font-size:1rem;font-family:inherit;}}
 .row input:focus{{outline:none;border-color:var(--accent);}}
-.row input::placeholder{{color:var(--dim);}}
 .btn{{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:.9rem;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;}}
-.btn:hover{{background:var(--accent-h);}} .btn:disabled{{opacity:.5;cursor:not-allowed;}}
+.btn:hover{{background:var(--accent-hover);}} .btn:disabled{{opacity:.5;cursor:not-allowed;}}
 .btn-green{{background:var(--green);color:#000;}} .btn-green:hover{{background:#25bd8e;}}
-.btn-ghost{{background:var(--surface2);color:var(--text);border:1px solid var(--border);}}
-.btn-ghost:hover{{border-color:var(--accent);color:var(--accent);}}
 .divider{{border:none;border-top:1px solid var(--border);margin:20px 0;}}
 .spinner{{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px;}}
 @keyframes spin{{to{{transform:rotate(360deg);}}}}
@@ -1240,7 +1226,6 @@ function showError(msg){{
   b.scrollIntoView({{behavior:'smooth'}});
 }}
 function hideError(){{ document.getElementById('error-box').style.display='none'; }}
-function esc(s){{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }}
 </script>
 </body>
 </html>"""

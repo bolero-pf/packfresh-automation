@@ -815,36 +815,22 @@ def _render_breakdown_page():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Breakdown — PackFresh Inventory</title>
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root {{
-  --bg:#0f1117; --surface:#1a1d27; --surface-2:#242736; --border:#2e3147;
-  --text:#e2e8f0; --text-dim:#8892a4; --accent:#7c6af7; --green:#22c55e;
-  --amber:#f59e0b; --red:#ef4444; --blue:#3b82f6;
-}}
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5}}
-a{{color:var(--accent);text-decoration:none}}
 .container{{max-width:1300px;margin:0 auto;padding:20px}}
 .nav{{display:flex;align-items:center;gap:16px;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border);margin-bottom:0}}
 .nav a{{color:var(--text-dim);font-size:13px}} .nav a:hover{{color:var(--text)}} .nav .active{{color:var(--accent)}}
-.card{{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}}
 .tabs{{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:20px}}
 .tab-btn{{background:none;border:none;color:var(--text-dim);padding:8px 16px;cursor:pointer;font-size:14px;border-bottom:2px solid transparent;margin-bottom:-1px}}
 .tab-btn.active{{color:var(--accent);border-bottom-color:var(--accent)}}
 .tab-pane{{display:none}} .tab-pane.active{{display:block}}
-table{{width:100%;border-collapse:collapse}}
-th{{text-align:left;padding:8px 10px;font-size:12px;color:var(--text-dim);border-bottom:1px solid var(--border);font-weight:500}}
-td{{padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:top}}
+th{{font-size:12px;font-weight:500}}
+td{{font-size:13px;vertical-align:top}}
 tr:last-child td{{border-bottom:none}}
-tr:hover td{{background:var(--surface-2)}}
-.btn{{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:500}}
 .btn-primary{{background:var(--accent);color:#fff}} .btn-primary:hover{{opacity:.9}}
 .btn-secondary{{background:var(--surface-2);color:var(--text);border:1px solid var(--border)}} .btn-secondary:hover{{background:var(--border)}}
 .btn-success{{background:#16a34a;color:#fff}} .btn-danger{{background:var(--red);color:#fff}}
-.btn-sm{{padding:3px 8px;font-size:12px}}
-.badge{{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}}
-.badge-green{{background:#14532d;color:#4ade80}} .badge-amber{{background:#451a03;color:#fbbf24}}
-.badge-red{{background:#450a0a;color:#f87171}} .badge-blue{{background:#1e3a5f;color:#93c5fd}}
 .badge-neutral{{background:var(--surface-2);color:var(--text-dim)}}
 .score-bar{{height:4px;border-radius:2px;background:var(--border);width:100%;margin-top:4px}}
 .score-fill{{height:4px;border-radius:2px;background:var(--green)}}
@@ -852,13 +838,11 @@ input[type=text],input[type=number],textarea,select{{
   background:var(--surface-2);border:1px solid var(--border);color:var(--text);
   border-radius:6px;padding:6px 10px;font-size:13px;width:100%
 }}
-input:focus,select:focus{{outline:none;border-color:var(--accent)}}
 .search-result{{padding:6px 10px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:4px}}
 .search-result:hover{{background:var(--surface-2)}}
 .loading{{display:flex;align-items:center;gap:8px;color:var(--text-dim);padding:12px}}
 .spinner{{width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}}
 @keyframes spin{{to{{transform:rotate(360deg)}}}}
-.alert{{padding:10px 14px;border-radius:6px;margin:8px 0;font-size:13px}}
 .alert-success{{background:#14532d22;border:1px solid #22c55e44;color:var(--green)}}
 .alert-error{{background:#450a0a22;border:1px solid #ef444444;color:var(--red)}}
 .alert-warning{{background:#451a0322;border:1px solid #f59e0b44;color:var(--amber)}}
@@ -1007,41 +991,9 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
   </div>
 </div>
 
-<!-- ═══ THEMED CONFIRM DIALOG ═════════════════════════════════════════════ -->
-<div id="themed-confirm-overlay" class="modal-overlay">
-  <div class="modal" style="max-width:420px">
-    <h3 id="tc-title" style="margin-bottom:10px"></h3>
-    <p id="tc-message" style="color:var(--text-dim);font-size:13px;margin-bottom:20px;line-height:1.5"></p>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button id="tc-cancel" class="btn btn-secondary">Cancel</button>
-      <button id="tc-confirm" class="btn btn-primary">Confirm</button>
-    </div>
-  </div>
-</div>
-
 <!-- Shared breakdown modal is injected by breakdown_modal.js -->
 
 <script>
-// ══════════════════════════════════════════════════════════════════
-// THEMED DIALOG  (matches intake/ingest modal style)
-// ══════════════════════════════════════════════════════════════════
-function themedConfirm(title, message, {{ confirmText='Confirm', dangerous=false }}={{}}) {{
-  return new Promise(resolve => {{
-    const overlay = document.getElementById('themed-confirm-overlay');
-    document.getElementById('tc-title').textContent = title;
-    document.getElementById('tc-message').textContent = message;
-    const btn = document.getElementById('tc-confirm');
-    btn.textContent = confirmText;
-    btn.className = 'btn ' + (dangerous ? 'btn-danger' : 'btn-primary');
-    overlay.classList.add('active');
-    function cleanup() {{ overlay.classList.remove('active'); btn.removeEventListener('click', onOk); document.getElementById('tc-cancel').removeEventListener('click', onCancel); }}
-    function onOk() {{ cleanup(); resolve(true); }}
-    function onCancel() {{ cleanup(); resolve(false); }}
-    btn.addEventListener('click', onOk);
-    document.getElementById('tc-cancel').addEventListener('click', onCancel);
-  }});
-}}
-
 // ══════════════════════════════════════════════════════════════════
 // FILTER PERSISTENCE
 // ══════════════════════════════════════════════════════════════════

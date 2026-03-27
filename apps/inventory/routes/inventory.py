@@ -680,21 +680,17 @@ def _render_inventory(rows, total_rows, filters, meta, limit):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pack Fresh · Inventory</title>
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root{{
-  --bg:#1a1d27;--panel:#22263a;--panel2:#2b2f45;
-  --text:#e8eaf0;--muted:#8b90a5;--border:rgba(255,255,255,.11);
-  --accent:#dfa260;--green:#2dd4a0;--red:#f05252;--amber:#f5a623;
-}}
-*{{box-sizing:border-box;margin:0;padding:0;}}
-body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;padding:14px 18px;}}
 a{{color:inherit;text-decoration:none;}}
+body{{padding:14px 18px;}}
 .pf-flash{{border-left:3px solid;padding:9px 14px;margin-bottom:8px;border-radius:6px;background:rgba(0,0,0,.3);font-size:13px;}}
 /* topbar */
 .topbar{{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}}
-.badge{{padding:3px 9px;border-radius:999px;font-size:12px;background:var(--panel);border:1px solid var(--border);}}
+.badge{{padding:3px 9px;border-radius:999px;font-size:12px;background:var(--surface);border:1px solid var(--border);}}
 .actions{{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto;}}
-.btn{{display:inline-flex;align-items:center;height:34px;padding:0 13px;border-radius:9px;font-size:13px;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text);font-family:inherit;white-space:nowrap;}}
+.btn{{height:34px;padding:0 13px;border-radius:9px;font-size:13px;border:1px solid var(--border);background:transparent;color:var(--text);white-space:nowrap;}}
 .btn:hover{{border-color:var(--accent);color:var(--accent);}}
 .btn-primary{{background:var(--accent);color:#1b1b1b;border-color:var(--accent);}}
 .btn-primary:hover{{filter:brightness(1.08);}}
@@ -702,31 +698,28 @@ a{{color:inherit;text-decoration:none;}}
 /* toolbar */
 .toolbar{{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;margin-bottom:8px;}}
 .search{{flex:1 1 240px;max-width:520px;}}
-.search input{{width:100%;height:38px;font-size:13px;border-radius:9px;background:var(--panel);color:var(--text);border:1px solid var(--border);padding:7px 11px;font-family:inherit;}}
+.search input{{width:100%;height:38px;font-size:13px;border-radius:9px;background:var(--surface);color:var(--text);border:1px solid var(--border);padding:7px 11px;font-family:inherit;}}
 .search input:focus{{outline:none;border-color:var(--accent);}}
-.search input::placeholder{{color:var(--muted);}}
 /* chips */
 .chips{{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;}}
 .chip{{display:inline-flex;align-items:center;cursor:pointer;}}
 .chip input{{display:none;}}
-.chip span{{display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;background:var(--panel);border:1px solid var(--border);font-size:12px;transition:all .15s;}}
+.chip span{{display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;background:var(--surface);border:1px solid var(--border);font-size:12px;transition:all .15s;}}
 .chip:has(input:checked) span{{background:var(--accent);color:#1b1b1b;border-color:var(--accent);}}
 /* table */
 .tbl-wrap{{overflow-x:auto;}}
-table{{width:100%;border-collapse:collapse;font-size:13px;}}
-thead th{{background:var(--panel);position:sticky;top:0;z-index:2;padding:8px 9px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;}}
+thead th{{position:sticky;top:0;z-index:2;padding:8px 9px;white-space:nowrap;}}
 .sort-link:hover{{color:var(--accent);}}
 tbody tr:nth-child(even){{background:rgba(255,255,255,.025);}}
-tbody tr:hover{{background:rgba(255,255,255,.06);}}
 td{{padding:6px 9px;vertical-align:middle;}}
 /* inputs */
-.pf-inp{{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;height:30px;font-size:13px;padding:3px 7px;font-family:inherit;}}
+.pf-inp{{background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:6px;height:30px;font-size:13px;padding:3px 7px;font-family:inherit;}}
 .pf-inp:focus{{outline:none;border-color:var(--accent);}}
 .pf-inp.dirty{{outline:2px solid var(--accent);}}
 .qty-wrap{{display:flex;align-items:center;gap:3px;}}
 .qty-btn{{min-width:26px;height:26px;border-radius:6px;background:transparent;color:var(--text);border:1px solid var(--border);cursor:pointer;font-size:13px;line-height:1;}}
 .qty-btn:hover{{border-color:var(--accent);color:var(--accent);}}
-/* toast */
+/* toast (legacy — used by inline JS) */
 #toast{{position:fixed;bottom:22px;right:22px;background:#1e2535;border:1px solid var(--green);color:var(--green);padding:11px 18px;border-radius:9px;font-size:13px;font-weight:600;z-index:9999;transform:translateY(70px);opacity:0;transition:transform .22s ease,opacity .22s ease;pointer-events:none;}}
 #toast.show{{transform:translateY(0);opacity:1;}}
 #toast.err{{border-color:var(--red);color:var(--red);}}
@@ -1016,29 +1009,24 @@ def _render_add_page():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Add Item · Pack Fresh</title>
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
 <style>
-:root{{--bg:#1a1d27;--surface:#22263a;--surface2:#2c3050;--border:rgba(255,255,255,.12);--text:#e8eaf0;--dim:#8b90a5;--accent:#4f7df9;--green:#2dd4a0;--green-bg:rgba(45,212,160,.12);--amber:#f5a623;--amber-bg:rgba(245,166,35,.12);--red:#f05252;--red-bg:rgba(240,82,82,.10);}}
-*{{box-sizing:border-box;margin:0;padding:0;}}
-body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;}}
 header{{background:var(--surface);border-bottom:1px solid var(--border);padding:0 24px;height:50px;display:flex;align-items:center;gap:12px;}}
 header .logo{{font-weight:700;}} header .logo span{{color:var(--green);}}
 header .sub{{color:var(--dim);font-size:.83rem;}}
 header a{{margin-left:auto;color:var(--dim);font-size:.8rem;text-decoration:none;}}
 header a:hover{{color:var(--text);}}
 .container{{max-width:860px;margin:0 auto;padding:28px 20px;}}
-.card{{background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:22px;margin-bottom:18px;}}
 .card h2{{font-size:.95rem;font-weight:600;margin-bottom:4px;}}
 .card p{{color:var(--dim);font-size:.82rem;margin-bottom:14px;}}
 .lbl{{font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);margin-bottom:6px;}}
 .row{{display:flex;gap:7px;align-items:flex-end;margin-bottom:9px;}}
 .row input{{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px 11px;font-size:.93rem;font-family:inherit;height:40px;}}
 .row input:focus{{outline:none;border-color:var(--accent);}}
-.row input::placeholder{{color:var(--dim);}}
 .btn{{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:0 16px;height:40px;font-size:.88rem;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;}}
 .btn:hover{{filter:brightness(1.08);}} .btn:disabled{{opacity:.5;cursor:not-allowed;}}
 .btn-green{{background:var(--green);color:#000;}}
-.btn-ghost{{background:var(--surface2);color:var(--text);border:1px solid var(--border);}}
-.btn-ghost:hover{{border-color:var(--accent);color:var(--accent);}}
 hr{{border:none;border-top:1px solid var(--border);margin:16px 0;}}
 .spinner{{display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:4px;}}
 @keyframes spin{{to{{transform:rotate(360deg);}}}}
@@ -1290,7 +1278,6 @@ async function createStub(){{
 
 function showErr(m){{ const b=document.getElementById('error-box'); b.innerHTML=`<div class="alert">${{esc(m)}}</div>`; b.style.display='block'; b.scrollIntoView({{behavior:'smooth'}}); }}
 function hideErr(){{ document.getElementById('error-box').style.display='none'; }}
-function esc(s){{ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }}
 </script>
 </body>
 </html>"""
