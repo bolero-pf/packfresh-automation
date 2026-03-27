@@ -696,8 +696,11 @@
                     _searchResults[i] = results[i];
                     var r = results[i];
                     var price = parseFloat(r.market_price || r.unopenedPrice || r.midPrice || r.marketPrice || 0);
+                    var setName = r.set_name || r.setName || r.set || '';
                     html += '<div class="bd-search-result" data-sr-idx="' + i + '" data-sr-type="sealed">';
-                    html += '<span class="bd-sr-name">' + _esc(r.name || r.product_name || '') + '</span>';
+                    html += '<span class="bd-sr-name">' + _esc(r.name || r.product_name || '');
+                    if (setName) html += '<br><span class="bd-sr-detail">' + _esc(setName) + '</span>';
+                    html += '</span>';
                     html += '<span class="bd-sr-price">' + (price > 0 ? '$' + price.toFixed(2) : '') + '</span>';
                     html += '</div>';
                 }
@@ -730,8 +733,14 @@
                     _promoResults[i] = results[i];
                     var r = results[i];
                     var price = parseFloat(r.market_price || 0);
+                    var setName = r.set_name || r.setName || r.set || '';
+                    var cardNum = r.number || r.cardNumber || '';
+                    var rarity = r.rarity || '';
+                    var detail = [setName, cardNum ? '#' + cardNum : '', rarity].filter(Boolean).join(' \u00b7 ');
                     html += '<div class="bd-search-result" data-sr-idx="' + i + '" data-sr-type="promo">';
-                    html += '<span class="bd-sr-name">' + _esc(r.name || r.product_name || '') + '</span>';
+                    html += '<span class="bd-sr-name">' + _esc(r.name || r.product_name || '');
+                    if (detail) html += '<br><span class="bd-sr-detail">' + _esc(detail) + '</span>';
+                    html += '</span>';
                     html += '<span class="bd-sr-price">' + (price > 0 ? '$' + price.toFixed(2) : '') + '</span>';
                     html += '</div>';
                 }

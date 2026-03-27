@@ -159,15 +159,16 @@
 }
 .bd-search-row button:hover { border-color: var(--accent, #7c93f5); }
 .bd-search-results {
-    max-height: 140px; overflow-y: auto; font-size: 12px;
+    max-height: 240px; overflow-y: auto; font-size: 12px;
 }
 .bd-search-result {
     padding: 4px 6px; cursor: pointer; border-radius: 4px;
     display: flex; justify-content: space-between;
 }
 .bd-search-result:hover { background: var(--bg-highlight, #2a2a4a); }
-.bd-search-result .bd-sr-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bd-search-result .bd-sr-price { color: var(--green, #2dd4a0); white-space: nowrap; margin-left: 8px; }
+.bd-search-result .bd-sr-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.bd-search-result .bd-sr-detail { font-size: 10px; color: var(--text-dim, #888); }
+.bd-search-result .bd-sr-price { color: var(--green, #2dd4a0); white-space: nowrap; margin-left: 8px; align-self: flex-start; }
 
 /* ─── Component Table ────────────────────────────────────────── */
 
