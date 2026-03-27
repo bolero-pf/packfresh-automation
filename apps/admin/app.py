@@ -25,9 +25,13 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
 db.init_pool()
 
 # Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
+# In Docker: WORKDIR=/app, shared/ is at /app/shared/ (not ../shared/)
+_shared_static = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared", "static")
+if not os.path.isdir(_shared_static):
+    _shared_static = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared", "static")
 app.register_blueprint(Blueprint(
     "pf_static", __name__,
-    static_folder=os.path.join(os.path.dirname(__file__), "..", "shared", "static"),
+    static_folder=_shared_static,
     static_url_path="/pf-static",
 ))
 

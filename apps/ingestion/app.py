@@ -47,9 +47,13 @@ app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
 
 # Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
+# In Docker: WORKDIR=/app, shared/ is at /app/shared/ (not ../shared/)
+_pf_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared", "static")
+if not os.path.isdir(_pf_dir):
+    _pf_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared", "static")
 pf_static = Blueprint(
     "pf_static", __name__,
-    static_folder=os.path.join(os.path.dirname(__file__), "..", "shared", "static"),
+    static_folder=_pf_dir,
     static_url_path="/pf-static",
 )
 app.register_blueprint(pf_static)
