@@ -1,10 +1,10 @@
 # Inventory + Breakdown Engine (inventory/)
 
 ## Key Files
-- **routes/breakdown.py** — Breakdown calculator: recipes, recommendations, execution
+- **routes/breakdown.py** — Breakdown recommendations engine + execute; recipe CRUD/search moved to shared/breakdown_routes.py blueprint
 - **routes/inventory.py** — Core inventory routes, Shopify client, auth
-- **app.py** — Flask app, cache manager initialization
-- **db.py** — Database connection pool (shared pattern across services)
+- **app.py** — Flask app, cache manager initialization, registers shared breakdown blueprint
+- DB via shared/db.py (no local db.py)
 
 ## Breakdown Engine
 The breakdown system spans 3 services (inventory, ingest-service, ingestion) sharing the same DB tables:

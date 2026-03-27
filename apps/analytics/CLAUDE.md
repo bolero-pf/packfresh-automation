@@ -5,7 +5,7 @@
 - **app.py** — Flask app: data browser UI, /run endpoint, /api/analytics, /api/browse
 - **compute.py** — Core engine: order ingestion, metric computation, inventory snapshots
 - **migrate_sku_analytics.py** — Create tables (sku_analytics, sku_daily_sales, sku_daily_inventory, drop_events, analytics_meta)
-- **db.py** — Database connection pool
+- DB via shared/db.py (no local db.py)
 
 ## Daily Pipeline (triggered by Flow POST to /run)
 1. Snapshot inventory levels from inventory_product_cache → sku_daily_inventory

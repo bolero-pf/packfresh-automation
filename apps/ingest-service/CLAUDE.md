@@ -22,6 +22,10 @@ in_progress → cancelled
 - **Completed** — Shows statuses: received, ingested, finalized
 - **Cancelled** — Shows cancelled sessions
 
+## Breakdown Integration
+- app.py registers shared/breakdown_routes.py blueprint for breakdown API
+- Breakdown recipes managed via shared/breakdown_logic.py, not inline SQL
+
 ## Key Patterns
 - Session status filtering is driven by the frontend dropdown and default load in `intake_dashboard.html`
 - Status badge colors are defined in a `statusColors` JS object in the dashboard template

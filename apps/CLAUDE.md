@@ -30,12 +30,16 @@
 - **Legacy**: some services still have HTTP Basic Auth as fallback — `requires_auth` decorator checks `g.user` first
 
 ## Shared Components (shared/)
-- **auth.py** — JWT cookie validation, admin bar injection, role checking
+- **auth.py** — JWT cookie validation, admin bar injection, role checking; `register_auth_hooks()` for standardized per-service auth setup
+- **db.py** — Shared database connection pool (replaces per-service db.py files)
 - **shopify_graphql.py** — Shopify Admin GraphQL client with retry (used by vip, screening)
 - **klaviyo.py** — Klaviyo profile upsert with duplicate resolution
 - **webhook_verify.py** — X-Flow-Secret validation for Shopify Flow webhooks
 - **ppt_client.py** — PokemonPriceTracker API client
 - **breakdown_helpers.py** — JIT component price refresh from PPT
+- **breakdown_logic.py** — Unified breakdown recipe CRUD + batch summaries (used by ingestion, intake, inventory)
+- **breakdown_routes.py** — Flask Blueprint for breakdown API (registered by all 3 breakdown services)
+- **static/** — Shared UI components (breakdown_inline.js, breakdown_modal.js, breakdown_modal.css)
 - **cache_manager.py** — Shopify product cache with staleness detection
 - **storage.py** — Bin assignment for raw card storage
 

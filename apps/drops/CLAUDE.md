@@ -5,7 +5,7 @@
 - **app.py** — Flask app: UI dashboard + all API endpoints
 - **service.py** — Shopify operations: product search, price, tags, channels, metafields
 - **migrate_drops.py** — Extend drop_events table with planner columns
-- **db.py** — Database connection pool
+- DB via shared/db.py (no local db.py)
 
 ## Drop Types
 - **weekly**: set price, add `unavailable-{month}-{day}` + `drop` + `weekly-deals` + `limit-X` tags, remove from non-Online channels

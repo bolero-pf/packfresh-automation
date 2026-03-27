@@ -4,7 +4,7 @@
 ## Key Files
 - **app.py** — Flask routes: hold queue, hold detail, scan, decisions, finish, returns, missing cards, Shopify listing creation
 - **templates/index.html** — Single-page app with sidebar nav (Hold Queue, Return Queue, Missing Cards)
-- **db.py** — Database connection pool
+- DB via shared/db.py (no local db.py)
 
 ## Hold Lifecycle
 ```

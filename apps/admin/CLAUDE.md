@@ -7,7 +7,7 @@
 - **templates/dashboard.html** — Command console with app cards
 - **templates/users.html** — User management (owner only)
 - **migrate_admin_users.py** — Create admin_users table + seed owner
-- **db.py** — Database connection pool
+- DB via shared/db.py (no local db.py)
 
 ## Authentication System
 - JWT token in `pf_auth` cookie, scoped to `.pack-fresh.com` domain
