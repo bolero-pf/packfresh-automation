@@ -54,24 +54,8 @@ def _ser(d: dict) -> dict:
     return out
 
 
-@app.before_request
-def _check_jwt_auth():
-    """Validate JWT cookie from admin portal."""
-    from flask import request as req
-    if req.path in ('/health', '/ping', '/favicon.ico') or req.path.startswith('/static'):
-        return
-    from auth import require_auth
-    return require_auth()
-
-@app.after_request
-def _add_admin_bar(response):
-    try:
-        from auth import inject_admin_bar, get_current_user
-        if get_current_user():
-            return inject_admin_bar(response)
-    except Exception:
-        pass
-    return response
+from auth import register_auth_hooks
+register_auth_hooks(app)  # any authenticated user
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

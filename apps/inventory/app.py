@@ -41,24 +41,8 @@ cache_manager:  CacheManager  = None
 ppt_client:     PPTClient     = None
 
 
-@app.before_request
-def _check_jwt_auth():
-    """Validate JWT cookie from admin portal. Skip health checks and static."""
-    from flask import request
-    if request.path in ('/health', '/ping', '/favicon.ico') or request.path.startswith('/static'):
-        return
-    from auth import require_auth
-    return require_auth(roles=["manager", "owner"])
-
-@app.after_request
-def _add_admin_bar(response):
-    try:
-        from auth import inject_admin_bar, get_current_user
-        if get_current_user():
-            return inject_admin_bar(response)
-    except Exception:
-        pass
-    return response
+from auth import register_auth_hooks
+register_auth_hooks(app, roles=["manager", "owner"])
 
 @app.before_request
 def _lazy_init():

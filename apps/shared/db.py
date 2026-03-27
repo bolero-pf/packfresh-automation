@@ -49,12 +49,12 @@ def get_conn():
 def get_cursor(commit: bool = False):
     """
     Get a RealDictCursor. Auto-commits if commit=True, else auto-rollbacks on error.
-    
+
     Usage:
         with get_cursor() as cur:
             cur.execute("SELECT ...")
             rows = cur.fetchall()
-        
+
         with get_cursor(commit=True) as cur:
             cur.execute("INSERT ...")
     """

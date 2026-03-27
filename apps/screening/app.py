@@ -15,28 +15,8 @@ from routes import bp as screening_bp
 app.register_blueprint(screening_bp)
 
 
-@app.before_request
-def _check_auth():
-    # Skip webhook endpoints
-    if request.path.startswith('/screening/'):
-        return
-    if request.path in ('/ping', '/health'):
-        return
-    try:
-        from auth import require_auth
-        return require_auth(roles=["owner", "manager"])
-    except Exception:
-        pass
-
-@app.after_request
-def _add_admin_bar(response):
-    try:
-        from auth import inject_admin_bar, get_current_user
-        if get_current_user():
-            return inject_admin_bar(response)
-    except Exception:
-        pass
-    return response
+from auth import register_auth_hooks
+register_auth_hooks(app, roles=["owner", "manager"], public_prefixes=('/screening/',))
 
 
 @app.route("/")

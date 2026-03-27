@@ -18,38 +18,9 @@ app = Flask(__name__)
 db.init_pool()
 
 
-@app.before_request
-def _check_auth():
-    if request.path in ('/ping', '/health'):
-        return
-    if request.path == '/release':
-        try:
-            from auth import decode_token
-            token = request.cookies.get("pf_auth", "")
-            if token:
-                payload = decode_token(token)
-                if payload:
-                    g.user = payload
-        except Exception:
-            pass
-        return
-    if request.path.startswith('/api/'):
-        return
-    try:
-        from auth import require_auth
-        return require_auth(roles=["owner"])
-    except Exception:
-        pass
-
-@app.after_request
-def _add_admin_bar(response):
-    try:
-        from auth import inject_admin_bar, get_current_user
-        if get_current_user():
-            return inject_admin_bar(response)
-    except Exception:
-        pass
-    return response
+from auth import register_auth_hooks
+register_auth_hooks(app, roles=["owner"], public_prefixes=('/static', '/api/'),
+                    skip_jwt_prefixes=('/release',))
 
 
 @app.route("/ping")
