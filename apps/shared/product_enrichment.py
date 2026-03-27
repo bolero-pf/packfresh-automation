@@ -871,6 +871,21 @@ def enrich_product(product_gid: str, ppt_item: dict, offer_price: float | None =
             logger.error(f"Image processing failed: {e}", exc_info=True)
             summary["errors"].append(f"image: {e}")
 
+    # 8) AI enrichment (agentic metafields, GTIN, description for new products)
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            from ai_enrichment import generate_ai_fields, push_ai_fields
+            ai_fields = generate_ai_fields(
+                product_title=product_name,
+                set_name=set_name,
+                product_tags=tags,
+            )
+            push_result = push_ai_fields(product_gid, ai_fields, set_body_html=True)
+            summary["ai_enrichment"] = push_result
+        except Exception as e:
+            logger.warning(f"AI enrichment failed (non-blocking): {e}")
+            summary["errors"].append(f"ai_enrichment: {e}")
+
     return summary
 
 

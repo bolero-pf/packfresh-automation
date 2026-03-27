@@ -7,3 +7,4 @@ Pillow>=10.0
 rembg>=2.0
 onnxruntime>=1.16
 PyJWT==2.10.1
+anthropic>=0.40.0

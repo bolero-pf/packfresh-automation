@@ -7,3 +7,4 @@ python-barcode==0.15.1
 rembg
 onnxruntime>=1.16
 PyJWT==2.10.1
+anthropic>=0.40.0

@@ -3,7 +3,8 @@
 ## Key Files
 - **routes/breakdown.py** — Breakdown recommendations engine + execute; recipe CRUD/search moved to shared/breakdown_routes.py blueprint
 - **routes/inventory.py** — Core inventory routes, Shopify client, auth
-- **app.py** — Flask app, cache manager initialization, registers shared breakdown blueprint
+- **routes/ai_enrichment.py** — AI Enrichment backfill console (agentic metafields, GTINs via Claude API)
+- **app.py** — Flask app, cache manager initialization, registers shared breakdown blueprint + AI enrichment blueprint
 - DB via shared/db.py (no local db.py)
 
 ## Breakdown Engine
@@ -24,6 +25,14 @@ The breakdown system spans 3 services (inventory, ingest-service, ingestion) sha
 - `_build_recommendations()` in breakdown.py — Joins inventory + recipes, computes scores
 - `refresh_stale_component_prices()` in shared/breakdown_helpers.py — JIT market price refresh
 - PPT client via `_get_ppt_client()` from routes/inventory.py
+
+## AI Enrichment (temporary backfill tool)
+- Page at `/inventory/ai-enrichment` for batch-generating agentic metafields + GTINs
+- Uses `shared/ai_enrichment.py` (Claude Haiku 4.5 API)
+- Workflow: Scan Shopify → Generate → Review/Edit → Approve → Push
+- Table: `ai_enrichment_queue` tracks status per product
+- Will be deprecated once all existing products are enriched (new products get it automatically via product_enrichment.py step 8)
+- Requires `ANTHROPIC_API_KEY` env var
 
 ## Key Patterns
 - Inventory service proxies to ingest-service via `INGEST_INTERNAL_URL` for some operations

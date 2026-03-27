@@ -70,13 +70,24 @@ def _lazy_init():
         else:
             logger.warning("PPT_API_KEY not set — PPT features disabled")
 
+    # Ensure AI enrichment table exists (idempotent)
+    if not getattr(_lazy_init, '_ai_table_ok', False):
+        try:
+            from routes.ai_enrichment import _ensure_table
+            _ensure_table()
+            _lazy_init._ai_table_ok = True
+        except Exception:
+            pass
+
 
 # ─── Blueprints ────────────────────────────────────────────────────────────────
 
 from routes.inventory import bp as inventory_bp  # noqa: E402
 from routes.breakdown import bp as breakdown_bp  # noqa: E402
+from routes.ai_enrichment import bp as ai_bp  # noqa: E402
 app.register_blueprint(inventory_bp)
 app.register_blueprint(breakdown_bp)
+app.register_blueprint(ai_bp)
 
 # Shared breakdown-cache blueprint (replaces cache CRUD, search, store-prices in breakdown.py)
 from breakdown_routes import create_breakdown_blueprint
