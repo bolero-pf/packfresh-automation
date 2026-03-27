@@ -90,6 +90,10 @@ else:
 
 cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_products=True)
 
+# Register shared breakdown blueprint (replaces breakdown-cache, PPT search, store-prices routes)
+from breakdown_routes import create_breakdown_blueprint
+app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: ppt))
+
 # Ingest service URL — used to proxy listing creation requests
 INGEST_INTERNAL_URL = os.getenv("INGEST_INTERNAL_URL", "").rstrip("/")
 
@@ -1863,43 +1867,7 @@ def debug_sealed(tcgplayer_id):
     return jsonify(results)
 
 
-@app.route("/api/ppt/search-sealed", methods=["POST"])
-def ppt_search_sealed():
-    """Search sealed products by name via PPT /v2/sealed-products?search=...&set=..."""
-    if not ppt:
-        return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
-
-    data = request.json or {}
-    query = data.get("query", "").strip()
-    set_name = data.get("set_name", "").strip() or None
-    if not query:
-        return jsonify({"error": "query required"}), 400
-
-    try:
-        results = ppt.search_sealed_products(query, set_name=set_name, limit=5)
-        return jsonify({"results": results})
-    except PPTError as e:
-        return jsonify({"error": str(e)}), 502
-
-
-@app.route("/api/ppt/search-cards", methods=["POST"])
-def ppt_search_cards():
-    """Search cards by name via PPT /v2/cards?search=...&set=..."""
-    if not ppt:
-        return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
-
-    data = request.json or {}
-    query = data.get("query", "").strip()
-    set_name = data.get("set_name", "").strip() or None
-    if not query:
-        return jsonify({"error": "query required"}), 400
-
-    try:
-        limit = int(data.get('limit', 8))
-        results = ppt.search_cards(query, set_name=set_name, limit=limit)
-        return jsonify({"results": results})
-    except PPTError as e:
-        return jsonify({"error": str(e)}), 502
+# PPT search-sealed + search-cards now served by shared breakdown blueprint
 
 
 @app.route("/api/ppt/parse-title", methods=["POST"])
@@ -2535,208 +2503,7 @@ def shopify_session_store_check(session_id):
 
 
 
-# ==========================================
-# BREAKDOWN CACHE  (multi-variant, read+write)
-# ==========================================
-
-def _get_full_breakdown(tcgplayer_id):
-    """Fetch full breakdown record with all variants and components."""
-    cache = db.query_one(
-        "SELECT * FROM sealed_breakdown_cache WHERE tcgplayer_id = %s", (tcgplayer_id,)
-    )
-    if not cache:
-        return None
-    variants = db.query(
-        "SELECT * FROM sealed_breakdown_variants WHERE breakdown_id = %s ORDER BY display_order",
-        (str(cache["id"]),)
-    )
-    result = dict(cache)
-    result["variants"] = []
-    for v in variants:
-        comps = db.query(
-            "SELECT * FROM sealed_breakdown_components WHERE variant_id = %s ORDER BY display_order",
-            (str(v["id"]),)
-        )
-        result["variants"].append({**v, "components": list(comps)})
-    return result
-
-
-@app.route("/api/breakdown-cache/<int:tcgplayer_id>")
-def get_breakdown_cache_intake(tcgplayer_id):
-    """Get full breakdown record (all variants + components)."""
-    result = _get_full_breakdown(tcgplayer_id)
-    if not result:
-        return jsonify({"found": False, "cache": None})
-
-    # JIT refresh stale component market prices in background
-    try:
-        from breakdown_helpers import refresh_stale_component_prices
-        import threading
-        variant_ids = [str(v["id"]) for v in result.get("variants", [])]
-        if variant_ids and ppt:
-            threading.Thread(target=refresh_stale_component_prices,
-                args=(variant_ids, db, ppt), daemon=True).start()
-    except Exception as e:
-        app.logger.warning(f"Component price refresh skipped: {e}")
-
-    return jsonify({"found": True, "cache": _serialize(result)})
-
-
-@app.route("/api/breakdown-cache/<int:tcgplayer_id>/variant", methods=["POST"])
-def save_variant_intake(tcgplayer_id):
-    """
-    Create or update a named variant from intake.
-    Body: {product_name, variant_name, components, notes?, variant_id?}
-    """
-    from decimal import Decimal
-    data = request.get_json(silent=True) or {}
-    product_name = data.get("product_name", "Unknown")
-    variant_name = data.get("variant_name", "Standard")
-    components = data.get("components", [])
-    notes = data.get("notes")
-    variant_id = data.get("variant_id")
-
-    if not components:
-        return jsonify({"error": "components required"}), 400
-
-    try:
-        # Ensure parent cache row
-        existing = db.query_one(
-            "SELECT id FROM sealed_breakdown_cache WHERE tcgplayer_id = %s", (tcgplayer_id,)
-        )
-        if existing:
-            cache_id = str(existing["id"])
-            db.execute(
-                "UPDATE sealed_breakdown_cache SET product_name=%s, last_updated=CURRENT_TIMESTAMP WHERE id=%s",
-                (product_name, cache_id)
-            )
-        else:
-            row = db.execute_returning(
-                "INSERT INTO sealed_breakdown_cache (tcgplayer_id, product_name) VALUES (%s,%s) RETURNING id",
-                (tcgplayer_id, product_name)
-            )
-            cache_id = str(row["id"])
-
-        total_market = sum(
-            Decimal(str(c.get("market_price", 0))) * int(c.get("quantity_per_parent", c.get("quantity", 1)))
-            for c in components
-        )
-        comp_count = len(components)
-
-        if variant_id:
-            db.execute("""
-                UPDATE sealed_breakdown_variants
-                SET variant_name=%s, notes=%s, total_component_market=%s,
-                    component_count=%s, last_updated=CURRENT_TIMESTAMP
-                WHERE id=%s
-            """, (variant_name, notes, total_market, comp_count, variant_id))
-            db.execute("DELETE FROM sealed_breakdown_components WHERE variant_id=%s", (variant_id,))
-            vid = variant_id
-        else:
-            order_row = db.query_one(
-                "SELECT COUNT(*) AS cnt FROM sealed_breakdown_variants WHERE breakdown_id=%s", (cache_id,)
-            )
-            disp = int(order_row["cnt"]) if order_row else 0
-            v_row = db.execute_returning("""
-                INSERT INTO sealed_breakdown_variants
-                    (breakdown_id, variant_name, notes, total_component_market, component_count, display_order)
-                VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (cache_id, variant_name, notes, total_market, comp_count, disp))
-            vid = str(v_row["id"])
-
-        for order, comp in enumerate(components):
-            db.execute("""
-                INSERT INTO sealed_breakdown_components
-                    (variant_id, tcgplayer_id, product_name, set_name,
-                     quantity_per_parent, market_price, notes, display_order,
-                     component_type, market_price_updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
-            """, (
-                vid, comp.get("tcgplayer_id"), comp["product_name"], comp.get("set_name"),
-                int(comp.get("quantity_per_parent", comp.get("quantity", 1))),
-                Decimal(str(comp.get("market_price", 0))), comp.get("notes"), order,
-                comp.get("component_type", "sealed"),
-            ))
-
-        # Refresh denorm totals
-        db.execute("""
-            UPDATE sealed_breakdown_cache SET
-                variant_count=(SELECT COUNT(*) FROM sealed_breakdown_variants WHERE breakdown_id=%s),
-                best_variant_market=COALESCE(
-                    (SELECT MAX(total_component_market) FROM sealed_breakdown_variants WHERE breakdown_id=%s), 0),
-                last_updated=CURRENT_TIMESTAMP
-            WHERE id=%s
-        """, (cache_id, cache_id, cache_id))
-
-        result = _get_full_breakdown(tcgplayer_id)
-        return jsonify({"success": True, "cache": _serialize(result)})
-    except Exception as e:
-        app.logger.exception(f"Failed to save variant for {tcgplayer_id}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/breakdown-cache/variant/<variant_id>", methods=["DELETE"])
-def delete_variant_intake(variant_id):
-    """Delete a single variant. Deletes parent if it was the last one."""
-    v = db.query_one("SELECT breakdown_id FROM sealed_breakdown_variants WHERE id=%s", (variant_id,))
-    if not v:
-        return jsonify({"success": False, "error": "not found"}), 404
-    cache_id = str(v["breakdown_id"])
-    db.execute("DELETE FROM sealed_breakdown_variants WHERE id=%s", (variant_id,))
-    remaining = db.query_one(
-        "SELECT COUNT(*) AS cnt FROM sealed_breakdown_variants WHERE breakdown_id=%s", (cache_id,)
-    )
-    if not remaining or int(remaining["cnt"]) == 0:
-        db.execute("DELETE FROM sealed_breakdown_cache WHERE id=%s", (cache_id,))
-        return jsonify({"success": True, "cache": None})
-    db.execute("""
-        UPDATE sealed_breakdown_cache SET
-            variant_count=(SELECT COUNT(*) FROM sealed_breakdown_variants WHERE breakdown_id=%s),
-            best_variant_market=COALESCE(
-                (SELECT MAX(total_component_market) FROM sealed_breakdown_variants WHERE breakdown_id=%s), 0),
-            last_updated=CURRENT_TIMESTAMP
-        WHERE id=%s
-    """, (cache_id, cache_id, cache_id))
-    parent = db.query_one("SELECT tcgplayer_id FROM sealed_breakdown_cache WHERE id=%s", (cache_id,))
-    result = _get_full_breakdown(int(parent["tcgplayer_id"])) if parent else None
-    return jsonify({"success": True, "cache": _serialize(result)})
-
-
-@app.route("/api/breakdown-cache/batch", methods=["POST"])
-def get_breakdown_cache_batch():
-    """Batch-fetch breakdown summaries for multiple tcgplayer_ids."""
-    data = request.get_json(silent=True) or {}
-    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
-    if not tcg_ids:
-        return jsonify({"summaries": {}})
-    ph = ",".join(["%s"] * len(tcg_ids))
-    rows = db.query(f"""
-        SELECT sbc.tcgplayer_id, sbc.variant_count, sbc.best_variant_market,
-               COALESCE(
-                   (SELECT STRING_AGG(variant_name, ' / ' ORDER BY display_order)
-                    FROM sealed_breakdown_variants WHERE breakdown_id=sbc.id), ''
-               ) AS variant_names
-        FROM sealed_breakdown_cache sbc
-        WHERE sbc.tcgplayer_id IN ({ph})
-    """, tuple(tcg_ids))
-    summaries = {r["tcgplayer_id"]: dict(r) for r in rows}
-    return jsonify({"summaries": _serialize(summaries)})
-
-
-@app.route("/api/store-prices", methods=["POST"])
-def get_store_prices():
-    """Look up shopify_product_cache prices for component tcgplayer_ids."""
-    data = request.get_json(silent=True) or {}
-    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
-    if not tcg_ids:
-        return jsonify({"prices": {}})
-    ph = ",".join(["%s"] * len(tcg_ids))
-    rows = db.query(
-        f"SELECT tcgplayer_id, shopify_product_id, shopify_variant_id, shopify_price, shopify_qty, handle, title FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
-        tuple(tcg_ids)
-    )
-    prices = {r["tcgplayer_id"]: dict(r) for r in rows}
-    return jsonify({"prices": _serialize(prices)})
+# Breakdown-cache, store-prices routes now served by shared breakdown blueprint
 
 
 @app.route("/api/store/search", methods=["GET"])

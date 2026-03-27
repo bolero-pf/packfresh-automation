@@ -576,174 +576,14 @@ def _load_cache_for_tcg(tcg_id):
     return {"found": True, "cache": {**dict(row), "variants": result_variants}}
 
 
-@bp.route("/api/cache/<int:tcg_id>")
-@requires_auth
-def get_cache(tcg_id):
-    return jsonify(_load_cache_for_tcg(tcg_id))
+# Cache CRUD routes (get, save variant, delete variant, search, store-prices)
+# now served by shared breakdown blueprint registered in app.py
 
 
-@bp.route("/api/cache/<int:tcg_id>/variant", methods=["POST"])
-@requires_auth
-def save_variant(tcg_id):
-    """Save (create or update) a breakdown variant. Proxies to ingest if available,
-    otherwise writes directly to the shared DB."""
-    body = request.get_json(silent=True) or {}
-    # Try ingest proxy first (it handles best_variant_market recalc etc.)
-    if INGEST_URL:
-        data, err = _ingest_post(f"/api/breakdown-cache/{tcg_id}/variant", body)
-        if not err:
-            return jsonify(data)
-    # Direct write fallback
-    from decimal import Decimal
-    import uuid as _uuid
-    product_name = body.get("product_name", "")
-    variant_name = body.get("variant_name", "Standard")
-    notes        = body.get("notes", "")
-    components   = body.get("components", [])
-    variant_id   = body.get("variant_id")
-
-    cache_row = db.query_one("SELECT id FROM sealed_breakdown_cache WHERE tcgplayer_id=%s", (tcg_id,))
-    if cache_row:
-        cache_id = cache_row["id"]
-        db.execute("UPDATE sealed_breakdown_cache SET product_name=%s, last_updated=CURRENT_TIMESTAMP WHERE id=%s",
-                   (product_name, cache_id))
-    else:
-        new_id = str(_uuid.uuid4())
-        db.execute("INSERT INTO sealed_breakdown_cache (id, tcgplayer_id, product_name) VALUES (%s,%s,%s)",
-                   (new_id, tcg_id, product_name))
-        cache_id = new_id
-
-    total_mkt = sum(
-        Decimal(str(c.get("market_price",0))) * int(c.get("quantity_per_parent", c.get("quantity",1)))
-        for c in components
-    )
-
-    if variant_id:
-        db.execute("UPDATE sealed_breakdown_variants SET variant_name=%s, notes=%s, total_component_market=%s WHERE id=%s",
-                   (variant_name, notes, total_mkt, variant_id))
-        db.execute("DELETE FROM sealed_breakdown_components WHERE variant_id=%s", (variant_id,))
-        vid = variant_id
-    else:
-        vid = str(_uuid.uuid4())
-        db.execute("""INSERT INTO sealed_breakdown_variants
-            (id, breakdown_id, variant_name, notes, total_component_market, component_count)
-            VALUES (%s,%s,%s,%s,%s,%s)""",
-            (vid, cache_id, variant_name, notes, total_mkt, len(components)))
-
-    for i, comp in enumerate(components):
-        db.execute("""INSERT INTO sealed_breakdown_components
-            (variant_id, tcgplayer_id, product_name, set_name, quantity_per_parent, market_price, display_order, component_type, market_price_updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)""",
-            (vid, comp.get("tcgplayer_id"), comp.get("product_name",""),
-             comp.get("set_name",""), int(comp.get("quantity_per_parent", comp.get("quantity",1))),
-             Decimal(str(comp.get("market_price",0))), i,
-             comp.get("component_type", "sealed")))
-
-    db.execute("UPDATE sealed_breakdown_variants SET component_count=%s WHERE id=%s", (len(components), vid))
-    # Recalc best_variant_market
-    db.execute("""UPDATE sealed_breakdown_cache SET
-        best_variant_market = (SELECT MAX(total_component_market) FROM sealed_breakdown_variants WHERE breakdown_id=%s),
-        variant_count = (SELECT COUNT(*) FROM sealed_breakdown_variants WHERE breakdown_id=%s)
-        WHERE id=%s""", (cache_id, cache_id, cache_id))
-
-    return jsonify({**_load_cache_for_tcg(tcg_id), "success": True})
 
 
-@bp.route("/api/cache/variant/<variant_id>", methods=["DELETE"])
-@requires_auth
-def delete_variant(variant_id):
-    v = db.query_one("SELECT sbv.breakdown_id, sbc.tcgplayer_id FROM sealed_breakdown_variants sbv JOIN sealed_breakdown_cache sbc ON sbc.id=sbv.breakdown_id WHERE sbv.id=%s", (variant_id,))
-    if not v:
-        return jsonify({"error": "Not found"}), 404
-    db.execute("DELETE FROM sealed_breakdown_components WHERE variant_id=%s", (variant_id,))
-    db.execute("DELETE FROM sealed_breakdown_variants WHERE id=%s", (variant_id,))
-    cnt = db.query_one("SELECT COUNT(*) AS c FROM sealed_breakdown_variants WHERE breakdown_id=%s", (v["breakdown_id"],))
-    if cnt and cnt["c"] == 0:
-        db.execute("DELETE FROM sealed_breakdown_cache WHERE id=%s", (v["breakdown_id"],))
-        return jsonify({"found": False})
-    db.execute("""UPDATE sealed_breakdown_cache SET
-        best_variant_market=(SELECT MAX(total_component_market) FROM sealed_breakdown_variants WHERE breakdown_id=%s),
-        variant_count=(SELECT COUNT(*) FROM sealed_breakdown_variants WHERE breakdown_id=%s)
-        WHERE id=%s""", (v["breakdown_id"], v["breakdown_id"], v["breakdown_id"]))
-    return jsonify(_load_cache_for_tcg(v["tcgplayer_id"]))
 
 
-@bp.route("/api/cache/search")
-@requires_auth
-def search_ppt():
-    from routes.inventory import _get_ppt_client
-    q = request.args.get("q", "")
-    if not q:
-        return jsonify({"results": []})
-    ppt = _get_ppt_client()
-    if ppt is None:
-        # fallback to ingest proxy
-        if INGEST_URL:
-            data, err = _ingest_post("/api/ppt/search-sealed", {"query": q})
-            if not err:
-                return jsonify(data)
-        return jsonify({"results": [], "error": "PPT not configured"}), 503
-    try:
-        results = ppt.search_sealed_products(q, limit=5)
-        return jsonify({"results": results})
-    except _PPTError as e:
-        details = e.args[2] if len(e.args) > 2 else {}
-        retry = details.get("retry_after", 60) if isinstance(details, dict) else 60
-        return jsonify({"results": [], "error": str(e.args[0]) if e.args else str(e), "retry_after": retry}), 429
-
-@bp.route("/api/cache/search-cards")
-@requires_auth
-def search_cards():
-    """Search raw cards via PPT — used for promo components in breakdown recipes.
-    Returns NM condition price as market_price."""
-    from routes.inventory import _get_ppt_client
-    q = request.args.get("q", "").strip()
-    if not q:
-        return jsonify({"results": []})
-
-    def _enrich_nm_price(results):
-        for r in (results or []):
-            if not r.get("market_price"):
-                conds = (r.get("prices") or {}).get("conditions") or {}
-                nm = conds.get("Near Mint") or conds.get("NM") or {}
-                r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
-        return results
-
-    ppt = _get_ppt_client()
-    if ppt is None:
-        if INGEST_URL:
-            data, err = _ingest_post("/api/ppt/search-cards", {"query": q, "limit": 5})
-            if not err:
-                return jsonify({"results": _enrich_nm_price(data.get("results") or [])})
-        return jsonify({"results": [], "error": "PPT not configured"}), 503
-
-    try:
-        results = ppt.search_cards(q, limit=5)
-        return jsonify({"results": _enrich_nm_price(results)})
-    except Exception as e:
-        # Fallback to ingest proxy on local failure
-        if INGEST_URL:
-            data, err = _ingest_post("/api/ppt/search-cards", {"query": q, "limit": 5})
-            if not err:
-                return jsonify({"results": _enrich_nm_price(data.get("results") or [])})
-        return jsonify({"results": [], "error": str(e)}), 502
-
-@bp.route("/api/store-prices", methods=["POST"])
-@requires_auth
-def store_prices_local():
-    """Look up store prices from local inventory cache (no ingest proxy needed)."""
-    body = request.get_json(silent=True) or {}
-    tcg_ids = [int(x) for x in body.get("tcgplayer_ids", []) if x]
-    if not tcg_ids:
-        return jsonify({"prices": {}})
-    ph = ",".join(["%s"] * len(tcg_ids))
-    rows = db.query(
-        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title "
-        f"FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
-        tuple(tcg_ids)
-    )
-    prices = {str(r["tcgplayer_id"]): dict(r) for r in rows}
-    return jsonify({"prices": prices})
 
 
 @bp.route("/api/variant-values/<int:tcg_id>")
@@ -969,7 +809,6 @@ def no_recipe_items():
 # ─── Page renderer ────────────────────────────────────────────────────────────
 
 def _render_breakdown_page():
-    ingest_url = INGEST_URL or ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1037,8 +876,10 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
 .delta-pos{{color:var(--green)}} .delta-neg{{color:var(--red)}} .delta-neutral{{color:var(--amber)}}
 .low-stock{{color:var(--red);font-weight:600}}
 </style>
+<link rel="stylesheet" href="/inventory/breakdown/api/cache/bd-static/breakdown_modal.css">
 </head>
 <body>
+<script src="/inventory/breakdown/api/cache/bd-static/breakdown_modal.js"></script>
 
 <nav class="nav">
   <strong style="color:var(--accent)">📦 PackFresh</strong>
@@ -1178,27 +1019,7 @@ input:focus,select:focus{{outline:none;border-color:var(--accent)}}
   </div>
 </div>
 
-<!-- ═══ RECIPE EDITOR MODAL ════════════════════════════════════════════════ -->
-<div id="recipe-modal" class="modal-overlay">
-  <div class="modal" style="max-width:860px">
-    <div class="modal-header">
-      <h3 id="recipe-modal-title">Breakdown Recipe</h3>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div id="recipe-modal-body"></div>
-  </div>
-</div>
-
-<!-- ═══ EXECUTE BREAKDOWN MODAL ════════════════════════════════════════════ -->
-<div id="execute-modal" class="modal-overlay">
-  <div class="modal">
-    <div class="modal-header">
-      <h3>Execute Breakdown</h3>
-      <button class="modal-close" onclick="document.getElementById('execute-modal').classList.remove('active')">✕</button>
-    </div>
-    <div id="execute-modal-body"></div>
-  </div>
-</div>
+<!-- Shared breakdown modal is injected by breakdown_modal.js -->
 
 <script>
 // ══════════════════════════════════════════════════════════════════
@@ -1261,12 +1082,6 @@ function restoreFilters() {{
 // STATE
 // ══════════════════════════════════════════════════════════════════
 let _allRecs = [];
-let _recipeTarget = null;   // {{tcgId, name, variantId, variantId}}
-let _recipeComponents = [];  // each item has component_type: 'sealed'|'promo'
-let _recipeVariantId = null;
-let _storePrices = {{}};
-let _pendingListings = new Set(); // TCG IDs listed this session, not yet in cache
-let _ingestUrl = "{ingest_url}";
 
 // ══════════════════════════════════════════════════════════════════
 // TABS
@@ -1379,11 +1194,11 @@ function recRow(r) {{
     <td>${{childStockStr}}</td>
     <td>
       <div style="display:flex;flex-direction:column;gap:4px">
-        <button class="btn btn-primary btn-sm" onclick="openExecuteModal(${{JSON.stringify(r).replace(/"/g,'&quot;')}})">
+        <button class="btn btn-primary btn-sm" onclick="openExecuteModal(this,${{r.tcgplayer_id}},'${{r.title.replace(/'/g,'').replace(/"/g,'')}}', ${{r.store_price}}, ${{r.store_qty}}, ${{r.shopify_variant_id}}, ${{r.inventory_item_id}})">
           ▶ Break Down
         </button>
         <div style="display:flex;gap:4px">
-          <button class="btn btn-secondary btn-sm" onclick="openRecipeEditor(${{r.tcgplayer_id}}, '${{r.title.replace(/'/g,'').replace(/"/g,'')}}')">
+          <button class="btn btn-secondary btn-sm" onclick="openRecipeEditor(${{r.tcgplayer_id}}, '${{r.title.replace(/'/g,'').replace(/"/g,'')}}', ${{r.store_price}}, ${{r.store_qty}})">
             ✎ Recipe
           </button>
           <button class="btn btn-sm" style="color:var(--text-dim);border:1px solid var(--border);background:none"
@@ -1397,193 +1212,13 @@ function recRow(r) {{
 }}
 
 // ══════════════════════════════════════════════════════════════════
-// EXECUTE BREAKDOWN
+// EXECUTE BREAKDOWN (via shared modal)
 // ══════════════════════════════════════════════════════════════════
-async function openExecuteModal(rec) {{
-  if (typeof rec === 'string') rec = JSON.parse(rec.replace(/&quot;/g, '"'));
-  const body = document.getElementById('execute-modal-body');
-  document.getElementById('execute-modal').classList.add('active');
-
-  // If multiple configs, fetch all variants and let user pick
-  if (rec.variant_count > 1) {{
-    body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading configs...</div>';
-    try {{
-      const r = await fetch(`/inventory/breakdown/api/cache/${{rec.tcgplayer_id}}`);
-      const d = await r.json();
-      const variants = d.cache?.variants || [];
-
-      // Fetch store + deep values for all variants from backend
-      const vr = await fetch(`/inventory/breakdown/api/variant-values/${{rec.tcgplayer_id}}`);
-      const vd = await vr.json();
-      const variantValues = vd.variants || {{}};
-
-      body.innerHTML = `
-        <div style="font-size:15px;font-weight:600;margin-bottom:4px">${{rec.title}}</div>
-        <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">
-          Store: <strong>$${{rec.store_price.toFixed(2)}}</strong> × ${{rec.store_qty}} in stock. Choose which config to break down into:
-        </p>
-        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
-          ${{variants.map(v => {{
-            const vals = variantValues[String(v.id)] || {{}};
-            const mktTotal = vals.market_value || parseFloat(v.total_component_market||0);
-            const storeTotal = vals.store_value;
-            const deepStore = vals.deep_store_value;
-            const bdVal = storeTotal != null ? storeTotal : mktTotal;
-            const bdSrc = storeTotal != null ? 'store' : 'mkt';
-            const delta = rec.store_price > 0 ? ((bdVal - rec.store_price)/rec.store_price*100) : 0;
-            const dc = delta >= 0 ? 'var(--green)' : delta >= -10 ? 'var(--amber)' : 'var(--red)';
-            const deepLine = deepStore ? ` · <span style="color:var(--accent)">Deep: $${{deepStore.toFixed(2)}}</span>` : '';
-            return `<div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer;transition:border-color .15s"
-              onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'"
-              onclick="openExecuteWithVariant(${{JSON.stringify(rec).replace(/"/g,'&quot;')}}, '${{v.id}}', '${{v.variant_name.replace(/'/g,'')}}', ${{mktTotal}})">
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <strong>${{v.variant_name}}</strong>
-                <span style="color:${{dc}};font-weight:600">${{delta>=0?'+':''}}${{delta.toFixed(1)}}%</span>
-              </div>
-              <div style="font-size:12px;color:var(--text-dim);margin-top:3px">
-                ${{v.component_count}} components · $${{bdVal.toFixed(2)}} (${{bdSrc}})${{deepLine}}
-                ${{v.notes ? ` · <em>${{v.notes}}</em>` : ''}}
-              </div>
-            </div>`;
-          }}).join('')}}
-        </div>
-        <button class="btn btn-secondary" onclick="document.getElementById('execute-modal').classList.remove('active')">Cancel</button>`;
-    }} catch(e) {{
-      body.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`;
-    }}
-    return;
-  }}
-
-  // Single-config: fetch fresh store prices and recalculate
-  openExecuteWithVariant(rec, rec.best_variant_id, rec.best_variant_name, rec.bd_value);
-}}
-
-async function openExecuteWithVariant(rec, variantId, variantName, bdValueMarket) {{
-  if (typeof rec === 'string') rec = JSON.parse(rec.replace(/&quot;/g, '"'));
-  const body = document.getElementById('execute-modal-body');
-  body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading components...</div>';
-
-  // Fetch component details for this specific variant with store qtys
-  let components = [];
-  let bdValue = bdValueMarket;
-  let bdLabel = 'market';
-  try {{
-    const r = await fetch(`/inventory/breakdown/api/cache/${{rec.tcgplayer_id}}`);
-    const d = await r.json();
-    const variant = (d.cache?.variants||[]).find(v => v.id === variantId);
-    if (variant?.components) {{
-      // Fetch store qtys for each component
-      const tcgIds = variant.components.map(c => c.tcgplayer_id).filter(Boolean);
-      const sr = await fetch('/inventory/breakdown/api/store-prices', {{
-        method: 'POST', headers: {{'Content-Type':'application/json'}},
-        body: JSON.stringify({{ tcgplayer_ids: tcgIds }})
-      }});
-      const sd = await sr.json();
-      const prices = sd.prices || {{}};
-      components = variant.components.map(c => ({{
-        tcgplayer_id: c.tcgplayer_id,
-        title: c.product_name,
-        qty_per_parent: parseInt(c.quantity_per_parent)||1,
-        shopify_qty: prices[String(c.tcgplayer_id)]?.shopify_qty ?? null,
-        shopify_price: prices[String(c.tcgplayer_id)]?.shopify_price ?? null,
-        in_store: !!prices[String(c.tcgplayer_id)],
-      }}));
-      // Recompute BD value from fresh store prices (only if ALL components have store prices)
-      const allHaveStore = components.length === tcgIds.length && components.every(c => c.shopify_price > 0);
-      if (allHaveStore) {{
-        bdValue = components.reduce((sum, c) => sum + c.shopify_price * c.qty_per_parent, 0);
-        bdLabel = 'store';
-      }}
-    }}
-  }} catch(e) {{}}
-
-  const delta = rec.store_price > 0 ? (bdValue - rec.store_price) / rec.store_price * 100 : 0;
-  renderExecuteForm({{...rec, bd_value: bdValue, delta_pct: delta, bd_value_label: bdLabel, components}}, variantId, variantName, bdValue);
-}}
-
-function renderExecuteForm(rec, variantId, variantName, bdValue) {{
-  const body = document.getElementById('execute-modal-body');
-  const deltaClass = rec.delta_pct >= 0 ? 'delta-pos' : rec.delta_pct >= -10 ? 'delta-neutral' : 'delta-neg';
-  const bdLabel = rec.bd_value_label === 'store' ? '(store prices)' : '(market prices)';
-
-  body.innerHTML = `
-    <div style="margin-bottom:16px">
-      <div style="font-size:15px;font-weight:600;margin-bottom:4px">${{rec.title}}</div>
-      <div style="display:flex;gap:16px;font-size:13px;color:var(--text-dim);flex-wrap:wrap">
-        <span>Store: <strong style="color:var(--text)">$${{rec.store_price.toFixed(2)}}</strong> × ${{rec.store_qty}} in stock</span>
-        <span>BD value: <strong class="${{deltaClass}}">$${{bdValue.toFixed(2)}}</strong> ${{bdLabel}} (${{rec.delta_pct >= 0 ? '+' : ''}}${{rec.delta_pct.toFixed(1)}}%)</span>
-        <span>Config: <strong style="color:var(--accent)">${{variantName}}</strong></span>
-      </div>
-    </div>
-
-    <div id="exec-components-preview" style="margin-bottom:16px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:10px 14px">
-      <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;font-weight:600">Breaking into:</div>
-      ${{(rec.components||[]).length > 0
-        ? rec.components.map(comp => {{
-            const col = comp.shopify_qty === null ? 'var(--text-dim)' : comp.shopify_qty === 0 ? 'var(--red)' : comp.shopify_qty < 5 ? 'var(--amber)' : 'var(--green)';
-            const storeStr = comp.shopify_qty !== null
-              ? `<span style="color:${{col}}">${{comp.shopify_qty}} in store</span>`
-              : '<span style="color:var(--text-dim)">not in store</span>';
-            return `<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0">
-              <span>${{comp.qty_per_parent > 1 ? comp.qty_per_parent + '× ' : ''}}${{comp.title}}</span>
-              <span>${{storeStr}}</span>
-            </div>`;
-          }}).join('')
-        : '<p style="font-size:12px;color:var(--text-dim)">Component list unavailable</p>'
-      }}
-    </div>
-
-    <div style="margin-bottom:16px">
-      <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:6px">
-        How many to break down? (max ${{rec.store_qty}})
-      </label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input type="number" id="exec-qty" value="1" min="1" max="${{rec.store_qty}}"
-               style="width:80px" oninput="updateExecPreview(${{rec.store_qty}}, ${{bdValue}}, ${{rec.store_price}})">
-        <div style="display:flex;gap:4px">
-          ${{[1,2,5,10].filter(n=>n<=rec.store_qty).map(n=>
-            `<button class="btn btn-secondary btn-sm" onclick="document.getElementById('exec-qty').value=${{n}};updateExecPreview(${{rec.store_qty}},${{bdValue}},${{rec.store_price}})">${{n}}</button>`
-          ).join('')}}
-          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('exec-qty').value=${{rec.store_qty}};updateExecPreview(${{rec.store_qty}},${{bdValue}},${{rec.store_price}})">All</button>
-        </div>
-      </div>
-      <div id="exec-preview" style="margin-top:8px;font-size:12px;color:var(--text-dim)"></div>
-    </div>
-
-    <div id="exec-result"></div>
-
-    <div style="display:flex;gap:8px;margin-top:16px">
-      <button class="btn btn-primary" id="exec-confirm-btn"
-        onclick="confirmExecute(${{rec.shopify_variant_id}},${{rec.inventory_item_id}},${{rec.tcgplayer_id}},'${{variantId}}')">
-        ✓ Confirm Breakdown
-      </button>
-      <button class="btn btn-secondary" onclick="document.getElementById('execute-modal').classList.remove('active')">Cancel</button>
-    </div>
-  `;
-  updateExecPreview(rec.store_qty, bdValue, rec.store_price);
-}}
-
-function updateExecPreview(maxQty, bdValue, storePrice) {{
-  const qty = Math.max(1, Math.min(parseInt(document.getElementById('exec-qty')?.value)||1, maxQty));
-  const totalBd = (qty * bdValue).toFixed(2);
-  const totalStore = (qty * storePrice).toFixed(2);
-  const diff = (qty * bdValue - qty * storePrice).toFixed(2);
-  const preview = document.getElementById('exec-preview');
-  if (preview) preview.innerHTML =
-    `Breaking down ${{qty}} unit${{qty!==1?'s':''}}: ` +
-    `Store value $${{totalStore}} → BD value <strong style="color:var(--green)">$${{totalBd}}</strong> ` +
-    `(<span style="color:${{diff>=0?'var(--green)':'var(--red)'}}">${{diff>=0?'+':''}}$${{diff}}</span>)`;
-}}
-
-async function confirmExecute(parentVariantId, parentInvItemId, parentTcgId, variantId) {{
-  const qty = parseInt(document.getElementById('exec-qty')?.value) || 1;
-  const btn = document.getElementById('exec-confirm-btn');
-  const result = document.getElementById('exec-result');
-  btn.disabled = true; btn.textContent = '⟳ Executing...';
-
-  try {{
-    const r = await fetch('/inventory/breakdown/api/execute', {{
-      method: 'POST', headers: {{'Content-Type':'application/json'}},
+function _bdExecuteHandler(parentVariantId, parentInvItemId, parentTcgId) {{
+  return function(variantId, qty, components) {{
+    return fetch('/inventory/breakdown/api/execute', {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
       body: JSON.stringify({{
         parent_variant_id: parentVariantId,
         parent_inventory_item_id: parentInvItemId,
@@ -1591,36 +1226,31 @@ async function confirmExecute(parentVariantId, parentInvItemId, parentTcgId, var
         qty_to_break: qty,
         variant_id: variantId,
       }})
-    }});
-    const d = await r.json();
-    if (!r.ok) {{ result.innerHTML = `<div class="alert alert-error">${{d.error}}</div>`; btn.disabled=false; btn.textContent='✓ Confirm Breakdown'; return; }}
+    }}).then(r => r.json().then(d => {{
+      if (!r.ok) throw new Error(d.error || 'Execute failed');
+      // Update rec in-place
+      const idx = _allRecs.findIndex(rec => rec.tcgplayer_id === parentTcgId);
+      if (idx >= 0 && d.results) {{
+        _allRecs[idx].store_qty = d.results.parent.new_qty;
+        renderRecommendations();
+      }}
+      return d;
+    }}));
+  }};
+}}
 
-    const res = d.results;
-    let html = `<div class="alert alert-success">
-      ✓ Breakdown complete — parent <strong>${{res.parent.title}}</strong>: ${{res.parent.old_qty}} → ${{res.parent.new_qty}}
-    </div>`;
-    if (res.children.length) {{
-      html += '<div style="margin-top:8px;font-size:12px"><strong>Children updated:</strong><ul style="margin-top:4px;padding-left:16px">' +
-        res.children.map(c => `<li>${{c.title}}: +${{c.add_qty}} (${{c.old_qty}} → ${{c.new_qty}})</li>`).join('') +
-        '</ul></div>';
-    }}
-    if (res.errors.length) {{
-      html += '<div class="alert alert-warning" style="margin-top:8px"><strong>⚠ Some children could not be updated:</strong><ul style="margin-top:4px;padding-left:16px">' +
-        res.errors.map(e => `<li>${{e.component}}: ${{e.error}}</li>`).join('') +
-        '</ul></div>';
-    }}
-    result.innerHTML = html;
-    btn.textContent = '✓ Done';
-    btn.disabled = false;
-    btn.onclick = () => document.getElementById('execute-modal').classList.remove('active');
-
-    // Update rec in-place
-    const idx = _allRecs.findIndex(r => r.shopify_variant_id === parentVariantId);
-    if (idx >= 0) {{ _allRecs[idx].store_qty = res.parent.new_qty; renderRecommendations(); }}
-  }} catch(e) {{
-    result.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`;
-    btn.disabled=false; btn.textContent='✓ Confirm Breakdown';
-  }}
+function openExecuteModal(btn, tcgId, name, storePrice, storeQty, parentVariantId, parentInvItemId) {{
+  openBreakdownModal({{
+    tcgplayerId: tcgId,
+    productName: name,
+    parentStore: storePrice || null,
+    parentQty: storeQty || 1,
+    apiBase: '/inventory/breakdown/api/cache',
+    priceMode: 'best',
+    onExecute: _bdExecuteHandler(parentVariantId, parentInvItemId, tcgId),
+    onSave: function() {{ loadRecommendations(); }},
+    showQtySelector: true,
+  }});
 }}
 
 // ══════════════════════════════════════════════════════════════════
@@ -1656,8 +1286,8 @@ async function searchInventory() {{
           <td>$${{parseFloat(item.shopify_price||0).toFixed(2)}}</td>
           <td>${{rec ? `<span class="${{rec.delta_pct>=0?'delta-pos':rec.delta_pct>=-10?'delta-neutral':'delta-neg'}}">$${{rec.bd_value.toFixed(2)}} (${{rec.delta_pct>=0?'+':''}}${{rec.delta_pct.toFixed(1)}}%)</span>` : '<span style="color:var(--text-dim)">No recipe</span>'}}</td>
           <td>
-            ${{rec ? `<button class="btn btn-primary btn-sm" onclick="openExecuteModal(${{JSON.stringify(rec).replace(/"/g,'&quot;')}})">▶ Break Down</button>` : ''}}
-            <button class="btn btn-secondary btn-sm" onclick="openRecipeEditor(${{item.tcgplayer_id||'null'}},'${{item.title.replace(/'/g,'').replace(/"/g,'')}}')">
+            ${{rec ? `<button class="btn btn-primary btn-sm" onclick="openExecuteModal(this,${{rec.tcgplayer_id}},'${{rec.title.replace(/'/g,'').replace(/"/g,'')}}', ${{rec.store_price}}, ${{rec.store_qty}}, ${{rec.shopify_variant_id}}, ${{rec.inventory_item_id}})">▶ Break Down</button>` : ''}}
+            <button class="btn btn-secondary btn-sm" onclick="openRecipeEditor(${{item.tcgplayer_id||'null'}},'${{item.title.replace(/'/g,'').replace(/"/g,'')}}', ${{parseFloat(item.shopify_price||0)}}, ${{item.shopify_qty||0}})">
               ${{rec ? '✎ Recipe' : '+ Recipe'}}
             </button>
           </td>
@@ -1716,431 +1346,20 @@ async function unignoreSku(tcgId, btn) {{
 }}
 
 // ══════════════════════════════════════════════════════════════════
-// RECIPE EDITOR  (reused breakdown widget from intake/ingest)
+// RECIPE EDITOR  (via shared modal)
 // ══════════════════════════════════════════════════════════════════
-async function openRecipeEditor(tcgId, productName) {{
-  _recipeTarget = {{ tcgId, productName }};
-  _recipeComponents = [];
-  _recipeVariantId = null;
-  _storePrices = {{}};
-  _pendingListings = new Set();
-
-  const body = document.getElementById('recipe-modal-body');
-  document.getElementById('recipe-modal-title').textContent = productName || 'Breakdown Recipe';
-  document.getElementById('recipe-modal').classList.add('active');
-
-  // If no item selected yet, show inventory search picker first
-  if (!tcgId) {{
-    body.innerHTML = `
-      <p style="color:var(--text-dim);font-size:13px;margin-bottom:12px">Search your store inventory to find the item you want to build a recipe for.</p>
-      <div style="display:flex;gap:8px;margin-bottom:10px">
-        <input type="text" id="re-picker-search" placeholder="Product name…" style="flex:1"
-               onkeydown="if(event.key==='Enter') rePickerSearch()">
-        <button class="btn btn-primary btn-sm" onclick="rePickerSearch()">Search</button>
-      </div>
-      <div id="re-picker-results" style="max-height:280px;overflow-y:auto"></div>`;
-    setTimeout(() => document.getElementById('re-picker-search')?.focus(), 100);
-    return;
-  }}
-
-  body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
-  let cache = null;
-  try {{
-    const r = await fetch(`/inventory/breakdown/api/cache/${{tcgId}}`);
-    const d = await r.json();
-    if (d.found) cache = d.cache;
-  }} catch(e) {{}}
-  fetchRecipeStorePrices();
-  renderRecipeModal(cache);
-}}
-
-async function rePickerSearch() {{
-  const q = document.getElementById('re-picker-search')?.value.trim().toLowerCase();
-  const panel = document.getElementById('re-picker-results');
-  if (!q) return;
-  panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
-  try {{
-    const r = await fetch('/inventory/breakdown/api/inventory-search?q=' + encodeURIComponent(q));
-    const d = await r.json();
-    const items = d.items || [];
-    if (!items.length) {{ panel.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No items found.</p>'; return; }}
-    window._rePickerItems = items;
-    panel.innerHTML = items.slice(0,20).map((i,idx) => `
-      <div class="search-result" onclick="rePickerSelect(${{idx}})">
-        <strong style="font-size:13px">${{i.title}}</strong>
-        <br><small style="color:var(--text-dim)">TCG#${{i.tcgplayer_id||'—'}} · qty ${{i.shopify_qty}} · $${{parseFloat(i.shopify_price||0).toFixed(2)}}</small>
-      </div>`).join('');
-  }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
-}}
-
-async function rePickerSelect(idx) {{
-  const item = (window._rePickerItems||[])[idx];
-  if (!item) return;
-  const tcgId = item.tcgplayer_id || null;
-  const productName = item.name || item.title || '';
-  _recipeTarget = {{ tcgId, productName }};
-  document.getElementById('recipe-modal-title').textContent = productName;
-  const body = document.getElementById('recipe-modal-body');
-  body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
-  let cache = null;
-  if (tcgId) {{
-    try {{
-      const r = await fetch(`/inventory/breakdown/api/cache/${{tcgId}}`);
-      const d = await r.json();
-      if (d.found) cache = d.cache;
-    }} catch(e) {{}}
-    fetchRecipeStorePrices();
-  }}
-  renderRecipeModal(cache);
-}}
-
-function renderRecipeModal(cache) {{
-  const body = document.getElementById('recipe-modal-body');
-  const variants = cache?.variants || [];
-  const tcgId = _recipeTarget?.tcgId;
-  const productName = _recipeTarget?.productName;
-
-  const variantCards = variants.length ? `
-    <div style="margin-bottom:16px">
-      <div style="font-size:12px;color:var(--green);font-weight:600;margin-bottom:8px">
-        💾 ${{variants.length}} saved config${{variants.length>1?'s':''}}
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-        ${{variants.map(v => `
-          <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;min-width:160px">
-            <div style="font-size:13px;font-weight:600">${{v.variant_name}}</div>
-            <div style="font-size:12px;color:var(--text-dim)">${{v.component_count}} components · $${{parseFloat(v.total_component_market||0).toFixed(2)}}</div>
-            ${{v.notes ? `<div style="font-size:11px;color:var(--amber)">📝 ${{v.notes}}</div>` : ''}}
-            <div style="display:flex;gap:6px;margin-top:8px">
-              <button class="btn btn-primary btn-sm" onclick="loadVariantIntoEditor(${{JSON.stringify(v).replace(/\"/g,'&quot;')}})">↓ Edit</button>
-              <button class="btn btn-sm" style="color:var(--red);border:1px solid var(--border);background:none"
-                onclick="deleteVariant('${{v.id}}','${{v.variant_name.replace(/'/g,'').replace(/\"/g,'')}}')">🗑</button>
-            </div>
-          </div>
-        `).join('')}}
-      </div>
-      <div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">— or add a new config below —</div>
-    </div>` : `<div style="font-size:13px;color:var(--text-dim);margin-bottom:16px">
-      No configs saved yet for <strong>${{productName}}</strong>. Build one below.</div>`;
-
-  body.innerHTML = `
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
-      ${{productName}}${{tcgId ? ` <span style="font-size:11px;background:var(--surface-2);padding:2px 6px;border-radius:4px">TCG#${{tcgId}}</span>` : ''}}
-    </p>
-    ${{variantCards}}
-    <div style="border-top:1px solid var(--border);padding-top:14px">
-      <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
-        <label style="font-size:12px;color:var(--text-dim)">Config name:</label>
-        <input type="text" id="re-variant-name" value="Standard" style="width:160px">
-        <span id="re-editing-badge" style="display:none;font-size:11px;color:var(--accent);background:var(--surface-2);padding:2px 8px;border-radius:4px">editing</span>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-bottom:14px">
-        <div style="border:1px solid var(--border);border-radius:8px;padding:12px">
-          <div style="font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">📦 Sealed</div>
-          <div style="display:flex;gap:6px;margin-bottom:6px">
-            <input type="text" id="re-search" placeholder="Booster Box, ETB…"
-                   style="flex:1;font-size:12px" onkeydown="if(event.key==='Enter') reSearch()">
-            <button class="btn btn-primary btn-sm" onclick="reSearch()" style="height:30px;font-size:11px">Search</button>
-          </div>
-          <div id="re-search-results" style="max-height:130px;overflow-y:auto"></div>
-        </div>
-        <div style="border:1px solid rgba(79,125,249,0.4);border-radius:8px;padding:12px">
-          <div style="font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">✨ Promos <span style="color:var(--text-dim);font-weight:400;text-transform:none">(NM price)</span></div>
-          <div style="display:flex;gap:6px;margin-bottom:6px">
-            <input type="text" id="re-promo-search" placeholder="Pikachu Promo, 187/XY…"
-                   style="flex:1;font-size:12px" onkeydown="if(event.key==='Enter') rePromoSearch()">
-            <button class="btn btn-sm" onclick="rePromoSearch()" style="height:30px;font-size:11px;border-color:var(--accent);color:var(--accent)">Search</button>
-          </div>
-          <div id="re-promo-results" style="max-height:130px;overflow-y:auto"></div>
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <h4 style="font-size:13px">Components</h4>
-        <div id="re-value-summary" style="font-size:12px;color:var(--text-dim)"></div>
-      </div>
-      <div id="re-components-list"><p style="color:var(--text-dim);font-size:13px">No components yet.</p></div>
-      <div id="re-notes-row" style="margin-top:12px;display:none">
-        <label style="font-size:12px;color:var(--text-dim)">Notes</label>
-        <input type="text" id="re-notes" placeholder="e.g. Dark Sylveon variant" style="width:100%;margin-top:4px">
-      </div>
-      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-success" onclick="saveRecipeVariant()">💾 Save Config</button>
-        <button class="btn btn-secondary" onclick="closeModal()">Close</button>
-        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('re-notes-row').style.display='block';document.getElementById('re-notes').focus()" style="font-size:11px">+ Notes</button>
-      </div>
-    </div>`;
-  setTimeout(() => document.getElementById('re-search')?.focus(), 100);
-  reRenderComponents();
-}}
-
-function loadVariantIntoEditor(v) {{
-  if (typeof v === 'string') v = JSON.parse(v.replace(/&quot;/g, '"'));
-  _recipeVariantId = v.id;
-  _recipeComponents = (v.components||[]).map(c => ({{
-    product_name: c.product_name, set_name: c.set_name||'',
-    tcgplayer_id: c.tcgplayer_id,
-    market_price: parseFloat(c.market_price)||0,
-    quantity: parseInt(c.quantity_per_parent)||1,
-    component_type: c.component_type || 'sealed',
-  }}));
-  const nameEl = document.getElementById('re-variant-name');
-  if (nameEl) nameEl.value = v.variant_name;
-  if (v.notes) {{
-    const notesEl = document.getElementById('re-notes');
-    if (notesEl) {{ notesEl.value = v.notes; document.getElementById('re-notes-row').style.display='block'; }}
-  }}
-  document.getElementById('re-editing-badge').style.display = 'inline';
-  reRenderComponents();
-  fetchRecipeStorePrices();
-}}
-
-async function deleteVariant(variantId, name) {{
-  const ok = await themedConfirm('Delete Config', `Remove the "${{name}}" config?`, {{ dangerous: true }});
-  if (!ok) return;
-  const r = await fetch(`/inventory/breakdown/api/cache/variant/${{variantId}}`, {{ method: 'DELETE' }});
-  const d = await r.json();
-  renderRecipeModal(d.cache);
-}}
-
-async function reSearch() {{
-  const q = document.getElementById('re-search')?.value.trim();
-  if (!q) return;
-  const panel = document.getElementById('re-search-results');
-  panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
-  try {{
-    const r = await fetch(`/inventory/breakdown/api/cache/search?q=${{encodeURIComponent(q)}}`);
-    const d = await r.json();
-    if (r.status === 429 || (d.error && !d.results?.length)) {{
-      panel.innerHTML = `<div class="alert alert-warning" style="font-size:12px">⚠ ${{d.error || 'Rate limited — try again shortly.'}}</div>`;
-      return;
-    }}
-    if (!r.ok) {{ panel.innerHTML = `<div class="alert alert-error">${{d.error}}</div>`; return; }}
-    const results = d.results || [];
-    if (!results.length) {{ panel.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No results</p>'; return; }}
-    window._reSearchResults = {{}};
-    panel.innerHTML = results.slice(0,5).map((p, idx) => {{
-      const name = p.name||p.productName||'';
-      const setName = p.setName||p.set_name||'';
-      const tcgId = p.tcgplayer_id||p.tcgplayerId||p.tcgPlayerId||p.id||0;
-      const price = p.unopenedPrice||p.marketPrice||0;
-      window._reSearchResults[idx] = {{ tcgId, name, setName, price, component_type: 'sealed' }};
-      return `<div class="search-result" onclick="reAddByIdx(${{idx}})">
-        <strong style="font-size:13px">${{name}}</strong>
-        <br><small style="color:var(--text-dim)">${{setName}} · $${{(price||0).toFixed(2)}}</small>
-      </div>`;
-    }}).join('');
-  }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
-}}
-
-async function rePromoSearch() {{
-  const q = document.getElementById('re-promo-search')?.value.trim();
-  if (!q) return;
-  const panel = document.getElementById('re-promo-results');
-  panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
-  try {{
-    const r = await fetch(`/inventory/breakdown/api/cache/search-cards?q=${{encodeURIComponent(q)}}`);
-    const d = await r.json();
-    if (r.status === 429 || (d.error && !d.results?.length)) {{
-      panel.innerHTML = `<div class="alert alert-warning" style="font-size:12px">⚠ ${{d.error || 'Rate limited — try again shortly.'}}</div>`;
-      return;
-    }}
-    if (!r.ok) {{ panel.innerHTML = `<div class="alert alert-error">${{d.error}}</div>`; return; }}
-    const results = d.results || [];
-    if (!results.length) {{ panel.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No results</p>'; return; }}
-    window._rePromoResults = {{}};
-    panel.innerHTML = results.slice(0,5).map((p, idx) => {{
-      const name = p.name||p.productName||'';
-      const setName = p.setName||p.set_name||'';
-      const tcgId = p.tcgPlayerId||p.tcgplayer_id||p.id||0;
-      const nmCond = (p.prices?.conditions||{{}})['Near Mint'] || {{}};
-      const price = parseFloat(p.market_price) || parseFloat(nmCond.price) || parseFloat(p.prices?.market) || 0;
-      window._rePromoResults[idx] = {{ tcgId, name, setName, price, component_type: 'promo' }};
-      return `<div class="search-result" onclick="reAddPromoByIdx(${{idx}})">
-        <strong style="font-size:13px">${{name}}</strong>
-        <br><small style="color:var(--text-dim)">${{setName}} · NM $${{price.toFixed(2)}}</small>
-      </div>`;
-    }}).join('');
-  }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
-}}
-
-function reAddByIdx(idx) {{
-  const r = (window._reSearchResults||{{}})[idx];
-  if (r) reAdd(r.tcgId, r.name, r.setName, r.price, 'sealed');
-}}
-
-function reAddPromoByIdx(idx) {{
-  const r = (window._rePromoResults||{{}})[idx];
-  if (r) reAdd(r.tcgId, r.name, r.setName, r.price, 'promo');
-}}
-
-function reAdd(tcgId, name, setName, price, componentType) {{
-  const existing = _recipeComponents.find(c => c.tcgplayer_id && c.tcgplayer_id === tcgId && c.component_type === componentType);
-  if (existing) {{ existing.quantity += 1; }}
-  else {{ _recipeComponents.push({{ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1, component_type: componentType || 'sealed' }}); }}
-  reRenderComponents();
-  fetchRecipeStorePrices();
-  const resultEl = componentType === 'promo' ? 're-promo-results' : 're-search-results';
-  const inputEl  = componentType === 'promo' ? 're-promo-search' : 're-search';
-  document.getElementById(resultEl).innerHTML = '';
-  document.getElementById(inputEl).value = '';
-  document.getElementById(inputEl).focus();
-}}
-
-async function fetchRecipeStorePrices() {{
-  const compIds = _recipeComponents.map(c => c.tcgplayer_id).filter(Boolean);
-  const parentId = _recipeTarget?.tcgId;
-  const allIds = parentId ? [...new Set([parentId, ...compIds])] : compIds;
-  if (!allIds.length) return;
-  try {{
-    const r = await fetch('/inventory/breakdown/api/store-prices', {{
-      method: 'POST', headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify({{ tcgplayer_ids: allIds }})
-    }});
-    const d = await r.json();
-    _storePrices = d.prices || {{}};
-  }} catch(e) {{ _storePrices = {{}}; }}
-  reRenderComponents();
-}}
-
-function reRenderComponents() {{
-  const el = document.getElementById('re-components-list');
-  const summary = document.getElementById('re-value-summary');
-  if (!el) return;
-
-  const sealedComps = _recipeComponents.filter(c => c.component_type !== 'promo');
-  const promoComps  = _recipeComponents.filter(c => c.component_type === 'promo');
-  const totalMkt = _recipeComponents.reduce((s,c) => s+(parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
-  const storeComps = _recipeComponents.filter(c => c.component_type !== 'promo' && c.tcgplayer_id && _storePrices[c.tcgplayer_id]);
-  const promoMktTotal = promoComps.reduce((s,c) => s+(parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
-  const totalStore = storeComps.reduce((s,c) => s+(_storePrices[c.tcgplayer_id].shopify_price||0)*(parseInt(c.quantity)||1), 0) + promoMktTotal;
-
-  if (summary) {{
-    const parentId = _recipeTarget?.tcgId;
-    const parentEntry = parentId ? _storePrices[String(parentId)] : null;
-    const parentStore = parentEntry ? parseFloat(parentEntry.shopify_price)||0 : 0;
-    let sh = _recipeComponents.length ? `Market: <strong>$${{totalMkt.toFixed(2)}}</strong>` : '';
-    if (promoComps.length) {{
-      const promoMkt = promoComps.reduce((s,c) => s+(parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
-      sh += ` <span style="color:var(--accent);font-size:11px">(incl. $${{promoMkt.toFixed(2)}} promos)</span>`;
-    }}
-    if (totalStore > 0) {{
-      const diff = parentStore > 0 ? totalStore - parentStore : null;
-      const col = diff !== null ? (diff >= 0 ? 'var(--green)' : diff >= -parentStore*0.1 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
-      const diffStr = diff !== null ? ` <small style="color:${{diff>=0?'var(--green)':'var(--red)'}}">  ${{diff>=0?'+':''}}$${{diff.toFixed(2)}} vs store</small>` : '';
-      const promoNote = promoComps.length > 0 ? ` <small style="color:var(--accent)">+promos@mkt</small>` : '';
-      sh += ` · <span style="color:${{col}}">Store+Promos: <strong>$${{totalStore.toFixed(2)}}</strong>${{diffStr}}${{promoNote}}</span>`;
-    }}
-    summary.innerHTML = sh;
-  }}
-
-  if (!_recipeComponents.length) {{
-    el.innerHTML = '<p style="color:var(--text-dim);font-size:13px">No components yet.</p>';
-    return;
-  }}
-
-  const hasStore = Object.keys(_storePrices).length > 0;
-  const renderRows = (comps) => comps.map((c) => {{
-    const realIdx = _recipeComponents.indexOf(c);
-    const sp = c.tcgplayer_id ? _storePrices[String(c.tcgplayer_id)] : null;
-    const isPromo = c.component_type === 'promo';
-    const storeCell = hasStore
-      ? `<td>${{sp
-          ? `<span style="color:var(--green)">$${{parseFloat(sp.shopify_price).toFixed(2)}}${{sp.shopify_qty===0?' <small style="color:var(--red)">qty 0</small>':''}}</span>`
-          : (_pendingListings.has(String(c.tcgplayer_id))
-              ? '<span style="color:var(--green);font-size:11px">✓ Draft</span>'
-              : (c.tcgplayer_id && !isPromo
-                  ? `<button class="btn btn-sm btn-primary" style="font-size:11px;padding:1px 5px;" onclick="reCreateListing(${{c.tcgplayer_id}},'component',this)">+ List</button>`
-                  : '<span style="color:var(--text-dim)">—</span>'))}}</td>`
-      : '';
-    return `<tr>
-      <td>
-        ${{isPromo ? '<span style="font-size:10px;background:rgba(79,125,249,0.15);color:var(--accent);padding:1px 5px;border-radius:3px;margin-right:4px">PROMO</span>' : ''}}
-        ${{c.product_name}}<br>
-        <small style="color:${{c.tcgplayer_id?'var(--text-dim)':'var(--red)'}};">${{c.tcgplayer_id?'TCG#'+c.tcgplayer_id:'⚠ No TCG ID'}}${{c.set_name?' · '+c.set_name:''}}</small>
-      </td>
-      <td><input type="number" value="${{c.quantity}}" min="1" style="width:55px" onchange="_recipeComponents[${{realIdx}}].quantity=parseInt(this.value)||1;reRenderComponents()"></td>
-      <td><input type="number" value="${{(c.market_price||0).toFixed(2)}}" min="0" step="0.01" style="width:80px" onchange="_recipeComponents[${{realIdx}}].market_price=parseFloat(this.value)||0;reRenderComponents()"></td>
-      ${{storeCell}}
-      <td><button class="btn btn-sm" style="color:var(--red);font-size:11px;padding:2px 6px;border:1px solid var(--border);background:none"
-        onclick="_recipeComponents.splice(${{realIdx}},1);_storePrices={{}};reRenderComponents()">✕</button></td>
-    </tr>`;
-  }}).join('');
-
-  let html = `<div style="overflow-x:auto"><table style="font-size:13px"><thead><tr>
-    <th>Component</th><th style="width:70px">Qty</th><th style="width:90px">Market</th>
-    ${{hasStore ? '<th style="width:90px;color:var(--accent)">Store</th>' : ''}}
-    <th style="width:30px"></th>
-  </tr></thead><tbody>`;
-  if (sealedComps.length) {{
-    if (promoComps.length) html += `<tr><td colspan="5" style="font-size:11px;color:var(--text-dim);padding:4px 0;font-weight:600;text-transform:uppercase;letter-spacing:.05em">📦 Sealed</td></tr>`;
-    html += renderRows(sealedComps);
-  }}
-  if (promoComps.length) {{
-    html += `<tr><td colspan="5" style="font-size:11px;color:var(--accent);padding:4px 0;font-weight:600;text-transform:uppercase;letter-spacing:.05em;border-top:1px solid var(--border)">✨ Promos</td></tr>`;
-    html += renderRows(promoComps);
-  }}
-  html += '</tbody></table></div>';
-  el.innerHTML = html;
-}}
-
-async function reCreateListing(tcgId, context, btn) {{
-  if (!tcgId) {{ alert('No TCGPlayer ID'); return; }}
-  const origText = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '⟳';
-  btn.title = 'Creating draft listing... ~30-60s';
-  try {{
-    const r = await fetch('/inventory/api/enrich/create-listing', {{
-      method: 'POST', headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify({{ tcgplayer_id: tcgId, quantity: 0 }}),
-    }});
-    const d = await r.json();
-    if (!r.ok) {{
-      btn.disabled = false;
-      btn.textContent = origText;
-      alert('Failed: ' + (d.error || 'Unknown'));
-      return;
-    }}
-    // Track locally so re-renders don't flip back to "+ List" before cache syncs
-    _pendingListings.add(String(tcgId));
-    // Refresh store prices (will re-render, but _pendingListings keeps ✓ Draft visible)
-    _storePrices = {{}};
-    fetchRecipeStorePrices();
-  }} catch(e) {{
-    btn.disabled = false;
-    btn.textContent = origText;
-    alert('Error: ' + e.message);
-  }}
-}}
-
-async function saveRecipeVariant() {{
-  if (!_recipeComponents.length) {{ alert('Add at least one component.'); return; }}
-  if (!_recipeTarget?.tcgId) {{ alert('This product has no TCGPlayer ID — cannot save to cache.'); return; }}
-  const variantName = document.getElementById('re-variant-name')?.value.trim() || 'Standard';
-  const notes = document.getElementById('re-notes')?.value.trim() || null;
-  try {{
-    const r = await fetch(`/inventory/breakdown/api/cache/${{_recipeTarget.tcgId}}/variant`, {{
-      method: 'POST', headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify({{
-        product_name: _recipeTarget.productName,
-        variant_name: variantName,
-        components: _recipeComponents,
-        notes: notes,
-        variant_id: _recipeVariantId || undefined,
-      }})
-    }});
-    const d = await r.json();
-    if (!r.ok) {{ alert(d.error||'Save failed'); return; }}
-    _recipeComponents = [];
-    _recipeVariantId = null;
-    renderRecipeModal(d.cache);
-    // Refresh both recs and no-recipe list (remove item that now has a recipe)
-    const currentTab = location.hash.replace('#','') || 'recommendations';
-    loadRecommendations();
-    // Remove from no-recipe list immediately so it's gone when modal closes
-    _noRecipeItems = _noRecipeItems.filter(i => i.tcgplayer_id !== _recipeTarget?.tcgId);
-    if (currentTab === 'norecipe') renderNoRecipe();
-  }} catch(e) {{ alert(e.message); }}
+function openRecipeEditor(tcgId, productName, storePrice, storeQty) {{
+  openBreakdownModal({{
+    tcgplayerId: tcgId || null,
+    productName: productName || '',
+    parentStore: storePrice || null,
+    parentQty: storeQty || 1,
+    apiBase: '/inventory/breakdown/api/cache',
+    priceMode: 'best',
+    onExecute: null,
+    onSave: function() {{ loadRecommendations(); }},
+    showQtySelector: false,
+  }});
 }}
 
 // ══════════════════════════════════════════════════════════════════
@@ -2221,7 +1440,7 @@ function renderNoRecipe() {{
 function nrOpenRecipe(tcgId) {{
   const item = _noRecipeItems.find(i => i.tcgplayer_id === tcgId);
   if (!item) return;
-  openRecipeEditor(item.tcgplayer_id || null, item.title || '');
+  openRecipeEditor(item.tcgplayer_id || null, item.title || '', parseFloat(item.shopify_price||0), item.shopify_qty||0);
 }}
 
 async function nrMarkBase(tcgId, btn) {{
@@ -2252,10 +1471,6 @@ async function unmarkBase(tcgId, btn) {{
 // ══════════════════════════════════════════════════════════════════
 // UTILS
 // ══════════════════════════════════════════════════════════════════
-function closeModal() {{
-  document.getElementById('recipe-modal').classList.remove('active');
-}}
-
 document.addEventListener('keydown', e => {{
   if (e.key === 'Escape') {{
     document.querySelectorAll('.modal-overlay.active').forEach(m => m.classList.remove('active'));
@@ -2336,7 +1551,7 @@ function renderKnownRecipes() {{
         <td>${{statusBadge}}</td>
         <td>
           <button class="btn btn-secondary btn-sm"
-            onclick="openRecipeEditor(${{r.tcgplayer_id || 'null'}},'${{(r.store_title || r.product_name || '').replace(/'/g,'').replace(/"/g,'')}}')">
+            onclick="openRecipeEditor(${{r.tcgplayer_id || 'null'}},'${{(r.store_title || r.product_name || '').replace(/'/g,'').replace(/"/g,'')}}', ${{parseFloat(r.store_price||0)}}, ${{r.store_qty||0}})">
             ✎ Edit
           </button>
         </td>
@@ -2378,8 +1593,8 @@ searchInventory = async function() {{
           <td>$${{parseFloat(item.shopify_price||0).toFixed(2)}}</td>
           <td>${{rec ? `<span class="${{rec.delta_pct>=0?'delta-pos':rec.delta_pct>=-10?'delta-neutral':'delta-neg'}}">$${{rec.bd_value.toFixed(2)}} (${{rec.delta_pct>=0?'+':''}}${{rec.delta_pct.toFixed(1)}}%)</span>` : '<span style="color:var(--text-dim)">No recipe</span>'}}</td>
           <td style="display:flex;gap:4px;flex-wrap:wrap">
-            ${{rec && qty > 0 ? `<button class="btn btn-primary btn-sm" onclick="openExecuteModal(${{JSON.stringify(rec).replace(/"/g,'&quot;')}})">▶ Break Down</button>` : ''}}
-            <button class="btn btn-secondary btn-sm" onclick="openRecipeEditor(${{item.tcgplayer_id||'null'}},'${{(item.name||item.title).replace(/'/g,'').replace(/"/g,'')}}')">
+            ${{rec && qty > 0 ? `<button class="btn btn-primary btn-sm" onclick="openExecuteModal(this,${{rec.tcgplayer_id}},'${{rec.title.replace(/'/g,'').replace(/"/g,'')}}', ${{rec.store_price}}, ${{rec.store_qty}}, ${{rec.shopify_variant_id}}, ${{rec.inventory_item_id}})">▶ Break Down</button>` : ''}}
+            <button class="btn btn-secondary btn-sm" onclick="openRecipeEditor(${{item.tcgplayer_id||'null'}},'${{(item.name||item.title).replace(/'/g,'').replace(/"/g,'')}}', ${{parseFloat(item.shopify_price||0)}}, ${{qty||0}})">
               ${{rec ? '✎ Recipe' : '+ Recipe'}}
             </button>
           </td>
@@ -2397,14 +1612,11 @@ searchInventory = async function() {{
   const tcgId = parseInt(bdTcg);
 
   function _autoOpen() {{
-    if (bdAction === 'execute') {{
-      // Need recommendations loaded to get the rec object
-      const rec = _allRecs.find(r => r.tcgplayer_id === tcgId);
-      if (rec) openExecuteModal(rec);
-      else openRecipeEditor(tcgId, 'Product');
+    const rec = _allRecs.find(r => r.tcgplayer_id === tcgId);
+    if (bdAction === 'execute' && rec) {{
+      openExecuteModal(null, rec.tcgplayer_id, rec.title, rec.store_price, rec.store_qty, rec.shopify_variant_id, rec.inventory_item_id);
     }} else {{
-      const rec = _allRecs.find(r => r.tcgplayer_id === tcgId);
-      openRecipeEditor(tcgId, rec ? rec.title : 'Product');
+      openRecipeEditor(tcgId, rec ? rec.title : 'Product', rec ? rec.store_price : null, rec ? rec.store_qty : null);
     }}
   }}
 

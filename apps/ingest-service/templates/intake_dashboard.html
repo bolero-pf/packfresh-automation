@@ -271,6 +271,7 @@
             .modal { padding: 12px; }
         }
     </style>
+    <link rel="stylesheet" href="/api/breakdown-cache/bd-static/breakdown_modal.css">
 </head>
 <body>
     <header>
@@ -788,18 +789,6 @@
         </div>
     </div>
 
-    <!-- ═══════════════════════════════════ BREAKDOWN MODAL ═══════════════════════════════════ -->
-    <div id="intake-breakdown-modal" class="modal-overlay">
-        <div class="modal" style="max-width:860px;">
-            <div class="modal-header">
-                <h3>📦 Breakdown Recipe</h3>
-                <button class="modal-close" onclick="closeModal('intake-breakdown-modal')">&times;</button>
-            </div>
-            <div id="intake-breakdown-body" style="padding:16px; max-height:75vh; overflow-y:auto;">
-            </div>
-        </div>
-    </div>
-
     <!-- ═══════════════════════════════════ MAPPING MODAL (must be AFTER session modal in DOM) ═══════════════════════════════════ -->
     <div id="mapping-modal" class="modal-overlay">
         <div class="modal">
@@ -911,8 +900,6 @@
             // Close topmost modal — check in reverse z-order
             const tp = document.getElementById('themed-prompt-overlay');
             if (tp.classList.contains('active')) { tp.classList.remove('active'); return; }
-            const bd = document.getElementById('intake-breakdown-modal');
-            if (bd.classList.contains('active')) { closeModal('intake-breakdown-modal'); return; }
             const relink = document.getElementById('relink-modal');
             if (relink && relink.classList.contains('active')) { closeModal('relink-modal'); return; }
             const mapping = document.getElementById('mapping-modal');
@@ -928,7 +915,6 @@
         document.querySelectorAll('.modal-overlay').forEach(overlay => {
             if (overlay.id === 'themed-prompt-overlay') return; // only via Cancel/Confirm/Escape
             if (overlay.id === 'session-modal') return;          // only via × button or Escape
-            if (overlay.id === 'intake-breakdown-modal') return; // only via Close button or Escape
             overlay.addEventListener('mouseup', (e) => {
                 // Only dismiss if BOTH mousedown and mouseup landed on the bare overlay (not a drag)
                 if (e.target === overlay && _mousedownTarget === overlay) {
@@ -1608,16 +1594,7 @@
                             const parentNote = i.parent_item_id ? '<br><small style="color:var(--text-dim);">↳ split from above</small>' : '';
                             const bd = s.session_type !== 'raw' ? i.breakdown_summary : null;
                             const bdVal = bd ? parseFloat(bd.best_variant_market) || 0 : 0;
-                            const mkt = parseFloat(i.market_price) || 0;
-                            const bdColor = bdVal > 0 && mkt > 0
-                                ? (bdVal >= mkt ? 'var(--green)' : bdVal >= mkt * 0.85 ? 'var(--amber)' : 'var(--red)')
-                                : 'var(--text-dim)';
-                            const bdTooltip = bd && bdVal > 0
-                                ? (bdVal >= mkt ? `Breakdown ($${bdVal.toFixed(2)}) ≥ market ($${mkt.toFixed(2)}) — better to break` : bdVal >= mkt * 0.85 ? `Breakdown ($${bdVal.toFixed(2)}) near market ($${mkt.toFixed(2)})` : `Breakdown ($${bdVal.toFixed(2)}) < market ($${mkt.toFixed(2)}) — keep sealed`)
-                                : '';
-                            const bdDeep = bd && bd.deep_bd_market ? parseFloat(bd.deep_bd_market) : 0;
-                            const bdDeepStr = bdDeep > 0 ? ` · <span style="color:var(--accent);" title="Market value if children are also broken down">Deep: $${bdDeep.toFixed(2)}</span>` : '';
-                            const bdNote = bd && bdVal > 0 ? `<br><small class="bd-baked" style="color:${bdColor};" title="${bdTooltip}">📦 breakdown: $${bdVal.toFixed(2)}${bdDeepStr}${bd.variant_count > 1 ? ' (' + bd.variant_count + ' configs)' : bd.variant_names ? ' · ' + bd.variant_names : ''}</small>` : '';
+                            const bdNote = '';
                             const vel = i.velocity;
                             let velNote = '';
                             if (vel) {
@@ -4744,435 +4721,30 @@
     setInterval(checkHealth, 30000);
 
     // ═══════════════════════════════════════════════════════════════
-    // INTAKE BREAKDOWN RECIPE MODAL
+    // INTAKE BREAKDOWN — SHARED MODAL WRAPPER
     // ═══════════════════════════════════════════════════════════════
 
-    let _intakeBdTcgId = null;
-    let _intakeBdProductName = '';
-    let _intakeBdParentMarket = 0;
-    let _intakeBdComponents = [];
-    let _intakeBdVariantId = null;
-    let _intakeBdSave = true;
-    let _ibdStorePrices = {};
-
-    async function openIntakeBreakdown(tcgId, productName) {
-        _intakeBdTcgId = tcgId;
-        _intakeBdProductName = productName;
-        _intakeBdComponents = [];
-        _intakeBdVariantId = null;
-        _ibdStorePrices = {};
-
-        const body = document.getElementById('intake-breakdown-body');
-        body.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
-        openModal('intake-breakdown-modal');
-
-        // Belt-and-suspenders: local keydown for Escape in case focus is inside an input
-        const _bdEscHandler = (e) => {
-            if (e.key === 'Escape') {
-                const modal = document.getElementById('intake-breakdown-modal');
-                if (modal && modal.classList.contains('active')) {
-                    closeModal('intake-breakdown-modal');
-                    document.removeEventListener('keydown', _bdEscHandler);
+    function openIntakeBreakdown(tcgId, productName) {
+        openBreakdownModal({
+            tcgplayerId: tcgId || null,
+            productName: productName || '',
+            apiBase: '/api/breakdown-cache',
+            priceMode: 'best',
+            onExecute: null,  // intake is recipe-only, no execution
+            onSave: function(cache) {
+                // Refresh breakdown badges in offer tab without full reload
+                _enrichIntakeBreakdowns();
+                // Patch action dropdown buttons so "Price as Breakdown" appears immediately
+                if (currentSessionId && tcgId) {
+                    _patchBreakdownActionButtons(tcgId, cache);
                 }
-            }
-        };
-        document.addEventListener('keydown', _bdEscHandler);
-
-        // Fetch parent store price immediately (before components are loaded/added)
-        if (tcgId) ibdFetchStorePrices();
-
-        // Load existing cache
-        let existingCache = null;
-        if (tcgId) {
-            try {
-                const r = await fetch(`/api/breakdown-cache/${tcgId}`);
-                const d = await r.json();
-                if (d.found) existingCache = d.cache;
-            } catch(e) {}
-        }
-
-        renderIntakeBdModal(existingCache);
-    }
-
-    function renderIntakeBdModal(cache) {
-        const body = document.getElementById('intake-breakdown-body');
-        const variants = cache?.variants || [];
-
-        const variantCards = variants.length ? `
-            <div style="margin-bottom:16px;">
-                <div style="font-size:0.8rem; color:var(--green); font-weight:600; margin-bottom:8px;">
-                    &#x1F4BE; ${variants.length} saved config${variants.length>1?'s':''} for this product
-                </div>
-                <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
-                ${variants.map(v => `
-                    <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:8px 12px; min-width:160px;">
-                        <div style="font-size:0.85rem; font-weight:600;">${v.variant_name}</div>
-                        <div style="font-size:0.78rem; color:var(--text-dim);">${v.component_count} components &middot; $${parseFloat(v.total_component_market||0).toFixed(2)}</div>
-                        ${v.notes ? `<div style="font-size:0.75rem; color:var(--amber);">&#x1F4DD; ${v.notes}</div>` : ''}
-                        <div style="display:flex; gap:6px; margin-top:8px;">
-                            <button class="btn btn-primary btn-sm" style="font-size:0.72rem; padding:2px 8px;"
-                                onclick="intakeBdLoadVariant(${JSON.stringify(v).replace(/"/g,'&quot;')})">&#x2B07; Edit</button>
-                            <button class="btn btn-secondary btn-sm" style="font-size:0.72rem; padding:2px 8px; color:var(--red);"
-                                onclick="intakeBdDeleteVariant('${v.id}', '${v.variant_name.replace(/'/g,'').replace(/"/g,'')}')">&#x1F5D1;</button>
-                        </div>
-                    </div>
-                `).join('')}
-                </div>
-                <div style="font-size:0.82rem; color:var(--text-dim); margin-bottom:4px;">— or add a new config below —</div>
-            </div>` : `
-            <div style="font-size:0.85rem; color:var(--text-dim); margin-bottom:16px;">
-                No configs saved yet for <strong>${_intakeBdProductName}</strong>. Build one below.
-            </div>`;
-
-        body.innerHTML = `
-            <p style="font-size:0.85rem; color:var(--text-dim); margin-bottom:12px;">
-                ${_intakeBdProductName}${_intakeBdTcgId ? ` <span style="font-size:0.75rem; background:var(--surface-2); padding:2px 6px; border-radius:4px;">TCG#${_intakeBdTcgId}</span>` : ''}
-            </p>
-
-            ${variantCards}
-
-            <div style="border-top:1px solid var(--border); padding-top:14px;">
-                <div style="display:flex; gap:8px; margin-bottom:10px; align-items:center; flex-wrap:wrap;">
-                    <label style="font-size:0.8rem; color:var(--text-dim);">Config name:</label>
-                    <input type="text" id="ibd-variant-name" value="Standard" style="width:160px; font-size:0.85rem;"
-                        onchange="_intakeBdVariantId=null;">
-                    <span id="ibd-editing-badge" style="display:none; font-size:0.72rem; color:var(--accent); background:var(--surface-2); padding:2px 8px; border-radius:4px;">editing existing</span>
-                </div>
-
-                <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; margin-bottom:10px;">
-                    <div style="border:1px solid var(--border); border-radius:8px; padding:10px;">
-                        <div style="font-size:0.72rem; font-weight:600; color:var(--text-dim); text-transform:uppercase; letter-spacing:.07em; margin-bottom:8px;">📦 Sealed</div>
-                        <div style="display:flex; gap:6px; margin-bottom:6px;">
-                            <input type="text" id="ibd-search" placeholder="Booster Box, ETB..."
-                                   style="flex:1; font-size:0.82rem;"
-                                   onkeydown="if(event.key==='Enter') ibdSearch()">
-                            <button class="btn btn-primary btn-sm" onclick="ibdSearch()" style="height:32px; font-size:0.75rem;">Search</button>
-                        </div>
-                        <div id="ibd-search-results" style="max-height:130px; overflow-y:auto;"></div>
-                    </div>
-                    <div style="border:1px solid rgba(79,125,249,0.4); border-radius:8px; padding:10px;">
-                        <div style="font-size:0.72rem; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:.07em; margin-bottom:8px;">✨ Promos <span style="color:var(--text-dim); font-weight:400; text-transform:none;">(NM price)</span></div>
-                        <div style="display:flex; gap:6px; margin-bottom:6px;">
-                            <input type="text" id="ibd-promo-search" placeholder="Pikachu Promo, 187/XY..."
-                                   style="flex:1; font-size:0.82rem;"
-                                   onkeydown="if(event.key==='Enter') ibdPromoSearch()">
-                            <button class="btn btn-sm" onclick="ibdPromoSearch()" style="height:32px; font-size:0.75rem; border-color:var(--accent); color:var(--accent);">Search</button>
-                        </div>
-                        <div id="ibd-promo-results" style="max-height:130px; overflow-y:auto;"></div>
-                    </div>
-                </div>
-
-                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
-                    <h4 style="font-size:0.9rem;">Components</h4>
-                    <div id="ibd-value-summary" style="font-size:0.82rem; color:var(--text-dim);"></div>
-                </div>
-                <div id="ibd-components-list"><p style="color:var(--text-dim); font-size:0.85rem;">No components yet.</p></div>
-
-                <div id="ibd-notes-row" style="margin-top:12px; display:none;">
-                    <label style="font-size:0.8rem; color:var(--text-dim);">Notes for this config</label>
-                    <input type="text" id="ibd-notes" placeholder="e.g. Dark Sylveon variant"
-                           style="width:100%; margin-top:4px; font-size:0.85rem;">
-                </div>
-
-                <div style="margin-top:14px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                    <button class="btn btn-success" onclick="ibdSaveVariant()">&#x1F4BE; Save Config</button>
-                    <button class="btn btn-secondary" onclick="closeModal('intake-breakdown-modal')">Close</button>
-                    <button class="btn btn-secondary btn-sm" onclick="document.getElementById('ibd-notes-row').style.display='block'; document.getElementById('ibd-notes').focus();" style="font-size:0.75rem; padding:3px 8px;">+ Notes</button>
-                </div>
-            </div>
-        `;
-        setTimeout(() => document.getElementById('ibd-search')?.focus(), 100);
-        ibdRenderComponents();
-    }
-
-    function intakeBdLoadVariant(v) {
-        if (typeof v === 'string') v = JSON.parse(v.replace(/&quot;/g, '"'));
-        _intakeBdVariantId = v.id;
-        _intakeBdComponents = (v.components || []).map(c => ({
-            product_name: c.product_name, set_name: c.set_name || '',
-            tcgplayer_id: c.tcgplayer_id,
-            market_price: parseFloat(c.market_price) || 0,
-            quantity: parseInt(c.quantity_per_parent) || 1,
-            component_type: c.component_type || 'sealed',
-        }));
-        const nameEl = document.getElementById('ibd-variant-name');
-        if (nameEl) nameEl.value = v.variant_name;
-        if (v.notes) {
-            const notesEl = document.getElementById('ibd-notes');
-            if (notesEl) { notesEl.value = v.notes; document.getElementById('ibd-notes-row').style.display = 'block'; }
-        }
-        const badge = document.getElementById('ibd-editing-badge');
-        if (badge) badge.style.display = 'inline';
-        ibdRenderComponents();
-        ibdFetchStorePrices();
-    }
-
-    async function intakeBdDeleteVariant(variantId, name) {
-        const ok = await themedConfirm('Delete Config', `Remove the "${name}" config?`, { dangerous: true });
-        if (!ok) return;
-        const r = await fetch(`/api/breakdown-cache/variant/${variantId}`, { method: 'DELETE' });
-        const d = await r.json();
-        renderIntakeBdModal(d.cache);
-    }
-
-    async function ibdSearch() {
-        const q = document.getElementById('ibd-search')?.value.trim();
-        if (!q) return;
-        const panel = document.getElementById('ibd-search-results');
-        panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
-        try {
-            const r = await fetch('/api/ppt/search-sealed', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ query: q }),
-            });
-            const d = await r.json();
-            if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
-            const results = d.results || [];
-            if (!results.length) { panel.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No results</p>'; return; }
-            // Store results in a map to avoid apostrophe-in-onclick issues
-            window._ibdSearchResults = {};
-            panel.innerHTML = results.slice(0, 15).map((p, idx) => {
-                const name = p.name || p.productName || '';
-                const setName = p.setName || p.set_name || '';
-                const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || p.id || 0;
-                const price = p.unopenedPrice || p.marketPrice || 0;
-                window._ibdSearchResults[idx] = { tcgId, name, setName, price };
-                return `<div class="search-result" onclick="ibdAddByIdx(${idx})">
-                    <strong style="font-size:0.88rem;">${name}</strong>
-                    <br><small style="color:var(--text-dim);">${setName} &middot; TCG#${tcgId} &middot; $${(price||0).toFixed(2)}</small>
-                </div>`;
-            }).join('');
-        } catch(err) { panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`; }
-    }
-
-    function ibdAddByIdx(idx) {
-        const r = (window._ibdSearchResults || {})[idx];
-        if (r) ibdAdd(r.tcgId, r.name, r.setName, r.price, 'sealed');
-    }
-
-    async function ibdPromoSearch() {
-        const q = document.getElementById('ibd-promo-search')?.value.trim();
-        if (!q) return;
-        const panel = document.getElementById('ibd-promo-results');
-        panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
-        try {
-            const r = await fetch('/api/ppt/search-cards', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ query: q }),
-            });
-            const d = await r.json();
-            if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
-            const results = d.results || [];
-            if (!results.length) { panel.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No results</p>'; return; }
-            window._ibdPromoResults = {};
-            panel.innerHTML = results.slice(0, 5).map((p, idx) => {
-                const name = p.name || p.productName || '';
-                const setName = p.setName || p.set_name || '';
-                const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.id || 0;
-                const nmCond = (p.prices?.conditions || {})['Near Mint'] || {};
-                const price = parseFloat(p.market_price) || parseFloat(nmCond.price) || parseFloat(p.prices?.market) || 0;
-                window._ibdPromoResults[idx] = { tcgId, name, setName, price };
-                return `<div class="search-result" onclick="ibdAddPromoByIdx(${idx})">
-                    <strong style="font-size:0.88rem;">${name}</strong>
-                    <br><small style="color:var(--text-dim);">${setName} &middot; NM $${price.toFixed(2)}</small>
-                </div>`;
-            }).join('');
-        } catch(err) { panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`; }
-    }
-
-    function ibdAddPromoByIdx(idx) {
-        const r = (window._ibdPromoResults || {})[idx];
-        if (r) ibdAdd(r.tcgId, r.name, r.setName, r.price, 'promo');
-    }
-
-    function ibdAdd(tcgId, name, setName, price, componentType) {
-        const existing = _intakeBdComponents.find(c => c.tcgplayer_id && c.tcgplayer_id === tcgId && c.component_type === (componentType || 'sealed'));
-        if (existing) { existing.quantity += 1; }
-        else { _intakeBdComponents.push({ product_name: name, set_name: setName, tcgplayer_id: tcgId, market_price: price, quantity: 1, component_type: componentType || 'sealed' }); }
-        ibdRenderComponents();
-        ibdFetchStorePrices();
-        const resultEl = componentType === 'promo' ? 'ibd-promo-results' : 'ibd-search-results';
-        const inputEl  = componentType === 'promo' ? 'ibd-promo-search' : 'ibd-search';
-        document.getElementById(resultEl).innerHTML = '';
-        document.getElementById(inputEl).value = '';
-        document.getElementById(inputEl).focus();
-    }
-
-    async function ibdFetchStorePrices() {
-        const compIds = _intakeBdComponents.map(c => c.tcgplayer_id).filter(Boolean);
-        const allIds = _intakeBdTcgId ? [...new Set([_intakeBdTcgId, ...compIds])] : compIds;
-        if (!allIds.length) return;
-        try {
-            const r = await fetch('/api/store-prices', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ tcgplayer_ids: allIds })
-            });
-            const d = await r.json();
-            _ibdStorePrices = d.prices || {};
-        } catch(e) { _ibdStorePrices = {}; }
-        ibdRenderComponents();
-    }
-
-    function ibdRenderComponents() {
-        const el = document.getElementById('ibd-components-list');
-        const summary = document.getElementById('ibd-value-summary');
-        if (!el) return;
-        const totalMkt = _intakeBdComponents.reduce((s,c) => s + (parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
-        const storeComps = _intakeBdComponents.filter(c => c.component_type !== 'promo' && c.tcgplayer_id && _ibdStorePrices[c.tcgplayer_id]);
-        const ibdPromoComps = _intakeBdComponents.filter(c => c.component_type === 'promo');
-        const ibdPromoMktTotal = ibdPromoComps.reduce((s,c) => s+(_ibdStorePrices[c.tcgplayer_id]?.shopify_price||parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
-        const totalStore = storeComps.reduce((s,c) => s + (_ibdStorePrices[c.tcgplayer_id].shopify_price||0)*(parseInt(c.quantity)||1), 0) + ibdPromoMktTotal;
-        const allHaveStore = _intakeBdComponents.length > 0 && (storeComps.length + ibdPromoComps.length) === _intakeBdComponents.length;
-        if (summary) {
-            // Parent store price (looked up alongside components)
-            const parentStoreEntry = _intakeBdTcgId ? _ibdStorePrices[_intakeBdTcgId] : null;
-            const parentStore = parentStoreEntry ? parseFloat(parentStoreEntry.shopify_price) || 0 : 0;
-            // Best reference for store comparison: store-parent > market-parent > nothing
-            let storeRef = null, storeRefLabel = null;
-            if (totalStore > 0) {
-                if (parentStore > 0) { storeRef = parentStore; storeRefLabel = `store parent ($${parentStore.toFixed(2)})`; }
-                // intake recipe editor has no parent market — store comparison is store-only or unavailable
-            }
-            let sh = _intakeBdComponents.length ? `Market total: <strong>$${totalMkt.toFixed(2)}</strong>` : '';
-            const promoMkt = _intakeBdComponents.filter(c => c.component_type === 'promo').reduce((s,c) => s+(parseFloat(c.market_price)||0)*(parseInt(c.quantity)||1), 0);
-            if (promoMkt > 0) sh += ` <span style="color:var(--accent);font-size:0.78rem;">(incl. $${promoMkt.toFixed(2)} promos)</span>`;
-            if (totalStore > 0) {
-                const diff = storeRef !== null ? totalStore - storeRef : null;
-                const storeCol = diff !== null ? (diff >= 0 ? 'var(--green)' : diff >= -storeRef * 0.1 ? 'var(--amber)' : 'var(--red)') : 'var(--text-dim)';
-                const diffStr = diff !== null ? ` <small style="color:${diff >= 0 ? 'var(--green)' : 'var(--red)'};"> (${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} vs ${storeRefLabel})</small>` : '';
-                const sealedCount = _intakeBdComponents.filter(c => c.component_type !== 'promo').length;
-                const coverageStr = !allHaveStore ? ` <small style="color:var(--text-dim);">(${storeComps.length}/${sealedCount} sealed in store${ibdPromoComps.length ? ', promos@mkt' : ''})</small>` : (ibdPromoComps.length ? ` <small style="color:var(--accent);">+promos@mkt</small>` : '');
-                const storeLabel = ibdPromoComps.length > 0 ? 'Store+Promos' : 'Store';
-                sh += ` &nbsp;·&nbsp; <span style="color:${storeCol};">${storeLabel}: <strong>$${totalStore.toFixed(2)}</strong>${diffStr}${coverageStr}</span>`;
-            }
-            // Parent "not in store" nudge
-            const parentEntry = _intakeBdTcgId ? _ibdStorePrices[_intakeBdTcgId] : null;
-            if (_intakeBdTcgId && !parentEntry) {
-                sh += ` &nbsp;<span id="ibd-parent-list-btn"><button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 6px;" onclick="ibdCreateListing(${_intakeBdTcgId}, 'parent', this)">+ List Parent</button></span>`;
-            } else if (parentEntry) {
-                sh += ` &nbsp;<small style="color:var(--green);">✓ parent listed</small>`;
-            }
-            summary.innerHTML = sh;
-        }
-        if (!_intakeBdComponents.length) {
-            el.innerHTML = '<p style="color:var(--text-dim); font-size:0.85rem;">No components yet.</p>';
-            return;
-        }
-        const hasStore = Object.keys(_ibdStorePrices).length > 0;
-        const sealedComps = _intakeBdComponents.filter(c => c.component_type !== 'promo');
-        const promoComps  = _intakeBdComponents.filter(c => c.component_type === 'promo');
-
-        const renderRows = (comps) => comps.map((c) => {
-            const realIdx = _intakeBdComponents.indexOf(c);
-            const sp = c.tcgplayer_id ? _ibdStorePrices[c.tcgplayer_id] : null;
-            const isPromo = c.component_type === 'promo';
-            const storeCell = hasStore
-                ? `<td style="font-size:0.8rem;">${sp
-                    ? '<span style="color:var(--green);">$' + parseFloat(sp.shopify_price).toFixed(2) + (sp.shopify_qty === 0 ? ' <small style="color:var(--red);">qty 0</small>' : '') + '</span>'
-                    : (c.tcgplayer_id && !isPromo
-                        ? '<button class=\"btn btn-sm btn-primary\" style=\"font-size:0.65rem; padding:1px 5px;\" onclick=\"ibdCreateListing(' + c.tcgplayer_id + ', \'component\', this)\">+ List</button>'
-                        : '<span style=\"color:var(--text-dim)\">—</span>')
-                    }</td>`
-                : '';
-            return `<tr>
-                <td>
-                    ${isPromo ? '<span style="font-size:10px;background:rgba(79,125,249,0.15);color:var(--accent);padding:1px 5px;border-radius:3px;margin-right:4px;">PROMO</span>' : ''}
-                    ${c.product_name}<br>
-                    <small style="color:${c.tcgplayer_id?'var(--text-dim)':'var(--red)'};">${c.tcgplayer_id?'TCG#'+c.tcgplayer_id:'⚠ No TCG ID'}${c.set_name?' · '+c.set_name:''}</small>
-                </td>
-                <td><input type="number" value="${c.quantity}" min="1" style="width:55px;" onchange="_intakeBdComponents[${realIdx}].quantity=parseInt(this.value)||1; ibdRenderComponents();"></td>
-                <td><input type="number" value="${(c.market_price||0).toFixed(2)}" min="0" step="0.01" style="width:80px;" onchange="_intakeBdComponents[${realIdx}].market_price=parseFloat(this.value)||0; ibdRenderComponents();"></td>
-                ${storeCell}
-                <td><button class="btn btn-sm" style="color:var(--red);font-size:0.72rem;padding:2px 6px;" onclick="_intakeBdComponents.splice(${realIdx},1); _ibdStorePrices={}; ibdRenderComponents();">✕</button></td>
-            </tr>`;
-        }).join('');
-
-        let html = `<div style="overflow-x:auto;"><table style="font-size:0.85rem;"><thead><tr>
-            <th>Component</th><th style="width:70px;">Qty</th><th style="width:90px;">Market</th>
-            ${hasStore ? '<th style="width:90px; color:var(--accent);">Store ↗</th>' : ''}
-            <th style="width:30px;"></th>
-        </tr></thead><tbody>`;
-        if (sealedComps.length) {
-            if (promoComps.length) html += `<tr><td colspan="5" style="font-size:11px;color:var(--text-dim);padding:4px 0;font-weight:600;text-transform:uppercase;letter-spacing:.05em;">📦 Sealed</td></tr>`;
-            html += renderRows(sealedComps);
-        }
-        if (promoComps.length) {
-            html += `<tr><td colspan="5" style="font-size:11px;color:var(--accent);padding:4px 0;font-weight:600;text-transform:uppercase;letter-spacing:.05em;border-top:1px solid var(--border);">✨ Promos</td></tr>`;
-            html += renderRows(promoComps);
-        }
-        html += '</tbody></table></div>';
-        el.innerHTML = html;
-    }
-
-    async function ibdCreateListing(tcgplayerId, context, btn) {
-        if (!tcgplayerId) { alert('No TCGPlayer ID'); return; }
-        const origHTML = btn.outerHTML;
-        btn.disabled = true;
-        btn.textContent = '⟳';
-        btn.title = 'Creating listing... ~30-60s';
-
-        try {
-            const r = await fetch('/api/create-listing', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tcgplayer_id: tcgplayerId, quantity: 0 }),
-            });
-            const d = await r.json();
-            if (!r.ok) {
-                btn.disabled = false;
-                btn.textContent = context === 'parent' ? '+ List Parent' : '+ List';
-                alert('Failed: ' + (d.error || 'Unknown error'));
-                return;
-            }
-            // Replace button with success indicator, refresh store prices
-            const span = document.createElement('span');
-            span.style.cssText = 'color:var(--green); font-size:0.7rem;';
-            span.textContent = '✓ Draft created';
-            btn.replaceWith(span);
-            // Refresh store prices so the UI reflects the new listing
-            _ibdStorePrices = {};
-            ibdFetchStorePrices();
-        } catch(e) {
-            btn.disabled = false;
-            btn.textContent = context === 'parent' ? '+ List Parent' : '+ List';
-            alert('Error: ' + e.message);
-        }
-    }
-
-        async function ibdSaveVariant() {
-        if (!_intakeBdComponents.length) { alert('Add at least one component.'); return; }
-        if (!_intakeBdTcgId) { alert('This product has no TCGPlayer ID — cannot save to cache.'); return; }
-        const variantName = document.getElementById('ibd-variant-name')?.value.trim() || 'Standard';
-        const notes = document.getElementById('ibd-notes')?.value.trim() || null;
-        try {
-            const r = await fetch(`/api/breakdown-cache/${_intakeBdTcgId}/variant`, {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    product_name: _intakeBdProductName,
-                    variant_name: variantName,
-                    components: _intakeBdComponents,
-                    notes: notes,
-                    variant_id: _intakeBdVariantId || undefined,
-                }),
-            });
-            const d = await r.json();
-            if (!r.ok) { alert(d.error || 'Save failed'); return; }
-            _intakeBdComponents = [];
-            _intakeBdVariantId = null;
-            renderIntakeBdModal(d.cache);
-            // Refresh breakdown badges in offer tab without full reload
-            _enrichIntakeBreakdowns();
-            // Patch the ⋯ action dropdown for the affected item(s) so "Price as Breakdown"
-            // appears immediately without needing a full viewSession reload.
-            if (currentSessionId && _intakeBdTcgId) {
-                _patchBreakdownActionButtons(_intakeBdTcgId, d.cache);
-            }
-            // If the store tab is currently loaded, refresh it too
-            const storeTab = document.getElementById('stab-store');
-            if (storeTab && storeTab.style.display !== 'none' && currentSessionId) {
-                storeCheck(currentSessionId);
-            }
-        } catch(err) { alert(err.message); }
+                // If the store tab is currently loaded, refresh it too
+                const storeTab = document.getElementById('stab-store');
+                if (storeTab && storeTab.style.display !== 'none' && currentSessionId) {
+                    storeCheck(currentSessionId);
+                }
+            },
+        });
     }
 
     // After saving a breakdown recipe, patch the action dropdown buttons live
@@ -5226,7 +4798,7 @@
         });
     }
 
-    // Enrich offer tab rows with live breakdown summary badges
+    // Enrich offer tab rows with live breakdown summary badges (uses shared renderBreakdownBadge)
     async function _enrichIntakeBreakdowns(items, sessionId) {
         // items/sessionId optional — if not passed, use current session
         const sid = sessionId || currentSessionId;
@@ -5260,32 +4832,16 @@
                 const cell = document.querySelector(`tr[data-item-id="${item.id}"] td.name-cell`);
                 if (!cell) return;
 
-                cell.querySelectorAll('.bd-live-badge').forEach(e => e.remove());
+                // Remove any old badges
+                cell.querySelectorAll('.bd-badge, .bd-baked, .bd-summary-badge, .bd-live-badge').forEach(e => e.remove());
                 if (!bd || !bd.best_variant_market) return;
 
-                const bdVal = parseFloat(bd.best_variant_market) || 0;
-                const mkt = parseFloat(item.market_price) || 0;
-                const color = bdVal > 0 && mkt > 0
-                    ? (bdVal >= mkt ? 'var(--green)' : bdVal >= mkt * 0.85 ? 'var(--amber)' : 'var(--red)')
-                    : 'var(--text-dim)';
-                const label = bd.variant_count > 1
-                    ? `${bd.variant_count} configs · best $${bdVal.toFixed(2)}`
-                    : `${bd.variant_names || 'Standard'} · $${bdVal.toFixed(2)}`;
-
-                // Only inject if the baked-in bdNote is absent (avoid duplicate)
-                const hasBdNote = !!cell.querySelector('small.bd-baked');
-                if (!hasBdNote) {
-                    const badge = document.createElement('small');
-                    badge.className = 'bd-live-badge';
-                    badge.style.cssText = `display:block; color:${color}; font-size:0.75rem; margin-top:2px;`;
-                    badge.innerHTML = `📦 ${label}`;
-                    cell.appendChild(badge);
-                } else {
-                    // Update existing note color/value live
-                    existing.style.color = color;
-                }
+                renderBreakdownBadge(cell, bd, { market_price: item.market_price }, { priceMode: 'best' });
             });
         } catch(e) { /* silent */ }
-    }</script>
+    }
+    </script>
+    <script src="/api/breakdown-cache/bd-static/breakdown_inline.js"></script>
+    <script src="/api/breakdown-cache/bd-static/breakdown_modal.js"></script>
 </body>
 </html>

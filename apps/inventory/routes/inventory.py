@@ -640,6 +640,7 @@ def _render_inventory(rows, total_rows, filters, meta, limit):
                 bd_val = row.get("bd_value")
                 tcg_id = row.get("tcgplayer_id")
                 store_price = float(row.get("shopify_price") or 0)
+                store_qty = int(row.get("shopify_qty") or 0)
                 name_esc = _html.escape(str(row.get("name", ""))).replace("'", "\\'")
                 if bd_val and tcg_id:
                     bd_f = float(bd_val)
@@ -651,17 +652,17 @@ def _render_inventory(rows, total_rows, filters, meta, limit):
                         f'title="BD Value: ${bd_f:.2f} ({delta_pct:+.1f}%)">'
                         f'${bd_f:.2f}</span> '
                         f'<button type="button" class="qty-btn" title="Edit recipe" '
-                        f'onclick="openBdModal({tcg_id},\'{name_esc}\',\'recipe\')" '
+                        f'onclick="openBdRecipe({tcg_id},\'{name_esc}\',{store_price},{store_qty})" '
                         f'style="font-size:10px;padding:1px 5px;">📋</button> '
                         f'<button type="button" class="qty-btn" title="Break down" '
-                        f'onclick="openBdModal({tcg_id},\'{name_esc}\',\'execute\')" '
+                        f'onclick="openBdExecute({tcg_id},\'{name_esc}\',{store_price},{store_qty},{vid},{iid})" '
                         f'style="font-size:10px;padding:1px 5px;background:#2dd4a0;color:#000;">▶</button>'
                         f'</td>')
                 elif tcg_id:
                     tds.append(
                         f'<td>'
                         f'<button type="button" class="qty-btn" '
-                        f'onclick="openBdModal({tcg_id},\'{name_esc}\',\'recipe\')" '
+                        f'onclick="openBdRecipe({tcg_id},\'{name_esc}\',{store_price},{store_qty})" '
                         f'title="Create breakdown recipe" '
                         f'style="font-size:11px;padding:2px 8px;">+ Recipe</button>'
                         f'</td>')
@@ -730,8 +731,10 @@ td{{padding:6px 9px;vertical-align:middle;}}
 #toast.show{{transform:translateY(0);opacity:1;}}
 #toast.err{{border-color:var(--red);color:var(--red);}}
 </style>
+<link rel="stylesheet" href="/inventory/breakdown/api/cache/bd-static/breakdown_modal.css">
 </head>
 <body>
+<script src="/inventory/breakdown/api/cache/bd-static/breakdown_modal.js"></script>
 <div id="toast"></div>
 {flash_html}
 
@@ -941,12 +944,63 @@ td{{padding:6px 9px;vertical-align:middle;}}
   _pollTimer = setTimeout(_pollStatus, 5000);
 }})();
 
-// ── Breakdown popup ──────────────────────────────────────────────
-function openBdModal(tcgId, name, action) {{
-  let url = '/inventory/breakdown/?bd_tcg=' + tcgId;
-  if (action === 'recipe') url += '&bd_action=recipe';
-  else if (action === 'execute') url += '&bd_action=execute';
-  window.open(url, 'breakdown', 'width=1100,height=800,scrollbars=yes');
+// ── Breakdown shared modal ──────────────────────────────────────
+var _bdLastVariantId = null, _bdLastInvItemId = null, _bdLastTcgId = null;
+
+function _bdExecuteHandler(variantId, qty, components) {{
+  return fetch('/inventory/breakdown/api/execute', {{
+    method: 'POST',
+    headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{
+      parent_variant_id: _bdLastVariantId,
+      parent_inventory_item_id: _bdLastInvItemId,
+      parent_tcgplayer_id: _bdLastTcgId,
+      qty_to_break: qty,
+      variant_id: variantId,
+    }})
+  }}).then(function(r) {{ return r.json().then(function(d) {{
+    if (!r.ok) throw new Error(d.error || 'Execute failed');
+    return d;
+  }}); }});
+}}
+
+function openBdRecipe(tcgId, name, storePrice, storeQty) {{
+  if (typeof openBreakdownModal === 'undefined') {{
+    window.open('/inventory/breakdown/?bd_tcg=' + tcgId + '&bd_action=recipe', 'breakdown', 'width=1100,height=800,scrollbars=yes');
+    return;
+  }}
+  openBreakdownModal({{
+    tcgplayerId: tcgId,
+    productName: name,
+    parentStore: storePrice || null,
+    parentQty: storeQty || 1,
+    apiBase: '/inventory/breakdown/api/cache',
+    priceMode: 'best',
+    onExecute: null,
+    onSave: function() {{ window.location.reload(); }},
+    showQtySelector: false,
+  }});
+}}
+
+function openBdExecute(tcgId, name, storePrice, storeQty, variantId, invItemId) {{
+  if (typeof openBreakdownModal === 'undefined') {{
+    window.open('/inventory/breakdown/?bd_tcg=' + tcgId + '&bd_action=execute', 'breakdown', 'width=1100,height=800,scrollbars=yes');
+    return;
+  }}
+  _bdLastTcgId = tcgId;
+  _bdLastVariantId = variantId || null;
+  _bdLastInvItemId = invItemId || null;
+  openBreakdownModal({{
+    tcgplayerId: tcgId,
+    productName: name,
+    parentStore: storePrice || null,
+    parentQty: storeQty || 1,
+    apiBase: '/inventory/breakdown/api/cache',
+    priceMode: 'best',
+    onExecute: _bdExecuteHandler,
+    onSave: function() {{ window.location.reload(); }},
+    showQtySelector: true,
+  }});
 }}
 </script>
 </body>

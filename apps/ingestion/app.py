@@ -135,6 +135,10 @@ cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_produ
 
 ppt = PPTClient(os.getenv("PPT_API_KEY", ""))
 
+# Register shared breakdown blueprint (replaces breakdown-cache, PPT search, store-prices routes)
+from breakdown_routes import create_breakdown_blueprint
+app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: ppt))
+
 
 def _serialize(obj):
     """JSON-safe serialization for DB rows."""
@@ -409,43 +413,7 @@ def add_item(session_id):
         return jsonify({"error": str(e)}), 500
 
 
-# ═══════════════════════════════════════════════════════════════════
-# PPT SEARCH (for break-down modal)
-# ═══════════════════════════════════════════════════════════════════
-
-@app.route("/api/ppt/search-sealed", methods=["POST"])
-def ppt_search_sealed():
-    data = request.get_json(silent=True) or {}
-    q = data.get("query", "").strip()
-    if not q:
-        return jsonify({"error": "No query"}), 400
-    try:
-        results = ppt.search_sealed_products(q, limit=10)
-        # Normalize tcgplayer_id field — PPT may return it as tcgplayerId, tcgPlayerId, etc.
-        for r in results:
-            if not r.get("tcgplayer_id"):
-                tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("tcgplayer_id") or r.get("id")
-                if tcg_id:
-                    r["tcgplayer_id"] = int(tcg_id)
-        return jsonify({"results": results})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/ppt/search-cards", methods=["POST"])
-def ppt_search_cards():
-    """Search cards by name via PPT /v2/cards — used by promo search in breakdown."""
-    data = request.get_json(silent=True) or {}
-    q = data.get("query", "").strip()
-    set_name = data.get("set_name", "").strip() or None
-    if not q:
-        return jsonify({"error": "No query"}), 400
-    try:
-        limit = int(data.get("limit", 8))
-        results = ppt.search_cards(q, set_name=set_name, limit=limit)
-        return jsonify({"results": results})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+# PPT search + breakdown-cache routes now served by shared breakdown blueprint
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1304,100 +1272,7 @@ def force_mark_ingested(session_id):
     return jsonify({"success": True, "message": "Session manually marked as ingested."})
 
 
-# ═══════════════════════════════════════════════════════════════════
-# BREAKDOWN CACHE API  (multi-variant)
-# ═══════════════════════════════════════════════════════════════════
-
-@app.route("/api/breakdown-cache")
-def list_breakdown_caches():
-    """List all cached products (summary only, no components)."""
-    rows = ingest.list_breakdown_cache()
-    return jsonify({"caches": [_serialize(r) for r in rows], "count": len(rows)})
-
-
-@app.route("/api/breakdown-cache/<int:tcgplayer_id>")
-def get_breakdown_cache(tcgplayer_id):
-    """Get full breakdown record (all variants + components) for a product."""
-    result = ingest.get_breakdown_cache(tcgplayer_id)
-    if not result:
-        return jsonify({"found": False, "cache": None})
-    return jsonify({"found": True, "cache": _serialize(result)})
-
-
-@app.route("/api/breakdown-cache/<int:tcgplayer_id>", methods=["DELETE"])
-def delete_breakdown_cache(tcgplayer_id):
-    """Delete entire breakdown record (all variants) for a product."""
-    deleted = ingest.delete_breakdown_cache(tcgplayer_id)
-    return jsonify({"success": deleted})
-
-
-@app.route("/api/breakdown-cache/<int:tcgplayer_id>/variant", methods=["POST"])
-def save_variant(tcgplayer_id):
-    """
-    Create or update a named variant.
-    Body: {product_name, variant_name, components, notes?, variant_id?}
-      variant_id: omit to create new; supply to update existing variant in-place.
-    """
-    data = request.get_json(silent=True) or {}
-    product_name = data.get("product_name", "Unknown")
-    variant_name = data.get("variant_name", "Standard")
-    components = data.get("components", [])
-    notes = data.get("notes")
-    variant_id = data.get("variant_id")
-
-    if not components:
-        return jsonify({"error": "components required"}), 400
-    try:
-        result = ingest.save_variant(
-            tcgplayer_id=tcgplayer_id,
-            product_name=product_name,
-            variant_name=variant_name,
-            components=components,
-            notes=notes,
-            variant_id=variant_id,
-        )
-        return jsonify({"success": True, "cache": _serialize(result)})
-    except Exception as e:
-        logger.exception(f"Failed to save variant for {tcgplayer_id}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/breakdown-cache/variant/<variant_id>", methods=["DELETE"])
-def delete_variant(variant_id):
-    """Delete a single variant. Deletes parent too if it was the last one."""
-    result = ingest.delete_variant(variant_id)
-    return jsonify({"success": True, "cache": _serialize(result)})
-
-
-@app.route("/api/breakdown-cache/batch", methods=["POST"])
-def breakdown_cache_batch():
-    """Batch-fetch breakdown summaries for multiple tcgplayer_ids (used by intake)."""
-    data = request.get_json(silent=True) or {}
-    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
-    if not tcg_ids:
-        return jsonify({"summaries": {}})
-    summaries = ingest.get_breakdown_summary_for_items(tcg_ids, ppt=ppt)
-    return jsonify({"summaries": _serialize(summaries)})
-
-
-@app.route("/api/store-prices", methods=["POST"])
-def get_store_prices():
-    """
-    Look up inventory_product_cache prices for a list of tcgplayer_ids.
-    Body: {tcgplayer_ids: [int, ...]}
-    Returns: {tcgplayer_id: {shopify_price, shopify_qty, handle, title}}
-    """
-    data = request.get_json(silent=True) or {}
-    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
-    if not tcg_ids:
-        return jsonify({"prices": {}})
-    ph = ",".join(["%s"] * len(tcg_ids))
-    rows = db.query(
-        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
-        tuple(tcg_ids)
-    )
-    prices = {r["tcgplayer_id"]: dict(r) for r in rows}
-    return jsonify({"prices": _serialize(prices)})
+# Breakdown-cache, store-prices routes now served by shared breakdown blueprint
 
 
 @app.route("/api/ingest/item/<item_id>/break-down", methods=["POST"])

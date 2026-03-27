@@ -94,6 +94,14 @@ from routes.breakdown import bp as breakdown_bp  # noqa: E402
 app.register_blueprint(inventory_bp)
 app.register_blueprint(breakdown_bp)
 
+# Shared breakdown-cache blueprint (replaces cache CRUD, search, store-prices in breakdown.py)
+from breakdown_routes import create_breakdown_blueprint
+app.register_blueprint(
+    create_breakdown_blueprint(db, ppt_getter=lambda: ppt_client,
+                               url_prefix="/inventory/breakdown/api/cache",
+                               name="bd_cache"),
+)
+
 
 # ─── Root ──────────────────────────────────────────────────────────────────────
 

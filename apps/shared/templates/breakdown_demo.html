@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Breakdown Component Demo</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --bg-alt: #16162a;
+            --bg-highlight: #2a2a4a;
+            --text: #e0e0e0;
+            --text-dim: #888;
+            --border: #333;
+            --green: #2dd4a0;
+            --red: #f05252;
+            --amber: #f5a623;
+            --accent: #7c93f5;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg); color: var(--text);
+            padding: 24px; max-width: 1100px; margin: 0 auto;
+        }
+        h1 { font-size: 22px; margin-bottom: 6px; }
+        h2 { font-size: 16px; margin: 20px 0 10px; color: var(--accent); }
+        .subtitle { color: var(--text-dim); font-size: 13px; margin-bottom: 20px; }
+
+        /* Config panel */
+        .config-panel {
+            background: var(--bg-alt); border: 1px solid var(--border);
+            border-radius: 10px; padding: 16px 20px; margin-bottom: 20px;
+        }
+        .config-row {
+            display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+            margin-bottom: 10px;
+        }
+        .config-row:last-child { margin-bottom: 0; }
+        .config-row label {
+            font-size: 12px; color: var(--text-dim); min-width: 80px;
+        }
+        .config-row input, .config-row select {
+            padding: 6px 10px; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--bg);
+            color: var(--text); font-size: 13px;
+        }
+        .config-row input[type="number"] { width: 100px; }
+        .config-row select { min-width: 120px; }
+        button.action {
+            padding: 8px 18px; border-radius: 6px; font-size: 13px; font-weight: 600;
+            border: none; cursor: pointer; transition: opacity 0.15s;
+        }
+        button.action:hover { opacity: 0.85; }
+        button.action.primary { background: var(--accent); color: #000; }
+        button.action.green { background: var(--green); color: #000; }
+        button.action.secondary {
+            background: var(--bg-alt); color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        /* Inline badge gallery */
+        .badge-gallery {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 12px; margin-bottom: 20px;
+        }
+        .badge-card {
+            background: var(--bg-alt); border: 1px solid var(--border);
+            border-radius: 8px; padding: 14px 16px;
+        }
+        .badge-card-title {
+            font-size: 12px; color: var(--text-dim); margin-bottom: 6px; font-weight: 600;
+        }
+        .badge-card-product {
+            font-size: 14px; font-weight: 600; margin-bottom: 4px;
+        }
+        .badge-container { min-height: 22px; }
+
+        /* JSON viewer */
+        .json-viewer {
+            background: var(--bg-alt); border: 1px solid var(--border);
+            border-radius: 8px; padding: 14px; font-family: monospace;
+            font-size: 12px; max-height: 300px; overflow: auto;
+            white-space: pre-wrap; word-break: break-all;
+        }
+
+        /* Status */
+        .status { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+        .status.error { color: var(--red); }
+        .status.ok { color: var(--green); }
+
+        /* Modal button row */
+        .modal-buttons {
+            display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;
+        }
+    </style>
+    <link rel="stylesheet" href="/api/breakdown-cache/bd-static/breakdown_modal.css">
+</head>
+<body>
+    <h1>Breakdown Component Demo</h1>
+    <p class="subtitle">Test the unified inline badge + modal in different configurations before rolling out.</p>
+
+    <!-- Config Panel -->
+    <div class="config-panel">
+        <div class="config-row">
+            <label>TCG Player ID:</label>
+            <input type="number" id="cfg-tcg-id" placeholder="e.g. 517710">
+            <label>Product Name:</label>
+            <input type="text" id="cfg-product-name" value="" placeholder="Auto-filled on load" style="width:260px;">
+        </div>
+        <div class="config-row">
+            <label>Price Mode:</label>
+            <select id="cfg-price-mode">
+                <option value="best" selected>Best (store when available, market fallback)</option>
+                <option value="market">Market only</option>
+                <option value="store">Store only</option>
+            </select>
+            <label>Show Deep:</label>
+            <select id="cfg-show-deep">
+                <option value="true" selected>Yes</option>
+                <option value="false">No</option>
+            </select>
+        </div>
+        <div class="config-row">
+            <label>Parent Market:</label>
+            <input type="number" id="cfg-parent-market" step="0.01" placeholder="0.00">
+            <label>Parent Store:</label>
+            <input type="number" id="cfg-parent-store" step="0.01" placeholder="0.00">
+            <label>Parent Qty:</label>
+            <input type="number" id="cfg-parent-qty" value="1" min="1">
+        </div>
+        <div class="config-row">
+            <button class="action primary" id="btn-load">Load Breakdown Data</button>
+            <button class="action secondary" id="btn-load-mock">Load Mock Examples</button>
+            <span class="status" id="load-status"></span>
+        </div>
+    </div>
+
+    <!-- Inline Badge Gallery -->
+    <h2>Inline Badge Gallery</h2>
+    <div class="badge-gallery" id="badge-gallery">
+        <div style="color:var(--text-dim);font-size:13px;grid-column:1/-1;">
+            Enter a TCG ID and click "Load Breakdown Data" or "Load Mock Examples" to see badges.
+        </div>
+    </div>
+
+    <!-- Modal Launch -->
+    <h2>Modal</h2>
+    <div class="modal-buttons">
+        <button class="action green" id="btn-modal-recipe">Open Modal (Recipe Only)</button>
+        <button class="action primary" id="btn-modal-execute">Open Modal (With Execute)</button>
+    </div>
+
+    <!-- JSON Viewer -->
+    <h2>Raw API Data</h2>
+    <div class="json-viewer" id="json-viewer">No data loaded yet.</div>
+
+    <script src="/api/breakdown-cache/bd-static/breakdown_inline.js"></script>
+    <script src="/api/breakdown-cache/bd-static/breakdown_modal.js"></script>
+    <script>
+    (function() {
+        var _bdData = null;  // Loaded breakdown summary
+        var _rawCache = null; // Full cache record
+
+        // ─── Load real data ─────────────────────────────────────────
+
+        document.getElementById('btn-load').addEventListener('click', function() {
+            var tcgId = document.getElementById('cfg-tcg-id').value.trim();
+            if (!tcgId) { setStatus('Enter a TCG ID first', 'error'); return; }
+
+            setStatus('Loading...');
+
+            // Fetch batch summary + full cache in parallel
+            Promise.all([
+                fetch('/api/breakdown-cache/batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({tcgplayer_ids: [parseInt(tcgId)]})
+                }).then(function(r) { return r.json(); }),
+                fetch('/api/breakdown-cache/' + tcgId).then(function(r) { return r.json(); })
+            ])
+            .then(function(results) {
+                var batchData = results[0];
+                var cacheData = results[1];
+
+                var summary = (batchData.summaries || {})[tcgId] || (batchData.summaries || {})[parseInt(tcgId)];
+                _rawCache = cacheData.cache;
+
+                if (!summary && !_rawCache) {
+                    setStatus('No breakdown data found for TCG#' + tcgId, 'error');
+                    return;
+                }
+
+                _bdData = summary;
+
+                // Auto-fill product name
+                if (_rawCache && _rawCache.product_name) {
+                    document.getElementById('cfg-product-name').value = _rawCache.product_name;
+                }
+
+                // Auto-fill parent prices from summary
+                if (summary) {
+                    if (summary.parent_store_price) {
+                        document.getElementById('cfg-parent-store').value = summary.parent_store_price;
+                    }
+                }
+
+                renderBadgeGallery();
+                renderJSON(summary, cacheData);
+                setStatus('Loaded breakdown for TCG#' + tcgId, 'ok');
+            })
+            .catch(function(e) {
+                setStatus('Load failed: ' + e.message, 'error');
+            });
+        });
+
+        // ─── Load mock examples ─────────────────────────────────────
+
+        document.getElementById('btn-load-mock').addEventListener('click', function() {
+            _bdData = null;
+            renderMockGallery();
+            setStatus('Showing mock examples', 'ok');
+        });
+
+        // ─── Badge Gallery ──────────────────────────────────────────
+
+        function renderBadgeGallery() {
+            var gallery = document.getElementById('badge-gallery');
+            var priceMode = document.getElementById('cfg-price-mode').value;
+            var showDeep = document.getElementById('cfg-show-deep').value === 'true';
+            var parentMarket = parseFloat(document.getElementById('cfg-parent-market').value) || 0;
+            var parentStore = parseFloat(document.getElementById('cfg-parent-store').value) || 0;
+
+            if (!_bdData) {
+                gallery.innerHTML = '<div style="color:var(--text-dim);">No data loaded.</div>';
+                return;
+            }
+
+            var parentData = {market_price: parentMarket, store_price: parentStore};
+            var modes = ['best', 'market', 'store'];
+            var html = '';
+
+            for (var m = 0; m < modes.length; m++) {
+                html += '<div class="badge-card">';
+                html += '<div class="badge-card-title">Price Mode: ' + modes[m] + '</div>';
+                html += '<div class="badge-card-product">' + (document.getElementById('cfg-product-name').value || 'Product') + '</div>';
+                html += '<div class="badge-container" id="badge-' + modes[m] + '"></div>';
+                html += '</div>';
+            }
+
+            // Compact mode
+            html += '<div class="badge-card">';
+            html += '<div class="badge-card-title">Compact Mode (for table cells)</div>';
+            html += '<div class="badge-card-product">' + (document.getElementById('cfg-product-name').value || 'Product') + '</div>';
+            html += '<div class="badge-container" id="badge-compact"></div>';
+            html += '</div>';
+
+            gallery.innerHTML = html;
+
+            // Render badges
+            for (var m2 = 0; m2 < modes.length; m2++) {
+                var container = document.getElementById('badge-' + modes[m2]);
+                renderBreakdownBadge(container, _bdData, parentData, {
+                    priceMode: modes[m2], showDeep: showDeep
+                });
+            }
+            var compactContainer = document.getElementById('badge-compact');
+            renderBreakdownBadge(compactContainer, _bdData, parentData, {
+                priceMode: priceMode, showDeep: false, compact: true
+            });
+        }
+
+        function renderMockGallery() {
+            var gallery = document.getElementById('badge-gallery');
+
+            var mocks = [
+                {
+                    title: 'Profitable Breakdown (BD > Sealed)',
+                    bd: {best_variant_market: 55.00, best_variant_store: 60.00, parent_store_price: 49.99, variant_count: 1, variant_names: 'Open + Sell', deep_bd_market: 62.00, deep_bd_store: 65.00},
+                    parent: {market_price: 49.99, store_price: 49.99}
+                },
+                {
+                    title: 'Near-Parity (-10%)',
+                    bd: {best_variant_market: 45.00, best_variant_store: null, parent_store_price: null, variant_count: 1, variant_names: 'Standard'},
+                    parent: {market_price: 49.99, store_price: null}
+                },
+                {
+                    title: 'Expected Loss (ETB pattern, -30%)',
+                    bd: {best_variant_market: 35.00, best_variant_store: 38.00, parent_store_price: 54.99, variant_count: 2, variant_names: 'Open / Open + Promos', deep_bd_market: null, deep_bd_store: null},
+                    parent: {market_price: 49.99, store_price: 54.99}
+                },
+                {
+                    title: 'No Store Data (market only)',
+                    bd: {best_variant_market: 42.00, best_variant_store: null, parent_store_price: null, variant_count: 1, variant_names: 'Standard'},
+                    parent: {market_price: 49.99, store_price: null}
+                },
+                {
+                    title: 'With Deep Value',
+                    bd: {best_variant_market: 45.00, best_variant_store: 48.00, parent_store_price: 54.99, variant_count: 1, variant_names: 'Open All', deep_bd_market: 68.00, deep_bd_store: 72.50},
+                    parent: {market_price: 49.99, store_price: 54.99}
+                },
+                {
+                    title: 'Compact Mode (table cell)',
+                    bd: {best_variant_market: 55.00, best_variant_store: 60.00, parent_store_price: 49.99, variant_count: 1, variant_names: 'Standard'},
+                    parent: {market_price: 49.99, store_price: 49.99},
+                    compact: true
+                }
+            ];
+
+            var priceMode = document.getElementById('cfg-price-mode').value;
+            var showDeep = document.getElementById('cfg-show-deep').value === 'true';
+
+            var html = '';
+            for (var i = 0; i < mocks.length; i++) {
+                html += '<div class="badge-card">';
+                html += '<div class="badge-card-title">' + mocks[i].title + '</div>';
+                html += '<div class="badge-card-product">Pokemon Scarlet & Violet Elite Trainer Box</div>';
+                html += '<div class="badge-container" id="mock-badge-' + i + '"></div>';
+                html += '</div>';
+            }
+            gallery.innerHTML = html;
+
+            for (var j = 0; j < mocks.length; j++) {
+                var container = document.getElementById('mock-badge-' + j);
+                renderBreakdownBadge(container, mocks[j].bd, mocks[j].parent, {
+                    priceMode: priceMode, showDeep: showDeep, compact: !!mocks[j].compact
+                });
+            }
+
+            renderJSON(mocks, null);
+        }
+
+        // ─── Modal Launch ───────────────────────────────────────────
+
+        document.getElementById('btn-modal-recipe').addEventListener('click', function() {
+            var tcgId = parseInt(document.getElementById('cfg-tcg-id').value) || null;
+            openBreakdownModal({
+                tcgplayerId: tcgId,
+                productName: document.getElementById('cfg-product-name').value || 'Demo Product',
+                parentMarket: parseFloat(document.getElementById('cfg-parent-market').value) || 0,
+                parentStore: parseFloat(document.getElementById('cfg-parent-store').value) || null,
+                parentQty: parseInt(document.getElementById('cfg-parent-qty').value) || 1,
+                apiBase: '/api/breakdown-cache',
+                priceMode: document.getElementById('cfg-price-mode').value,
+                showDeep: document.getElementById('cfg-show-deep').value === 'true',
+                onExecute: null,
+                onSave: function(cache) { console.log('Recipe saved:', cache); },
+            });
+        });
+
+        document.getElementById('btn-modal-execute').addEventListener('click', function() {
+            var tcgId = parseInt(document.getElementById('cfg-tcg-id').value) || null;
+            var qty = parseInt(document.getElementById('cfg-parent-qty').value) || 1;
+            openBreakdownModal({
+                tcgplayerId: tcgId,
+                productName: document.getElementById('cfg-product-name').value || 'Demo Product',
+                parentMarket: parseFloat(document.getElementById('cfg-parent-market').value) || 0,
+                parentStore: parseFloat(document.getElementById('cfg-parent-store').value) || null,
+                parentQty: qty,
+                apiBase: '/api/breakdown-cache',
+                priceMode: document.getElementById('cfg-price-mode').value,
+                showDeep: document.getElementById('cfg-show-deep').value === 'true',
+                showQtySelector: qty > 1,
+                onExecute: function(variantId, qtyToBreak, components) {
+                    // Demo: just log and resolve
+                    console.log('Execute breakdown:', {variantId: variantId, qty: qtyToBreak, components: components});
+                    return new Promise(function(resolve) {
+                        setTimeout(function() {
+                            alert('Demo execute: would break down ' + qtyToBreak + ' unit(s) using variant ' + (variantId || 'new'));
+                            resolve({success: true});
+                        }, 500);
+                    });
+                },
+                onSave: function(cache) { console.log('Recipe saved:', cache); },
+            });
+        });
+
+        // ─── Price mode change re-renders ───────────────────────────
+
+        document.getElementById('cfg-price-mode').addEventListener('change', function() {
+            if (_bdData) renderBadgeGallery();
+        });
+        document.getElementById('cfg-show-deep').addEventListener('change', function() {
+            if (_bdData) renderBadgeGallery();
+        });
+
+        // ─── Helpers ────────────────────────────────────────────────
+
+        function renderJSON(summary, cache) {
+            var viewer = document.getElementById('json-viewer');
+            var data = {batch_summary: summary};
+            if (cache) data.full_cache = cache;
+            viewer.textContent = JSON.stringify(data, null, 2);
+        }
+
+        function setStatus(msg, cls) {
+            var el = document.getElementById('load-status');
+            el.textContent = msg;
+            el.className = 'status' + (cls ? ' ' + cls : '');
+        }
+    })();
+    </script>
+</body>
+</html>
