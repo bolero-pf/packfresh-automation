@@ -695,7 +695,7 @@
                 for (var i = 0; i < results.length; i++) {
                     _searchResults[i] = results[i];
                     var r = results[i];
-                    var price = parseFloat(r.market_price || r.midPrice || 0);
+                    var price = parseFloat(r.market_price || r.unopenedPrice || r.midPrice || r.marketPrice || 0);
                     html += '<div class="bd-search-result" data-sr-idx="' + i + '" data-sr-type="sealed">';
                     html += '<span class="bd-sr-name">' + _esc(r.name || r.product_name || '') + '</span>';
                     html += '<span class="bd-sr-price">' + (price > 0 ? '$' + price.toFixed(2) : '') + '</span>';
@@ -761,7 +761,7 @@
                     tcgplayer_id: tcgId ? parseInt(tcgId) : null,
                     set_name: r.set_name || r.setName || '',
                     quantity_per_parent: 1,
-                    market_price: parseFloat(r.market_price || r.midPrice || 0),
+                    market_price: parseFloat(r.market_price || r.unopenedPrice || r.midPrice || r.marketPrice || 0),
                     component_type: type === 'promo' ? 'promo' : 'sealed',
                 });
 

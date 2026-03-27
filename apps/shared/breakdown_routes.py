@@ -157,12 +157,15 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
             return jsonify({"results": [], "error": "PPT not configured"}), 503
         try:
             results = ppt.search_sealed_products(q, limit=10)
-            # Normalize tcgplayer_id field
+            # Normalize fields — PPT returns varying field names
             for r in results:
                 if not r.get("tcgplayer_id"):
                     tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
                     if tcg_id:
                         r["tcgplayer_id"] = int(tcg_id)
+                # Sealed products: price is in unopenedPrice, not market_price
+                if not r.get("market_price"):
+                    r["market_price"] = r.get("unopenedPrice") or r.get("marketPrice") or r.get("midPrice") or 0
             return jsonify({"results": results})
         except Exception as e:
             details = e.args[2] if len(e.args) > 2 else {}
