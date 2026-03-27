@@ -11,7 +11,6 @@ import threading
 from flask import Blueprint, request, jsonify, render_template_string
 
 import db
-from auth import require_auth
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +42,11 @@ def _ensure_table():
 # ─── API Routes ──────────────────────────────────────────────────────────────
 
 @bp.route("/inventory/ai-enrichment")
-@require_auth
 def ai_enrichment_page():
     return render_template_string(PAGE_HTML)
 
 
 @bp.route("/api/ai/scan", methods=["POST"])
-@require_auth
 def api_scan():
     """Pull all products from Shopify into the enrichment queue."""
     from shopify_graphql import shopify_gql
@@ -116,7 +113,6 @@ def api_scan():
 
 
 @bp.route("/api/ai/queue")
-@require_auth
 def api_queue():
     """List queue items with optional status filter and search."""
     status = request.args.get("status", "")
@@ -166,7 +162,6 @@ def api_queue():
 
 
 @bp.route("/api/ai/generate/<int:item_id>", methods=["POST"])
-@require_auth
 def api_generate_one(item_id):
     """Generate AI fields for one queue item."""
     row = db.query_one("SELECT * FROM ai_enrichment_queue WHERE id = %s", (item_id,))
@@ -198,7 +193,6 @@ def api_generate_one(item_id):
 
 
 @bp.route("/api/ai/generate-batch", methods=["POST"])
-@require_auth
 def api_generate_batch():
     """Generate AI fields for all pending items. Runs in background thread."""
     pending = db.query(
@@ -239,7 +233,6 @@ def api_generate_batch():
 
 
 @bp.route("/api/ai/item/<int:item_id>", methods=["PUT"])
-@require_auth
 def api_update_item(item_id):
     """Edit generated fields before approval."""
     data = request.get_json(silent=True) or {}
@@ -259,7 +252,6 @@ def api_update_item(item_id):
 
 
 @bp.route("/api/ai/approve/<int:item_id>", methods=["POST"])
-@require_auth
 def api_approve_one(item_id):
     affected = db.execute(
         "UPDATE ai_enrichment_queue SET status = 'approved' WHERE id = %s AND status = 'generated'",
@@ -269,7 +261,6 @@ def api_approve_one(item_id):
 
 
 @bp.route("/api/ai/approve-batch", methods=["POST"])
-@require_auth
 def api_approve_batch():
     """Batch approve all generated items."""
     affected = db.execute(
@@ -279,7 +270,6 @@ def api_approve_batch():
 
 
 @bp.route("/api/ai/push-batch", methods=["POST"])
-@require_auth
 def api_push_batch():
     """Push all approved items to Shopify."""
     rows = db.query(
@@ -323,7 +313,6 @@ def api_push_batch():
 
 
 @bp.route("/api/ai/skip/<int:item_id>", methods=["POST"])
-@require_auth
 def api_skip_one(item_id):
     db.execute("UPDATE ai_enrichment_queue SET status = 'skipped' WHERE id = %s", (item_id,))
     return jsonify({"ok": True})
