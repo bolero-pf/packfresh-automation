@@ -708,7 +708,53 @@ def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
         })
 
     # ── Truly new items (no snapshot ancestor) ──
+    # Group orphan breakdown children by their non-snapshot parent so we show
+    # "Added: Skeledirge Tin (×5)" instead of each individual pack/promo.
+    orphan_by_root = {}  # root_id -> {name, qty, total_offer}
+    direct_orphans = []  # items with no parent (genuinely added top-level items)
+
     for curr in orphan_items:
+        offer = float(curr.get("offer_price") or 0)
+        pid = str(curr.get("parent_item_id") or "")
+
+        if not pid:
+            direct_orphans.append(curr)
+            continue
+
+        # Walk up to the top-level non-snapshot ancestor
+        root_id = pid
+        root_item = all_curr_by_id.get(root_id)
+        visited = set()
+        while root_item and str(root_item.get("parent_item_id") or "") and root_id not in visited:
+            visited.add(root_id)
+            next_pid = str(root_item["parent_item_id"])
+            if next_pid in snap_id_set:
+                break  # stop before entering snapshot territory
+            root_id = next_pid
+            root_item = all_curr_by_id.get(root_id)
+
+        if root_id not in orphan_by_root:
+            root = all_curr_by_id.get(root_id)
+            orphan_by_root[root_id] = {
+                "name": root.get("product_name") if root else curr.get("product_name"),
+                "qty": root.get("quantity", 1) if root else curr.get("quantity", 1),
+                "total_offer": 0.0,
+            }
+        orphan_by_root[root_id]["total_offer"] += offer
+
+    # Emit grouped "Added" lines for breakdown families
+    for root_id, info in orphan_by_root.items():
+        amount = round(info["total_offer"], 2)
+        if abs(amount) < 0.01:
+            continue
+        adjustments.append({
+            "type": "added",
+            "description": f"Added: {info['name']} (×{info['qty']})",
+            "amount": amount,
+        })
+
+    # Emit direct orphans (top-level items added during ingest, not broken down)
+    for curr in direct_orphans:
         amount = round(float(curr.get("offer_price") or 0), 2)
         if abs(amount) < 0.01:
             continue
