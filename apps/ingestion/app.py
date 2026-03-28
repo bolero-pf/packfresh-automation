@@ -713,6 +713,10 @@ def _push_session_worker(job_id, session_id, active):
 
             job["progress"] += len(group["items"])
 
+        # Suppress cache refresh from our own Shopify writes
+        if cache_mgr:
+            cache_mgr.record_tool_push()
+
         # Determine final session status
         all_items_after = ingest.get_session_items(session_id)
         remaining_unpushed = [i for i in all_items_after

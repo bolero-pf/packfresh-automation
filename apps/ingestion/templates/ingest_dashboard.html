@@ -1355,17 +1355,25 @@ async function _pollPushJob(jobId, total, panel) {
     /**
      * Poll a background push job until it completes.
      * Shows progress bar in the panel. Returns the final job result or null on error.
+     * Retries on transient failures — the backend keeps processing even if we lose connection briefly.
      */
     const startTime = Date.now();
+    let consecutiveFailures = 0;
+    const MAX_RETRIES = 10;
     while (true) {
         await new Promise(r => setTimeout(r, 2000));  // poll every 2s
         try {
             const r = await fetch(`/api/ingest/push-job/${jobId}`);
-            const d = await r.json();
             if (!r.ok) {
-                panel.innerHTML = `<div class="alert alert-error">Lost connection to push job</div>`;
-                return null;
+                consecutiveFailures++;
+                if (consecutiveFailures >= MAX_RETRIES) {
+                    panel.innerHTML = `<div class="alert alert-error">Lost connection to push job after ${MAX_RETRIES} retries. The push may still be running in the background — reload the page to check session status.</div>`;
+                    return null;
+                }
+                continue;
             }
+            const d = await r.json();
+            consecutiveFailures = 0;  // reset on success
 
             if (d.status === 'running') {
                 const pct = total > 0 ? Math.round((d.progress / total) * 100) : 0;
@@ -1386,8 +1394,23 @@ async function _pollPushJob(jobId, total, panel) {
             // Job complete
             return d;
         } catch(err) {
-            panel.innerHTML = `<div class="alert alert-error">Connection lost: ${err.message}</div>`;
-            return null;
+            consecutiveFailures++;
+            if (consecutiveFailures >= MAX_RETRIES) {
+                panel.innerHTML = `<div class="alert alert-error">Connection lost after ${MAX_RETRIES} retries: ${err.message}. The push may still be running — reload the page to check session status.</div>`;
+                return null;
+            }
+            // Show transient warning but keep polling
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            panel.innerHTML = `
+                <div style="padding:16px;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:0.85rem;">
+                        <span><span class="spinner" style="display:inline-block;width:14px;height:14px;margin-right:6px;"></span> Pushing to Shopify... (reconnecting ${consecutiveFailures}/${MAX_RETRIES})</span>
+                        <span style="color:var(--text-dim);">${elapsed}s</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="fill" style="width:0%;"></div>
+                    </div>
+                </div>`;
         }
     }
 }
