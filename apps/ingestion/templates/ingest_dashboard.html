@@ -551,7 +551,7 @@ async function viewSession(sessionId, _preserveScroll) {
         // Load raw card barcodes for this session (persists across refreshes)
         _loadSessionBarcodes(sessionId);
         // Load offer adjustment summary (if changes exist)
-        if (isReceived) _loadOfferAdjustment(sessionId);
+        _loadOfferAdjustment(sessionId);
     } catch(err) {
         el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
