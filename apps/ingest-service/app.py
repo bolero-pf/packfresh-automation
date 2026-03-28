@@ -1029,18 +1029,46 @@ def map_item():
         )
 
         # Auto-link other unmapped items in the same session with the same product_name
-        # so you don't have to manually relink duplicates
+        # AND same condition/grade — a PSA 9 and PSA 10 of the same card have different prices
         siblings_updated = 0
         session_id = data.get("session_id") or updated.get("session_id")
         if session_id and new_price is not None:
-            siblings = db.query("""
-                SELECT id FROM intake_items
-                WHERE session_id = %s
-                  AND id != %s
-                  AND product_name = %s
-                  AND (tcgplayer_id IS NULL OR is_mapped = FALSE)
-                  AND item_status IN ('good', 'damaged')
-            """, (session_id, item_id, updated.get("product_name") or data.get("product_name", "")))
+            # Fetch the source item to know its condition/grade for sibling matching
+            source_item = db.query_one(
+                "SELECT is_graded, grade_company, grade_value, condition FROM intake_items WHERE id = %s",
+                (item_id,)
+            )
+            if source_item and source_item.get("is_graded"):
+                # Graded: only auto-link siblings with same company + grade
+                siblings = db.query("""
+                    SELECT id FROM intake_items
+                    WHERE session_id = %s
+                      AND id != %s
+                      AND product_name = %s
+                      AND is_graded = TRUE
+                      AND grade_company = %s
+                      AND grade_value = %s
+                      AND (tcgplayer_id IS NULL OR is_mapped = FALSE)
+                      AND item_status IN ('good', 'damaged')
+                """, (session_id, item_id,
+                      updated.get("product_name") or data.get("product_name", ""),
+                      source_item.get("grade_company", ""),
+                      source_item.get("grade_value", "")))
+            else:
+                # Raw: only auto-link siblings with same condition (and not graded)
+                source_cond = (source_item or {}).get("condition") or "NM"
+                siblings = db.query("""
+                    SELECT id FROM intake_items
+                    WHERE session_id = %s
+                      AND id != %s
+                      AND product_name = %s
+                      AND (is_graded = FALSE OR is_graded IS NULL)
+                      AND COALESCE(condition, 'NM') = %s
+                      AND (tcgplayer_id IS NULL OR is_mapped = FALSE)
+                      AND item_status IN ('good', 'damaged')
+                """, (session_id, item_id,
+                      updated.get("product_name") or data.get("product_name", ""),
+                      source_cond))
             for sib in siblings:
                 try:
                     intake.map_item(

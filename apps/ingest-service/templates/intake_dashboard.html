@@ -1389,7 +1389,7 @@
                     <div class="stat"><div class="stat-label">Type</div><div class="stat-value" style="font-size:1.1rem;"><span class="badge badge-blue">${s.session_type}</span>
                         ${editable ? `<div style="margin-top:6px;"><button class="btn btn-sm" style="font-size:0.75rem;padding:2px 8px;background:${s.is_distribution === true ? '#7c3aed' : 'var(--surface-2)'};color:${s.is_distribution === true ? '#fff' : 'var(--text-dim)'};border:1px solid ${s.is_distribution === true ? '#7c3aed' : 'var(--border)'};" onclick="toggleDistribution('${sessionId}')">${s.is_distribution === true ? '📦 Distribution' : '🤝 Private Purchase'}</button></div>` : ''}
                     </div></div>
-                    <div class="stat"><div class="stat-label">Market Value</div><div class="stat-value">$${(s.total_market_value || 0).toFixed(2)}</div></div>
+                    <div class="stat"><div class="stat-label">Market Value</div><div class="stat-value"><span id="market-value-display">$${(s.total_market_value || 0).toFixed(2)}</span></div></div>
                     <div class="stat">
                         <div class="stat-label">Offer %</div>
                         <div class="stat-value" style="display:flex; align-items:center; gap:8px;">
@@ -1583,7 +1583,7 @@
                                             const linkLabel = i.is_mapped ? 'Relink' : 'Link';
                                             const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
                                             if (s.session_type === 'raw') {
-                                                btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${s.offer_percentage},'${(i.set_name||'').replace(/'/g,"\\'")}','${(i.card_number||'').replace(/'/g,"\\'")}',${i.is_graded||false},'${(i.grade_company||'')}','${(i.grade_value||'')}')">${linkLabel}</button> `;
+                                                btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${s.offer_percentage},'${(i.set_name||'').replace(/'/g,"\\'")}','${(i.card_number||'').replace(/'/g,"\\'")}',${i.is_graded||false},'${(i.grade_company||'')}','${(i.grade_value||'')}','${i.condition||i.listing_condition||'NM'}',${i.quantity||1})">${linkLabel}</button> `;
                                             } else {
                                                 btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
                                             }
@@ -2378,24 +2378,15 @@
                 cells[5].innerHTML = '<span class="badge badge-green">Applied</span>';
             }
 
-            // Update session stats at top of modal
+            // Update session stats at top of modal (market value + offer total)
             try {
                 const sr = await fetch(`/api/intake/session/${sessionId}`);
                 const sd = await sr.json();
                 const s = sd.session;
-                const statsDiv = document.querySelector('#session-modal-body .stats');
-                if (statsDiv) {
-                    const marketStat = statsDiv.querySelectorAll('.stat-value');
-                    if (marketStat[2]) marketStat[2].textContent = '$' + (s.total_market_value || 0).toFixed(2);
-                    const offerStat = document.querySelector('#session-modal-body .stat-value');
-                    // Update offer total
-                    const allStats = document.querySelectorAll('#session-modal-body .stat-value');
-                    allStats.forEach(el => {
-                        if (el.textContent.startsWith('$') && el.closest('.stat')?.querySelector('.stat-label')?.textContent === 'Offer Total') {
-                            el.textContent = '$' + (s.total_offer_amount || 0).toFixed(2);
-                        }
-                    });
-                }
+                const mvEl = document.getElementById('market-value-display');
+                if (mvEl) mvEl.textContent = '$' + (s.total_market_value || 0).toFixed(2);
+                const otEl = document.getElementById('offer-total-display');
+                if (otEl) otEl.textContent = '$' + (s.total_offer_amount || 0).toFixed(2);
             } catch(e) { /* stats update is best-effort */ }
         } catch(err) { alert(err.message); }
     }
@@ -3317,8 +3308,8 @@
         renderTiles();
     }
 
-    async function relinkRawCard(itemId, sessionId, cardName, offerPct, setName, cardNumber, isGraded, gradeCompany, gradeValue) {
-        window._relinkState = { itemId, sessionId, cardName, setName: setName||'', cardNumber: cardNumber||'', isGraded: !!isGraded, gradeCompany: gradeCompany||'', gradeValue: gradeValue||'' };
+    async function relinkRawCard(itemId, sessionId, cardName, offerPct, setName, cardNumber, isGraded, gradeCompany, gradeValue, condition, quantity) {
+        window._relinkState = { itemId, sessionId, cardName, setName: setName||'', cardNumber: cardNumber||'', isGraded: !!isGraded, gradeCompany: gradeCompany||'', gradeValue: gradeValue||'', condition: condition||'NM', quantity: parseInt(quantity)||1 };
         _relinkShowSearch();
         openModal('relink-modal');
         // Auto-fire search immediately — we already have name + set from the import
@@ -3328,7 +3319,7 @@
     function _relinkShowSearch() {
         const rs = window._relinkState;
         const body = document.getElementById('relink-body');
-        document.getElementById('relink-title').textContent = '\u{1f517} Relink: ' + rs.cardName;
+        document.getElementById('relink-title').textContent = '\u{1f517} Relink: ' + rs.cardName + (rs.quantity > 1 ? ' (×' + rs.quantity + ')' : '');
         body.innerHTML = `
             <div class="form-group"><label>Card Name</label>
                 <input type="text" id="relink-search" value="${rs.cardName.replace(/"/g,'&quot;')}" placeholder="e.g. Charizard ex"></div>
@@ -3339,9 +3330,85 @@
                     <input type="number" id="relink-tcgid" placeholder="e.g. 535090"></div>
             </div>
             <button class="btn btn-primary" id="relink-search-btn" style="width:100%;">Search</button>
+            <button class="btn btn-secondary" id="relink-manual-btn" style="width:100%;margin-top:6px;font-size:0.8rem;">💲 Manual Price (no TCGPlayer ID)</button>
             <div id="relink-results" style="margin-top:12px;"></div>`;
         document.getElementById('relink-search-btn').addEventListener('click', _relinkDoSearch);
+        document.getElementById('relink-manual-btn').addEventListener('click', _relinkManualPrice);
         document.getElementById('relink-search').addEventListener('keydown', function(e) { if (e.key === 'Enter') _relinkDoSearch(); });
+    }
+
+    async function _relinkManualPrice() {
+        const rs = window._relinkState;
+        const body = document.getElementById('relink-body');
+        const isGraded = rs.isGraded;
+
+        let condHtml = '';
+        if (isGraded) {
+            condHtml = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
+                <div class="form-group"><label>Grading Company</label>
+                <select id="manual-grade-company">
+                    ${['PSA','BGS','CGC','SGC'].map(c => `<option value="${c}"${c===rs.gradeCompany?' selected':''}>${c}</option>`).join('')}
+                </select></div>
+                <div class="form-group"><label>Grade</label>
+                <select id="manual-grade-value">
+                    ${['10','9.5','9','8.5','8','7','6','5','4','3','2','1'].map(g => `<option value="${g}"${g===rs.gradeValue?' selected':''}>${g}</option>`).join('')}
+                </select></div>
+            </div>`;
+        } else {
+            const cond = rs.condition || 'NM';
+            condHtml = `<div class="form-group"><label>Condition</label>
+                <select id="manual-condition">
+                    ${['NM','LP','MP','HP','DMG'].map(c => `<option value="${c}"${c===cond?' selected':''}>${c}</option>`).join('')}
+                </select></div>`;
+        }
+
+        body.innerHTML = `
+            <div style="margin-bottom:8px;font-size:0.85rem;"><strong>${rs.cardName}</strong>${rs.quantity > 1 ? ` <span style="color:var(--amber);font-weight:700;">× ${rs.quantity}</span>` : ''}
+            ${rs.setName ? `<br><span style="color:var(--text-dim);">${rs.setName}</span>` : ''}</div>
+            <div class="alert alert-warning" style="font-size:0.8rem;margin-bottom:12px;">No TCGPlayer ID — entering manual market price only.</div>
+            ${condHtml}
+            <div class="form-group"><label>Market Price ($)</label>
+                <input type="number" id="manual-price-input" min="0" step="0.01" placeholder="e.g. 45.00" style="font-size:1.1rem;"></div>
+            <div style="display:flex;gap:8px;">
+                <button id="manual-link-ok" class="btn btn-primary" style="flex:1;">Link with Manual Price</button>
+                <button id="manual-link-back" class="btn btn-secondary">← Back</button>
+            </div>`;
+
+        document.getElementById('manual-link-back').addEventListener('click', _relinkShowSearch);
+        document.getElementById('manual-price-input').focus();
+        document.getElementById('manual-link-ok').addEventListener('click', async function() {
+            const price = parseFloat(document.getElementById('manual-price-input').value);
+            if (isNaN(price) || price <= 0) { document.getElementById('manual-price-input').style.borderColor = 'var(--red)'; return; }
+
+            body.innerHTML = '<div class="loading"><span class="spinner"></span> Linking...</div>';
+            try {
+                // Use accept-price endpoint (allows null tcgplayer_id)
+                const payload = { session_id: rs.sessionId, override_price: price };
+                const r = await fetch('/api/intake/item/' + rs.itemId + '/accept-price', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                });
+                if (!r.ok) { const d = await r.json(); body.innerHTML = '<div class="alert alert-error">' + (d.error||'Failed') + '</div>'; return; }
+
+                // Update condition or grade
+                if (isGraded) {
+                    const company = document.getElementById('manual-grade-company')?.value || rs.gradeCompany || 'PSA';
+                    const gradeVal = document.getElementById('manual-grade-value')?.value || rs.gradeValue || '9';
+                    await fetch('/api/intake/item/' + rs.itemId + '/mark-graded', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ session_id: rs.sessionId, grade_company: company, grade_value: gradeVal, market_price: price }),
+                    });
+                } else {
+                    const cond = document.getElementById('manual-condition')?.value || 'NM';
+                    await fetch('/api/intake/item/' + rs.itemId + '/update-condition', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ condition: cond, session_id: rs.sessionId }),
+                    });
+                }
+                closeModal('relink-modal');
+                viewSession(rs.sessionId, true);
+            } catch(err) { body.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
+        });
     }
 
     function _relinkRenderResults(results, resultsDiv, append) {
@@ -3445,7 +3512,7 @@
             if (!rs._relinkMode) rs._relinkMode = rs.isGraded ? 'graded' : 'raw';
             if (!rs._relinkGradeCompany) rs._relinkGradeCompany = rs.gradeCompany || 'PSA';
             if (!rs._relinkGradeValue) rs._relinkGradeValue = rs.gradeValue || '9';
-            _relinkRenderConditions('NM');
+            _relinkRenderConditions(rs.condition || 'NM');
         } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
     }
 
@@ -3457,9 +3524,10 @@
         const selectedVariant = rs.primary;
         const variantData = (rs.variants || {})[selectedVariant] || {};
 
-        let html = `<div style="margin-bottom:6px; font-size:0.8rem; color:var(--text-dim);">Replacing: <span style="text-decoration:line-through;">${rs.cardName}</span></div>`;
+        let html = `<div style="margin-bottom:6px; font-size:0.8rem; color:var(--text-dim);">Replacing: <span style="text-decoration:line-through;">${rs.cardName}</span>${rs.quantity > 1 ? ` <span style="font-weight:700;color:var(--amber);">× ${rs.quantity}</span>` : ''}</div>`;
         html += `<div style="margin-bottom:12px;"><strong style="color:var(--accent); font-size:1.1rem;">${rs.newName}</strong>`;
-        html += `<span style="color:var(--text-dim);"> — ${rs.setName}${rs.cardNum ? ' #'+rs.cardNum : ''} · TCG#${rs.tcgId}</span></div>`;
+        html += `<span style="color:var(--text-dim);"> — ${rs.setName}${rs.cardNum ? ' #'+rs.cardNum : ''} · TCG#${rs.tcgId}</span>`;
+        html += `${rs.quantity > 1 ? `<span style="background:var(--amber);color:#000;font-weight:700;font-size:0.75rem;padding:1px 6px;border-radius:4px;margin-left:6px;">Qty: ${rs.quantity}</span>` : ''}</div>`;
 
         // Raw / Graded toggle
         const modeRaw = rs._relinkMode === 'raw';
