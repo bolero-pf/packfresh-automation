@@ -660,8 +660,27 @@ def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
             })
             continue
 
-        # Qty reduced due to partial breakdown — skip (COGS-neutral)
-        if sid in breakdown_parent_ids and curr.get("quantity", 1) < snap.get("quantity", 1):
+        # Qty reduced — account for partial breakdown portion (COGS-neutral)
+        if sid in breakdown_parent_ids:
+            # How many units were broken down from this item?
+            bd_children = [i for i in all_current_items
+                           if str(i.get("parent_item_id") or "") == sid
+                           and i.get("item_status") == "broken_down"]
+            bd_qty = sum(c.get("quantity", 1) for c in bd_children)
+            # Expected qty after breakdown only
+            expected_qty = snap.get("quantity", 1) - bd_qty
+            actual_qty = curr.get("quantity", 1)
+            if actual_qty < expected_qty:
+                # Additional qty reduction beyond breakdown (e.g. manual edit = missing)
+                missing_qty = expected_qty - actual_qty
+                per_unit_offer = snap_offer / snap.get("quantity", 1) if snap.get("quantity", 1) else 0
+                amount = -(per_unit_offer * missing_qty)
+                adjustments.append({
+                    "type": "missing",
+                    "description": f"Missing: {snap['product_name']} (×{missing_qty})",
+                    "amount": round(amount, 2),
+                })
+            # Either way, the breakdown portion is handled — move on
             continue
 
         # Relinked (different product)
