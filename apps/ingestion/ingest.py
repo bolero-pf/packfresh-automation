@@ -596,8 +596,17 @@ def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
 
         # ── Item fully broken down (status=broken_down, family includes children) ──
         if full_item and full_item.get("item_status") == "broken_down":
-            # Breakdown should be ~COGS-neutral, but rounding may cause tiny delta
-            if abs(amount) > 0.01:
+            curr_qty = full_item.get("quantity", 1)
+            snap_qty = snap.get("quantity", 1)
+            if curr_qty < snap_qty:
+                # Qty was reduced before breakdown (e.g. relinked some to different product)
+                missing_qty = snap_qty - curr_qty
+                adjustments.append({
+                    "type": "qty_changed",
+                    "description": f"Qty: {snap['product_name']} ({snap_qty} → {curr_qty})",
+                    "amount": amount,
+                })
+            elif abs(amount) > 0.01:
                 adjustments.append({
                     "type": "price_changed",
                     "description": f"Breakdown rounding: {snap['product_name']}",
