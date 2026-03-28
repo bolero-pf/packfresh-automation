@@ -3573,8 +3573,12 @@
             html += `</div>`;
 
             const selPrice = variantData[selectedCond];
+            html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                <label style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap;">Price $</label>
+                <input type="number" id="relink-price-override" value="${selPrice ? selPrice.toFixed(2) : ''}" min="0" step="0.01" style="flex:1;font-size:1rem;font-weight:700;" placeholder="Enter price">
+            </div>`;
             html += `<div style="display:flex;gap:8px;">`;
-            html += `<button id="relink-ok" class="btn btn-primary" style="flex:1;">Relink ${selectedCond}${selPrice ? ' — $'+selPrice.toFixed(2) : ''}</button>`;
+            html += `<button id="relink-ok" class="btn btn-primary" style="flex:1;">Relink ${selectedCond}</button>`;
             html += `<button id="relink-back" class="btn btn-secondary">← Back</button>`;
             html += `</div>`;
 
@@ -3620,8 +3624,12 @@
                 html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;color:var(--text-dim);">No eBay data for ${selCompany} ${selGrade}</div>`;
             }
 
+            html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                <label style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap;">Price $</label>
+                <input type="number" id="relink-price-override" value="${gradePrice ? gradePrice.toFixed(2) : ''}" min="0" step="0.01" style="flex:1;font-size:1rem;font-weight:700;" placeholder="Enter price">
+            </div>`;
             html += `<div style="display:flex;gap:8px;">`;
-            html += `<button id="relink-ok" class="btn btn-primary" style="flex:1;">Relink ${selCompany} ${selGrade}${gradePrice ? ' — $'+gradePrice.toFixed(2) : ''}</button>`;
+            html += `<button id="relink-ok" class="btn btn-primary" style="flex:1;">Relink ${selCompany} ${selGrade}</button>`;
             html += `<button id="relink-back" class="btn btn-secondary">← Back</button>`;
             html += `</div>`;
         }
@@ -3638,19 +3646,12 @@
         document.getElementById('relink-back').addEventListener('click', _relinkShowSearch);
         document.getElementById('relink-ok').addEventListener('click', async function() {
             const modeRaw = rs._relinkMode === 'raw';
-            const variantData2 = (rs.variants || {})[rs.primary] || {};
-            let price = modeRaw ? (variantData2[selectedCond] || 0) : ((rs.gradedPrices || {})[rs._relinkGradeCompany || 'PSA']?.[rs._relinkGradeValue || '9']?.price || 0);
+            const overrideInput = document.getElementById('relink-price-override');
+            let price = overrideInput ? parseFloat(overrideInput.value) : 0;
 
-            if (!price) {
-                const manual = await themedPrompt({
-                    title: 'No price',
-                    message: 'No price available. Enter manually:',
-                    inputs: [{ type: 'number', label: 'Market price ($)', min: 0, step: '0.01' }],
-                    confirmText: 'Relink',
-                });
-                if (manual === null) return;
-                price = parseFloat(manual);
-                if (isNaN(price) || price <= 0) return;
+            if (!price || isNaN(price) || price <= 0) {
+                if (overrideInput) { overrideInput.style.borderColor = 'var(--red)'; overrideInput.focus(); }
+                return;
             }
 
             body.innerHTML = '<div class="loading"><span class="spinner"></span> Relinking...</div>';
