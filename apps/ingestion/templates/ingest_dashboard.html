@@ -1109,7 +1109,7 @@ async function _loadOfferAdjustment(sessionId) {
                 <summary style="cursor:pointer; color:var(--text-dim); margin-bottom:8px;">${d.adjustments.length} change(s) — click to expand</summary>
                 <div style="display:flex; flex-direction:column; gap:4px;">`;
             d.adjustments.forEach(a => {
-                const icon = a.type === 'damaged' ? '⚠️' : a.type === 'removed' ? '🗑' : a.type === 'added' ? '➕' : a.type === 'relinked' ? '🔗' : a.type === 'qty_changed' ? '✏️' : '💲';
+                const icon = a.type === 'damaged' ? '⚠️' : a.type === 'missing' ? '❌' : a.type === 'removed' ? '🗑' : a.type === 'added' ? '➕' : a.type === 'relinked' ? '🔗' : a.type === 'qty_changed' ? '✏️' : '💲';
                 const amtColor = a.amount < 0 ? 'var(--red)' : a.amount > 0 ? 'var(--green)' : 'var(--text-dim)';
                 const amtSign = a.amount > 0 ? '+' : '';
                 html += `<div style="display:flex; justify-content:space-between; align-items:center; padding:4px 8px; background:var(--surface-2); border-radius:4px;">

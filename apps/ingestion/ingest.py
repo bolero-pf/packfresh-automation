@@ -531,42 +531,79 @@ def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
     # Build lookup maps
     snap_by_id = {s["id"]: s for s in snapshot_items}
 
-    # Current items (excluding broken_down parents — they're replaced by children)
-    current_items = get_session_items(session_id)
-    current_active = [i for i in current_items if i.get("item_status") in ("good", "damaged")]
+    # Get ALL current items (including broken_down, missing, etc.) for status checks
+    all_current_items = query(
+        "SELECT * FROM intake_items WHERE session_id = %s ORDER BY created_at",
+        (session_id,)
+    )
+    all_curr_by_id = {str(i["id"]): i for i in all_current_items}
+
+    # Active items for value comparison
+    current_active = [i for i in all_current_items if i.get("item_status") in ("good", "damaged")]
     curr_by_id = {str(i["id"]): i for i in current_active}
+
+    # IDs that are parents of damage-split children
+    damage_parent_ids = set()
+    for i in all_current_items:
+        if i.get("parent_item_id") and i.get("item_status") == "damaged":
+            damage_parent_ids.add(str(i["parent_item_id"]))
+
+    # IDs that are parents of breakdown children (child status 'broken_down' = split-then-break)
+    breakdown_parent_ids = set()
+    for i in all_current_items:
+        if i.get("parent_item_id") and i.get("item_status") == "broken_down":
+            breakdown_parent_ids.add(str(i["parent_item_id"]))
+
+    # Collect damage-split children keyed by parent_item_id
+    damage_children_by_parent = {}
+    for i in all_current_items:
+        pid = str(i.get("parent_item_id") or "")
+        if pid and i.get("item_status") == "damaged" and pid in damage_parent_ids:
+            damage_children_by_parent.setdefault(pid, []).append(i)
 
     adjustments = []
 
-    # Items in snapshot but not in current → removed
+    # Items in snapshot but not in current active → figure out why
     for sid, snap in snap_by_id.items():
-        if sid not in curr_by_id:
-            # Check if this item was broken down (not truly removed)
-            broken = query_one(
-                "SELECT id FROM intake_items WHERE id = %s AND item_status = 'broken_down'",
-                (sid,)
-            )
-            if broken:
-                continue  # breakdown is COGS-neutral, skip
+        if sid in curr_by_id:
+            continue  # still active, handle below
+
+        full_item = all_curr_by_id.get(sid)
+
+        # Fully broken down — COGS-neutral, skip
+        if full_item and full_item.get("item_status") == "broken_down":
+            continue
+
+        # Missing (hard-deleted from DB)
+        if not full_item:
             amount = -snap["offer_price"]
             adjustments.append({
-                "type": "removed",
-                "description": f"Removed: {snap['product_name']} (×{snap['quantity']})",
+                "type": "missing",
+                "description": f"Missing: {snap['product_name']} (×{snap['quantity']})",
                 "amount": round(amount, 2),
             })
+            continue
 
-    # Items in current but not in snapshot → added
+        # Item exists but in a non-active status (e.g. 'missing', 'rejected')
+        amount = -snap["offer_price"]
+        adjustments.append({
+            "type": "removed",
+            "description": f"Removed: {snap['product_name']} (×{snap['quantity']})",
+            "amount": round(amount, 2),
+        })
+
+    # Items in current but not in snapshot → added (skip breakdown/damage children)
     for cid, curr in curr_by_id.items():
-        if cid not in snap_by_id:
-            # Skip breakdown children (their parent is in snapshot as broken_down)
-            if curr.get("parent_item_id"):
-                continue
-            amount = float(curr.get("offer_price") or 0)
-            adjustments.append({
-                "type": "added",
-                "description": f"Added: {curr.get('product_name')} (×{curr.get('quantity', 1)})",
-                "amount": round(amount, 2),
-            })
+        if cid in snap_by_id:
+            continue
+        if curr.get("parent_item_id"):
+            continue  # child of breakdown or damage split — accounted for via parent
+        amount = float(curr.get("offer_price") or 0)
+        adjustments.append({
+            "type": "added",
+            "description": f"Added: {curr.get('product_name')} (×{curr.get('quantity', 1)})",
+            "amount": round(amount, 2),
+        })
 
     # Items in both → check for changes
     for sid, snap in snap_by_id.items():
@@ -576,7 +613,22 @@ def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
         curr_offer = float(curr.get("offer_price") or 0)
         snap_offer = snap["offer_price"]
 
-        # Damaged
+        # Check if this item had damage splits created from it
+        if sid in damage_parent_ids:
+            damaged_kids = damage_children_by_parent.get(sid, [])
+            total_damaged_qty = sum(k.get("quantity", 1) for k in damaged_kids)
+            total_damaged_offer = sum(float(k.get("offer_price") or 0) for k in damaged_kids)
+            # The offer delta is: (reduced good offer + damaged offer) - original offer
+            combined_offer = curr_offer + total_damaged_offer
+            delta = combined_offer - snap_offer
+            adjustments.append({
+                "type": "damaged",
+                "description": f"Damaged: {snap['product_name']} (×{total_damaged_qty} of {snap['quantity']})",
+                "amount": round(delta, 2),
+            })
+            continue
+
+        # Whole item marked damaged
         if curr.get("item_status") == "damaged" and snap.get("item_status") != "damaged":
             delta = curr_offer - snap_offer
             adjustments.append({
@@ -584,6 +636,10 @@ def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
                 "description": f"Damaged: {snap['product_name']} (×{curr.get('quantity', 1)})",
                 "amount": round(delta, 2),
             })
+            continue
+
+        # Qty reduced due to partial breakdown — skip (COGS-neutral, children account for it)
+        if sid in breakdown_parent_ids and curr.get("quantity", 1) < snap.get("quantity", 1):
             continue
 
         # Relinked (different product)
@@ -598,7 +654,7 @@ def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
             })
             continue
 
-        # Quantity changed
+        # Quantity changed (not from breakdown or damage split)
         if curr.get("quantity", 1) != snap.get("quantity", 1):
             delta = curr_offer - snap_offer
             adjustments.append({
