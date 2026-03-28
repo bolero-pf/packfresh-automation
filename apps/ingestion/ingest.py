@@ -715,6 +715,17 @@ def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
             })
 
     delta = round(adjusted_offer - original_offer, 2)
+
+    # Reconcile: adjustments should sum to delta. Any gap is rounding from
+    # COGS redistribution / damage discount math — show it explicitly.
+    adj_sum = round(sum(a["amount"] for a in adjustments), 2)
+    if abs(adj_sum - delta) > 0.01:
+        adjustments.append({
+            "type": "price_changed",
+            "description": "Rounding adjustment (breakdown COGS / damage discount)",
+            "amount": round(delta - adj_sum, 2),
+        })
+
     return {
         "original_offer": round(original_offer, 2),
         "adjusted_offer": round(adjusted_offer, 2),
