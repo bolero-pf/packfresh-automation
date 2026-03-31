@@ -215,16 +215,70 @@
                 right: 0 !important;
                 top: auto !important;
                 border-radius: 12px 12px 0 0;
-                min-width: auto;
+                min-width: auto !important;
+                max-width: none !important;
+                width: auto !important;
                 padding: 8px 8px 20px;
                 max-height: 60vh;
                 overflow-y: auto;
+                z-index: 99999 !important;
                 box-shadow: 0 -4px 24px rgba(0,0,0,0.5);
             }
-            .action-dropdown button { min-height: 48px; }
+            .action-dropdown button { min-height: 48px; white-space: normal; }
 
-            /* Modal close button: bigger */
+            /* Modal: full-width, no horizontal overflow */
+            .modal {
+                max-width: 100% !important;
+                width: 100% !important;
+                padding: 12px !important;
+                border-radius: 8px;
+            }
+            .modal-overlay { padding: 4px !important; }
             .modal-close-sticky { width: 40px; height: 40px; font-size: 1.4rem; }
+
+            /* Prevent horizontal scroll inside modal */
+            .modal table { table-layout: auto; }
+            .modal .name-cell { max-width: 200px; overflow-wrap: break-word; word-break: break-word; }
+
+            /* Session list table → cards */
+            #active-sessions-list table,
+            #completed-sessions-list table,
+            #cancelled-sessions-list table { border-collapse: separate; border-spacing: 0; }
+            #active-sessions-list thead,
+            #completed-sessions-list thead,
+            #cancelled-sessions-list thead { display: none; }
+            #active-sessions-list table,
+            #active-sessions-list tbody,
+            #active-sessions-list tr,
+            #active-sessions-list td,
+            #completed-sessions-list table,
+            #completed-sessions-list tbody,
+            #completed-sessions-list tr,
+            #completed-sessions-list td,
+            #cancelled-sessions-list table,
+            #cancelled-sessions-list tbody,
+            #cancelled-sessions-list tr,
+            #cancelled-sessions-list td { display: block; width: 100%; }
+            #active-sessions-list tr,
+            #completed-sessions-list tr,
+            #cancelled-sessions-list tr {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 12px;
+                margin-bottom: 10px;
+            }
+            #active-sessions-list td,
+            #completed-sessions-list td,
+            #cancelled-sessions-list td {
+                padding: 3px 0;
+                border: none;
+                text-align: left !important;
+            }
+            /* Empty cells (hidden columns) collapse in card mode */
+            #active-sessions-list td.hide-mobile,
+            #completed-sessions-list td.hide-mobile,
+            #cancelled-sessions-list td.hide-mobile { display: none !important; }
 
             /* Card headers */
             .card h2 { font-size: 1.05rem; }
@@ -232,7 +286,6 @@
 
         @media (max-width: 480px) {
             .stats { grid-template-columns: 1fr; }
-            .modal { padding: 12px; }
         }
     </style>
     <link rel="stylesheet" href="/api/breakdown-cache/bd-static/breakdown_modal.css">
@@ -1344,11 +1397,11 @@
                         details = '📬 no tracking';
                     }
                     return `<tr>
-                    <td>${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''}</td>
-                    <td><span class="badge badge-blue">${s.session_type}</span></td>
-                    <td><span class="badge" style="${statusStyle}">${statusLabel}</span></td>
-                    <td>${s.item_count || 0}</td>
-                    <td>$${(s.total_offer_amount || 0).toFixed(2)}</td>
+                    <td style="font-weight:600;font-size:1rem;">${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''} <span class="badge badge-blue" style="margin-left:4px;">${s.session_type}</span> <span class="badge" style="${statusStyle};margin-left:4px;">${statusLabel}</span></td>
+                    <td class="hide-mobile"><span class="badge badge-blue">${s.session_type}</span></td>
+                    <td class="hide-mobile"><span class="badge" style="${statusStyle}">${statusLabel}</span></td>
+                    <td>${s.item_count || 0} items · $${(s.total_offer_amount || 0).toFixed(2)}</td>
+                    <td class="hide-mobile">$${(s.total_offer_amount || 0).toFixed(2)}</td>
                     <td style="font-size:0.8rem; color:var(--text-dim);">${details}</td>
                     <td>${new Date(s.created_at).toLocaleDateString()}</td>
                     <td style="display:flex;gap:6px;align-items:center;">
