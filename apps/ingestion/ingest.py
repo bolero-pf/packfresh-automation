@@ -170,6 +170,8 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
         allocated_offer += comp_offer
 
         child_id = str(uuid4())
+        # Promos are raw cards (barcoded + binned), not sealed products
+        child_product_type = "raw" if comp.get("component_type") == "promo" else "sealed"
         execute("""
             INSERT INTO intake_items (
                 id, session_id, product_name, set_name, tcgplayer_id,
@@ -179,7 +181,7 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
         """, (
             child_id, session_id, comp["product_name"], comp.get("set_name"),
             comp.get("tcgplayer_id"), child_qty, market_price,
-            comp_offer, "sealed",
+            comp_offer, child_product_type,
             comp.get("tcgplayer_id") is not None, "good", item_id,
         ))
 

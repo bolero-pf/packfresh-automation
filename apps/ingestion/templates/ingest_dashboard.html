@@ -139,6 +139,96 @@
         }
         .filter-btn:hover { border-color: var(--accent); color: var(--text); }
         .filter-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+        /* ─── MOBILE ─── */
+        @media (max-width: 768px) {
+            .container { padding: 10px; }
+
+            /* Header */
+            header .container { flex-wrap: wrap; gap: 8px; }
+            .logo { font-size: 1.2rem; }
+            header .status { font-size: 0.78rem; }
+
+            /* Tabs */
+            .tab-btn { padding: 10px 14px; min-height: 44px; font-size: 0.85rem; }
+
+            /* Session rows: 2-col wrap */
+            .session-row {
+                grid-template-columns: 1fr auto;
+                gap: 8px 12px;
+                padding: 14px;
+            }
+
+            /* Filter buttons */
+            .filter-btn { min-height: 38px; padding: 8px 14px; font-size: 0.82rem; }
+
+            /* Stats grid: 2-col */
+            .stats { grid-template-columns: 1fr 1fr; gap: 10px; }
+            .stat { padding: 12px; }
+            .stat-value { font-size: 1.3rem; }
+
+            /* Action dropdown → bottom sheet */
+            .action-dropdown {
+                position: fixed !important;
+                bottom: 0 !important;
+                left: 0 !important;
+                right: 0 !important;
+                top: auto !important;
+                border-radius: 12px 12px 0 0;
+                min-width: auto;
+                padding: 8px 8px 20px;
+                max-height: 60vh;
+                overflow-y: auto;
+                box-shadow: 0 -4px 24px rgba(0,0,0,0.5);
+            }
+            .action-dropdown button {
+                padding: 14px 12px;
+                font-size: 0.9rem;
+                min-height: 48px;
+            }
+
+            /* Approve button: bigger touch target */
+            .approve-mobile {
+                min-height: 44px !important;
+                min-width: 44px !important;
+                width: 44px !important;
+                font-size: 1.1rem !important;
+            }
+
+            /* Item card actions: wrap nicely */
+            .item-actions-row {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                padding-top: 8px;
+                border-top: 1px solid var(--border);
+                margin-top: 8px;
+            }
+            .item-actions-row .btn { flex: 1; min-width: 0; justify-content: center; text-align: center; }
+
+            /* Modals: near-fullscreen */
+            .modal-overlay { padding: 8px 4px; }
+            .modal { max-width: 100%; width: 100%; padding: 16px; }
+            .modal-close-sticky { width: 40px; height: 40px; font-size: 1.4rem; }
+
+            /* Card headers */
+            .card h2 { font-size: 1.05rem; }
+
+            /* Search results: bigger touch targets */
+            .search-result { padding: 12px; min-height: 44px; }
+
+            /* Push section: full-width buttons */
+            .card .btn-danger,
+            .card .btn-primary { width: 100%; text-align: center; margin-bottom: 8px; }
+        }
+
+        @media (max-width: 480px) {
+            /* Stats: single column */
+            .stats { grid-template-columns: 1fr; }
+
+            /* Session rows: single column */
+            .session-row { grid-template-columns: 1fr; gap: 6px; }
+        }
     </style>
     <link rel="stylesheet" href="/api/breakdown-cache/bd-static/breakdown_modal.css">
 </head>
@@ -280,12 +370,16 @@ function themedPrompt(title, msg, defaultVal = '', inputType = 'number') {
 function toggleActionMenu(event, dd) {
     if (event) event.stopPropagation();
     document.querySelectorAll('.action-dropdown.show').forEach(d => { if (d !== dd) d.classList.remove('show'); });
-    const btn = dd.previousElementSibling;
-    const rect = btn.getBoundingClientRect();
-    const spaceBelow = window.innerHeight - rect.bottom;
-    const dropH = 200;
-    dd.style.left = Math.max(8, rect.right - 180) + 'px';
-    dd.style.top = spaceBelow > dropH ? (rect.bottom + 4) + 'px' : Math.max(4, rect.top - dropH) + 'px';
+    if (window.innerWidth > 768) {
+        const btn = dd.previousElementSibling;
+        const rect = btn.getBoundingClientRect();
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const dropH = 200;
+        dd.style.left = Math.max(8, rect.right - 180) + 'px';
+        dd.style.top = spaceBelow > dropH ? (rect.bottom + 4) + 'px' : Math.max(4, rect.top - dropH) + 'px';
+    } else {
+        dd.style.left = ''; dd.style.top = '';
+    }
     dd.classList.toggle('show');
 }
 
@@ -293,6 +387,10 @@ document.addEventListener('click', (e) => {
     if (!e.target.closest('.action-dropdown') && !e.target.closest('.action-trigger')) {
         document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
     }
+});
+
+window.addEventListener('resize', () => {
+    document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -457,14 +555,14 @@ async function viewSession(sessionId, _preserveScroll) {
                         ${isReceived ? `<button class="btn btn-sm btn-secondary" style="font-size:0.78rem;padding:3px 10px;" onclick="openAddItem('${sessionId}')">➕ Add Item</button>` : ''}
                     </div>
                     ${isReceived ? `<div style="display:flex; align-items:center; gap:12px; font-size:0.82rem;">
-                        <span id="approve-stats" style="color:var(--text-dim);">0/${activeItems.length} approved</span>
+                        <span id="approve-stats" style="color:var(--text-dim);">0/${activeItems.filter(i => !i.pushed_at).length} approved</span>
                         <label style="display:flex; align-items:center; gap:6px; color:var(--text-dim); cursor:pointer;">
                             <input type="checkbox" id="hide-approved-cb" onchange="toggleHideApproved(this)" ${_hideApproved ? 'checked' : ''}> Hide approved
                         </label>
                     </div>` : ''}
                 </div>
                 <div style="overflow-x:auto;">
-                <table>
+                <table class="responsive-cards">
                     <thead><tr>
                         <th>Product</th><th>Qty</th><th>Status</th><th>Store</th><th>COGS</th>
                         ${isReceived ? '<th>Actions</th>' : ''}
@@ -543,8 +641,9 @@ async function viewSession(sessionId, _preserveScroll) {
 
         el.innerHTML = html;
         if (scrollY) requestAnimationFrame(() => window.scrollTo(0, scrollY));
-        // Restore hide-approved state after re-render
-        if (_hideApproved) _refreshApprovedVisibility();
+        // Restore hide-approved state and update counter after re-render
+        _refreshApprovedVisibility();
+        _updateApproveStats();
         // Enrich items with breakdown summaries after render
         _lastRenderedItems = items;
         _enrichBreakdownSummaries(items, sessionId, isReceived);
@@ -560,7 +659,7 @@ async function viewSession(sessionId, _preserveScroll) {
 // ── APPROVE SYSTEM ──────────────────────────────────────────────────────────
 let _approvedItems = new Set();
 let _pushedItemIds = new Set();
-let _hideApproved = false;
+let _hideApproved = true;
 
 function toggleApproved(itemId) {
     if (_approvedItems.has(itemId)) {
@@ -606,16 +705,21 @@ function _refreshApprovedVisibility() {
 function _updateApproveStats() {
     const el = document.getElementById('approve-stats');
     if (!el) return;
-    const total = document.querySelectorAll('tr[data-item-id]').length;
+    // Count only unpushed, non-broken-down items (the ones still actionable)
+    let total = 0;
+    document.querySelectorAll('tr[data-item-id]').forEach(row => {
+        if (_pushedItemIds.has(row.dataset.itemId)) return;
+        if (row.dataset.itemStatus === 'broken_down') return;
+        total++;
+    });
     const pushed = _pushedItemIds.size;
-    const approved = _approvedItems.size - pushed; // pending approvals not yet pushed
-    const totalApproved = _approvedItems.size;
+    const pendingApproved = [..._approvedItems].filter(id => !_pushedItemIds.has(id)).length;
     if (pushed > 0) {
-        el.innerHTML = `<span style="color:var(--green)">✓${pushed} pushed</span> · ${approved} pending · ${total - totalApproved} unapproved`;
+        el.innerHTML = `<span style="color:var(--green)">✓${pushed} pushed</span> · ${pendingApproved} pending · ${total - pendingApproved} unapproved`;
     } else {
-        el.textContent = `${totalApproved}/${total} approved`;
+        el.textContent = `${pendingApproved}/${total} approved`;
     }
-    el.style.color = totalApproved === total ? 'var(--green)' : 'var(--text-dim)';
+    el.style.color = pendingApproved === total ? 'var(--green)' : 'var(--text-dim)';
 }
 
 function toggleHideApproved(cb) {
@@ -677,8 +781,8 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
                 ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;'
                 : 'color:var(--text-dim);border-color:var(--border);width:32px;';
         const approveBtn = isPushed
-            ? `<button class="btn btn-sm" style="${approveStyle}" title="Already pushed to Shopify" disabled>✓</button>`
-            : `<button class="btn btn-sm" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>`;
+            ? `<button class="btn btn-sm approve-mobile" style="${approveStyle}" title="Already pushed to Shopify" disabled>✓</button>`
+            : `<button class="btn btn-sm approve-mobile" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>`;
         const damageToggle = isDamaged
             ? `<button onclick="markGood('${item.id}', '${sessionId}')">✅ Mark Good</button>`
             : `<button onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠️ Mark Damaged</button>`;
@@ -708,8 +812,8 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
                 ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;'
                 : 'color:var(--text-dim);border-color:var(--border);width:32px;';
         const approveBtn = isPushed
-            ? `<button class="btn btn-sm" style="${approveStyle}" title="Already pushed to Shopify" disabled>✓</button>`
-            : `<button class="btn btn-sm" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>`;
+            ? `<button class="btn btn-sm approve-mobile" style="${approveStyle}" title="Already pushed to Shopify" disabled>✓</button>`
+            : `<button class="btn btn-sm approve-mobile" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>`;
         const childBreakBtn = item.tcgplayer_id
             ? `<button class="btn btn-sm btn-primary" style="font-size:0.72rem;padding:3px 8px;" onclick="openBdModal('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button>`
             : '';
@@ -723,7 +827,7 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
 
     const approvedStyle = _approvedItems.has(item.id) ? 'opacity:0.5;' : '';
     return `<tr style="${rowStyle}${approvedStyle}" data-item-id="${item.id}" data-item-status="${st}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${(item.product_name||'').replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
-        <td class="name-cell">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}${(() => {
+        <td class="name-cell" data-label="">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}${(() => {
             const v = item.velocity;
             if (!v) return '';
             const sold = v.units_sold_90d || 0;
@@ -745,11 +849,11 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
             const conf = oos > 0 ? '' : ' ⚠';
             return '<br><small>📊 <span style="color:' + rateColor + ';">' + sold + ' sold · ' + rateLabel + '</span> · <span style="color:' + stockColor + ';">' + stockInfo + '</span>' + conf + '</small>';
         })()}</td>
-        <td>${item.quantity || 1}</td>
-        <td><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
-        <td>${item.store_price != null ? `$${item.store_price.toFixed(2)}` : `<span style="color:var(--dim);" title="Not in store — showing market">$${(item.market_price || 0).toFixed(2)}*</span>`}</td>
-        <td>$${(item.offer_price || 0).toFixed(2)}${(item.quantity || 1) > 1 ? '<br><small style="color:var(--text-dim);">$' + ((item.offer_price || 0) / (item.quantity || 1)).toFixed(2) + '/ea</small>' : ''}</td>
-        ${isReceived ? '<td>' + actionCell + '</td>' : ''}
+        <td data-label="Qty">${item.quantity || 1}</td>
+        <td data-label="Status"><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
+        <td data-label="Store">${item.store_price != null ? `$${item.store_price.toFixed(2)}` : `<span style="color:var(--dim);" title="Not in store — showing market">$${(item.market_price || 0).toFixed(2)}*</span>`}</td>
+        <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}${(item.quantity || 1) > 1 ? '<br><small style="color:var(--text-dim);">$' + ((item.offer_price || 0) / (item.quantity || 1)).toFixed(2) + '/ea</small>' : ''}</td>
+        ${isReceived ? '<td data-label="">' + actionCell + '</td>' : ''}
     </tr>`;
 }
 
@@ -1418,9 +1522,6 @@ async function _pollPushJob(jobId, total, panel) {
 
 async function pushLive(sessionId) {
     const pendingApproved = [..._approvedItems].filter(id => !_pushedItemIds.has(id));
-    const totalRows = document.querySelectorAll('tr[data-item-id]').length;
-    const totalPending = totalRows - _pushedItemIds.size;
-    const isPartial = pendingApproved.length > 0 && pendingApproved.length < totalPending;
 
     // Separate graded items from sealed/raw — graded get their own cert-entry flow
     const allItemRows = [...document.querySelectorAll('tr[data-item-id]')];
@@ -1429,10 +1530,13 @@ async function pushLive(sessionId) {
     allItemRows.forEach(row => {
         const id = row.getAttribute('data-item-id');
         if (_pushedItemIds.has(id)) return;
+        if (row.getAttribute('data-item-status') === 'broken_down') return;
         if (pendingApproved.length > 0 && !pendingApproved.includes(id)) return;
         if (row.getAttribute('data-is-graded') === 'true') gradedIds.add(id);
         else sealedRawIds.add(id);
     });
+    const totalPending = gradedIds.size + sealedRawIds.size;
+    const isPartial = pendingApproved.length > 0 && pendingApproved.length < totalPending;
 
     const confirmMsg = isPartial
         ? `Push ${pendingApproved.length} approved items (${gradedIds.size} graded, ${sealedRawIds.size} sealed/raw)?`

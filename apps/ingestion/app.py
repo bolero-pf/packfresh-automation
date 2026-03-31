@@ -999,21 +999,61 @@ def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
                 store_price=float(normal_row.get("shopify_price", 0)),
             )
         else:
-            # No normal product to duplicate — create fresh damaged listing
+            # No normal product to duplicate — create enriched damaged listing
             product_name = item.get("product_name", "Unknown Product")
             damaged_title = f"{product_name} [DAMAGED]"
-            market_price = float(item.get("market_price", 0))
-            new_product = shopify.create_product(
-                title=damaged_title,
-                price=market_price,
-                tags=["auto-created", "ingest", "damaged"],
-                tcgplayer_id=tcg_id if tcg_id else None,
-                quantity=qty,
-            )
-            entry.update(
-                action="created_damaged_listing",
-                new_title=damaged_title,
-            )
+            our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
+
+            ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id and ppt else None
+            if ppt_item and enrichment:
+                market_price = float(ppt_item.get("marketPrice") or ppt_item.get("unopenedPrice") or item.get("market_price") or 0)
+                try:
+                    summary = enrichment.create_draft_listing(
+                        ppt_item,
+                        price=market_price,
+                        offer_price=our_unit_cost if our_unit_cost > 0 else None,
+                        quantity=qty,
+                    )
+                    # Rename to [DAMAGED] and add damaged tag
+                    new_product_id = summary.get("product_id")
+                    if new_product_id:
+                        product_gid = f"gid://shopify/Product/{new_product_id}"
+                        shopify.add_tags(product_gid, ["damaged"])
+                        shopify._rest("PUT", f"/products/{new_product_id}.json",
+                                      json={"product": {"id": int(new_product_id), "title": damaged_title}})
+                    entry.update(
+                        action="created_damaged_listing",
+                        new_title=damaged_title,
+                        enriched=True,
+                    )
+                except Exception as e:
+                    logger.exception(f"Enriched damaged listing failed for {tcg_id} — falling back to skeleton")
+                    market_price = float(item.get("market_price", 0))
+                    shopify.create_product(
+                        title=damaged_title,
+                        price=market_price,
+                        tags=["auto-created", "ingest", "damaged", "needs-enrichment"],
+                        tcgplayer_id=tcg_id if tcg_id else None,
+                        quantity=qty,
+                    )
+                    entry.update(
+                        action="created_damaged_listing",
+                        new_title=damaged_title,
+                        enriched=False,
+                    )
+            else:
+                market_price = float(item.get("market_price", 0))
+                shopify.create_product(
+                    title=damaged_title,
+                    price=market_price,
+                    tags=["auto-created", "ingest", "damaged", "needs-enrichment"],
+                    tcgplayer_id=tcg_id if tcg_id else None,
+                    quantity=qty,
+                )
+                entry.update(
+                    action="created_damaged_listing",
+                    new_title=damaged_title,
+                )
 
     return entry
 
