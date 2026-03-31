@@ -197,6 +197,67 @@ def api_release_and_fulfill():
     return jsonify(result)
 
 
+@app.route("/api/uncombine-order", methods=["POST"])
+def api_uncombine_order():
+    """Remove a single order from a combine group.
+
+    Only removes hold-for-review tag (so it leaves the queue) and releases the
+    fulfillment hold. Does NOT touch other screening tags (tier verification,
+    fraud, etc.) or Klaviyo — those are unrelated to the combine decision.
+    """
+    data = request.get_json(silent=True) or {}
+    order_gid = data.get("order_id")
+    if not order_gid:
+        return jsonify({"error": "order_id required"}), 400
+
+    from service import _release_fulfillment_holds
+    from shopify_graphql import shopify_gql
+
+    result = {"order_gid": order_gid}
+
+    # 1. Remove only hold-for-review tag (leaves other screening tags intact)
+    try:
+        shopify_gql("""
+            mutation TagsRemove($id: ID!, $tags: [String!]!) {
+              tagsRemove(id: $id, tags: $tags) {
+                node { ... on Order { id tags } }
+                userErrors { field message }
+              }
+            }
+        """, {"id": order_gid, "tags": ["hold-for-review"]})
+        result["tag_removed"] = "hold-for-review"
+    except Exception as e:
+        print(f"[screening] Failed to remove hold-for-review from {order_gid}: {e}", flush=True)
+
+    # 2. Release fulfillment hold so it can be shipped normally
+    try:
+        result["holds_released"] = _release_fulfillment_holds(order_gid)
+    except Exception as e:
+        print(f"[screening] Failed to release holds for {order_gid}: {e}", flush=True)
+
+    # 3. Strip the "Combine Order" line from the order note
+    try:
+        note_data = shopify_gql("""
+            query($id: ID!) { order(id: $id) { id note } }
+        """, {"id": order_gid})
+        existing_note = (note_data.get("data", {}).get("order", {}).get("note") or "")
+        cleaned_lines = [l for l in existing_note.split("\n")
+                         if "combine order" not in l.lower() and "combine shipping" not in l.lower()]
+        cleaned_note = "\n".join(cleaned_lines).strip()
+        while "\n---\n\n---\n" in cleaned_note:
+            cleaned_note = cleaned_note.replace("\n---\n\n---\n", "\n---\n")
+        cleaned_note = cleaned_note.strip().strip("-").strip()
+        shopify_gql("""
+            mutation OrderUpdate($input: OrderInput!) {
+              orderUpdate(input: $input) { order { id note } userErrors { field message } }
+            }
+        """, {"input": {"id": order_gid, "note": cleaned_note}})
+    except Exception as e:
+        print(f"[screening] Failed to clean combine note from {order_gid}: {e}", flush=True)
+
+    return jsonify({"ok": True, **result})
+
+
 @app.route("/api/cancel-order", methods=["POST"])
 def api_cancel_order():
     """Cancel + full refund a held order, then clean up tags."""
@@ -424,7 +485,7 @@ function renderVerification(orders) {
   el.innerHTML = orders.map(o => `
     <div class="card">
       <div class="order-header">
-        <span class="order-name">${o.name}</span>
+        <a href="https://admin.shopify.com/store/{{ shopify_store }}/orders/${o.numeric_id}" target="_blank" class="order-name" style="color:var(--accent);text-decoration:none;">${o.name}</a>
         <span class="badge badge-amber">${o.check_type}</span>
         <span style="font-weight:700;">$${o.total.toFixed(2)}</span>
         <div style="margin-left:auto;display:flex;gap:6px;">
@@ -457,7 +518,10 @@ function renderCombine(groups) {
           <div class="combine-order">
             <div style="display:flex;justify-content:space-between;align-items:center;">
               <strong>${o.name}</strong>
-              <span>$${o.total.toFixed(2)}</span>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <span>$${o.total.toFixed(2)}</span>
+                <button class="btn btn-sm" style="background:var(--amber);color:#000;font-size:0.7rem;padding:2px 8px;" onclick="uncombineOrder('${o.id}','${o.name}',this)">✂ Do Not Combine</button>
+              </div>
             </div>
             <div style="font-size:0.78rem;color:var(--dim);margin-top:4px;">
               ${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}
@@ -591,6 +655,22 @@ async function releaseAndFulfillGroup(btn, orderIds) {
     toast('All ' + ok + ' orders fulfilled with tracking', 'green');
   }
   loadOrders();
+}
+
+async function uncombineOrder(orderId, orderName, btn) {
+  if (!confirm('Remove ' + orderName + ' from this combine group? It will be released for normal fulfillment.')) return;
+  btn.disabled = true;
+  btn.textContent = '⏳...';
+  try {
+    const r = await fetch('/api/uncombine-order', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ order_id: orderId }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); btn.disabled = false; btn.textContent = '✂ Do Not Combine'; return; }
+    toast(orderName + ' removed from combine group', 'green');
+    loadOrders();
+  } catch(e) { alert(e.message); btn.disabled = false; btn.textContent = '✂ Do Not Combine'; }
 }
 
 // ── Customer Notes Tab ──

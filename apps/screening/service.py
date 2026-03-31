@@ -302,12 +302,16 @@ def _release_fulfillment_holds(order_gid: str) -> int:
     return released
 
 def release_and_fulfill(order_gid: str, tracking_number: str, tracking_company: str = "USPS") -> dict:
-    """Release holds on an order and create a fulfillment with tracking info."""
+    """Release holds on an order and create a fulfillment with tracking info.
+
+    Resilient to orders where the hold was already manually released in Shopify
+    and/or the order was already fulfilled (label purchased manually).
+    """
     data = shopify_gql(ORDER_FULFILLMENT_ORDERS_Q, {"id": order_gid})
     fo_edges = (data.get("data", {}).get("order", {})
                 .get("fulfillmentOrders", {}).get("edges", []))
 
-    fulfillment_order_ids = []
+    # Release any remaining holds (ignore errors — hold may already be released)
     for edge in fo_edges:
         fo = edge["node"]
         if fo["status"] == "ON_HOLD":
@@ -315,10 +319,27 @@ def release_and_fulfill(order_gid: str, tracking_number: str, tracking_company: 
                 shopify_gql(FULFILLMENT_ORDER_RELEASE_HOLD, {"id": fo["id"]})
             except Exception as e:
                 print(f"[screening] Failed to release hold {fo['id']}: {e}", flush=True)
-        # After release, the FO should be OPEN — collect for fulfillment
-        fulfillment_order_ids.append(fo["id"])
 
+    # Re-query to get current statuses after release attempts
+    data = shopify_gql(ORDER_FULFILLMENT_ORDERS_Q, {"id": order_gid})
+    fo_edges = (data.get("data", {}).get("order", {})
+                .get("fulfillmentOrders", {}).get("edges", []))
+
+    # Only collect FOs that are OPEN (ready for fulfillment)
+    # Skip FULFILLED, CLOSED, CANCELLED — those are already done
+    fulfillment_order_ids = []
+    already_done = 0
+    for edge in fo_edges:
+        fo = edge["node"]
+        if fo["status"] in ("OPEN", "SCHEDULED"):
+            fulfillment_order_ids.append(fo["id"])
+        elif fo["status"] in ("FULFILLED", "CLOSED"):
+            already_done += 1
+
+    # If everything is already fulfilled, that's a success — not an error
     if not fulfillment_order_ids:
+        if already_done > 0:
+            return {"fulfilled": True, "note": "Already fulfilled"}
         return {"fulfilled": False, "error": "No fulfillment orders found"}
 
     # Create fulfillment with tracking
