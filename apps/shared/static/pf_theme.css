@@ -276,3 +276,67 @@ tbody tr:hover { background: rgba(79,125,249,0.04); }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+
+/* ── Mobile Responsive ─────────────────────────────────── */
+@media (max-width: 768px) {
+    /* Touch targets */
+    .btn { min-height: 44px; padding: 10px 16px; font-size: 0.88rem; }
+    .btn-sm { min-height: 38px; padding: 8px 12px; }
+
+    /* Prevent iOS Safari zoom on input focus */
+    input, select, textarea { font-size: 16px !important; }
+
+    /* Stats bar: 2-col */
+    .stats-bar { gap: 10px; flex-wrap: wrap; }
+    .stat-box { min-width: 0; flex: 1 1 calc(50% - 5px); }
+
+    /* Table → Card transformation (opt-in) */
+    table.responsive-cards { border-collapse: separate; border-spacing: 0; }
+    table.responsive-cards thead { display: none; }
+    table.responsive-cards,
+    table.responsive-cards tbody,
+    table.responsive-cards tr,
+    table.responsive-cards td { display: block; width: 100%; }
+    table.responsive-cards tr {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm, 6px);
+        padding: 12px;
+        margin-bottom: 10px;
+    }
+    table.responsive-cards td {
+        padding: 4px 0;
+        border: none;
+        text-align: left !important;
+    }
+    table.responsive-cards td[data-label]::before {
+        content: attr(data-label);
+        display: inline-block;
+        font-size: 0.68rem;
+        font-weight: 700;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        min-width: 56px;
+        margin-right: 8px;
+    }
+    table.responsive-cards td[data-label=""]::before { display: none; }
+    table.responsive-cards td:empty { display: none; }
+
+    /* Modal: near-fullscreen */
+    .modal-overlay { padding: 8px; }
+    .modal-content { max-width: 100%; width: 100%; border-radius: 12px; }
+
+    /* Toast: bottom-center, wider */
+    .pf-toast { right: 12px; left: 12px; bottom: 12px; max-width: none; }
+
+    /* Confirm dialog: full-width, stacked buttons */
+    .pf-confirm-box { max-width: 100%; width: 92vw; }
+    .pf-confirm-btns { flex-direction: column; }
+    .pf-confirm-btns .btn { width: 100%; justify-content: center; text-align: center; }
+}
+
+@media (max-width: 480px) {
+    .stat-box { flex: 1 1 100%; }
+}

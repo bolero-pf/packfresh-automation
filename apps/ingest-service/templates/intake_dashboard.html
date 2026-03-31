@@ -206,6 +206,28 @@
 
             header .container { flex-wrap: wrap; }
             .logo { font-size: 1.2rem; }
+
+            /* Action dropdown → bottom sheet */
+            .action-dropdown {
+                position: fixed !important;
+                bottom: 0 !important;
+                left: 0 !important;
+                right: 0 !important;
+                top: auto !important;
+                border-radius: 12px 12px 0 0;
+                min-width: auto;
+                padding: 8px 8px 20px;
+                max-height: 60vh;
+                overflow-y: auto;
+                box-shadow: 0 -4px 24px rgba(0,0,0,0.5);
+            }
+            .action-dropdown button { min-height: 48px; }
+
+            /* Modal close button: bigger */
+            .modal-close-sticky { width: 40px; height: 40px; font-size: 1.4rem; }
+
+            /* Card headers */
+            .card h2 { font-size: 1.05rem; }
         }
 
         @media (max-width: 480px) {
@@ -1515,7 +1537,7 @@
                     ` : ''}
 
                     <div style="overflow-x:auto;">
-                    <table>
+                    <table class="responsive-cards">
                         <thead><tr>
                             <th>Product</th>${s.session_type === 'raw' ? '<th>Cond</th>' : ''}<th>Qty</th><th>Market</th><th>Offer</th><th>Status</th><th>Actions</th>
                         </tr></thead>
@@ -1561,8 +1583,8 @@
                                 velNote = `<br><small>📊 <span style="color:${rateColor};">${sold} sold · ${rateLabel}</span> · <span style="color:${stockColor};">${stockInfo}</span>${confidence}</small>`;
                             }
                             return `<tr style="${rowStyle}" data-item-id="${i.id}">
-                                <td class="name-cell">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}${velNote}</td>
-                                ${s.session_type === 'raw' ? `<td>${i.is_graded
+                                <td class="name-cell" data-label="">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}${velNote}</td>
+                                ${s.session_type === 'raw' ? `<td data-label="Cond">${i.is_graded
                                     ? `<span class="badge" style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;">${i.grade_company || 'PSA'} ${i.grade_value || '?'}</span>`
                                     : (() => {
                                         const _c = i.condition || i.listing_condition || '—';
@@ -1570,11 +1592,11 @@
                                         return `<span class="badge" style="${_condStyle}">${_c}</span>`;
                                     })()
                                 }</td>` : ''}
-                                <td>${i.quantity}</td>
-                                <td>$${(i.market_price || 0).toFixed(2)}</td>
-                                <td>$${(i.offer_price || 0).toFixed(2)}</td>
-                                <td>${statusBadge}</td>
-                                <td style="white-space:nowrap;">
+                                <td data-label="Qty">${i.quantity}</td>
+                                <td data-label="Market">$${(i.market_price || 0).toFixed(2)}</td>
+                                <td data-label="Offer">$${(i.offer_price || 0).toFixed(2)}</td>
+                                <td data-label="Status">${statusBadge}</td>
+                                <td data-label="" style="white-space:nowrap;">
                                     ${editable ? (() => {
                                         let btns = '';
                                         if (isDead) {
@@ -2931,20 +2953,27 @@
         // Close all others first
         document.querySelectorAll('.action-dropdown.show').forEach(d => { if (d !== dd) d.classList.remove('show'); });
 
-        // Find the trigger button (previous sibling of dd)
-        const btn = dd.previousElementSibling;
-        const rect = btn.getBoundingClientRect();
-        const dropdownHeight = 220; // approximate max height
-
-        // Position below button, or above if not enough space below
-        if (rect.bottom + dropdownHeight > window.innerHeight) {
-            dd.style.top = Math.max(4, rect.top - dropdownHeight) + 'px';
+        if (window.innerWidth > 768) {
+            // Desktop: position near the trigger button
+            const btn = dd.previousElementSibling;
+            const rect = btn.getBoundingClientRect();
+            const dropdownHeight = 220;
+            if (rect.bottom + dropdownHeight > window.innerHeight) {
+                dd.style.top = Math.max(4, rect.top - dropdownHeight) + 'px';
+            } else {
+                dd.style.top = (rect.bottom + 4) + 'px';
+            }
+            dd.style.left = Math.max(8, rect.right - 160) + 'px';
         } else {
-            dd.style.top = (rect.bottom + 4) + 'px';
+            // Mobile: let CSS bottom-sheet handle positioning
+            dd.style.left = ''; dd.style.top = '';
         }
-        dd.style.left = Math.max(8, rect.right - 160) + 'px';
         dd.classList.toggle('show');
     }
+
+    window.addEventListener('resize', () => {
+        document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
+    });
 
     async function cancelSession(sessionId) {
         const reason = await themedPrompt({
@@ -4691,14 +4720,14 @@
             if (!items.length) { tableDiv.innerHTML = '<p style="color:var(--text-dim);">No cards added yet.</p>'; return; }
             tableDiv.innerHTML = '<div style="margin-bottom:8px; font-weight:600;">' +
                 items.length + ' cards \u2022 Total offer: $' + (s.total_offer_amount || 0).toFixed(2) +
-                '</div><table><thead><tr><th>Card</th><th>Cond</th><th>Qty</th><th>Market</th><th>Offer</th><th>Actions</th></tr></thead><tbody>' +
+                '</div><table class="responsive-cards"><thead><tr><th>Card</th><th>Cond</th><th>Qty</th><th>Market</th><th>Offer</th><th>Actions</th></tr></thead><tbody>' +
                 items.map(i => '<tr>' +
-                    '<td>' + i.product_name + '<br><small style="color:var(--text-dim);">' + (i.set_name || '') + ' ' + (i.card_number ? '#'+i.card_number : '') + '</small></td>' +
-                    '<td>' + (i.is_graded ? '<span class="badge" style="background:var(--accent-alt,#7c3aed);color:#fff;">' + (i.grade_company||'') + ' ' + (i.grade_value||'') + '</span>' : (() => { const _c2 = i.condition || ''; const _s2 = _c2==='NM' ? 'background:#14532d;color:#4ade80;' : _c2==='LP' ? 'background:rgba(79,125,249,0.18);color:#7aadff;' : _c2==='MP' ? 'background:#422006;color:#fbbf24;' : _c2==='HP' ? 'background:#431407;color:#fb923c;' : _c2==='DMG' ? 'background:#450a0a;color:#f87171;' : 'background:var(--surface-2);color:var(--text-dim);'; return '<span class="badge" style="' + _s2 + '">' + _c2 + '</span>'; })()) + '</td>' +
-                    '<td>' + i.quantity + '</td>' +
-                    '<td>$' + (i.market_price || 0).toFixed(2) + '</td>' +
-                    '<td>$' + (i.offer_price || 0).toFixed(2) + '</td>' +
-                    '<td style="white-space:nowrap;"><div style="display:inline-block; position:relative;">' +
+                    '<td data-label="">' + i.product_name + '<br><small style="color:var(--text-dim);">' + (i.set_name || '') + ' ' + (i.card_number ? '#'+i.card_number : '') + '</small></td>' +
+                    '<td data-label="Cond">' + (i.is_graded ? '<span class="badge" style="background:var(--accent-alt,#7c3aed);color:#fff;">' + (i.grade_company||'') + ' ' + (i.grade_value||'') + '</span>' : (() => { const _c2 = i.condition || ''; const _s2 = _c2==='NM' ? 'background:#14532d;color:#4ade80;' : _c2==='LP' ? 'background:rgba(79,125,249,0.18);color:#7aadff;' : _c2==='MP' ? 'background:#422006;color:#fbbf24;' : _c2==='HP' ? 'background:#431407;color:#fb923c;' : _c2==='DMG' ? 'background:#450a0a;color:#f87171;' : 'background:var(--surface-2);color:var(--text-dim);'; return '<span class="badge" style="' + _s2 + '">' + _c2 + '</span>'; })()) + '</td>' +
+                    '<td data-label="Qty">' + i.quantity + '</td>' +
+                    '<td data-label="Market">$' + (i.market_price || 0).toFixed(2) + '</td>' +
+                    '<td data-label="Offer">$' + (i.offer_price || 0).toFixed(2) + '</td>' +
+                    '<td data-label="" style="white-space:nowrap;"><div style="display:inline-block; position:relative;">' +
                         '<button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(this)">\u22ee</button>' +
                         '<div class="action-dropdown">' +
                             '<button onclick="editCondition(\'' + i.id + '\',\'' + rawSessionId + '\',\'' + (i.condition || 'NM') + '\',' + (i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null) + ',\'' + (i.product_name||'').replace(/'/g,"\\'").replace(/"/g,'') + (i.set_name ? ' · '+(i.set_name||'').replace(/'/g,"\\'").replace(/"/g,'') : '') + '\')">🏷 Edit Condition</button>' +
