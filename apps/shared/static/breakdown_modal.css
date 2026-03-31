@@ -333,61 +333,107 @@
 
 /* ── Mobile Responsive ─────────────────────────────────── */
 @media (max-width: 768px) {
-    .bd-overlay { padding-top: 0; align-items: flex-end; }
+    /* Modal: full-screen scrollable, NOT pinned to bottom */
+    .bd-overlay { padding: 0; align-items: stretch; }
     .bd-modal {
         width: 100%; max-width: 100%;
-        border-radius: 12px 12px 0 0;
+        border-radius: 0;
         margin-bottom: 0;
-        max-height: 92vh;
+        max-height: 100vh;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
     }
-    .bd-header { padding: 12px 16px; }
-    .bd-body { max-height: 65vh; padding: 12px; }
+    .bd-header {
+        padding: 12px 16px;
+        position: sticky; top: 0;
+        background: var(--bg, #1a1a2e);
+        z-index: 2;
+    }
+    .bd-body {
+        max-height: none;
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    /* Action bar: sticky at bottom so it's always visible */
+    .bd-actions {
+        position: sticky; bottom: 0;
+        background: var(--bg, #1a1a2e);
+        border-top: 1px solid var(--border, #333);
+        padding: 10px 12px;
+        gap: 8px;
+        z-index: 2;
+        flex-wrap: wrap;
+    }
+    .bd-btn {
+        flex: 1 1 auto;
+        min-height: 48px;
+        text-align: center;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .bd-btn-notes { flex: 0 0 auto; min-height: 36px; }
+
+    /* Parent info: wrap cleanly */
+    .bd-parent-info { flex-wrap: wrap; gap: 8px; padding: 8px 12px; font-size: 12px; }
 
     /* Search grid: single column */
     .bd-search-grid { grid-template-columns: 1fr; }
 
     /* Search inputs: bigger touch targets */
-    .bd-search-row input { min-height: 40px; font-size: 16px; }
-    .bd-search-row button { min-height: 40px; }
-    .bd-search-result { padding: 10px 8px; min-height: 44px; }
+    .bd-search-row input { min-height: 44px; font-size: 16px; }
+    .bd-search-row button { min-height: 44px; padding: 8px 16px; }
+    .bd-search-results { max-height: 180px; }
+    .bd-search-result { padding: 12px 8px; min-height: 44px; }
 
-    /* Component table: card layout */
-    .bd-comp-table thead { display: none; }
-    .bd-comp-table,
-    .bd-comp-table tbody,
-    .bd-comp-table tr,
-    .bd-comp-table td { display: block; width: 100%; }
-    .bd-comp-table tr {
-        padding: 10px;
-        border: 1px solid var(--border, #2a2f42);
-        border-radius: 8px;
-        margin-bottom: 8px;
-        position: relative;
+    /* Component table: keep as table but make it readable */
+    .bd-comp-table { font-size: 12px; }
+    .bd-comp-table th { font-size: 10px; padding: 4px 6px; }
+    .bd-comp-table td { padding: 6px; vertical-align: top; }
+    .bd-comp-table .bd-comp-name {
+        max-width: none; white-space: normal;
+        font-size: 12px; line-height: 1.3;
     }
-    .bd-comp-table td { padding: 3px 0; border: none; }
-    .bd-comp-table .bd-comp-name { max-width: none; white-space: normal; }
-    .bd-comp-table input[type="number"] { width: 80px; min-height: 40px; font-size: 16px; }
+    .bd-comp-table .bd-comp-tcg,
+    .bd-comp-table .bd-comp-set { font-size: 9px; }
+    .bd-comp-table input[type="number"] {
+        width: 60px; min-height: 36px; font-size: 16px;
+        padding: 4px;
+    }
     .bd-comp-table .bd-delete-btn {
-        position: absolute; top: 8px; right: 8px;
-        font-size: 18px; padding: 8px; min-width: 36px; min-height: 36px;
+        font-size: 18px; padding: 6px;
+        min-width: 32px; min-height: 32px;
+    }
+    /* Hide store column header text, show abbreviated */
+    .bd-comp-table td[style*="white-space"] { font-size: 10px; }
+
+    /* Config cards: single column, bigger touch targets */
+    .bd-config-cards { gap: 8px; }
+    .bd-config-card {
+        flex: 1 1 100%; min-width: 0;
+        padding: 14px;
+    }
+    .bd-config-name { font-size: 15px; }
+    .bd-config-meta { font-size: 12px; }
+    .bd-config-actions { gap: 8px; margin-top: 8px; }
+    .bd-config-actions button {
+        font-size: 13px; padding: 8px 16px;
+        min-height: 40px; border-radius: 6px;
     }
 
-    /* Config cards: single column */
-    .bd-config-card { flex: 1 1 100%; min-width: 0; }
-
-    /* Qty buttons: bigger touch */
-    .bd-qty-section { flex-wrap: wrap; }
+    /* Qty selector */
+    .bd-qty-section { flex-wrap: wrap; gap: 8px; }
     .bd-qty-buttons button { min-height: 44px; min-width: 44px; font-size: 16px; }
     .bd-qty-section input[type="number"] { min-height: 44px; font-size: 16px; }
-
-    /* Action bar: stack vertically */
-    .bd-actions { flex-wrap: wrap; padding: 12px; gap: 8px; }
-    .bd-btn { flex: 1 1 100%; min-height: 48px; text-align: center; justify-content: center; }
 
     /* Summary: tighter */
     .bd-summary { padding: 10px; }
     .bd-summary-row { flex-wrap: wrap; gap: 4px; }
 
-    /* Parent info: wrap */
-    .bd-parent-info { flex-wrap: wrap; gap: 8px; }
+    /* Editor row: stack on mobile */
+    .bd-editor-row { flex-wrap: wrap; gap: 6px; }
+    .bd-editor-row label { min-width: 100%; }
+    .bd-editor-row input[type="text"] { min-height: 44px; font-size: 16px; }
 }

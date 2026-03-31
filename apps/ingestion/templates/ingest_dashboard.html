@@ -187,24 +187,33 @@
                 min-height: 48px;
             }
 
-            /* Approve button: bigger touch target */
-            .approve-mobile {
+            /* Item card actions: consistent row on mobile */
+            td[data-label=""] > div {
+                flex-wrap: wrap !important;
+                gap: 8px !important;
+            }
+            td[data-label=""] > div > .approve-mobile {
                 min-height: 44px !important;
                 min-width: 44px !important;
                 width: 44px !important;
+                flex: 0 0 44px !important;
                 font-size: 1.1rem !important;
             }
-
-            /* Item card actions: wrap nicely */
-            .item-actions-row {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 8px;
-                padding-top: 8px;
-                border-top: 1px solid var(--border);
-                margin-top: 8px;
+            td[data-label=""] > div > .btn-primary {
+                flex: 1 1 auto !important;
+                min-height: 44px !important;
+                font-size: 0.85rem !important;
+                padding: 8px 12px !important;
             }
-            .item-actions-row .btn { flex: 1; min-width: 0; justify-content: center; text-align: center; }
+            td[data-label=""] > div > .action-dropdown-container {
+                flex: 0 0 auto;
+            }
+            td[data-label=""] > div > .action-dropdown-container > .action-trigger {
+                min-height: 44px !important;
+                min-width: 44px !important;
+                font-size: 1.1rem !important;
+                padding: 8px !important;
+            }
 
             /* Modals: near-fullscreen */
             .modal-overlay { padding: 8px 4px; }
