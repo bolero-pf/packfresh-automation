@@ -681,7 +681,11 @@ def _push_session_worker(job_id, session_id, active):
             consolidated[key]["total_qty"] += item.get("quantity", 1)
             consolidated[key]["items"].append(item)
 
-        for key, group in consolidated.items():
+        # Process normal items before damaged — ensures normal listing exists
+        # for damaged to duplicate (even if it has to be created fresh)
+        sorted_keys = sorted(consolidated.keys(), key=lambda k: k[1])  # is_damaged=False first
+        for key in sorted_keys:
+            group = consolidated[key]
             tcg_id, is_damaged = key
             qty = group["total_qty"]
             entry = {
@@ -999,11 +1003,14 @@ def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
                 store_price=float(normal_row.get("shopify_price", 0)),
             )
         else:
-            # No normal product to duplicate — create enriched damaged listing
+            # No normal product to duplicate — create the normal listing first,
+            # then duplicate it as damaged. This ensures both variants exist.
             product_name = item.get("product_name", "Unknown Product")
             damaged_title = f"{product_name} [DAMAGED]"
             our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
 
+            # Step 1: Create normal enriched listing (qty=0, normal items will increment later)
+            normal_product_id = None
             ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id and ppt else None
             if ppt_item and enrichment:
                 market_price = float(ppt_item.get("marketPrice") or ppt_item.get("unopenedPrice") or item.get("market_price") or 0)
@@ -1012,48 +1019,57 @@ def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
                         ppt_item,
                         price=market_price,
                         offer_price=our_unit_cost if our_unit_cost > 0 else None,
-                        quantity=qty,
+                        quantity=0,  # normal items will increment when they process
                     )
-                    # Rename to [DAMAGED] and add damaged tag
-                    new_product_id = summary.get("product_id")
-                    if new_product_id:
-                        product_gid = f"gid://shopify/Product/{new_product_id}"
-                        shopify.add_tags(product_gid, ["damaged"])
-                        shopify._rest("PUT", f"/products/{new_product_id}.json",
-                                      json={"product": {"id": int(new_product_id), "title": damaged_title}})
-                    entry.update(
-                        action="created_damaged_listing",
-                        new_title=damaged_title,
-                        enriched=True,
-                    )
+                    normal_product_id = summary.get("product_id")
+                    logger.info(f"Created normal listing {normal_product_id} for {product_name} (damaged needed it)")
                 except Exception as e:
-                    logger.exception(f"Enriched damaged listing failed for {tcg_id} — falling back to skeleton")
-                    market_price = float(item.get("market_price", 0))
-                    shopify.create_product(
-                        title=damaged_title,
-                        price=market_price,
-                        tags=["auto-created", "ingest", "damaged", "needs-enrichment"],
-                        tcgplayer_id=tcg_id if tcg_id else None,
-                        quantity=qty,
-                    )
-                    entry.update(
-                        action="created_damaged_listing",
-                        new_title=damaged_title,
-                        enriched=False,
-                    )
-            else:
+                    logger.warning(f"Enriched normal listing failed for {tcg_id}: {e}")
+            if not normal_product_id:
+                # Fallback: skeleton normal listing
                 market_price = float(item.get("market_price", 0))
-                shopify.create_product(
-                    title=damaged_title,
+                new_product = shopify.create_product(
+                    title=product_name,
                     price=market_price,
-                    tags=["auto-created", "ingest", "damaged", "needs-enrichment"],
+                    tags=["auto-created", "ingest", "needs-enrichment"],
                     tcgplayer_id=tcg_id if tcg_id else None,
-                    quantity=qty,
+                    quantity=0,
                 )
+                normal_product_id = str(new_product["id"]).replace("gid://shopify/Product/", "")
+                logger.info(f"Created skeleton normal listing {normal_product_id} for {product_name} (damaged needed it)")
+
+            # Seed normal_cache so normal items for this tcg_id just increment
+            normal_cache[tcg_id] = {
+                "shopify_product_id": normal_product_id,
+                "shopify_variant_id": None,  # will be looked up by _push_normal_item if needed
+                "title": product_name,
+                "shopify_price": market_price,
+            }
+            # Look up the variant ID for the cache entry
+            try:
+                prod_data = shopify._rest("GET", f"/products/{normal_product_id}.json")
+                variant = prod_data["product"]["variants"][0]
+                normal_cache[tcg_id]["shopify_variant_id"] = str(variant["id"])
+            except Exception as e:
+                logger.warning(f"Could not fetch variant for new normal product {normal_product_id}: {e}")
+
+            # Step 2: Duplicate the normal listing as damaged
+            product_gid = f"gid://shopify/Product/{normal_product_id}"
+            try:
+                new_product = shopify.duplicate_product_as_damaged(product_gid, damaged_title)
+                shopify.add_tags(new_product["id"], ["damaged"])
+                new_var = new_product["variants"]["edges"][0]["node"]
+                new_inv_id = new_var.get("inventoryItem", {}).get("id", "").split("/")[-1]
+                if new_inv_id:
+                    shopify.set_inventory_quantity(new_inv_id, qty)
                 entry.update(
                     action="created_damaged_listing",
                     new_title=damaged_title,
+                    also_created_normal=True,
                 )
+            except Exception as e:
+                logger.exception(f"Duplicate as damaged failed for {normal_product_id}")
+                entry.update(action="error", error=f"Created normal listing but duplication failed: {e}")
 
     return entry
 
