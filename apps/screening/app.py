@@ -254,12 +254,14 @@ def _uncombine_single_order(order_gid, shopify_gql, release_holds_fn, sig_thresh
     return result
 
 
-def _clean_combine_references(order_gid, removed_names, shopify_gql):
+def _clean_combine_references(order_gid, removed_names, shopify_gql, strip_signature=False):
     """Remove references to uncombined order names from a sibling's combine notes.
 
     Notes look like: '📦 Combine Order (#1234, #1235)'
     After removing #1234: '📦 Combine Order (#1235)'
     If all names removed from a line, the whole line is dropped.
+    If strip_signature=True, also removes 'Signature Required' notes (combined
+    total dropped below threshold).
     """
     import re
     note_data = shopify_gql("""
@@ -275,20 +277,19 @@ def _clean_combine_references(order_gid, removed_names, shopify_gql):
         if "combine order" in line.lower():
             new_line = line
             for name in removed_names:
-                # Remove the order name and any surrounding comma/space
-                # Handles: "#1234, #1235" → "#1235" and "(#1234)" → "()" etc.
                 new_line = re.sub(r",?\s*" + re.escape(name) + r"\s*,?", "", new_line)
-            # Clean up leftover formatting: "(, #1235)" → "(#1235)", "()" → drop line
             new_line = re.sub(r"\(\s*,\s*", "(", new_line)
             new_line = re.sub(r",\s*\)", ")", new_line)
             new_line = new_line.strip()
-            # If parentheses are now empty, drop the whole line
             if re.search(r"\(\s*\)", new_line):
                 changed = True
                 continue
             if new_line != line:
                 changed = True
             updated_lines.append(new_line)
+        elif strip_signature and "signature required" in line.lower():
+            changed = True
+            continue
         else:
             updated_lines.append(line)
 
@@ -347,9 +348,14 @@ def api_uncombine_order():
     released_names.discard("")
 
     if remaining and released_names:
+        # Check if the remaining combined total drops below signature threshold
+        remaining_combined_total = sum(o.get("total", 0) for o in remaining)
+        strip_sig = remaining_combined_total < SIGNATURE_THRESHOLD
+
         for sib in remaining:
             try:
-                _clean_combine_references(sib["id"], released_names, shopify_gql)
+                _clean_combine_references(sib["id"], released_names, shopify_gql,
+                                          strip_signature=strip_sig)
             except Exception as e:
                 print(f"[screening] Failed to update sibling note {sib['id']}: {e}", flush=True)
 
@@ -618,7 +624,7 @@ function renderCombine(groups) {
               <strong>${o.name}</strong>
               <div style="display:flex;align-items:center;gap:8px;">
                 <span>$${o.total.toFixed(2)}</span>
-                <button class="btn btn-sm" style="background:var(--amber);color:#000;font-size:0.7rem;padding:2px 8px;" onclick="uncombineOrder('${o.id}','${o.name}',${JSON.stringify(g.orders.map(x=>({id:x.id,name:x.name}))).replace(/"/g,'&quot;')},this)">✂ Do Not Combine</button>
+                <button class="btn btn-sm" style="background:var(--amber);color:#000;font-size:0.7rem;padding:2px 8px;" onclick="uncombineOrder('${o.id}','${o.name}',${JSON.stringify(g.orders.map(x=>({id:x.id,name:x.name,total:x.total}))).replace(/"/g,'&quot;')},this)">✂ Do Not Combine</button>
               </div>
             </div>
             <div style="font-size:0.78rem;color:var(--dim);margin-top:4px;">
