@@ -186,6 +186,11 @@ def release_drops():
 
 @app.route("/api/drops")
 def list_drops():
+    # Auto-advance past-due scheduled drops so they appear in history
+    db.execute("""
+        UPDATE drop_events SET status = 'active'
+        WHERE status = 'scheduled' AND drop_date < CURRENT_DATE
+    """)
     status = request.args.get("status", "all")
     if status == "all":
         rows = db.query("SELECT * FROM drop_events ORDER BY drop_date DESC LIMIT 100")
@@ -652,7 +657,7 @@ async function loadCandidates() {
     const items = d.candidates||[];
     if (!items.length) { el.innerHTML = '<div style="color:var(--dim);padding:20px;">No items with qty >= '+min+'</div>'; return; }
     el.innerHTML = `<table><thead><tr>
-      <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Sold 90d</th><th>Days to Sell</th>
+      <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Sold 90d</th><th>Days to Sell</th><th></th>
     </tr></thead><tbody>${items.map(i => {
       const cogs = i.avg_cogs ? '$'+i.avg_cogs.toFixed(2) : '—';
       const margin = (i.avg_cogs && i.shopify_price) ? ((1 - i.avg_cogs/i.shopify_price)*100).toFixed(0)+'%' : '—';
@@ -664,6 +669,7 @@ async function loadCandidates() {
         <td>${margin}</td>
         <td>${i.units_sold_90d||0}</td>
         <td>${velBadge(i.velocity_score)}</td>
+        <td><button class="btn btn-sm btn-primary" onclick='scheduleFromCandidate(${JSON.stringify({variant_id:i.shopify_variant_id,product_id:i.shopify_product_id,title:i.title,price:i.shopify_price,qty:i.shopify_qty}).replace(/'/g,"&#39;")})'>Schedule</button></td>
       </tr>`;
     }).join('')}</tbody></table>`;
   } catch(e) { el.innerHTML = `<div style="color:var(--red);">${e.message}</div>`; }
@@ -863,6 +869,29 @@ async function removeSingleFounder(gid) {
     toast('Founder\\'s pick removed', 'green');
     loadFoundersPicks();
   } catch(e) { alert(e.message); }
+}
+
+// Schedule from candidate — pre-fill create form
+function scheduleFromCandidate(c) {
+  _selected = {
+    product_gid: 'gid://shopify/Product/' + c.product_id,
+    variant_gid: 'gid://shopify/ProductVariant/' + c.variant_id,
+    variant_id: c.variant_id,
+    product_id: c.product_id,
+    title: c.title,
+    price: c.price
+  };
+  document.getElementById('selected-title').textContent = c.title + ' ($' + c.price.toFixed(2) + ' · qty ' + c.qty + ')';
+  document.getElementById('orig-price').value = c.price.toFixed(2);
+  document.getElementById('drop-form').style.display = '';
+  document.getElementById('search-results').innerHTML = '';
+  document.getElementById('drop-search').value = '';
+  // Switch to create tab
+  document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('pane-create').classList.add('active');
+  document.querySelector('.tab').classList.add('active');
+  document.getElementById('drop-form').scrollIntoView({behavior:'smooth'});
 }
 
 // Manual release
