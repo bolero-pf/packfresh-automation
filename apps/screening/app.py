@@ -197,22 +197,8 @@ def api_release_and_fulfill():
     return jsonify(result)
 
 
-@app.route("/api/uncombine-order", methods=["POST"])
-def api_uncombine_order():
-    """Remove a single order from a combine group.
-
-    Only removes hold-for-review tag (so it leaves the queue) and releases the
-    fulfillment hold. Does NOT touch other screening tags (tier verification,
-    fraud, etc.) or Klaviyo — those are unrelated to the combine decision.
-    """
-    data = request.get_json(silent=True) or {}
-    order_gid = data.get("order_id")
-    if not order_gid:
-        return jsonify({"error": "order_id required"}), 400
-
-    from service import _release_fulfillment_holds
-    from shopify_graphql import shopify_gql
-
+def _uncombine_single_order(order_gid, shopify_gql, release_holds_fn, sig_threshold):
+    """Release a single order from combine: remove tag, release hold, clean note, check signature."""
     result = {"order_gid": order_gid}
 
     # 1. Remove only hold-for-review tag (leaves other screening tags intact)
@@ -229,20 +215,30 @@ def api_uncombine_order():
     except Exception as e:
         print(f"[screening] Failed to remove hold-for-review from {order_gid}: {e}", flush=True)
 
-    # 2. Release fulfillment hold so it can be shipped normally
+    # 2. Release fulfillment hold
     try:
-        result["holds_released"] = _release_fulfillment_holds(order_gid)
+        result["holds_released"] = release_holds_fn(order_gid)
     except Exception as e:
         print(f"[screening] Failed to release holds for {order_gid}: {e}", flush=True)
 
-    # 3. Strip the "Combine Order" line from the order note
+    # 3. Strip combine + signature notes from the order note
     try:
         note_data = shopify_gql("""
-            query($id: ID!) { order(id: $id) { id note } }
+            query($id: ID!) { order(id: $id) { id note currentTotalPriceSet { shopMoney { amount } } } }
         """, {"id": order_gid})
-        existing_note = (note_data.get("data", {}).get("order", {}).get("note") or "")
+        order_node = note_data.get("data", {}).get("order", {})
+        existing_note = (order_node.get("note") or "")
+        order_total = float(order_node.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+
         cleaned_lines = [l for l in existing_note.split("\n")
-                         if "combine order" not in l.lower() and "combine shipping" not in l.lower()]
+                         if "combine order" not in l.lower()
+                         and "combine shipping" not in l.lower()]
+        # If this order is below the signature threshold on its own,
+        # the combined-signature note no longer applies — strip it
+        if order_total < sig_threshold:
+            cleaned_lines = [l for l in cleaned_lines
+                             if "signature required" not in l.lower()]
+            result["signature_removed"] = True
         cleaned_note = "\n".join(cleaned_lines).strip()
         while "\n---\n\n---\n" in cleaned_note:
             cleaned_note = cleaned_note.replace("\n---\n\n---\n", "\n---\n")
@@ -253,9 +249,111 @@ def api_uncombine_order():
             }
         """, {"input": {"id": order_gid, "note": cleaned_note}})
     except Exception as e:
-        print(f"[screening] Failed to clean combine note from {order_gid}: {e}", flush=True)
+        print(f"[screening] Failed to clean note from {order_gid}: {e}", flush=True)
 
-    return jsonify({"ok": True, **result})
+    return result
+
+
+def _clean_combine_references(order_gid, removed_names, shopify_gql):
+    """Remove references to uncombined order names from a sibling's combine notes.
+
+    Notes look like: '📦 Combine Order (#1234, #1235)'
+    After removing #1234: '📦 Combine Order (#1235)'
+    If all names removed from a line, the whole line is dropped.
+    """
+    import re
+    note_data = shopify_gql("""
+        query($id: ID!) { order(id: $id) { id note } }
+    """, {"id": order_gid})
+    existing_note = (note_data.get("data", {}).get("order", {}).get("note") or "")
+    if not existing_note:
+        return
+
+    updated_lines = []
+    changed = False
+    for line in existing_note.split("\n"):
+        if "combine order" in line.lower():
+            new_line = line
+            for name in removed_names:
+                # Remove the order name and any surrounding comma/space
+                # Handles: "#1234, #1235" → "#1235" and "(#1234)" → "()" etc.
+                new_line = re.sub(r",?\s*" + re.escape(name) + r"\s*,?", "", new_line)
+            # Clean up leftover formatting: "(, #1235)" → "(#1235)", "()" → drop line
+            new_line = re.sub(r"\(\s*,\s*", "(", new_line)
+            new_line = re.sub(r",\s*\)", ")", new_line)
+            new_line = new_line.strip()
+            # If parentheses are now empty, drop the whole line
+            if re.search(r"\(\s*\)", new_line):
+                changed = True
+                continue
+            if new_line != line:
+                changed = True
+            updated_lines.append(new_line)
+        else:
+            updated_lines.append(line)
+
+    if changed:
+        cleaned_note = "\n".join(updated_lines).strip()
+        while "\n---\n\n---\n" in cleaned_note:
+            cleaned_note = cleaned_note.replace("\n---\n\n---\n", "\n---\n")
+        cleaned_note = cleaned_note.strip().strip("-").strip()
+        shopify_gql("""
+            mutation OrderUpdate($input: OrderInput!) {
+              orderUpdate(input: $input) { order { id note } userErrors { field message } }
+            }
+        """, {"input": {"id": order_gid, "note": cleaned_note}})
+
+
+@app.route("/api/uncombine-order", methods=["POST"])
+def api_uncombine_order():
+    """Remove a single order from a combine group.
+
+    Only removes hold-for-review tag and releases the fulfillment hold.
+    Does NOT touch other screening tags (tier verification, fraud, etc.) or Klaviyo.
+
+    If this leaves only 1 order in the group, that order is also auto-uncombined.
+    Re-evaluates signature required for each released order based on its individual total.
+    """
+    data = request.get_json(silent=True) or {}
+    order_gid = data.get("order_id")
+    order_name = data.get("order_name", "")
+    # All orders in this combine group: [{id, name}, ...]
+    group_orders = data.get("group_orders", [])
+    if not order_gid:
+        return jsonify({"error": "order_id required"}), 400
+
+    from service import _release_fulfillment_holds, SIGNATURE_THRESHOLD
+    from shopify_graphql import shopify_gql
+
+    # Figure out which orders to uncombine vs which stay combined
+    orders_to_release = [order_gid]
+    remaining = [o for o in group_orders if o["id"] != order_gid]
+    # If only 1 order would remain, uncombine it too — don't leave a solo combine group
+    if len(remaining) == 1:
+        orders_to_release.append(remaining[0]["id"])
+        remaining = []
+
+    # 1. Release the uncombined orders
+    released = []
+    for oid in orders_to_release:
+        r = _uncombine_single_order(oid, shopify_gql, _release_fulfillment_holds, SIGNATURE_THRESHOLD)
+        released.append(r)
+
+    # 2. Update remaining siblings' notes to remove references to uncombined orders
+    released_names = {order_name}
+    for o in group_orders:
+        if o["id"] in orders_to_release:
+            released_names.add(o.get("name", ""))
+    released_names.discard("")
+
+    if remaining and released_names:
+        for sib in remaining:
+            try:
+                _clean_combine_references(sib["id"], released_names, shopify_gql)
+            except Exception as e:
+                print(f"[screening] Failed to update sibling note {sib['id']}: {e}", flush=True)
+
+    return jsonify({"ok": True, "released": released})
 
 
 @app.route("/api/cancel-order", methods=["POST"])
@@ -520,7 +618,7 @@ function renderCombine(groups) {
               <strong>${o.name}</strong>
               <div style="display:flex;align-items:center;gap:8px;">
                 <span>$${o.total.toFixed(2)}</span>
-                <button class="btn btn-sm" style="background:var(--amber);color:#000;font-size:0.7rem;padding:2px 8px;" onclick="uncombineOrder('${o.id}','${o.name}',this)">✂ Do Not Combine</button>
+                <button class="btn btn-sm" style="background:var(--amber);color:#000;font-size:0.7rem;padding:2px 8px;" onclick="uncombineOrder('${o.id}','${o.name}',${JSON.stringify(g.orders.map(x=>({id:x.id,name:x.name}))).replace(/"/g,'&quot;')},this)">✂ Do Not Combine</button>
               </div>
             </div>
             <div style="font-size:0.78rem;color:var(--dim);margin-top:4px;">
@@ -657,18 +755,23 @@ async function releaseAndFulfillGroup(btn, orderIds) {
   loadOrders();
 }
 
-async function uncombineOrder(orderId, orderName, btn) {
-  if (!confirm('Remove ' + orderName + ' from this combine group? It will be released for normal fulfillment.')) return;
+async function uncombineOrder(orderId, orderName, groupOrders, btn) {
+  const remaining = groupOrders.filter(o => o.id !== orderId);
+  const msg = remaining.length === 1
+    ? 'This group only has 2 orders — both will be released for normal fulfillment. Continue?'
+    : 'Remove ' + orderName + ' from this combine group? It will be released for normal fulfillment.';
+  if (!confirm(msg)) return;
   btn.disabled = true;
   btn.textContent = '⏳...';
   try {
     const r = await fetch('/api/uncombine-order', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ order_id: orderId }),
+      body: JSON.stringify({ order_id: orderId, order_name: orderName, group_orders: groupOrders }),
     });
     const d = await r.json();
     if (!r.ok) { alert(d.error); btn.disabled = false; btn.textContent = '✂ Do Not Combine'; return; }
-    toast(orderName + ' removed from combine group', 'green');
+    const count = (d.released || []).length;
+    toast(count > 1 ? count + ' orders released from combine group' : orderName + ' removed from combine group', 'green');
     loadOrders();
   } catch(e) { alert(e.message); btn.disabled = false; btn.textContent = '✂ Do Not Combine'; }
 }
