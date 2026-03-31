@@ -240,46 +240,6 @@
             .modal table { table-layout: auto; }
             .modal .name-cell { max-width: 200px; overflow-wrap: break-word; word-break: break-word; }
 
-            /* Session list table → cards */
-            #active-sessions-list table,
-            #completed-sessions-list table,
-            #cancelled-sessions-list table { border-collapse: separate; border-spacing: 0; }
-            #active-sessions-list thead,
-            #completed-sessions-list thead,
-            #cancelled-sessions-list thead { display: none; }
-            #active-sessions-list table,
-            #active-sessions-list tbody,
-            #active-sessions-list tr,
-            #active-sessions-list td,
-            #completed-sessions-list table,
-            #completed-sessions-list tbody,
-            #completed-sessions-list tr,
-            #completed-sessions-list td,
-            #cancelled-sessions-list table,
-            #cancelled-sessions-list tbody,
-            #cancelled-sessions-list tr,
-            #cancelled-sessions-list td { display: block; width: 100%; }
-            #active-sessions-list tr,
-            #completed-sessions-list tr,
-            #cancelled-sessions-list tr {
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: 8px;
-                padding: 12px;
-                margin-bottom: 10px;
-            }
-            #active-sessions-list td,
-            #completed-sessions-list td,
-            #cancelled-sessions-list td {
-                padding: 3px 0;
-                border: none;
-                text-align: left !important;
-            }
-            /* Empty cells (hidden columns) collapse in card mode */
-            #active-sessions-list td.hide-mobile,
-            #completed-sessions-list td.hide-mobile,
-            #cancelled-sessions-list td.hide-mobile { display: none !important; }
-
             /* Card headers */
             .card h2 { font-size: 1.05rem; }
         }
@@ -304,26 +264,181 @@
 
     <div class="container">
         <div class="tabs">
-            <button class="tab active" data-tab="sealed-intake" onclick="switchTab('sealed-intake')">Sealed Intake (CSV)</button>
-            <button class="tab" data-tab="raw-intake" onclick="switchTab('raw-intake')">Raw Card Entry</button>
+            <button class="tab active" data-tab="new-intake" onclick="switchTab('new-intake')">New Intake</button>
             <button class="tab" data-tab="active-sessions" onclick="switchTab('active-sessions')">Active Sessions</button>
             <button class="tab" data-tab="completed" onclick="switchTab('completed')">Completed</button>
             <button class="tab" data-tab="cancelled" onclick="switchTab('cancelled')">Cancelled</button>
         </div>
 
-        <!-- ═══════════════════════════════════ SEALED INTAKE TAB ═══════════════════════════════════ -->
-        <div id="sealed-intake" class="tab-content active">
+        <!-- ═══════════════════════════════════ NEW INTAKE TAB ═══════════════════════════════════ -->
+        <div id="new-intake" class="tab-content active">
             <div class="card">
-                <h2>Import Sealed Products</h2>
+                <h2>Intake</h2>
                 <div style="display:flex; gap:4px; margin-bottom:16px; border-bottom:1px solid var(--border); padding-bottom:0;">
-                    <button class="tab active" data-subtab="csv" onclick="switchSubTab(this, 'csv')">Collectr CSV</button>
+                    <button class="tab active" data-subtab="manual-intake" onclick="switchSubTab(this, 'manual-intake')">Manual Entry</button>
+                    <button class="tab" data-subtab="csv" onclick="switchSubTab(this, 'csv')">Collectr CSV</button>
                     <button class="tab" data-subtab="generic-csv" onclick="switchSubTab(this, 'generic-csv')">Generic CSV</button>
                     <button class="tab" data-subtab="html-paste" onclick="switchSubTab(this, 'html-paste')">Paste HTML</button>
-                    <button class="tab" data-subtab="manual-sealed" onclick="switchSubTab(this, 'manual-sealed')">Manual Entry</button>
+                </div>
+
+                <!-- Manual Entry sub-tab (unified sealed + card) -->
+                <div id="subtab-manual-intake" class="subtab-content">
+                    <p style="color:var(--text-dim); margin-bottom:12px; font-size:0.85rem;">
+                        Start a session, then add sealed products or individual cards.
+                    </p>
+
+                    <!-- Create session -->
+                    <div id="intake-setup">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Customer Name</label>
+                                <input type="text" id="intake-customer" value="Walk-in">
+                            </div>
+                            <div class="form-group">
+                                <label>Offer Percentage (%)</label>
+                                <input type="number" id="intake-offer-pct" value="75" min="1" max="100" step="0.5">
+                            </div>
+                            <div class="form-group" style="justify-content:flex-end;">
+                                <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                    <input type="checkbox" id="intake-distribution" style="width:auto;"> Distribution
+                                </label>
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" onclick="createIntakeSession()">Start Intake Session</button>
+                    </div>
+
+                    <!-- Active session entry -->
+                    <div id="intake-entry" style="display:none;">
+                        <div class="alert alert-success" id="intake-session-info"></div>
+
+                        <!-- Type toggle -->
+                        <div style="display:flex; gap:4px; margin-bottom:12px;">
+                            <button class="btn btn-sm btn-primary" id="intake-type-btn-sealed" onclick="switchIntakeType('sealed')">Sealed Product</button>
+                            <button class="btn btn-sm btn-secondary" id="intake-type-btn-card" onclick="switchIntakeType('card')">Individual Card</button>
+                        </div>
+
+                        <!-- Card-specific: graded toggle -->
+                        <div id="intake-card-fields" style="display:none;">
+                            <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; padding:10px 14px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
+                                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9rem;">
+                                    <input type="checkbox" id="intake-is-graded" onchange="toggleIntakeGraded()" style="width:16px;height:16px;">
+                                    <span style="font-weight:600;">Graded Card</span>
+                                </label>
+                                <span id="intake-graded-fields" style="display:none; align-items:center; gap:8px;">
+                                    <select id="intake-grade-company" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);" onchange="onIntakeGradeChange()">
+                                        <option value="PSA">PSA</option>
+                                        <option value="BGS">BGS</option>
+                                        <option value="CGC">CGC</option>
+                                        <option value="SGC">SGC</option>
+                                    </select>
+                                    <select id="intake-grade-value" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);" onchange="onIntakeGradeChange()">
+                                        <option value="10">10</option>
+                                        <option value="9.5">9.5</option>
+                                        <option value="9">9</option>
+                                        <option value="8.5">8.5</option>
+                                        <option value="8">8</option>
+                                        <option value="7">7</option>
+                                    </select>
+                                    <span id="intake-graded-badge" style="display:none; background:var(--accent); color:#fff; padding:3px 8px; border-radius:4px; font-size:0.8rem; font-weight:600;"></span>
+                                </span>
+                                <span style="color:var(--text-dim); font-size:0.8rem;" id="intake-graded-hint">Toggle for PSA/BGS/CGC graded cards — uses eBay market data</span>
+                            </div>
+                        </div>
+
+                        <!-- Sealed search area -->
+                        <div id="intake-sealed-search-area">
+                            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                                <div class="form-group" style="flex:2; min-width:160px; margin:0;">
+                                    <label>Product Name</label>
+                                    <input type="text" id="intake-sealed-search" placeholder="e.g. Booster Box, ETB..."
+                                           onkeydown="if(event.key==='Enter') intakeSealedSearch()">
+                                </div>
+                                <div class="form-group" style="width:70px; margin:0;">
+                                    <label>Qty</label>
+                                    <input type="number" id="intake-sealed-qty" value="1" min="1">
+                                </div>
+                                <button class="btn btn-primary btn-sm" onclick="intakeSealedSearch()">Search</button>
+                                <button class="btn btn-secondary btn-sm" onclick="toggleIntakeManualDirect()">Manual</button>
+                            </div>
+
+                            <div id="intake-manual-direct" style="display:none; margin-bottom:12px; padding:12px; background:var(--surface-1); border-radius:6px; border:1px solid var(--border);">
+                                <h5 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Manual Add (for items not in PPT)</h5>
+                                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+                                    <div class="form-group" style="flex:2; min-width:160px; margin:0;">
+                                        <label style="font-size:0.8rem;">Product Name</label>
+                                        <input type="text" id="intake-direct-name" placeholder="e.g. Terastal Festival ex Box">
+                                    </div>
+                                    <div class="form-group" style="flex:1; min-width:100px; margin:0;">
+                                        <label style="font-size:0.8rem;">Set Name</label>
+                                        <input type="text" id="intake-direct-set" placeholder="optional">
+                                    </div>
+                                    <div class="form-group" style="width:100px; margin:0;">
+                                        <label style="font-size:0.8rem;">TCGPlayer ID</label>
+                                        <input type="number" id="intake-direct-tcgid" placeholder="optional">
+                                    </div>
+                                    <div class="form-group" style="width:90px; margin:0;">
+                                        <label style="font-size:0.8rem;">Price</label>
+                                        <input type="number" id="intake-direct-price" step="0.01" min="0" placeholder="$0.00">
+                                    </div>
+                                    <div class="form-group" style="width:55px; margin:0;">
+                                        <label style="font-size:0.8rem;">Qty</label>
+                                        <input type="number" id="intake-direct-qty" value="1" min="1">
+                                    </div>
+                                    <button class="btn btn-success btn-sm" onclick="submitIntakeManualDirect()">Add</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Card search area -->
+                        <div id="intake-card-search-area" style="display:none;">
+                            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                                <div class="form-group" style="flex:2; min-width:140px; margin:0;">
+                                    <label>Card Name</label>
+                                    <input type="text" id="intake-card-search" placeholder="e.g. Charizard ex"
+                                           onkeydown="if(event.key==='Enter') intakeCardSearch()">
+                                </div>
+                                <div class="form-group" style="flex:1; min-width:100px; margin:0;">
+                                    <label>Set (optional)</label>
+                                    <input type="text" id="intake-card-set" placeholder="e.g. Paldean Fates">
+                                </div>
+                                <div class="form-group" style="width:90px; margin:0;">
+                                    <label>TCG ID</label>
+                                    <input type="number" id="intake-card-tcgid" placeholder="optional"
+                                           onkeydown="if(event.key==='Enter') intakeCardSearch()">
+                                </div>
+                                <div class="form-group" id="intake-cond-group" style="width:70px; margin:0;">
+                                    <label>Cond</label>
+                                    <select id="intake-card-condition">
+                                        <option value="NM">NM</option>
+                                        <option value="LP">LP</option>
+                                        <option value="MP">MP</option>
+                                        <option value="HP">HP</option>
+                                        <option value="DMG">DMG</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" style="width:50px; margin:0;">
+                                    <label>Qty</label>
+                                    <input type="number" id="intake-card-qty" value="1" min="1">
+                                </div>
+                                <button class="btn btn-primary btn-sm" onclick="intakeCardSearch()">Search</button>
+                            </div>
+                        </div>
+
+                        <!-- Search results -->
+                        <div id="intake-search-results"></div>
+
+                        <!-- Unified item list -->
+                        <div id="intake-items-table" style="margin-top:16px;"></div>
+
+                        <div style="margin-top:16px; display:flex; gap:8px;">
+                            <button class="btn btn-success" onclick="finalizeIntakeSession()" id="intake-finalize-btn" style="display:none;">Finalize Session</button>
+                            <button class="btn btn-secondary" onclick="viewSession(intakeSessionId)" id="intake-view-btn" style="display:none;">View Full Session</button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- CSV Upload sub-tab -->
-                <div id="subtab-csv" class="subtab-content">
+                <div id="subtab-csv" class="subtab-content" style="display:none;">
                     <form id="csv-upload-form">
                         <div class="form-row">
                             <div class="form-group">
@@ -409,243 +524,8 @@
                     </form>
                 </div>
 
-                <!-- Manual Sealed Entry sub-tab -->
-                <div id="subtab-manual-sealed" class="subtab-content" style="display:none;">
-                    <p style="color:var(--text-dim); margin-bottom:12px; font-size:0.85rem;">
-                        Start a session, then search PPT for sealed products and add them one at a time.
-                    </p>
-
-                    <!-- Create session section -->
-                    <div id="sealed-manual-setup">
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label>Customer Name</label>
-                                <input type="text" id="sealed-manual-customer" value="Walk-in">
-                            </div>
-                            <div class="form-group">
-                                <label>Offer Percentage (%)</label>
-                                <input type="number" id="sealed-manual-offer-pct" value="75" min="1" max="100" step="0.5">
-                            </div>
-                            <div class="form-group" style="justify-content:flex-end;">
-                                <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
-                                    <input type="checkbox" id="sealed-manual-distribution" style="width:auto;"> Distribution
-                                </label>
-                            </div>
-                        </div>
-                        <button class="btn btn-primary" onclick="createManualSealedSession()">Start Sealed Intake Session</button>
-                    </div>
-
-                    <!-- Active sealed session entry -->
-                    <div id="sealed-manual-entry" style="display:none;">
-                        <div class="alert alert-success" id="sealed-manual-session-info"></div>
-
-                        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
-                            <div class="form-group" style="flex:2; min-width:160px; margin:0;">
-                                <label>Product Name</label>
-                                <input type="text" id="sealed-manual-search" placeholder="e.g. Booster Box, ETB..."
-                                       onkeydown="if(event.key==='Enter') manualSealedSearch()">
-                            </div>
-                            <div class="form-group" style="width:70px; margin:0;">
-                                <label>Qty</label>
-                                <input type="number" id="sealed-manual-qty" value="1" min="1">
-                            </div>
-                            <button class="btn btn-primary btn-sm" onclick="manualSealedSearch()">Search</button>
-                            <button class="btn btn-secondary btn-sm" onclick="toggleManualSealedEntry()">Manual</button>
-                        </div>
-
-                        <div id="sealed-manual-direct" style="display:none; margin-bottom:12px; padding:12px; background:var(--surface-1); border-radius:6px; border:1px solid var(--border);">
-                            <h5 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Manual Add (for items not in PPT)</h5>
-                            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
-                                <div class="form-group" style="flex:2; min-width:160px; margin:0;">
-                                    <label style="font-size:0.8rem;">Product Name</label>
-                                    <input type="text" id="manual-direct-name" placeholder="e.g. Terastal Festival ex Box">
-                                </div>
-                                <div class="form-group" style="flex:1; min-width:100px; margin:0;">
-                                    <label style="font-size:0.8rem;">Set Name</label>
-                                    <input type="text" id="manual-direct-set" placeholder="optional">
-                                </div>
-                                <div class="form-group" style="width:100px; margin:0;">
-                                    <label style="font-size:0.8rem;">TCGPlayer ID</label>
-                                    <input type="number" id="manual-direct-tcgid" placeholder="optional">
-                                </div>
-                                <div class="form-group" style="width:90px; margin:0;">
-                                    <label style="font-size:0.8rem;">Price</label>
-                                    <input type="number" id="manual-direct-price" step="0.01" min="0" placeholder="$0.00">
-                                </div>
-                                <div class="form-group" style="width:55px; margin:0;">
-                                    <label style="font-size:0.8rem;">Qty</label>
-                                    <input type="number" id="manual-direct-qty" value="1" min="1">
-                                </div>
-                                <button class="btn btn-success btn-sm" onclick="submitManualDirectSealed()">Add</button>
-                            </div>
-                        </div>
-
-                        <div id="sealed-manual-results"></div>
-
-                        <div id="sealed-manual-items-table" style="margin-top:16px;"></div>
-
-                        <div style="margin-top:16px; display:flex; gap:8px;">
-                            <button class="btn btn-primary" onclick="finalizeSealedManualSession()" id="sealed-manual-finalize-btn" style="display:none;">Finalize Session</button>
-                            <button class="btn btn-secondary" onclick="viewSession(sealedManualSessionId)" id="sealed-manual-view-btn" style="display:none;">View Full Session</button>
-                        </div>
-                    </div>
-                </div>
             </div>
             <div id="csv-upload-result"></div>
-        </div>
-
-        <!-- ═══════════════════════════════════ RAW CARD ENTRY TAB ═══════════════════════════════════ -->
-        <div id="raw-intake" class="tab-content">
-            <div class="card">
-                <h2>Raw Card Intake</h2>
-                <p style="color:var(--text-dim); margin-bottom:16px; font-size:0.9rem;">
-                    Import from a Collectr export, paste Collectr HTML, match a spreadsheet, or add cards manually.
-                </p>
-
-                <!-- ── Create session ──────────────────────────── -->
-                <div id="raw-session-setup">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Customer Name</label>
-                            <input type="text" id="raw-customer" value="Walk-in">
-                        </div>
-                        <div class="form-group">
-                            <label>Offer Percentage (%)</label>
-                            <input type="number" id="raw-offer-pct" value="65" min="1" max="100" step="0.5">
-                        </div>
-                    </div>
-                    <button class="btn btn-primary" onclick="createRawSession()">Start Raw Intake Session</button>
-                </div>
-
-                <!-- ── Active session entry ─────────────────────── -->
-                <div id="raw-entry-form" style="display:none;">
-                    <div class="alert alert-success" id="raw-session-info"></div>
-
-                    <!-- Import sub-tabs -->
-                    <div style="display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap; border-bottom:1px solid var(--border); padding-bottom:10px;">
-                        <button class="btn btn-sm btn-primary" id="raw-subtab-btn-manual" onclick="switchRawSubtab('manual')">✏️ Manual Entry</button>
-                        <button class="btn btn-sm btn-secondary" id="raw-subtab-btn-collectr-csv" onclick="switchRawSubtab('collectr-csv')">📥 Collectr CSV</button>
-                        <button class="btn btn-sm btn-secondary" id="raw-subtab-btn-collectr-html" onclick="switchRawSubtab('collectr-html')">🌐 Collectr HTML</button>
-                        <button class="btn btn-sm btn-secondary" id="raw-subtab-btn-generic-csv" onclick="switchRawSubtab('generic-csv')">📊 Spreadsheet</button>
-                    </div>
-
-                    <!-- ── Manual entry panel ── -->
-                    <div id="raw-subtab-manual">
-                        <!-- Graded toggle -->
-                        <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; padding:10px 14px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
-                            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9rem;">
-                                <input type="checkbox" id="raw-is-graded" onchange="toggleGradedMode()" style="width:16px;height:16px;">
-                                <span style="font-weight:600;">Graded Card</span>
-                            </label>
-                            <span id="raw-graded-fields" style="display:none; align-items:center; gap:8px;">
-                                <select id="raw-grade-company" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);" onchange="onGradeFieldChange()">
-                                    <option value="PSA">PSA</option>
-                                    <option value="BGS">BGS</option>
-                                    <option value="CGC">CGC</option>
-                                    <option value="SGC">SGC</option>
-                                </select>
-                                <select id="raw-grade-value" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);" onchange="onGradeFieldChange()">
-                                    <option value="10">10</option>
-                                    <option value="9.5">9.5</option>
-                                    <option value="9">9</option>
-                                    <option value="8.5">8.5</option>
-                                    <option value="8">8</option>
-                                    <option value="7">7</option>
-                                </select>
-                                <span id="raw-graded-market-badge" style="display:none; background:var(--accent); color:#fff; padding:3px 8px; border-radius:4px; font-size:0.8rem; font-weight:600;"></span>
-                            </span>
-                            <span style="color:var(--text-dim); font-size:0.8rem;" id="raw-graded-hint">Toggle for PSA/BGS/CGC graded cards — uses eBay market data</span>
-                        </div>
-
-                        <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
-                            <div class="form-group" style="flex:2; min-width:140px; margin:0;">
-                                <label>Card Name</label>
-                                <input type="text" id="raw-card-search" placeholder="e.g. Charizard ex"
-                                       onkeydown="if(event.key==='Enter') smartCardSearch(rawSessionId, parseFloat(document.getElementById('raw-offer-pct').value)||65, 'raw')">
-                            </div>
-                            <div class="form-group" style="flex:1; min-width:100px; margin:0;">
-                                <label>Set (optional)</label>
-                                <input type="text" id="raw-card-set" placeholder="e.g. Paldean Fates">
-                            </div>
-                            <div class="form-group" style="width:90px; margin:0;">
-                                <label>TCG ID</label>
-                                <input type="number" id="raw-tcgid" placeholder="optional"
-                                       onkeydown="if(event.key==='Enter') lookupByTcgId(rawSessionId, parseFloat(document.getElementById('raw-offer-pct').value)||65, 'raw')">
-                            </div>
-                            <div class="form-group" id="raw-cond-group" style="width:70px; margin:0;">
-                                <label>Cond</label>
-                                <select id="raw-condition">
-                                    <option value="NM">NM</option>
-                                    <option value="LP">LP</option>
-                                    <option value="MP">MP</option>
-                                    <option value="HP">HP</option>
-                                    <option value="DMG">DMG</option>
-                                </select>
-                            </div>
-                            <div class="form-group" style="width:50px; margin:0;">
-                                <label>Qty</label>
-                                <input type="number" id="raw-quantity" value="1" min="1">
-                            </div>
-                            <button class="btn btn-primary btn-sm" onclick="smartCardSearch(rawSessionId, parseFloat(document.getElementById('raw-offer-pct').value)||65, 'raw')">Search</button>
-                        </div>
-                        <div id="raw-search-results" style="margin-top:8px;"></div>
-                    </div>
-
-                    <!-- ── Collectr CSV panel ── -->
-                    <div id="raw-subtab-collectr-csv" style="display:none;">
-                        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:12px;">
-                            Export your collection from Collectr as a CSV. Raw cards with a Grade column will be imported as graded automatically.
-                        </p>
-                        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
-                            <div class="form-group" style="margin:0;">
-                                <label>Collectr CSV File</label>
-                                <input type="file" id="raw-collectr-csv-file" accept=".csv" style="color:var(--text);">
-                            </div>
-                            <button class="btn btn-primary btn-sm" onclick="uploadRawCollectrCSV()">Import CSV</button>
-                        </div>
-                        <div id="raw-collectr-csv-result" style="margin-top:10px;"></div>
-                    </div>
-
-                    <!-- ── Collectr HTML panel ── -->
-                    <div id="raw-subtab-collectr-html" style="display:none;">
-                        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:12px;">
-                            Navigate to your Collectr portfolio page, select-all and copy the HTML source of the product list, then paste it below.
-                        </p>
-                        <div class="form-group">
-                            <label>Paste Collectr HTML</label>
-                            <textarea id="raw-collectr-html-paste" rows="6"
-                                style="width:100%; background:var(--surface); border:1px solid var(--border); border-radius:6px; color:var(--text); padding:10px; font-family:monospace; font-size:0.8rem; resize:vertical;"
-                                placeholder="Paste <ul class=&quot;contents ...&quot;> block here..."></textarea>
-                        </div>
-                        <button class="btn btn-primary btn-sm" onclick="uploadRawCollectrHTML()">Parse HTML</button>
-                        <div id="raw-collectr-html-result" style="margin-top:10px;"></div>
-                    </div>
-
-                    <!-- ── Generic CSV / spreadsheet panel ── -->
-                    <div id="raw-subtab-generic-csv" style="display:none;">
-                        <p style="color:var(--text-dim); font-size:0.85rem; margin-bottom:12px;">
-                            Upload any CSV or spreadsheet. We'll try to auto-detect columns (card name, set, condition, qty, price). Include a <em>Grade</em> or <em>PSA Grade</em> column for graded cards.
-                        </p>
-                        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
-                            <div class="form-group" style="margin:0;">
-                                <label>CSV / Spreadsheet File</label>
-                                <input type="file" id="raw-generic-csv-file" accept=".csv,.xlsx,.xls" style="color:var(--text);">
-                            </div>
-                            <button class="btn btn-secondary btn-sm" onclick="previewRawGenericCSV()">Preview Columns</button>
-                            <button class="btn btn-primary btn-sm" onclick="importRawGenericCSV()">Import</button>
-                        </div>
-                        <div id="raw-generic-csv-preview" style="margin-top:10px;"></div>
-                        <div id="raw-generic-csv-result" style="margin-top:10px;"></div>
-                    </div>
-
-                    <!-- Items added so far -->
-                    <div id="raw-items-table" style="margin-top:16px;"></div>
-
-                    <div style="margin-top:16px; display:flex; gap:10px;">
-                        <button class="btn btn-success" onclick="finalizeRawSession()">Finalize Session</button>
-                    </div>
-                </div>
-            </div>
         </div>
 
         <!-- ═══════════════════════════════════ ACTIVE SESSIONS TAB ═══════════════════════════════════ -->
@@ -946,6 +826,8 @@
     let currentMapItemId = null;
     let currentMapProductType = 'sealed';
     let rawSessionId = null;
+    let intakeSessionId = null;
+    let intakeType = 'sealed'; // 'sealed' or 'card'
 
     // ═══════════════════════════════ TABS ═══════════════════════════════
     function switchTab(name) {
@@ -963,7 +845,7 @@
     // Restore tab from hash on load
     (function() {
         const hash = window.location.hash.replace('#', '');
-        const validTabs = ['sealed-intake','raw-intake','active-sessions','completed','cancelled'];
+        const validTabs = ['new-intake','active-sessions','completed','cancelled'];
         if (hash && validTabs.includes(hash)) { switchTab(hash); }
         else { loadSessions('in_progress,offered,accepted,partially_ingested', 'active-sessions-list'); }
     })();
@@ -1182,33 +1064,64 @@
         }
     }
 
-    // ═══════════════════════════════ MANUAL SEALED ENTRY ═══════════════════════════════
-    let sealedManualSessionId = null;
+    // ═══════════════════════════════ UNIFIED INTAKE (MANUAL ENTRY) ═══════════════════════════════
 
-    async function createManualSealedSession() {
-        const customer = document.getElementById('sealed-manual-customer').value || 'Walk-in';
-        const offerPct = document.getElementById('sealed-manual-offer-pct').value || '75';
-        const isDist = document.getElementById('sealed-manual-distribution').checked;
+    async function createIntakeSession() {
+        const customer = document.getElementById('intake-customer').value || 'Walk-in';
+        const offerPct = document.getElementById('intake-offer-pct').value || '75';
+        const isDist = document.getElementById('intake-distribution').checked;
         try {
             const r = await fetch('/api/intake/create-session', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ customer_name: customer, session_type: 'sealed', offer_percentage: parseFloat(offerPct), is_distribution: isDist }),
+                body: JSON.stringify({ customer_name: customer, session_type: 'mixed', offer_percentage: parseFloat(offerPct), is_distribution: isDist }),
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
-            sealedManualSessionId = d.session.id;
-            document.getElementById('sealed-manual-setup').style.display = 'none';
-            document.getElementById('sealed-manual-entry').style.display = 'block';
-            document.getElementById('sealed-manual-session-info').innerHTML =
-                'Session started for <strong>' + customer + '</strong> \u2022 Offer: ' + offerPct + '% \u2022 ID: ' + sealedManualSessionId.slice(0,8) + '...';
-            document.getElementById('sealed-manual-search').focus();
+            intakeSessionId = d.session.id;
+            document.getElementById('intake-setup').style.display = 'none';
+            document.getElementById('intake-entry').style.display = 'block';
+            document.getElementById('intake-session-info').innerHTML =
+                'Session started for <strong>' + customer + '</strong> \u2022 Offer: ' + offerPct + '% \u2022 ID: ' + intakeSessionId.slice(0,8) + '...';
+            document.getElementById('intake-sealed-search').focus();
         } catch(err) { alert(err.message); }
     }
 
-    async function manualSealedSearch() {
-        const searchTerm = document.getElementById('sealed-manual-search').value.trim();
-        const resultsDiv = document.getElementById('sealed-manual-results');
+    function switchIntakeType(type) {
+        intakeType = type;
+        document.getElementById('intake-type-btn-sealed').className = 'btn btn-sm ' + (type === 'sealed' ? 'btn-primary' : 'btn-secondary');
+        document.getElementById('intake-type-btn-card').className = 'btn btn-sm ' + (type === 'card' ? 'btn-primary' : 'btn-secondary');
+        document.getElementById('intake-sealed-search-area').style.display = type === 'sealed' ? '' : 'none';
+        document.getElementById('intake-card-search-area').style.display = type === 'card' ? '' : 'none';
+        document.getElementById('intake-card-fields').style.display = type === 'card' ? '' : 'none';
+        document.getElementById('intake-search-results').innerHTML = '';
+    }
+
+    function toggleIntakeGraded() {
+        const isGraded = document.getElementById('intake-is-graded').checked;
+        document.getElementById('intake-graded-fields').style.display = isGraded ? 'flex' : 'none';
+        const condGroup = document.getElementById('intake-cond-group');
+        condGroup.style.opacity = isGraded ? '0.4' : '1';
+        condGroup.title = isGraded ? 'Condition not used for graded cards' : '';
+        document.getElementById('intake-graded-hint').style.display = isGraded ? 'none' : '';
+        const badge = document.getElementById('intake-graded-badge');
+        if (badge) { badge.style.display = 'none'; badge.textContent = ''; }
+    }
+
+    function onIntakeGradeChange() {
+        const badge = document.getElementById('intake-graded-badge');
+        if (badge) { badge.style.display = 'none'; badge.textContent = ''; }
+        document.getElementById('intake-search-results').innerHTML = '';
+    }
+
+    function toggleIntakeManualDirect() {
+        const el = document.getElementById('intake-manual-direct');
+        el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    }
+
+    async function intakeSealedSearch() {
+        const searchTerm = document.getElementById('intake-sealed-search').value.trim();
+        const resultsDiv = document.getElementById('intake-search-results');
         if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a search term</div>'; return; }
 
         resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
@@ -1221,42 +1134,41 @@
             const contentType = r.headers.get('content-type') || '';
             if (!contentType.includes('application/json')) {
                 const text = await r.text();
-                resultsDiv.innerHTML = `<div class="alert alert-error">Server error (${r.status}): ${text.substring(0, 100)}</div>`;
+                resultsDiv.innerHTML = '<div class="alert alert-error">Server error (' + r.status + '): ' + text.substring(0, 100) + '</div>';
                 return;
             }
             const d = await r.json();
-            if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+            if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + d.error + '</div>'; return; }
 
             const products = d.results || [];
             if (!products.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No results found</div>'; return; }
 
-            const qty = parseInt(document.getElementById('sealed-manual-qty').value) || 1;
-            const offerPct = parseFloat(document.getElementById('sealed-manual-offer-pct').value) || 75;
+            const qty = parseInt(document.getElementById('intake-sealed-qty').value) || 1;
+            const offerPct = parseFloat(document.getElementById('intake-offer-pct').value) || 75;
             resultsDiv.innerHTML = products.map(p => {
                 const price = p.unopenedPrice || (p.prices ? p.prices.market : null) || 0;
                 const offer = (price * qty * offerPct / 100).toFixed(2);
                 const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.id || '';
                 const setName = (p.setName || p.set_name || '').replace(/'/g, "\\'");
                 const safeName = (p.name || '').replace(/'/g, "\\'");
-                return `<div class="search-result" onclick="addManualSealed(${tcgId}, '${safeName}', '${setName}', ${price}, ${qty})">
-                    <h4>${p.name}</h4>
-                    <p>${p.setName || p.set_name || ''} \u00b7 TCG#${tcgId} \u00b7 $${Number(price).toFixed(2)} each \u00b7 Qty ${qty} \u00b7 Offer: $${offer}</p>
-                </div>`;
+                return '<div class="search-result" onclick="addIntakeSealed(' + tcgId + ', \'' + safeName + '\', \'' + setName + '\', ' + price + ', ' + qty + ')">' +
+                    '<h4>' + p.name + '</h4>' +
+                    '<p>' + (p.setName || p.set_name || '') + ' \u00b7 TCG#' + tcgId + ' \u00b7 $' + Number(price).toFixed(2) + ' each \u00b7 Qty ' + qty + ' \u00b7 Offer: $' + offer + '</p></div>';
             }).join('');
         } catch(err) {
-            resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+            resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
         }
     }
 
-    async function addManualSealed(tcgplayerId, name, setName, price, qty) {
-        const resultsDiv = document.getElementById('sealed-manual-results');
+    async function addIntakeSealed(tcgplayerId, name, setName, price, qty) {
+        const resultsDiv = document.getElementById('intake-search-results');
         resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding...</div>';
         try {
             const r = await fetch('/api/intake/add-sealed-item', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    session_id: sealedManualSessionId,
+                    session_id: intakeSessionId,
                     product_name: name,
                     set_name: setName,
                     tcgplayer_id: tcgplayerId,
@@ -1265,58 +1177,121 @@
                 }),
             });
             const d = await r.json();
-            if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+            if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + d.error + '</div>'; return; }
 
-            document.getElementById('sealed-manual-search').value = '';
-            document.getElementById('sealed-manual-qty').value = '1';
+            document.getElementById('intake-sealed-search').value = '';
+            document.getElementById('intake-sealed-qty').value = '1';
             resultsDiv.innerHTML = '<div class="alert alert-success">Added! \u2713</div>';
             setTimeout(() => { resultsDiv.innerHTML = ''; }, 1500);
-            loadManualSealedItems();
-            document.getElementById('sealed-manual-search').focus();
+            loadIntakeItems();
+            document.getElementById('intake-sealed-search').focus();
         } catch(err) {
-            resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+            resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
         }
     }
 
-    async function loadManualSealedItems() {
-        if (!sealedManualSessionId) return;
-        try {
-            const r = await fetch('/api/intake/session/' + sealedManualSessionId);
-            const d = await r.json();
-            const items = d.items;
-            const s = d.session;
-            const tableDiv = document.getElementById('sealed-manual-items-table');
-            document.getElementById('sealed-manual-finalize-btn').style.display = items.length ? '' : 'none';
-            document.getElementById('sealed-manual-view-btn').style.display = items.length ? '' : 'none';
-            if (!items.length) { tableDiv.innerHTML = '<p style="color:var(--text-dim);">No products added yet.</p>'; return; }
-            tableDiv.innerHTML = '<div style="margin-bottom:8px; font-weight:600;">' +
-                items.length + ' products \u2022 Market: $' + (s.total_market_value || 0).toFixed(2) +
-                ' \u2022 Offer: $' + (s.total_offer_amount || 0).toFixed(2) +
-                '</div><table><thead><tr><th>Product</th><th>Set</th><th>Qty</th><th>Market</th><th>Offer</th><th></th></tr></thead><tbody>' +
-                items.map(i => '<tr>' +
-                    '<td>' + i.product_name + '</td>' +
-                    '<td><small style="color:var(--text-dim);">' + (i.set_name || '') + '</small></td>' +
-                    '<td>' + i.quantity + '</td>' +
-                    '<td>$' + (i.market_price || 0).toFixed(2) + '</td>' +
-                    '<td>$' + (i.offer_price || 0).toFixed(2) + '</td>' +
-                    '<td><button class="btn btn-sm" style="color:var(--red); font-size:0.7rem; padding:2px 6px;" onclick="deleteManualSealedItem(\'' + i.id + '\')">✕</button></td>' +
-                '</tr>').join('') + '</tbody></table>';
-        } catch(err) { console.error(err); }
-    }
+    async function submitIntakeManualDirect() {
+        const name = document.getElementById('intake-direct-name').value.trim();
+        const setName = document.getElementById('intake-direct-set').value.trim();
+        const tcgId = document.getElementById('intake-direct-tcgid').value.trim();
+        const price = parseFloat(document.getElementById('intake-direct-price').value) || 0;
+        const qty = parseInt(document.getElementById('intake-direct-qty').value) || 1;
 
-    async function deleteManualSealedItem(itemId) {
+        if (!name) { alert('Product name is required'); return; }
+        if (price <= 0) { alert('Price is required'); return; }
+        if (!intakeSessionId) { alert('Create a session first'); return; }
+
         try {
-            await fetch('/api/intake/item/' + itemId + '/delete', { method: 'POST' });
-            loadManualSealedItems();
+            const r = await fetch('/api/intake/add-sealed-item', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: intakeSessionId,
+                    product_name: name,
+                    set_name: setName,
+                    tcgplayer_id: tcgId ? parseInt(tcgId) : null,
+                    market_price: price,
+                    quantity: qty,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Failed to add'); return; }
+
+            document.getElementById('intake-direct-name').value = '';
+            document.getElementById('intake-direct-set').value = '';
+            document.getElementById('intake-direct-tcgid').value = '';
+            document.getElementById('intake-direct-price').value = '';
+            document.getElementById('intake-direct-qty').value = '1';
+            document.getElementById('intake-manual-direct').style.display = 'none';
+            loadIntakeItems();
         } catch(err) { alert(err.message); }
     }
 
-    async function finalizeSealedManualSession() {
-        if (!sealedManualSessionId) return;
-        await finalizeSession(sealedManualSessionId);
-        sealedManualSessionId = null;
-        document.getElementById('sealed-manual-entry').style.display = 'none';
-        document.getElementById('sealed-manual-setup').style.display = '';
+    function intakeCardSearch() {
+        const offerPct = parseFloat(document.getElementById('intake-offer-pct').value) || 75;
+        smartCardSearch(intakeSessionId, offerPct, 'intake');
+    }
+
+    async function loadIntakeItems() {
+        if (!intakeSessionId) return;
+        try {
+            const r = await fetch('/api/intake/session/' + intakeSessionId);
+            const d = await r.json();
+            const items = d.items;
+            const s = d.session;
+            const tableDiv = document.getElementById('intake-items-table');
+            document.getElementById('intake-finalize-btn').style.display = items.length ? '' : 'none';
+            document.getElementById('intake-view-btn').style.display = items.length ? '' : 'none';
+            if (!items.length) { tableDiv.innerHTML = '<p style="color:var(--text-dim);">No items added yet.</p>'; return; }
+
+            const sealedCount = items.filter(i => i.product_type === 'sealed').length;
+            const cardCount = items.filter(i => i.product_type === 'raw').length;
+            let summary = items.length + ' items';
+            if (sealedCount && cardCount) summary += ' (' + sealedCount + ' sealed, ' + cardCount + ' cards)';
+            summary += ' \u2022 Market: $' + (s.total_market_value || 0).toFixed(2) + ' \u2022 Offer: $' + (s.total_offer_amount || 0).toFixed(2);
+
+            tableDiv.innerHTML = '<div style="margin-bottom:8px; font-weight:600;">' + summary +
+                '</div><table class="responsive-cards"><thead><tr><th>Item</th><th>Type</th><th>Qty</th><th>Market</th><th>Offer</th><th></th></tr></thead><tbody>' +
+                items.map(i => {
+                    const isCard = i.product_type === 'raw';
+                    let typeBadge;
+                    if (i.is_graded) {
+                        typeBadge = '<span class="badge" style="background:var(--accent-alt,#7c3aed);color:#fff;">' + (i.grade_company||'') + ' ' + (i.grade_value||'') + '</span>';
+                    } else if (isCard) {
+                        const _c = i.condition || '';
+                        const _s = _c==='NM' ? 'background:#14532d;color:#4ade80;' : _c==='LP' ? 'background:rgba(79,125,249,0.18);color:#7aadff;' : _c==='MP' ? 'background:#422006;color:#fbbf24;' : _c==='HP' ? 'background:#431407;color:#fb923c;' : _c==='DMG' ? 'background:#450a0a;color:#f87171;' : 'background:var(--surface-2);color:var(--text-dim);';
+                        typeBadge = '<span class="badge" style="' + _s + '">' + _c + '</span>';
+                    } else {
+                        typeBadge = '<span class="badge" style="background:rgba(79,125,249,0.18);color:#7aadff;">Sealed</span>';
+                    }
+                    const nameHtml = isCard
+                        ? i.product_name + '<br><small style="color:var(--text-dim);">' + (i.set_name || '') + ' ' + (i.card_number ? '#'+i.card_number : '') + '</small>'
+                        : i.product_name + (i.set_name ? '<br><small style="color:var(--text-dim);">' + i.set_name + '</small>' : '');
+                    return '<tr>' +
+                        '<td data-label="">' + nameHtml + '</td>' +
+                        '<td data-label="Type">' + typeBadge + '</td>' +
+                        '<td data-label="Qty">' + i.quantity + '</td>' +
+                        '<td data-label="Market">$' + (i.market_price || 0).toFixed(2) + '</td>' +
+                        '<td data-label="Offer">$' + (i.offer_price || 0).toFixed(2) + '</td>' +
+                        '<td data-label=""><button class="btn btn-sm" style="color:var(--red); font-size:0.7rem; padding:2px 6px;" onclick="deleteIntakeItem(\'' + i.id + '\')">✕</button></td>' +
+                    '</tr>';
+                }).join('') + '</tbody></table>';
+        } catch(err) { console.error(err); }
+    }
+
+    async function deleteIntakeItem(itemId) {
+        try {
+            await fetch('/api/intake/item/' + itemId + '/delete', { method: 'POST' });
+            loadIntakeItems();
+        } catch(err) { alert(err.message); }
+    }
+
+    async function finalizeIntakeSession() {
+        if (!intakeSessionId) return;
+        await finalizeSession(intakeSessionId);
+        intakeSessionId = null;
+        document.getElementById('intake-entry').style.display = 'none';
+        document.getElementById('intake-setup').style.display = '';
         document.getElementById('sealed-manual-items-table').innerHTML = '';
     }
 
@@ -1359,7 +1334,7 @@
             const d = await r.json();
             if (!d.sessions.length) { c.innerHTML = '<p style="color:var(--text-dim);">No sessions found.</p>'; return; }
 
-            c.innerHTML = `<table>
+            c.innerHTML = `<table class="responsive-cards">
                 <thead><tr>
                     <th>Customer</th><th>Type</th><th>Status</th><th>Items</th><th>Offer</th>
                     <th>Accepted Details</th><th>Created</th><th></th>
@@ -1397,14 +1372,14 @@
                         details = '📬 no tracking';
                     }
                     return `<tr>
-                    <td style="font-weight:600;font-size:1rem;">${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''} <span class="badge badge-blue" style="margin-left:4px;">${s.session_type}</span> <span class="badge" style="${statusStyle};margin-left:4px;">${statusLabel}</span></td>
-                    <td class="hide-mobile"><span class="badge badge-blue">${s.session_type}</span></td>
-                    <td class="hide-mobile"><span class="badge" style="${statusStyle}">${statusLabel}</span></td>
-                    <td>${s.item_count || 0} items · $${(s.total_offer_amount || 0).toFixed(2)}</td>
-                    <td class="hide-mobile">$${(s.total_offer_amount || 0).toFixed(2)}</td>
-                    <td style="font-size:0.8rem; color:var(--text-dim);">${details}</td>
-                    <td>${new Date(s.created_at).toLocaleDateString()}</td>
-                    <td style="display:flex;gap:6px;align-items:center;">
+                    <td data-label="Customer" style="font-weight:600;">${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''}</td>
+                    <td data-label="Type"><span class="badge badge-blue">${s.session_type}</span></td>
+                    <td data-label="Status"><span class="badge" style="${statusStyle}">${statusLabel}</span></td>
+                    <td data-label="Items">${s.item_count || 0}</td>
+                    <td data-label="Offer">$${(s.total_offer_amount || 0).toFixed(2)}</td>
+                    <td data-label="Details" style="font-size:0.8rem; color:var(--text-dim);">${details}</td>
+                    <td data-label="Created">${new Date(s.created_at).toLocaleDateString()}</td>
+                    <td data-label="" style="display:flex;gap:6px;align-items:center;">
                         <button class="btn btn-secondary btn-sm" onclick="viewSession('${s.id}')">View</button>
                         ${['cancelled','rejected'].includes(s.status) ? `
                         <button class="btn btn-sm" style="background:#059669;color:#fff;border:none;"
@@ -4093,9 +4068,20 @@
     // ═══════════════════════════════ CARD SEARCH & ADD (shared by session modal + raw tab) ═══════════════════════════════
 
     function _getCardFormIds(context) {
-        return context === 'session'
-            ? { search: 'session-raw-search', set: 'session-raw-set', tcgid: 'session-raw-tcgid', cond: 'session-raw-condition', qty: 'session-raw-qty', results: 'session-raw-results' }
-            : { search: 'raw-card-search', set: 'raw-card-set', tcgid: 'raw-tcgid', cond: 'raw-condition', qty: 'raw-quantity', results: 'raw-search-results' };
+        if (context === 'session') return { search: 'session-raw-search', set: 'session-raw-set', tcgid: 'session-raw-tcgid', cond: 'session-raw-condition', qty: 'session-raw-qty', results: 'session-raw-results' };
+        if (context === 'intake') return { search: 'intake-card-search', set: 'intake-card-set', tcgid: 'intake-card-tcgid', cond: 'intake-card-condition', qty: 'intake-card-qty', results: 'intake-search-results' };
+        return { search: 'raw-card-search', set: 'raw-card-set', tcgid: 'raw-tcgid', cond: 'raw-condition', qty: 'raw-quantity', results: 'raw-search-results' };
+    }
+
+    function _isGradedContext(context) {
+        if (context === 'intake') return document.getElementById('intake-is-graded')?.checked || false;
+        if (context === 'raw') return document.getElementById('raw-is-graded')?.checked || false;
+        return false;
+    }
+
+    function _getGradeFields(context) {
+        if (context === 'intake') return { company: document.getElementById('intake-grade-company')?.value || 'PSA', value: document.getElementById('intake-grade-value')?.value || '10', badge: document.getElementById('intake-graded-badge') };
+        return { company: document.getElementById('raw-grade-company')?.value || 'PSA', value: document.getElementById('raw-grade-value')?.value || '10', badge: document.getElementById('raw-graded-market-badge') };
     }
 
     function smartCardSearch(sessionId, offerPct, context) {
@@ -4148,14 +4134,15 @@
 
             // Update graded badge if in graded mode
             if (gradedPrices && Object.keys(gradedPrices).length) {
-                _updateGradedBadge(gradedPrices);
+                _updateGradedBadge(gradedPrices, context);
             }
 
-            const inGradedMode = context === 'raw' && document.getElementById('raw-is-graded')?.checked;
+            const inGradedMode = _isGradedContext(context);
 
             if (inGradedMode) {
-                const gradeCompany = (document.getElementById('raw-grade-company')?.value || 'PSA').toUpperCase();
-                const gradeVal = document.getElementById('raw-grade-value')?.value || '10';
+                const _gf = _getGradeFields(context);
+                const gradeCompany = _gf.company.toUpperCase();
+                const gradeVal = _gf.value;
                 const companyGrades = gradedPrices[gradeCompany] || {};
                 const gradeEntry = companyGrades[gradeVal] || {};
                 const gradedPrice = gradeEntry.price;
@@ -4283,8 +4270,9 @@
                 const safeName = (c.name||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
                 const safeSet = setName.replace(/'/g, "\\'").replace(/"/g, '&quot;');
 
-                const inGraded = context === 'raw' && document.getElementById('raw-is-graded')?.checked;
-                const gradeLabel = inGraded ? (' · <span style="color:var(--accent);font-weight:600;">' + (document.getElementById('raw-grade-company')?.value||'PSA') + ' ' + (document.getElementById('raw-grade-value')?.value||'10') + ' — click for graded price</span>') : '';
+                const inGraded = _isGradedContext(context);
+                const _gfSearch = inGraded ? _getGradeFields(context) : null;
+                const gradeLabel = inGraded ? (' · <span style="color:var(--accent);font-weight:600;">' + (_gfSearch.company||'PSA') + ' ' + (_gfSearch.value||'10') + ' — click for graded price</span>') : '';
                 return `<div class="search-result" onclick="addCardFromSearch('${sessionId}', ${tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${condition}', ${qty}, ${price || 0}, '${context}')">
                     <h4>${c.name} ${cardNum ? '#'+cardNum : ''}</h4>
                     <p>${setName}${rarity ? ' \u00b7 '+rarity : ''} \u00b7 TCG#${tcgId} \u00b7 ${condition}: $${displayPrice} \u00b7 Qty ${qty} \u00b7 Offer: $${offer}${gradeLabel}</p>
@@ -4428,7 +4416,7 @@
         resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding...</div>';
         try {
             // Pass graded info from the form (only relevant for manual entry in raw tab)
-            const isGraded = context === 'raw' && document.getElementById('raw-is-graded')?.checked;
+            const isGraded = _isGradedContext(context);
             const gradeCompany = isGraded ? (document.getElementById('raw-grade-company')?.value || '') : '';
             const gradeValue = isGraded ? (document.getElementById('raw-grade-value')?.value || '') : '';
             const r = await fetch('/api/intake/add-raw-card', {
@@ -4608,11 +4596,12 @@
     }
 
     // Show the graded price badge after a card lookup returns graded_prices
-    function _updateGradedBadge(gradedPrices) {
-        const badge = document.getElementById('raw-graded-market-badge');
+    function _updateGradedBadge(gradedPrices, context) {
+        const _gf = _getGradeFields(context || 'raw');
+        const badge = _gf.badge;
         if (!badge) return;
-        const company = (document.getElementById('raw-grade-company')?.value || 'PSA').toUpperCase();
-        const grade = document.getElementById('raw-grade-value')?.value || '10';
+        const company = _gf.company.toUpperCase();
+        const grade = _gf.value;
         const gd = gradedPrices?.[company]?.[grade] || {};
         const price = gd.price;
         if (price != null) {
