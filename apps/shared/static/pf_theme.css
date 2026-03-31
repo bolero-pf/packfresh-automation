@@ -176,6 +176,7 @@ thead th {
 tbody td {
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
+  text-align: left;
 }
 tbody tr:hover { background: rgba(79,125,249,0.04); }
 
