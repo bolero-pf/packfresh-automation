@@ -83,8 +83,15 @@
         _closeModal();
         var el = document.createElement('div');
         el.className = 'bd-overlay';
-        el.addEventListener('click', function(e) {
-            if (e.target === el) _closeModal();
+        // Only close if BOTH mousedown and mouseup are on the overlay itself.
+        // Prevents accidental dismiss when selecting text and releasing outside the modal.
+        var _mouseDownOnOverlay = false;
+        el.addEventListener('mousedown', function(e) {
+            _mouseDownOnOverlay = (e.target === el);
+        });
+        el.addEventListener('mouseup', function(e) {
+            if (_mouseDownOnOverlay && e.target === el) _closeModal();
+            _mouseDownOnOverlay = false;
         });
         document.body.appendChild(el);
         _overlayEl = el;
@@ -788,14 +795,29 @@
 
                 var tcgId = r.tcgplayer_id || r.tcgplayerId || r.tcgPlayerId || r.id;
 
-                _components.push({
+                var newComp = {
                     product_name: r.name || r.product_name || '',
                     tcgplayer_id: tcgId ? parseInt(tcgId) : null,
                     set_name: r.set_name || r.setName || '',
                     quantity_per_parent: 1,
                     market_price: parseFloat(r.market_price || r.unopenedPrice || r.midPrice || r.marketPrice || 0),
                     component_type: type === 'promo' ? 'promo' : 'sealed',
-                });
+                };
+
+                // Insert sealed items before the first promo to keep sections grouped
+                if (newComp.component_type !== 'promo') {
+                    var firstPromoIdx = -1;
+                    for (var j = 0; j < _components.length; j++) {
+                        if (_components[j].component_type === 'promo') { firstPromoIdx = j; break; }
+                    }
+                    if (firstPromoIdx >= 0) {
+                        _components.splice(firstPromoIdx, 0, newComp);
+                    } else {
+                        _components.push(newComp);
+                    }
+                } else {
+                    _components.push(newComp);
+                }
 
                 _renderComponentTable();
                 _renderSummary();
