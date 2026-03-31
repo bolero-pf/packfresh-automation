@@ -11,11 +11,9 @@ import json
 import logging
 import hashlib
 import secrets
-import threading
-import uuid as _uuid
 from datetime import datetime, date
 from decimal import Decimal
-from flask import Flask, Blueprint, render_template, request, jsonify, redirect, make_response
+from flask import Flask, render_template, request, jsonify, redirect, make_response
 
 import db
 import ingest
@@ -23,40 +21,12 @@ from shopify_client import ShopifyClient, ShopifyError
 from ppt_client import PPTClient
 import product_enrichment as enrichment
 from cache_manager import CacheManager
-try:
-    import psa_client
-    from psa_client import PSAQuotaHit
-except ImportError:
-    psa_client = None
-    PSAQuotaHit = Exception
-try:
-    from storage import assign_bins, release_bins, _canonical_card_type
-except ImportError as e:
-    logger.error(f"storage import failed: {e} — raw card push will not work")
-    assign_bins = release_bins = _canonical_card_type = None
-try:
-    from barcode_gen import generate_barcode_id, generate_barcode_image
-except ImportError as e:
-    logger.error(f"barcode_gen import failed: {e} — raw card push will not work")
-    generate_barcode_id = generate_barcode_image = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
-
-# Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
-# In Docker: WORKDIR=/app, shared/ is at /app/shared/ (not ../shared/)
-_pf_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared", "static")
-if not os.path.isdir(_pf_dir):
-    _pf_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared", "static")
-pf_static = Blueprint(
-    "pf_static", __name__,
-    static_folder=_pf_dir,
-    static_url_path="/pf-static",
-)
-app.register_blueprint(pf_static)
 
 # ─── Password gate ───────────────────────────────────────────────
 INGEST_PASSWORD = os.getenv("INGEST_PASSWORD", "")
@@ -82,33 +52,15 @@ def _make_auth_cookie(response):
     response.set_cookie("ingest_auth", token, max_age=60*60*24*30, httponly=True, samesite="Lax")
     return response
 
-@app.after_request
-def _add_admin_bar(response):
-    try:
-        from auth import inject_admin_bar, get_current_user
-        if get_current_user():
-            return inject_admin_bar(response)
-    except Exception:
-        pass
-    return response
-
 @app.before_request
 def require_auth():
-    """Gate all routes behind JWT cookie (admin portal) or legacy password."""
+    """Gate all routes behind password if INGEST_PASSWORD is set."""
+    if not INGEST_PASSWORD:
+        return None
+    # Allow login page, health check, and API through
     if request.path in ("/login", "/health"):
         return None
-    if request.path.startswith(("/static", "/pf-static")):
-        return None
-    # Try JWT auth first (from admin portal)
-    try:
-        from auth import require_auth as jwt_auth
-        result = jwt_auth(roles=["manager", "owner"])
-        if result is None:
-            return None  # JWT valid — authenticated
-    except Exception:
-        pass
-    # Fall through to legacy auth
-    if not INGEST_PASSWORD:
+    if request.path.startswith("/static"):
         return None
     if request.path.startswith("/api/"):
         # API calls: check cookie but also check if referer is from our domain
@@ -146,10 +98,6 @@ else:
 cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_products=True)
 
 ppt = PPTClient(os.getenv("PPT_API_KEY", ""))
-
-# Register shared breakdown blueprint (replaces breakdown-cache, PPT search, store-prices routes)
-from breakdown_routes import create_breakdown_blueprint
-app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: ppt))
 
 
 def _serialize(obj):
@@ -238,13 +186,7 @@ def index():
 
 @app.route("/api/ingest/sessions")
 def list_sessions():
-    status = request.args.get("status", "pending")  # 'pending' or 'completed'
-    limit = int(request.args.get("limit", 50))
-    days = request.args.get("days")  # for completed: filter by recency
-    if status == "completed":
-        sessions = ingest.list_sessions_completed(limit=limit, days=int(days) if days else None)
-    else:
-        sessions = ingest.list_sessions_pending(limit=limit)
+    sessions = ingest.list_sessions(limit=int(request.args.get("limit", 50)))
     return jsonify([_serialize(s) for s in sessions])
 
 
@@ -254,53 +196,9 @@ def get_session(session_id):
     if not session:
         return jsonify({"error": "Session not found"}), 404
     items = ingest.get_session_items(session_id)
-
-    # Enrich items with store prices from inventory_product_cache
-    tcg_ids = list(set(int(i["tcgplayer_id"]) for i in items if i.get("tcgplayer_id")))
-    store_map = {}
-    if tcg_ids:
-        try:
-            ph = ",".join(["%s"] * len(tcg_ids))
-            store_rows = db.query(
-                f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
-                tuple(tcg_ids))
-            store_map = {r["tcgplayer_id"]: r for r in store_rows}
-        except Exception:
-            pass
-
-    # Enrich with velocity data (prefer non-damaged variant with most sales)
-    velocity_map = {}
-    if tcg_ids:
-        try:
-            vph = ",".join(["%s"] * len(tcg_ids))
-            vel_rows = db.query(f"""
-                SELECT a.tcgplayer_id, a.units_sold_90d, a.units_sold_30d, a.units_sold_7d,
-                       a.total_sold_all_time, a.first_seen_date,
-                       a.velocity_score, a.current_qty, a.avg_days_to_sell, a.out_of_stock_days
-                FROM sku_analytics a
-                JOIN inventory_product_cache c ON c.shopify_variant_id = a.shopify_variant_id
-                WHERE a.tcgplayer_id IN ({vph}) AND c.is_damaged = FALSE
-                ORDER BY a.units_sold_90d DESC
-            """, tuple(tcg_ids))
-            for r in vel_rows:
-                if r["tcgplayer_id"] not in velocity_map:
-                    velocity_map[r["tcgplayer_id"]] = dict(r)
-        except Exception:
-            pass
-
-    serialized = []
-    for i in items:
-        d = _serialize(i)
-        sp = store_map.get(i.get("tcgplayer_id"))
-        d["store_price"] = float(sp["shopify_price"]) if sp and sp.get("shopify_price") else None
-        d["store_qty"] = int(sp["shopify_qty"] or 0) if sp else None
-        vel = velocity_map.get(i.get("tcgplayer_id"))
-        d["velocity"] = _serialize(vel) if vel else None
-        serialized.append(d)
-
     return jsonify({
         "session": _serialize(session),
-        "items": serialized,
+        "items": [_serialize(i) for i in items],
     })
 
 
@@ -395,37 +293,26 @@ def delete_item(item_id):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# OFFER ADJUSTMENT SUMMARY
+# PPT SEARCH (for break-down modal)
 # ═══════════════════════════════════════════════════════════════════
 
-@app.route("/api/ingest/session/<session_id>/offer-summary", methods=["GET"])
-def offer_summary(session_id):
-    """Get offer adjustment summary comparing current state to receive-time snapshot."""
-    result = ingest.get_offer_adjustment_summary(session_id)
-    if result is None:
-        return jsonify({"available": False})
-    return jsonify({"available": True, **result})
-
-
-# ═══════════════════════════════════════════════════════════════════
-# ADD ITEM TO SESSION
-# ═══════════════════════════════════════════════════════════════════
-
-@app.route("/api/ingest/session/<session_id>/add-item", methods=["POST"])
-def add_item(session_id):
-    """Add a new item to an ingest session."""
+@app.route("/api/ppt/search-sealed", methods=["POST"])
+def ppt_search_sealed():
     data = request.get_json(silent=True) or {}
+    q = data.get("query", "").strip()
+    if not q:
+        return jsonify({"error": "No query"}), 400
     try:
-        item = ingest.add_item_to_session(session_id, data)
-        return jsonify({"success": True, "item": _serialize(item)})
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+        results = ppt.search_sealed_products(q, limit=10)
+        # Normalize tcgplayer_id field — PPT may return it as tcgplayerId, tcgPlayerId, etc.
+        for r in results:
+            if not r.get("tcgplayer_id"):
+                tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("tcgplayer_id") or r.get("id")
+                if tcg_id:
+                    r["tcgplayer_id"] = int(tcg_id)
+        return jsonify({"results": results})
     except Exception as e:
-        logger.exception(f"Add item failed for session {session_id}")
         return jsonify({"error": str(e)}), 500
-
-
-# PPT search + breakdown-cache routes now served by shared breakdown blueprint
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -454,41 +341,14 @@ def push_dry_run(session_id):
     if not active:
         return jsonify({"error": "No active mapped items to preview"}), 400
 
-    # Split by product_type
-    raw_items    = [i for i in active if i.get("product_type") == "raw" and not i.get("is_graded")]
-    graded_items = [i for i in active if i.get("is_graded")]
-    sealed_items = [i for i in active if i.get("product_type") != "raw" and not i.get("is_graded")]
+    tcg_ids = list(set(i["tcgplayer_id"] for i in active if i.get("tcgplayer_id")))
+    normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
 
     results = []
 
-    # Raw cards — show what would be inserted into raw_cards table
-    for item in raw_items:
-        results.append({
-            "product_name": item.get("product_name"),
-            "quantity": item.get("quantity", 1),
-            "action": "would_ingest_raw",
-            "new_title": item.get("product_name"),
-            "listing_price": float(item.get("market_price", 0)),
-            "note": "Barcode generated + assigned to bin — no Shopify listing",
-        })
-
-    # Graded slabs — show cert entry required
-    for item in graded_items:
-        results.append({
-            "product_name": item.get("product_name"),
-            "quantity": item.get("quantity", 1),
-            "action": "would_push_graded",
-            "new_title": item.get("product_name"),
-            "listing_price": float(item.get("market_price", 0)),
-            "note": f"{item.get('grade_company','PSA')} {item.get('grade_value','?')} — cert number required at push",
-        })
-
-    tcg_ids = list(set(i["tcgplayer_id"] for i in sealed_items if i.get("tcgplayer_id")))
-    normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
-
     # Consolidate by (tcg_id, is_damaged)
     consolidated = {}
-    for item in sealed_items:
+    for item in active:
         tcg_id = item["tcgplayer_id"]
         is_damaged = item.get("item_status") == "damaged"
         key = (tcg_id, is_damaged)
@@ -548,32 +408,18 @@ def push_dry_run(session_id):
         "dry_run": True,
         "results": [_serialize(r) for r in results],
         "total": len(active),
-        "would_increment":      sum(1 for r in results if r.get("action") == "would_increment"),
+        "would_increment": sum(1 for r in results if r.get("action") == "would_increment"),
         "would_create_damaged": sum(1 for r in results if r.get("action") == "would_create_damaged"),
         "would_create_listing": sum(1 for r in results if r.get("action") == "would_create_listing"),
-        "would_ingest_raw":     sum(1 for r in results if r.get("action") == "would_ingest_raw"),
-        "would_push_graded":    sum(1 for r in results if r.get("action") == "would_push_graded"),
     })
 
 
 
-_push_jobs = {}  # {job_id: {status, progress, total, results, errors, ...}}
-
-
-@app.route("/api/ingest/push-job/<job_id>", methods=["GET"])
-def get_push_job(job_id):
-    """Poll background push job status."""
-    job = _push_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify(job)
-
-
 @app.route("/api/ingest/session/<session_id>/push-live", methods=["POST"])
 def push_session_live(session_id):
-    """Push a received session to Shopify (runs in background thread)."""
     if cache_mgr:
         cache_mgr.check_and_refresh_if_stale()
+    """Push a received session to Shopify."""
     if not shopify:
         return jsonify({"error": "Shopify not configured"}), 503
 
@@ -587,13 +433,17 @@ def push_session_live(session_id):
     requested_item_ids = set(str(x) for x in (data.get("item_ids") or []))
 
     items = ingest.get_session_items(session_id)
+    # Only push good/damaged mapped items (not broken_down, missing, rejected)
+    # Skip items already pushed (have pushed_at timestamp) — allows retry of just failed items
     active = [i for i in items if i.get("item_status") in ("good", "damaged")
               and i.get("is_mapped") and not i.get("pushed_at")]
 
+    # If caller specified a subset (partial push), filter to just those IDs
     if requested_item_ids:
         active = [i for i in active if str(i["id"]) in requested_item_ids]
 
     if not active:
+        # If nothing to push but there ARE pushed items, everything succeeded — mark ingested
         already_pushed = [i for i in items if i.get("pushed_at")]
         if already_pushed:
             ingest.mark_session_ingested(session_id)
@@ -601,180 +451,106 @@ def push_session_live(session_id):
                             "total": 0, "ingested": True,
                             "message": "All items already pushed. Session marked ingested."})
         return jsonify({"error": "No active mapped items to push"}), 400
+    tcg_ids = list(set(i["tcgplayer_id"] for i in active if i.get("tcgplayer_id")))
+    normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
 
-    # Serialize items for the background thread (avoid psycopg2 cursor issues)
-    active_dicts = [dict(i) for i in active]
-
-    job_id = str(_uuid.uuid4())
-    _push_jobs[job_id] = {
-        "status": "running",
-        "progress": 0,
-        "total": len(active_dicts),
-        "results": [],
-        "errors": [],
-        "session_id": session_id,
-    }
-
-    thread = threading.Thread(
-        target=_push_session_worker,
-        args=(job_id, session_id, active_dicts),
-        daemon=True,
-    )
-    thread.start()
-
-    return jsonify({"job_id": job_id, "status": "running", "total": len(active_dicts)})
-
-
-def _push_session_worker(job_id, session_id, active):
-    """Background worker that processes the actual push to Shopify."""
-    job = _push_jobs[job_id]
     results = []
     errors = []
 
-    try:
-        # Split by product_type
-        raw_items    = [i for i in active if i.get("product_type") == "raw" and not i.get("is_graded")]
-        graded_items = [i for i in active if i.get("is_graded")]
-        sealed_items = [i for i in active if i.get("product_type") != "raw" and not i.get("is_graded")]
-
-        # Graded slabs
-        for item in graded_items:
-            results.append({
-                "product_name": item.get("product_name"),
-                "quantity":     item.get("quantity", 1),
-                "action":       "graded_pending_cert",
-                "note":         f"{item.get('grade_company','PSA')} {item.get('grade_value','?')} — use cert entry panel below",
-            })
-            job["progress"] += 1
-
-        # Raw cards
-        for item in raw_items:
-            item_dict = dict(item)
-            item_dict["session_id"] = session_id
-            try:
-                r = _push_raw_item(item_dict)
-                results.append(r)
-                db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
-                           (item["id"],))
-            except Exception as e:
-                logger.exception(f"push_raw_item failed for {item['id']}: {e}")
-                errors.append({"product_name": item.get("product_name"), "action": "error", "error": str(e)})
-            job["progress"] += 1
-
-        # Sealed items: consolidate
-        tcg_ids = list(set(i["tcgplayer_id"] for i in sealed_items if i.get("tcgplayer_id")))
-        normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids) if tcg_ids else ({}, {})
-
-        consolidated = {}
-        for item in sealed_items:
-            tcg_id = item["tcgplayer_id"]
-            is_damaged = item.get("item_status") == "damaged"
-            key = (tcg_id, is_damaged)
-            if key not in consolidated:
-                consolidated[key] = {
-                    "tcg_id": tcg_id,
-                    "is_damaged": is_damaged,
-                    "total_qty": 0,
-                    "items": [],
-                    "product_name": item.get("product_name"),
-                }
-            consolidated[key]["total_qty"] += item.get("quantity", 1)
-            consolidated[key]["items"].append(item)
-
-        for key, group in consolidated.items():
-            tcg_id, is_damaged = key
-            qty = group["total_qty"]
-            entry = {
-                "product_name": group["product_name"],
-                "tcgplayer_id": tcg_id,
-                "quantity": qty,
+    # ── Consolidate items by (tcg_id, is_damaged) to minimize Shopify API calls ──
+    consolidated = {}  # (tcg_id, is_damaged) -> {total_qty, items[], ...}
+    for item in active:
+        tcg_id = item["tcgplayer_id"]
+        is_damaged = item.get("item_status") == "damaged"
+        key = (tcg_id, is_damaged)
+        if key not in consolidated:
+            consolidated[key] = {
+                "tcg_id": tcg_id,
                 "is_damaged": is_damaged,
-                "consolidated_from": len(group["items"]),
+                "total_qty": 0,
+                "items": [],
+                "product_name": item.get("product_name"),
             }
+        consolidated[key]["total_qty"] += item.get("quantity", 1)
+        consolidated[key]["items"].append(item)
 
-            try:
-                if not is_damaged:
-                    entry = _push_normal_item(entry, tcg_id, qty, group["items"][0], normal_cache)
-                else:
-                    entry = _push_damaged_item(entry, tcg_id, qty, group["items"][0], normal_cache, damaged_cache)
-            except Exception as e:
-                entry.update(action="error", error=str(e))
-                errors.append(entry)
-                job["progress"] += len(group["items"])
-                continue
+    for key, group in consolidated.items():
+        tcg_id, is_damaged = key
+        qty = group["total_qty"]
+        item_names = ", ".join(set(i.get("product_name", "") for i in group["items"]))
+        entry = {
+            "product_name": group["product_name"],
+            "tcgplayer_id": tcg_id,
+            "quantity": qty,
+            "is_damaged": is_damaged,
+            "consolidated_from": len(group["items"]),
+        }
 
-            if entry.get("action") == "error":
-                errors.append(entry)
+        try:
+            if not is_damaged:
+                entry = _push_normal_item(entry, tcg_id, qty, group["items"][0], normal_cache)
             else:
-                results.append(entry)
-                for pushed_item in group["items"]:
-                    db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
-                               (pushed_item["id"],))
+                entry = _push_damaged_item(entry, tcg_id, qty, group["items"][0], normal_cache, damaged_cache)
+        except Exception as e:
+            entry.update(action="error", error=str(e))
+            errors.append(entry)
+            continue
 
-            job["progress"] += len(group["items"])
+        if entry.get("action") == "error":
+            errors.append(entry)
+        else:
+            results.append(entry)
+            # Mark successfully pushed items so retry skips them
+            for pushed_item in group["items"]:
+                db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
+                           (pushed_item["id"],))
 
-        # Suppress cache refresh from our own Shopify writes
-        if cache_mgr:
-            cache_mgr.record_tool_push()
+    # Determine final session status
+    # Check if any unpushed items remain after this push
+    all_items_after = ingest.get_session_items(session_id)
+    remaining_unpushed = [i for i in all_items_after
+                          if i.get("item_status") in ("good", "damaged")
+                          and i.get("is_mapped") and not i.get("pushed_at")]
 
-        # Determine final session status
-        all_items_after = ingest.get_session_items(session_id)
-        remaining_unpushed = [i for i in all_items_after
-                              if i.get("item_status") in ("good", "damaged")
-                              and i.get("is_mapped") and not i.get("pushed_at")]
+    partially_ingested = False
+    if not errors:
+        if remaining_unpushed:
+            # Some items still waiting — mark as partially ingested
+            db.execute(
+                "UPDATE intake_sessions SET status = 'partially_ingested' WHERE id = %s",
+                (session_id,)
+            )
+            partially_ingested = True
+        else:
+            ingest.mark_session_ingested(session_id)
 
-        partially_ingested = False
-        if not errors:
-            if remaining_unpushed:
-                db.execute(
-                    "UPDATE intake_sessions SET status = 'partially_ingested' WHERE id = %s",
-                    (session_id,)
-                )
-                partially_ingested = True
-            else:
-                ingest.mark_session_ingested(session_id)
+    # Notify intake cache that inventory has changed
+    if not errors:
+        try:
+            import requests as _req
+            intake_url = os.getenv("INTAKE_INTERNAL_URL", "")
+            if intake_url:
+                _req.post(f"{intake_url}/api/cache/invalidate",
+                          json={"reason": "ingest"},
+                          timeout=3)
+        except Exception:
+            pass  # non-fatal — cache will self-heal on next staleness check
 
-        # Notify intake cache
-        if not errors:
-            try:
-                import requests as _req
-                intake_url = os.getenv("INTAKE_INTERNAL_URL", "")
-                if intake_url:
-                    _req.post(f"{intake_url}/api/cache/invalidate",
-                              json={"reason": "ingest"},
-                              timeout=3)
-            except Exception:
-                pass
-
-        job.update({
-            "status": "complete",
-            "success": len(errors) == 0,
-            "results": results,
-            "errors": errors,
-            "total": len(active),
-            "incremented": sum(1 for r in results if r.get("action") == "inventory_incremented"),
-            "created_damaged": sum(1 for r in results if r.get("action") == "created_damaged_listing"),
-            "created_listing": sum(1 for r in results if r.get("action") == "created_listing"),
-            "error_count": len(errors),
-            "ingested": not errors and not partially_ingested,
-            "partially_ingested": not errors and partially_ingested,
-            "pushed_count": len(results),
-            "remaining_count": len(remaining_unpushed),
-            "can_retry": len(errors) > 0,
-        })
-
-    except Exception as e:
-        logger.exception(f"Push worker crashed for session {session_id}: {e}")
-        job.update({
-            "status": "complete",
-            "success": False,
-            "results": results,
-            "errors": errors + [{"action": "error", "error": f"Worker crashed: {str(e)}"}],
-            "error_count": len(errors) + 1,
-            "total": len(active),
-            "pushed_count": len(results),
-            "can_retry": True,
-        })
+    return jsonify({
+        "success": len(errors) == 0,
+        "results": results,
+        "errors": errors,
+        "total": len(active),
+        "incremented": sum(1 for r in results if r.get("action") == "inventory_incremented"),
+        "created_damaged": sum(1 for r in results if r.get("action") == "created_damaged_listing"),
+        "created_listing": sum(1 for r in results if r.get("action") == "created_listing"),
+        "error_count": len(errors),
+        "ingested": not errors and not partially_ingested,
+        "partially_ingested": not errors and partially_ingested,
+        "pushed_count": len(results),
+        "remaining_count": len(remaining_unpushed),
+        "can_retry": len(errors) > 0,
+    })
 
 
 def _compute_weighted_cost(current_cost, current_qty, our_unit_cost, adding_qty):
@@ -782,111 +558,6 @@ def _compute_weighted_cost(current_cost, current_qty, our_unit_cost, adding_qty)
     if not current_cost or current_qty <= 0:
         return our_unit_cost
     return (current_cost * current_qty + our_unit_cost * adding_qty) / (current_qty + adding_qty)
-
-
-def _push_raw_item(item: dict) -> dict:
-    """
-    Push a raw (ungraded) card to internal inventory:
-      1. Generate barcode
-      2. Fetch PPT card data for image URL + clean name
-      3. Assign bin location
-      4. Insert into raw_cards table
-      5. Return barcode PNG bytes (base64) for immediate printing
-
-    Returns entry dict with action, barcode, bin assignments.
-    """
-    if not generate_barcode_id or not assign_bins:
-        raise RuntimeError("barcode_gen or storage module not available")
-
-    tcg_id    = item.get("tcgplayer_id")
-    card_name = item.get("product_name", "Unknown")
-    set_name  = item.get("set_name", "")
-    condition = item.get("condition", "NM")
-    qty       = item.get("quantity", 1)
-    cost      = float(item.get("offer_price", 0)) / max(qty, 1)
-    card_type = "pokemon"  # default; could be inferred from tags later
-
-    # Fetch PPT data for image URL + clean name + real card number
-    image_url = None
-    ppt_card_number = None
-    if tcg_id and ppt:
-        try:
-            card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
-            if card_data:
-                image_url = (card_data.get("imageCdnUrl800")
-                             or card_data.get("imageCdnUrl")
-                             or card_data.get("imageCdnUrl400"))
-                card_name = card_data.get("name") or card_name
-                set_name  = card_data.get("setName") or set_name
-                # Real card number e.g. "004/125" — not the Collectr set code
-                ppt_card_number = card_data.get("cardNumber") or card_data.get("number")
-        except Exception as e:
-            logger.warning(f"PPT fetch for raw card TCG#{tcg_id} failed: {e}")
-
-    # Assign bin(s) — one card at a time for placement accuracy
-    assignments = assign_bins(card_type, qty, db)
-
-    results = []
-    for assignment in assignments:
-        bin_id    = assignment["bin_id"]
-        bin_label = assignment["bin_label"]
-        count     = assignment["count"]
-
-        for _ in range(count):
-            barcode_id = generate_barcode_id()
-
-            db.execute("""
-                INSERT INTO raw_cards (
-                    barcode, tcgplayer_id, card_name, set_name,
-                    card_number, condition, rarity,
-                    state, cost_basis, current_price, last_price_update,
-                    bin_id, image_url,
-                    is_graded, grade_company, grade_value,
-                    variant, language,
-                    intake_session_id, stored_at
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s,
-                    'STORED', %s, %s, CURRENT_TIMESTAMP,
-                    %s, %s,
-                    FALSE, NULL, NULL,
-                    %s, 'EN',
-                    %s, CURRENT_TIMESTAMP
-                )
-            """, (
-                barcode_id, tcg_id, card_name, set_name,
-                ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
-                cost, float(item.get("market_price", cost)),
-                bin_id, image_url,
-                item.get("variant"),
-                item.get("session_id"),
-            ))
-
-            # Generate barcode PNG
-            price_str = f"${float(item.get('market_price', 0)):.2f}"
-            png_bytes = generate_barcode_image(
-                barcode_id,
-                card_name=card_name,
-                set_name=set_name,
-                condition=condition,
-                card_number=ppt_card_number or item.get("card_number") or "",
-            )
-
-            results.append({
-                "barcode":    barcode_id,
-                "bin_label":  bin_label,
-                "card_name":  card_name,
-                "set_name":   set_name,
-                "condition":  condition,
-                "png_b64":    __import__("base64").b64encode(png_bytes).decode(),
-            })
-
-    return {
-        "action":      "raw_card_ingested",
-        "product_name": card_name,
-        "quantity":    qty,
-        "barcodes":    results,
-        "bins":        [a["bin_label"] for a in assignments],
-    }
 
 
 def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cache: dict) -> dict:
@@ -1068,199 +739,6 @@ def store_check(session_id):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════════
-# RAW CARD + GRADED SLAB ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════
-
-@app.route("/api/ingest/item/<item_id>/push-graded", methods=["POST"])
-def push_graded_item(item_id):
-    """
-    Push a single graded slab to Shopify.
-    Called per-item from the frontend's cert-entry flow.
-
-    POST body:
-        { "cert_number": "12345678", "session_id": "..." }
-
-    Returns:
-        { action, shopify_product_id, shopify_variant_id, title, cert_number }
-    """
-    if not shopify:
-        return jsonify({"error": "Shopify not configured"}), 503
-    if not psa_client:
-        return jsonify({"error": "psa_client module not available"}), 503
-
-    data        = request.get_json(silent=True) or {}
-    cert_number = (data.get("cert_number") or "").strip()
-    session_id  = data.get("session_id")
-
-    if not cert_number:
-        return jsonify({"error": "cert_number is required"}), 400
-
-    # Load item
-    item = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
-    if not item:
-        return jsonify({"error": "Item not found"}), 404
-    if item.get("pushed_at"):
-        return jsonify({"error": "Item already pushed"}), 400
-
-    grade_company = (item.get("grade_company") or "PSA").upper()
-    grade_value   = item.get("grade_value") or "9"
-    tcg_id        = item.get("tcgplayer_id")
-    price         = float(item.get("offer_price") or item.get("market_price") or 0)
-
-    # Fetch PPT card data for clean name
-    ppt_card = None
-    if tcg_id and ppt:
-        try:
-            ppt_card = ppt.get_card_by_tcgplayer_id(int(tcg_id))
-        except Exception as e:
-            logger.warning(f"PPT fetch for graded TCG#{tcg_id}: {e}")
-
-    try:
-        result = psa_client.push_graded_slab(
-            tcgplayer_id=tcg_id,
-            grade_company=grade_company,
-            grade_value=grade_value,
-            cert_number=cert_number,
-            price=price,
-            ppt_card=ppt_card,
-            shopify_domain=shopify.domain,
-            shopify_token=shopify.token,
-            db=db,
-        )
-    except PSAQuotaHit as e:
-        return jsonify({"error": f"PSA API quota hit — try again tomorrow: {e}"}), 429
-    except Exception as e:
-        logger.exception(f"push_graded_item failed for item {item_id}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-    # Mark item pushed + store cert number
-    db.execute("""
-        UPDATE intake_items
-        SET pushed_at = CURRENT_TIMESTAMP, cert_number = %s
-        WHERE id = %s
-    """, (cert_number, item_id))
-
-    # Update session status
-    if session_id:
-        remaining = db.query_one("""
-            SELECT COUNT(*) AS cnt FROM intake_items
-            WHERE session_id = %s AND pushed_at IS NULL
-              AND item_status IN ('good','damaged') AND is_mapped = TRUE
-        """, (session_id,))
-        if remaining and remaining["cnt"] == 0:
-            db.execute(
-                "UPDATE intake_sessions SET status='ingested' WHERE id=%s",
-                (session_id,)
-            )
-
-    return jsonify({"success": True, **result})
-
-
-@app.route("/api/ingest/session/<session_id>/push-raw", methods=["POST"])
-def push_raw_items(session_id):
-    """
-    Push all unmapped raw (non-graded) items in a session to internal inventory.
-    Generates barcodes, assigns bins, inserts raw_cards rows.
-
-    POST body (optional): { "item_ids": [...] }  — subset of items to push
-
-    Returns list of barcode results with PNG data (base64) for printing.
-    """
-    session = ingest.get_session(session_id)
-    if not session:
-        return jsonify({"error": "Session not found"}), 404
-
-    data = request.get_json(silent=True) or {}
-    requested_ids = set(str(x) for x in (data.get("item_ids") or []))
-
-    items = db.query("""
-        SELECT * FROM intake_items
-        WHERE session_id = %s
-          AND product_type = 'raw'
-          AND is_graded IS NOT TRUE
-          AND item_status IN ('good', 'damaged')
-          AND is_mapped = TRUE
-          AND pushed_at IS NULL
-    """, (session_id,))
-
-    if requested_ids:
-        items = [i for i in items if str(i["id"]) in requested_ids]
-
-    if not items:
-        return jsonify({"error": "No unmapped raw items to push"}), 400
-
-    results = []
-    errors  = []
-
-    for item in items:
-        item_dict = dict(item)
-        item_dict["session_id"] = session_id
-        try:
-            r = _push_raw_item(item_dict)
-            results.append(r)
-            db.execute(
-                "UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
-                (item["id"],)
-            )
-        except Exception as e:
-            logger.exception(f"push_raw_item failed for {item['id']}: {e}")
-            errors.append({"item_id": str(item["id"]),
-                           "product_name": item.get("product_name"), "error": str(e)})
-
-    return jsonify({
-        "success":  True,
-        "pushed":   len(results),
-        "errors":   errors,
-        "results":  results,
-    })
-
-
-@app.route("/api/raw-cards/barcode/<barcode_id>.png")
-def get_raw_barcode(barcode_id):
-    """
-    Generate + return barcode label PNG for a raw card.
-    Reprintable at any time — looks up card data from raw_cards table.
-    """
-    if not generate_barcode_image:
-        return jsonify({"error": "barcode_gen not available"}), 503
-
-    card = db.query_one("""
-        SELECT card_name, set_name, condition, card_number
-        FROM raw_cards WHERE barcode = %s
-    """, (barcode_id,))
-
-    if not card:
-        return jsonify({"error": "Barcode not found"}), 404
-
-    png = generate_barcode_image(
-        barcode_id,
-        card_name=card["card_name"],
-        set_name=card["set_name"],
-        condition=card.get("condition", ""),
-        card_number=card.get("card_number") or "",
-    )
-
-    from flask import Response
-    return Response(png, mimetype="image/png",
-                    headers={"Content-Disposition": f'inline; filename="{barcode_id}.png"'})
-
-
-@app.route("/api/raw-cards/session/<session_id>")
-def get_session_raw_cards(session_id):
-    """List all raw cards ingested from a session, with bin assignments."""
-    cards = db.query("""
-        SELECT rc.barcode, rc.card_name, rc.set_name, rc.condition,
-               rc.current_price, rc.state, rc.image_url,
-               sl.bin_label, sl.card_type
-        FROM raw_cards rc
-        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
-        WHERE rc.intake_session_id = %s
-        ORDER BY rc.created_at ASC
-    """, (session_id,))
-    return jsonify({"cards": [dict(c) for c in cards]})
-
-
 # MANUAL OVERRIDES
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1276,7 +754,100 @@ def force_mark_ingested(session_id):
     return jsonify({"success": True, "message": "Session manually marked as ingested."})
 
 
-# Breakdown-cache, store-prices routes now served by shared breakdown blueprint
+# ═══════════════════════════════════════════════════════════════════
+# BREAKDOWN CACHE API  (multi-variant)
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/breakdown-cache")
+def list_breakdown_caches():
+    """List all cached products (summary only, no components)."""
+    rows = ingest.list_breakdown_cache()
+    return jsonify({"caches": [_serialize(r) for r in rows], "count": len(rows)})
+
+
+@app.route("/api/breakdown-cache/<int:tcgplayer_id>")
+def get_breakdown_cache(tcgplayer_id):
+    """Get full breakdown record (all variants + components) for a product."""
+    result = ingest.get_breakdown_cache(tcgplayer_id)
+    if not result:
+        return jsonify({"found": False, "cache": None})
+    return jsonify({"found": True, "cache": _serialize(result)})
+
+
+@app.route("/api/breakdown-cache/<int:tcgplayer_id>", methods=["DELETE"])
+def delete_breakdown_cache(tcgplayer_id):
+    """Delete entire breakdown record (all variants) for a product."""
+    deleted = ingest.delete_breakdown_cache(tcgplayer_id)
+    return jsonify({"success": deleted})
+
+
+@app.route("/api/breakdown-cache/<int:tcgplayer_id>/variant", methods=["POST"])
+def save_variant(tcgplayer_id):
+    """
+    Create or update a named variant.
+    Body: {product_name, variant_name, components, notes?, variant_id?}
+      variant_id: omit to create new; supply to update existing variant in-place.
+    """
+    data = request.get_json(silent=True) or {}
+    product_name = data.get("product_name", "Unknown")
+    variant_name = data.get("variant_name", "Standard")
+    components = data.get("components", [])
+    notes = data.get("notes")
+    variant_id = data.get("variant_id")
+
+    if not components:
+        return jsonify({"error": "components required"}), 400
+    try:
+        result = ingest.save_variant(
+            tcgplayer_id=tcgplayer_id,
+            product_name=product_name,
+            variant_name=variant_name,
+            components=components,
+            notes=notes,
+            variant_id=variant_id,
+        )
+        return jsonify({"success": True, "cache": _serialize(result)})
+    except Exception as e:
+        logger.exception(f"Failed to save variant for {tcgplayer_id}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/breakdown-cache/variant/<variant_id>", methods=["DELETE"])
+def delete_variant(variant_id):
+    """Delete a single variant. Deletes parent too if it was the last one."""
+    result = ingest.delete_variant(variant_id)
+    return jsonify({"success": True, "cache": _serialize(result)})
+
+
+@app.route("/api/breakdown-cache/batch", methods=["POST"])
+def breakdown_cache_batch():
+    """Batch-fetch breakdown summaries for multiple tcgplayer_ids (used by intake)."""
+    data = request.get_json(silent=True) or {}
+    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
+    if not tcg_ids:
+        return jsonify({"summaries": {}})
+    summaries = ingest.get_breakdown_summary_for_items(tcg_ids)
+    return jsonify({"summaries": _serialize(summaries)})
+
+
+@app.route("/api/store-prices", methods=["POST"])
+def get_store_prices():
+    """
+    Look up inventory_product_cache prices for a list of tcgplayer_ids.
+    Body: {tcgplayer_ids: [int, ...]}
+    Returns: {tcgplayer_id: {shopify_price, shopify_qty, handle, title}}
+    """
+    data = request.get_json(silent=True) or {}
+    tcg_ids = [int(x) for x in data.get("tcgplayer_ids", []) if x]
+    if not tcg_ids:
+        return jsonify({"prices": {}})
+    ph = ",".join(["%s"] * len(tcg_ids))
+    rows = db.query(
+        f"SELECT tcgplayer_id, shopify_price, shopify_qty, handle, title FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+        tuple(tcg_ids)
+    )
+    prices = {r["tcgplayer_id"]: dict(r) for r in rows}
+    return jsonify({"prices": _serialize(prices)})
 
 
 @app.route("/api/ingest/item/<item_id>/break-down", methods=["POST"])
@@ -1346,27 +917,6 @@ def enrich_page():
     # e.g. "d1m1a4-1i.myshopify.com" -> "d1m1a4-1i"
     store_handle = store.replace(".myshopify.com", "").split(".")[0] if store else ""
     return render_template("enrich_preview.html", shopify_store_handle=store_handle)
-
-
-@app.route("/api/ppt/search-sealed", methods=["POST"])
-def ppt_search_sealed():
-    """Search PPT for sealed products by name."""
-    if not ppt:
-        return jsonify({"error": "PPT API not configured"}), 503
-    data = request.get_json(silent=True) or {}
-    q = data.get("query", "").strip()
-    if not q:
-        return jsonify({"error": "No query"}), 400
-    try:
-        results = ppt.search_sealed_products(q, limit=5)
-        for r in results:
-            if not r.get("tcgplayer_id"):
-                tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
-                if tcg_id:
-                    r["tcgplayer_id"] = int(tcg_id)
-        return jsonify({"results": results})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/ppt/sealed/<int:tcgplayer_id>")

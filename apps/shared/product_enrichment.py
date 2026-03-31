@@ -363,23 +363,6 @@ def _download_image(url: str) -> Image.Image:
     return Image.open(io.BytesIO(r.content)).convert("RGBA")
 
 
-def _remove_background_rembg(im: Image.Image) -> Image.Image:
-    """
-    Remove background using rembg (U2Net ML model) — local inference, no API key needed.
-    Model (~170MB) is downloaded on first call and cached in ~/.u2net/.
-    Pre-warmed at startup so this never stalls mid-request.
-    """
-    try:
-        from rembg import remove as rembg_remove
-    except (ImportError, SystemExit):
-        raise RuntimeError("rembg not available — onnxruntime not installed in this container")
-
-    buf_in = io.BytesIO()
-    im.save(buf_in, format="PNG")
-    result_bytes = rembg_remove(buf_in.getvalue())
-    return Image.open(io.BytesIO(result_bytes)).convert("RGBA")
-
-
 def _remove_background_removebg(im: Image.Image) -> Image.Image:
     """
     Remove background via remove.bg API (high quality, 50 free credits/month).
@@ -401,22 +384,6 @@ def _remove_background_removebg(im: Image.Image) -> Image.Image:
     if resp.status_code != 200:
         raise RuntimeError(f"remove.bg error {resp.status_code}: {resp.text[:200]}")
     return Image.open(io.BytesIO(resp.content)).convert("RGBA")
-
-
-def _prewarm_rembg() -> None:
-    """
-    Pre-warm the rembg model at startup so the first listing creation isn't slow.
-    Runs in a background thread — doesn't block Flask startup.
-    """
-    try:
-        from rembg import remove as rembg_remove
-        dummy = Image.new("RGB", (64, 64), (255, 255, 255))
-        buf = io.BytesIO()
-        dummy.save(buf, format="PNG")
-        rembg_remove(buf.getvalue())
-        logger.info("rembg model pre-warmed successfully")
-    except Exception as e:
-        logger.warning(f"rembg pre-warm failed (will retry on first use): {e}")
 
 
 def _matte_product(src_im: Image.Image) -> Image.Image:
@@ -444,36 +411,29 @@ def _png_bytes(im: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def process_product_image(image_url: str, product_name: str) -> bytes:
+def process_product_image(image_url: str, product_name: str) -> bytes | None:
     """
-    Download image from URL, remove background, apply matte.
-    Returns PNG bytes ready for Shopify upload.
+    Download image from URL, remove background via remove.bg, apply matte.
+    Returns PNG bytes ready for Shopify upload, or None if bg removal fails.
 
-    Strategy: try remove.bg first (best quality), fall back to rembg (local ML).
-    rembg is pre-warmed at startup so fallback is always fast.
+    If remove.bg is not configured or fails, returns None — caller should
+    skip the image rather than upload a bad one.
     """
+    api_key = os.environ.get("REMOVE_BG_API_KEY", "")
+    if not api_key:
+        logger.warning("REMOVE_BG_API_KEY not set — skipping image processing")
+        return None
+
     logger.info(f"Downloading image: {image_url}")
     src = _download_image(image_url)
 
-    # Try remove.bg first
-    api_key = os.environ.get("REMOVE_BG_API_KEY", "")
-    no_bg = None
-    if api_key:
-        try:
-            logger.info("Removing background via remove.bg")
-            no_bg = _remove_background_removebg(src)
-            logger.info("remove.bg succeeded")
-        except RuntimeError as e:
-            logger.warning(f"remove.bg failed ({e}), falling back to rembg")
-
-    if no_bg is None:
-        try:
-            logger.info("Removing background via rembg (local ML)")
-            no_bg = _remove_background_rembg(src)
-            logger.info("rembg succeeded")
-        except RuntimeError as e:
-            logger.warning(f"rembg failed ({e}) — proceeding without background removal")
-            no_bg = src.convert("RGBA")
+    try:
+        logger.info("Removing background via remove.bg")
+        no_bg = _remove_background_removebg(src)
+        logger.info("remove.bg succeeded")
+    except RuntimeError as e:
+        logger.warning(f"remove.bg failed ({e}) — skipping image (no fallback)")
+        return None
 
     logger.info("Applying matte")
     matted = _matte_product(no_bg)
@@ -863,10 +823,13 @@ def enrich_product(product_gid: str, ppt_item: dict, offer_price: float | None =
     if image_url:
         try:
             png = process_product_image(image_url, product_name)
-            hosted_url = upload_product_image(product_name, png)
-            set_product_image(product_gid, hosted_url, alt=product_name)
-            summary["image_processed"] = True
-            summary["image_url"] = hosted_url
+            if png is not None:
+                hosted_url = upload_product_image(product_name, png)
+                set_product_image(product_gid, hosted_url, alt=product_name)
+                summary["image_processed"] = True
+                summary["image_url"] = hosted_url
+            else:
+                summary["errors"].append("image: bg removal unavailable — upload manually")
         except Exception as e:
             logger.error(f"Image processing failed: {e}", exc_info=True)
             summary["errors"].append(f"image: {e}")
