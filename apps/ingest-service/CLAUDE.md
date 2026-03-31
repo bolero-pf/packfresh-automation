@@ -16,8 +16,7 @@ in_progress → cancelled
 ```
 
 ## Dashboard Tabs (intake_dashboard.html)
-- **Sealed Intake** — CSV upload for sealed product
-- **Raw Intake** — Individual card entry
+- **New Intake** — Unified tab: manual entry (sealed + cards in one session), Collectr CSV, Generic CSV, Paste HTML. Creates `session_type: 'mixed'`. Type toggle switches between sealed search and card search (with grading support).
 - **Active Sessions** — Shows statuses: in_progress, offered, accepted, partially_ingested
 - **Completed** — Shows statuses: received, ingested, finalized
 - **Cancelled** — Shows cancelled sessions

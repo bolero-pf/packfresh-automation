@@ -1407,8 +1407,8 @@
 
     async function viewSession(sessionId, _preserveScroll) {
         currentSessionId = sessionId;
-        if (rawSessionId && sessionId === rawSessionId) {
-            loadRawSessionItems();
+        if (intakeSessionId && sessionId === intakeSessionId) {
+            loadIntakeItems();
         }
         const body = document.getElementById('session-modal-body');
         const overlay = document.getElementById('session-modal');
@@ -3916,11 +3916,6 @@
         el.style.display = el.style.display === 'none' ? 'block' : 'none';
     }
 
-    function toggleManualSealedEntry() {
-        const el = document.getElementById('sealed-manual-direct');
-        el.style.display = el.style.display === 'none' ? 'block' : 'none';
-    }
-
     async function submitManualSealedAdd(sessionId, offerPct) {
         const name = document.getElementById('session-manual-name').value.trim();
         const setName = document.getElementById('session-manual-set').value.trim();
@@ -3954,43 +3949,6 @@
             document.getElementById('session-manual-qty').value = '1';
             document.getElementById('session-sealed-manual').style.display = 'none';
             viewSession(sessionId, true);
-        } catch(err) { alert(err.message); }
-    }
-
-    async function submitManualDirectSealed() {
-        const name = document.getElementById('manual-direct-name').value.trim();
-        const setName = document.getElementById('manual-direct-set').value.trim();
-        const tcgId = document.getElementById('manual-direct-tcgid').value.trim();
-        const price = parseFloat(document.getElementById('manual-direct-price').value) || 0;
-        const qty = parseInt(document.getElementById('manual-direct-qty').value) || 1;
-
-        if (!name) { alert('Product name is required'); return; }
-        if (price <= 0) { alert('Price is required'); return; }
-        if (!sealedManualSessionId) { alert('Create a session first'); return; }
-
-        try {
-            const r = await fetch('/api/intake/add-sealed-item', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    session_id: sealedManualSessionId,
-                    product_name: name,
-                    set_name: setName,
-                    tcgplayer_id: tcgId ? parseInt(tcgId) : null,
-                    market_price: price,
-                    quantity: qty,
-                }),
-            });
-            const d = await r.json();
-            if (!r.ok) { alert(d.error || 'Failed to add'); return; }
-
-            document.getElementById('manual-direct-name').value = '';
-            document.getElementById('manual-direct-set').value = '';
-            document.getElementById('manual-direct-tcgid').value = '';
-            document.getElementById('manual-direct-price').value = '';
-            document.getElementById('manual-direct-qty').value = '1';
-            // Refresh the items table
-            loadManualSealedItems();
         } catch(err) { alert(err.message); }
     }
 
@@ -4221,15 +4179,7 @@
         await _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offerPct, 'session');
     }
 
-    async function searchCardsForRawTab() {
-        const searchTerm = document.getElementById('raw-card-search').value.trim();
-        const setFilter = (document.getElementById('raw-card-set')?.value || '').trim();
-        const resultsDiv = document.getElementById('raw-search-results');
-        if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a card name</div>'; return; }
-        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
-        const offerPct = parseFloat(document.getElementById('raw-offer-pct').value) || 65;
-        await _doCardSearch(searchTerm, setFilter, resultsDiv, rawSessionId, offerPct, 'raw');
-    }
+
 
     async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offerPct, context) {
         try {
@@ -4284,7 +4234,7 @@
     }
 
     async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context) {
-        const resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : 'raw-search-results');
+        const resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : context === 'intake' ? 'intake-search-results' : 'raw-search-results');
 
         // Detail lookup to get all variant/condition prices
         resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading pricing...</div>';
@@ -4331,7 +4281,7 @@
         const selectedVariant = pc.primaryVariant;
         const variantData = variants[selectedVariant] || {};
         const qty = pc.qty;
-        const divId = pc.context === 'session' ? 'session-raw-results' : 'raw-search-results';
+        const divId = pc.context === 'session' ? 'session-raw-results' : pc.context === 'intake' ? 'intake-search-results' : 'raw-search-results';
 
         let html = '<div id="cond-picker" style="background:var(--surface-2); border-radius:8px; padding:16px; margin-top:8px;">';
         html += '<div style="margin-bottom:12px;"><strong style="color:var(--accent);">' + pc.cardName + '</strong>';
@@ -4399,7 +4349,7 @@
     }
 
     async function _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv) {
-        if (!resultsDiv) resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : 'raw-search-results');
+        if (!resultsDiv) resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : context === 'intake' ? 'intake-search-results' : 'raw-search-results');
 
         if (!price || price <= 0) {
             const manual = await themedPrompt({
@@ -4417,8 +4367,9 @@
         try {
             // Pass graded info from the form (only relevant for manual entry in raw tab)
             const isGraded = _isGradedContext(context);
-            const gradeCompany = isGraded ? (document.getElementById('raw-grade-company')?.value || '') : '';
-            const gradeValue = isGraded ? (document.getElementById('raw-grade-value')?.value || '') : '';
+            const _gfAdd = isGraded ? _getGradeFields(context) : {};
+            const gradeCompany = isGraded ? (_gfAdd.company || '') : '';
+            const gradeValue = isGraded ? (_gfAdd.value || '') : '';
             const r = await fetch('/api/intake/add-raw-card', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -4438,12 +4389,14 @@
                 document.getElementById('session-raw-qty').value = '1';
                 resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
                 setTimeout(function() { viewSession(sessionId, true); }, 500);
-            } else {
-                document.getElementById('raw-card-search').value = '';
-                document.getElementById('raw-card-set').value = '';
-                document.getElementById('raw-quantity').value = '1';
+            } else if (context === 'intake') {
+                document.getElementById('intake-card-search').value = '';
+                document.getElementById('intake-card-set').value = '';
+                document.getElementById('intake-card-qty').value = '1';
                 resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
-                loadRawSessionItems();
+                loadIntakeItems();
+            } else {
+                resultsDiv.innerHTML = '<div class="alert alert-success">' + msg + '</div>';
             }
         } catch(err) {
             resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
@@ -4558,43 +4511,6 @@
         return transitionSession(sessionId, 'offer');
     }
 
-    // ═══════════════════════════════ RAW CARD SESSION (tab) ═══════════════════════════════
-    // ═══════════════════════════════ RAW INTAKE — SUB-TABS & GRADED ═══════════════════════════════
-
-    function switchRawSubtab(name) {
-        ['manual','collectr-csv','collectr-html','generic-csv'].forEach(function(t) {
-            const el = document.getElementById('raw-subtab-' + t);
-            const btn = document.getElementById('raw-subtab-btn-' + t);
-            if (el) el.style.display = t === name ? '' : 'none';
-            if (btn) {
-                btn.classList.toggle('btn-primary', t === name);
-                btn.classList.toggle('btn-secondary', t !== name);
-            }
-        });
-    }
-
-    function toggleGradedMode() {
-        const isGraded = document.getElementById('raw-is-graded').checked;
-        const gradedFields = document.getElementById('raw-graded-fields');
-        const condGroup = document.getElementById('raw-cond-group');
-        const hint = document.getElementById('raw-graded-hint');
-        gradedFields.style.display = isGraded ? 'flex' : 'none';
-        condGroup.style.opacity = isGraded ? '0.4' : '1';
-        condGroup.title = isGraded ? 'Condition not used for graded cards' : '';
-        hint.style.display = isGraded ? 'none' : '';
-        // Clear cached graded market badge
-        const badge = document.getElementById('raw-graded-market-badge');
-        if (badge) { badge.style.display = 'none'; badge.textContent = ''; }
-    }
-
-    // Called when grade company/value changes — updates badge if a card is already looked up
-    function onGradeFieldChange() {
-        const badge = document.getElementById('raw-graded-market-badge');
-        if (badge) { badge.style.display = 'none'; badge.textContent = ''; }
-        // Clear search results so user re-searches with new grade
-        document.getElementById('raw-search-results').innerHTML = '';
-    }
-
     // Show the graded price badge after a card lookup returns graded_prices
     function _updateGradedBadge(gradedPrices, context) {
         const _gf = _getGradeFields(context || 'raw');
@@ -4615,182 +4531,6 @@
             badge.style.background = 'var(--orange, #f59e0b)';
         }
     }
-
-    // ── Collectr CSV upload (raw session) ──
-    async function uploadRawCollectrCSV() {
-        const fileInput = document.getElementById('raw-collectr-csv-file');
-        const resultDiv = document.getElementById('raw-collectr-csv-result');
-        if (!fileInput.files.length) { resultDiv.innerHTML = '<div class="alert alert-warning">Select a CSV file first.</div>'; return; }
-        const offerPct = parseFloat(document.getElementById('raw-offer-pct').value) || 65;
-        const customerName = document.getElementById('raw-customer').value || 'Walk-in';
-
-        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Importing CSV...</div>';
-        const fd = new FormData();
-        fd.append('file', fileInput.files[0]);
-        fd.append('customer_name', customerName);
-        fd.append('offer_percentage', offerPct);
-        fd.append('force_product_type', 'raw');
-        try {
-            const r = await fetch('/api/intake/upload-collectr', { method: 'POST', body: fd });
-            const d = await r.json();
-            if (!r.ok) { resultDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Import failed') + '</div>'; return; }
-            // If this creates a new session, switch to it
-            if (d.session_id && !rawSessionId) {
-                rawSessionId = d.session_id;
-                document.getElementById('raw-session-info').innerHTML =
-                    'Session started for <strong>' + customerName + '</strong> · ' + d.item_count + ' cards imported · Offer: ' + offerPct + '%';
-            }
-            const mapped = d.auto_mapped_count || 0;
-            const unmapped = d.unmapped_count || 0;
-            resultDiv.innerHTML = '<div class="alert alert-success">' +
-                '<strong>' + d.item_count + ' cards imported</strong> — $' + (d.total_market_value || 0).toFixed(2) + ' market value, $' + (d.total_offer || 0).toFixed(2) + ' offer' +
-                (unmapped ? ' <span style="color:var(--orange);">· ' + unmapped + ' need mapping</span>' : '') +
-                '</div>';
-            loadRawSessionItems();
-        } catch(err) { resultDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
-    }
-
-    // ── Collectr HTML upload (raw session) ──
-    async function uploadRawCollectrHTML() {
-        const html = document.getElementById('raw-collectr-html-paste').value.trim();
-        const resultDiv = document.getElementById('raw-collectr-html-result');
-        if (!html) { resultDiv.innerHTML = '<div class="alert alert-warning">Paste Collectr HTML first.</div>'; return; }
-        const offerPct = parseFloat(document.getElementById('raw-offer-pct').value) || 65;
-        const customerName = document.getElementById('raw-customer').value || 'Walk-in';
-
-        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Parsing HTML...</div>';
-        try {
-            const body = {
-                html_content: html,
-                customer_name: customerName,
-                offer_percentage: offerPct,
-                force_product_type: 'raw',  // always treat as raw cards in raw session
-            };
-            // Append to existing raw session if one is open
-            if (rawSessionId) body.session_id = rawSessionId;
-
-            const r = await fetch('/api/intake/upload-collectr-html', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(body),
-            });
-            const d = await r.json();
-            if (!r.ok) { resultDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Parse failed') + '</div>'; return; }
-            if (d.session_id && !rawSessionId) rawSessionId = d.session_id;
-            resultDiv.innerHTML = '<div class="alert alert-success">' +
-                '<strong>' + (d.item_count || 0) + ' items ' + (d.appended_to_existing ? 'added to session' : 'imported') + '</strong> — $' + (d.total_market_value || 0).toFixed(2) + ' market value' +
-                '</div>';
-            loadRawSessionItems();
-        } catch(err) { resultDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
-    }
-
-    // ── Generic CSV preview ──
-    async function previewRawGenericCSV() {
-        const fileInput = document.getElementById('raw-generic-csv-file');
-        const previewDiv = document.getElementById('raw-generic-csv-preview');
-        if (!fileInput.files.length) { previewDiv.innerHTML = '<div class="alert alert-warning">Select a file first.</div>'; return; }
-        previewDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Analyzing columns...</div>';
-        const fd = new FormData();
-        fd.append('file', fileInput.files[0]);
-        try {
-            const r = await fetch('/api/intake/preview-csv', { method: 'POST', body: fd });
-            const d = await r.json();
-            if (!r.ok) { previewDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Preview failed') + '</div>'; return; }
-            const detected = d.detected_columns || {};
-            const all = d.available_columns || [];
-            previewDiv.innerHTML = '<div style="padding:10px; background:var(--surface-2); border-radius:6px; font-size:0.85rem;">' +
-                '<strong>Detected columns:</strong> ' +
-                Object.entries(detected).map(([k,v]) => '<span style="margin:0 4px;"><em>' + k + '</em> → ' + v + '</span>').join(' · ') +
-                '<br><span style="color:var(--text-dim);">All columns: ' + all.join(', ') + '</span></div>';
-        } catch(err) { previewDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
-    }
-
-    // ── Generic CSV import ──
-    async function importRawGenericCSV() {
-        const fileInput = document.getElementById('raw-generic-csv-file');
-        const resultDiv = document.getElementById('raw-generic-csv-result');
-        if (!fileInput.files.length) { resultDiv.innerHTML = '<div class="alert alert-warning">Select a file first.</div>'; return; }
-        const offerPct = parseFloat(document.getElementById('raw-offer-pct').value) || 65;
-        const customerName = document.getElementById('raw-customer').value || 'Walk-in';
-
-        resultDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Importing...</div>';
-        const fd = new FormData();
-        fd.append('file', fileInput.files[0]);
-        fd.append('customer_name', customerName);
-        fd.append('offer_percentage', offerPct);
-        fd.append('force_product_type', 'raw');
-        try {
-            const r = await fetch('/api/intake/upload-generic-csv', { method: 'POST', body: fd });
-            const d = await r.json();
-            if (!r.ok) { resultDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Import failed') + '</div>'; return; }
-            if (d.session_id && !rawSessionId) rawSessionId = d.session_id;
-            resultDiv.innerHTML = '<div class="alert alert-success">' +
-                '<strong>' + (d.item_count || 0) + ' items imported</strong> — $' + (d.total_market_value || 0).toFixed(2) + ' market value' +
-                (d.unmapped_count ? ' · <span style="color:var(--orange);">' + d.unmapped_count + ' need mapping</span>' : '') +
-                '</div>';
-            loadRawSessionItems();
-        } catch(err) { resultDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
-    }
-
-    async function createRawSession() {
-        const customer = document.getElementById('raw-customer').value || 'Walk-in';
-        const offerPct = document.getElementById('raw-offer-pct').value || '65';
-        try {
-            const r = await fetch('/api/intake/create-session', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ customer_name: customer, session_type: 'raw', offer_percentage: parseFloat(offerPct) }),
-            });
-            const d = await r.json();
-            if (!r.ok) { alert(d.error); return; }
-            rawSessionId = d.session.id;
-            document.getElementById('raw-session-setup').style.display = 'none';
-            document.getElementById('raw-entry-form').style.display = 'block';
-            document.getElementById('raw-session-info').innerHTML =
-                'Session started for <strong>' + customer + '</strong> \u2022 Offer: ' + offerPct + '% \u2022 ID: ' + rawSessionId.slice(0,8) + '...';
-        } catch(err) { alert(err.message); }
-    }
-
-    async function loadRawSessionItems() {
-        if (!rawSessionId) return;
-        try {
-            const r = await fetch('/api/intake/session/' + rawSessionId);
-            const d = await r.json();
-            const items = d.items;
-            const s = d.session;
-            const tableDiv = document.getElementById('raw-items-table');
-            if (!items.length) { tableDiv.innerHTML = '<p style="color:var(--text-dim);">No cards added yet.</p>'; return; }
-            tableDiv.innerHTML = '<div style="margin-bottom:8px; font-weight:600;">' +
-                items.length + ' cards \u2022 Total offer: $' + (s.total_offer_amount || 0).toFixed(2) +
-                '</div><table class="responsive-cards"><thead><tr><th>Card</th><th>Cond</th><th>Qty</th><th>Market</th><th>Offer</th><th>Actions</th></tr></thead><tbody>' +
-                items.map(i => '<tr>' +
-                    '<td data-label="">' + i.product_name + '<br><small style="color:var(--text-dim);">' + (i.set_name || '') + ' ' + (i.card_number ? '#'+i.card_number : '') + '</small></td>' +
-                    '<td data-label="Cond">' + (i.is_graded ? '<span class="badge" style="background:var(--accent-alt,#7c3aed);color:#fff;">' + (i.grade_company||'') + ' ' + (i.grade_value||'') + '</span>' : (() => { const _c2 = i.condition || ''; const _s2 = _c2==='NM' ? 'background:#14532d;color:#4ade80;' : _c2==='LP' ? 'background:rgba(79,125,249,0.18);color:#7aadff;' : _c2==='MP' ? 'background:#422006;color:#fbbf24;' : _c2==='HP' ? 'background:#431407;color:#fb923c;' : _c2==='DMG' ? 'background:#450a0a;color:#f87171;' : 'background:var(--surface-2);color:var(--text-dim);'; return '<span class="badge" style="' + _s2 + '">' + _c2 + '</span>'; })()) + '</td>' +
-                    '<td data-label="Qty">' + i.quantity + '</td>' +
-                    '<td data-label="Market">$' + (i.market_price || 0).toFixed(2) + '</td>' +
-                    '<td data-label="Offer">$' + (i.offer_price || 0).toFixed(2) + '</td>' +
-                    '<td data-label="" style="white-space:nowrap;"><div style="display:inline-block; position:relative;">' +
-                        '<button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(this)">\u22ee</button>' +
-                        '<div class="action-dropdown">' +
-                            '<button onclick="editCondition(\'' + i.id + '\',\'' + rawSessionId + '\',\'' + (i.condition || 'NM') + '\',' + (i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null) + ',\'' + (i.product_name||'').replace(/'/g,"\\'").replace(/"/g,'') + (i.set_name ? ' · '+(i.set_name||'').replace(/'/g,"\\'").replace(/"/g,'') : '') + '\')">🏷 Edit Condition</button>' +
-                            '<button onclick="overridePrice(\'' + i.id + '\',\'' + rawSessionId + '\',' + (i.market_price || 0) + ')">💰 Override Price</button>' +
-                            '<button onclick="editQuantity(\'' + i.id + '\',\'' + rawSessionId + '\',' + i.quantity + ')">✏ Edit Qty</button>' +
-                            '<hr>' +
-                            '<button style="color:var(--red);" onclick="deleteItem(\'' + i.id + '\',\'' + rawSessionId + '\')">🗑 Delete</button>' +
-                        '</div></div></td></tr>'
-                ).join('') + '</tbody></table>';
-        } catch(err) { console.error(err); }
-    }
-
-    async function finalizeRawSession() {
-        if (!rawSessionId) return;
-        await finalizeSession(rawSessionId);
-        rawSessionId = null;
-        document.getElementById('raw-session-setup').style.display = 'block';
-        document.getElementById('raw-entry-form').style.display = 'none';
-        document.getElementById('raw-items-table').innerHTML = '';
-    }
-
 
     // ═══════════════════════════════ HEALTH CHECK ═══════════════════════════════
     async function checkHealth() {
