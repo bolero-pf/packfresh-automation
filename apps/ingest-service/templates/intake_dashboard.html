@@ -1372,7 +1372,7 @@
                         details = '📬 no tracking';
                     }
                     return `<tr>
-                    <td data-label="Customer" style="font-weight:600;">${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''}</td>
+                    <td data-label="Customer">${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''}</td>
                     <td data-label="Type"><span class="badge badge-blue">${s.session_type}</span></td>
                     <td data-label="Status"><span class="badge" style="${statusStyle}">${statusLabel}</span></td>
                     <td data-label="Items">${s.item_count || 0}</td>
