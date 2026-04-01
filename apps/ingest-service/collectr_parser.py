@@ -18,6 +18,7 @@ import csv
 import hashlib
 import re
 from decimal import Decimal, InvalidOperation
+from collectr_html_parser import _normalize_set_name
 from io import StringIO
 from typing import NamedTuple
 
@@ -205,7 +206,7 @@ def parse_collectr_csv(file_content: str) -> ParseResult:
             item = ParsedItem(
                 product_name=product_name,
                 product_type=product_type,
-                set_name=(row.get("Set") or "").strip(),
+                set_name=_normalize_set_name((row.get("Set") or "").strip()),
                 card_number=(row.get("Card Number") or "").strip() if is_raw else "",
                 rarity=(row.get("Rarity") or "").strip() if is_raw else "",
                 condition=_normalize_condition(row.get("Card Condition") or "Near Mint"),

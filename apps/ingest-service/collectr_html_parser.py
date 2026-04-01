@@ -57,6 +57,54 @@ class CollectrHTMLResult:
     sealed_count: int = 0
 
 
+# Set name normalisation — Collectr uses full names, PPT expects abbreviations
+_SET_NAME_MAP = {
+    "sun & moon promo": "SM Promo",
+    "sun & moon promos": "SM Promo",
+    "sun and moon promo": "SM Promo",
+    "sun and moon promos": "SM Promo",
+    "xy promo": "XY Promo",
+    "xy promos": "XY Promo",
+    "mega evolution": "ME Promo",
+    "mega evolution promo": "ME Promo",
+    "mega evolution promos": "ME Promo",
+    "sword & shield promo": "SWSH Promo",
+    "sword & shield promos": "SWSH Promo",
+    "sword and shield promo": "SWSH Promo",
+    "sword and shield promos": "SWSH Promo",
+    "scarlet & violet promo": "SV Promo",
+    "scarlet & violet promos": "SV Promo",
+    "scarlet and violet promo": "SV Promo",
+    "scarlet and violet promos": "SV Promo",
+    "black & white promo": "BW Promo",
+    "black & white promos": "BW Promo",
+    "black and white promo": "BW Promo",
+    "black and white promos": "BW Promo",
+    "heartgold & soulsilver promo": "HGSS Promo",
+    "heartgold & soulsilver promos": "HGSS Promo",
+    "diamond & pearl promo": "DP Promo",
+    "diamond & pearl promos": "DP Promo",
+    "scarlet & violet base set": "Scarlet & Violet",
+    "sv: 151": "151",
+    "crown zenith: galarian gallery": "Crown Zenith Galarian Gallery",
+    "brilliant stars trainer gallery": "Brilliant Stars Trainer Gallery",
+    "astral radiance trainer gallery": "Astral Radiance Trainer Gallery",
+    "lost origin trainer gallery": "Lost Origin Trainer Gallery",
+    "silver tempest trainer gallery": "Silver Tempest Trainer Gallery",
+    "alternate art promos": "Alt Art Promo",
+    "wizards of the coast promo": "WoTC Promo",
+    "wotc promo": "WoTC Promo",
+    "wotc promos": "WoTC Promo",
+    "team rocket (japanese)": "Team Rocket Japanese",
+}
+
+
+def _normalize_set_name(raw: str) -> str:
+    """Normalize Collectr set names to PPT-friendly equivalents."""
+    mapped = _SET_NAME_MAP.get(raw.strip().lower())
+    return mapped if mapped else raw.strip()
+
+
 # Condition normalisation (same mapping as CSV parser)
 _CONDITION_MAP = {
     "near mint": "NM",
@@ -151,7 +199,7 @@ def _parse_li_block(html: str, index: int) -> Optional[CollectrHTMLItem]:
     set_m = re.search(
         r'underline\s+text-muted-foreground["\s][^>]*>(.*?)</span>', html, re.DOTALL
     )
-    set_name = _clean(set_m.group(1)) if set_m else ""
+    set_name = _normalize_set_name(_clean(set_m.group(1))) if set_m else ""
 
     # ── Rarity + card number ─────────────────────────────────────────
     # Current Collectr structure (flex-row with bullet separators):
