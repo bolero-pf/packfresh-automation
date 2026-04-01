@@ -1633,7 +1633,7 @@
                                         } else {
                                             const linkLabel = i.is_mapped ? 'Relink' : 'Link';
                                             const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
-                                            if (s.session_type === 'raw') {
+                                            if (i.product_type === 'raw') {
                                                 btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${s.offer_percentage},'${(i.set_name||'').replace(/'/g,"\\'")}','${(i.card_number||'').replace(/'/g,"\\'")}',${i.is_graded||false},'${(i.grade_company||'')}','${(i.grade_value||'')}','${i.condition||i.listing_condition||'NM'}',${i.quantity||1},${i.market_price||0})">${linkLabel}</button> `;
                                             } else {
                                                 btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
@@ -3631,10 +3631,19 @@
             html += `</div>`;
 
             const selPrice = variantData[selectedCond];
+            const importedPrice = rs.currentPrice || 0;
+            const pptLabel = selPrice ? `PPT: $${selPrice.toFixed(2)}` : 'PPT: —';
+            const importLabel = importedPrice > 0 ? `Imported: $${importedPrice.toFixed(2)}` : '';
             html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
                 <label style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap;">Price $</label>
                 <input type="number" id="relink-price-override" value="${selPrice ? selPrice.toFixed(2) : ''}" min="0" step="0.01" style="flex:1;font-size:1rem;font-weight:700;" placeholder="Enter price">
             </div>`;
+            if (importedPrice > 0 && selPrice && Math.abs(importedPrice - selPrice) > 0.01) {
+                html += `<div style="display:flex;gap:6px;margin-bottom:10px;font-size:0.82rem;">
+                    <button class="btn btn-sm btn-secondary" id="relink-use-ppt" style="font-size:0.78rem;">${pptLabel}</button>
+                    <button class="btn btn-sm btn-secondary" id="relink-use-imported" style="font-size:0.78rem;">${importLabel}</button>
+                </div>`;
+            }
             html += `<div style="display:flex;gap:8px;">`;
             html += `<button id="relink-ok" class="btn btn-primary" style="flex:1;">Relink ${selectedCond}</button>`;
             html += `<button id="relink-back" class="btn btn-secondary">← Back</button>`;
@@ -3700,6 +3709,16 @@
         });
         body.querySelectorAll('[data-rv]').forEach(el => {
             el.addEventListener('click', () => { rs.primary = el.getAttribute('data-rv'); _relinkRenderConditions(selectedCond); });
+        });
+        const _rlPptBtn = document.getElementById('relink-use-ppt');
+        const _rlImpBtn = document.getElementById('relink-use-imported');
+        const _rlPriceInput = document.getElementById('relink-price-override');
+        if (_rlPptBtn) _rlPptBtn.addEventListener('click', () => {
+            const vd = (rs.variants || {})[rs.primary] || {};
+            if (vd[selectedCond] != null) _rlPriceInput.value = vd[selectedCond].toFixed(2);
+        });
+        if (_rlImpBtn) _rlImpBtn.addEventListener('click', () => {
+            _rlPriceInput.value = (rs.currentPrice || 0).toFixed(2);
         });
         document.getElementById('relink-back').addEventListener('click', _relinkShowSearch);
         document.getElementById('relink-ok').addEventListener('click', async function() {
