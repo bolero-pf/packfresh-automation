@@ -1502,14 +1502,16 @@
                             addHtml += '<button class="btn btn-sm btn-secondary" id="session-add-type-card" onclick="switchSessionAddType(\'card\')">Individual Card</button>';
                             addHtml += '</div>';
                         }
+                        const _sid = sessionId;
+                        const _opct = s.offer_percentage;
                         if (showSealed) {
                             addHtml += '<div id="session-add-sealed">';
                             addHtml += '<div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">';
                             addHtml += '<div class="form-group" style="flex:2; min-width:180px; margin:0;"><label>Search PPT</label>';
-                            addHtml += '<input type="text" id="session-sealed-search" placeholder="e.g. Celebrations ETB" onkeydown="if(event.key===\'Enter\') searchSealedForSession(\'${sessionId}\', ${s.offer_percentage})"></div>';
+                            addHtml += '<input type="text" id="session-sealed-search" placeholder="e.g. Celebrations ETB" onkeydown="if(event.key===\'Enter\') searchSealedForSession(\'' + _sid + '\', ' + _opct + ')"></div>';
                             addHtml += '<div class="form-group" style="width:60px; margin:0;"><label>Qty</label><input type="number" id="session-sealed-qty" value="1" min="1"></div>';
-                            addHtml += '<button class="btn btn-primary btn-sm" onclick="searchSealedForSession(\'${sessionId}\', ${s.offer_percentage})">Search</button>';
-                            addHtml += '<button class="btn btn-secondary btn-sm" onclick="toggleManualSealedAdd(\'${sessionId}\', ${s.offer_percentage})">Manual</button>';
+                            addHtml += '<button class="btn btn-primary btn-sm" onclick="searchSealedForSession(\'' + _sid + '\', ' + _opct + ')">Search</button>';
+                            addHtml += '<button class="btn btn-secondary btn-sm" onclick="toggleManualSealedAdd(\'' + _sid + '\', ' + _opct + ')">Manual</button>';
                             addHtml += '</div>';
                             addHtml += '<div id="session-sealed-results" style="margin-top:8px;"></div>';
                             addHtml += '<div id="session-sealed-manual" style="display:none; margin-top:12px; padding:12px; background:var(--surface-1); border-radius:6px; border:1px solid var(--border);">';
@@ -1520,19 +1522,19 @@
                             addHtml += '<div class="form-group" style="width:100px; margin:0;"><label style="font-size:0.8rem;">TCGPlayer ID</label><input type="number" id="session-manual-tcgid" placeholder="optional"></div>';
                             addHtml += '<div class="form-group" style="width:90px; margin:0;"><label style="font-size:0.8rem;">Price</label><input type="number" id="session-manual-price" step="0.01" min="0" placeholder="$0.00"></div>';
                             addHtml += '<div class="form-group" style="width:55px; margin:0;"><label style="font-size:0.8rem;">Qty</label><input type="number" id="session-manual-qty" value="1" min="1"></div>';
-                            addHtml += '<button class="btn btn-success btn-sm" onclick="submitManualSealedAdd(\'${sessionId}\', ${s.offer_percentage})">Add</button>';
+                            addHtml += '<button class="btn btn-success btn-sm" onclick="submitManualSealedAdd(\'' + _sid + '\', ' + _opct + ')">Add</button>';
                             addHtml += '</div></div></div>';
                         }
                         if (showRaw) {
                             addHtml += '<div id="session-add-card" style="display:none;">';
                             addHtml += '<div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">';
                             addHtml += '<div class="form-group" style="flex:2; min-width:160px; margin:0;"><label>Card Search</label>';
-                            addHtml += '<input type="text" id="session-raw-search" placeholder="e.g. Charizard ex" onkeydown="if(event.key===\'Enter\') smartCardSearch(\'${sessionId}\', ${s.offer_percentage}, \'session\')"></div>';
+                            addHtml += '<input type="text" id="session-raw-search" placeholder="e.g. Charizard ex" onkeydown="if(event.key===\'Enter\') smartCardSearch(\'' + _sid + '\', ' + _opct + ', \'session\')"></div>';
                             addHtml += '<div class="form-group" style="flex:1; min-width:120px; margin:0;"><label>Set</label><input type="text" id="session-raw-set" placeholder="optional"></div>';
-                            addHtml += '<div class="form-group" style="width:90px; margin:0;"><label>TCG ID</label><input type="number" id="session-raw-tcgid" placeholder="optional" onkeydown="if(event.key===\'Enter\') smartCardSearch(\'${sessionId}\', ${s.offer_percentage}, \'session\')"></div>';
+                            addHtml += '<div class="form-group" style="width:90px; margin:0;"><label>TCG ID</label><input type="number" id="session-raw-tcgid" placeholder="optional" onkeydown="if(event.key===\'Enter\') smartCardSearch(\'' + _sid + '\', ' + _opct + ', \'session\')"></div>';
                             addHtml += '<div class="form-group" style="width:70px; margin:0;"><label>Cond</label><select id="session-raw-condition"><option value="NM">NM</option><option value="LP">LP</option><option value="MP">MP</option><option value="HP">HP</option><option value="DMG">DMG</option></select></div>';
                             addHtml += '<div class="form-group" style="width:50px; margin:0;"><label>Qty</label><input type="number" id="session-raw-qty" value="1" min="1"></div>';
-                            addHtml += '<button class="btn btn-primary btn-sm" onclick="smartCardSearch(\'${sessionId}\', ${s.offer_percentage}, \'session\')">Search</button>';
+                            addHtml += '<button class="btn btn-primary btn-sm" onclick="smartCardSearch(\'' + _sid + '\', ' + _opct + ', \'session\')">Search</button>';
                             addHtml += '</div>';
                             addHtml += '<div id="session-raw-results" style="margin-top:8px;"></div>';
                             addHtml += '</div>';
