@@ -1503,7 +1503,7 @@
                             addHtml += '</div>';
                         }
                         if (showSealed) {
-                            addHtml += '<div id="session-add-sealed" style="${showToggle && !showSealed ? 'display:none;' : ''}">';
+                            addHtml += '<div id="session-add-sealed">';
                             addHtml += '<div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">';
                             addHtml += '<div class="form-group" style="flex:2; min-width:180px; margin:0;"><label>Search PPT</label>';
                             addHtml += '<input type="text" id="session-sealed-search" placeholder="e.g. Celebrations ETB" onkeydown="if(event.key===\'Enter\') searchSealedForSession(\'${sessionId}\', ${s.offer_percentage})"></div>';
@@ -1524,7 +1524,7 @@
                             addHtml += '</div></div></div>';
                         }
                         if (showRaw) {
-                            addHtml += '<div id="session-add-card" style="${showToggle ? 'display:none;' : ''}">';
+                            addHtml += '<div id="session-add-card" style="display:none;">';
                             addHtml += '<div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">';
                             addHtml += '<div class="form-group" style="flex:2; min-width:160px; margin:0;"><label>Card Search</label>';
                             addHtml += '<input type="text" id="session-raw-search" placeholder="e.g. Charizard ex" onkeydown="if(event.key===\'Enter\') smartCardSearch(\'${sessionId}\', ${s.offer_percentage}, \'session\')"></div>';
