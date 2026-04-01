@@ -277,13 +277,14 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
 def map_item(item_id: str, tcgplayer_id: int,
              new_market_price: Decimal = None,
              product_name: str = None, set_name: str = None,
-             card_number: str = None, rarity: str = None) -> dict:
+             card_number: str = None, rarity: str = None,
+             variance: str = None) -> dict:
     """
     Map an intake item to a tcgplayer_id.
     Optionally update the market price (e.g., from PPT verification).
-    Optionally update product_name, set_name, card_number, rarity.
+    Optionally update product_name, set_name, card_number, rarity, variance.
     Recalculates offer_price based on session's offer_percentage.
-    
+
     Returns updated item row.
     """
     # Get item and session
@@ -309,22 +310,24 @@ def map_item(item_id: str, tcgplayer_id: int,
     sname = set_name if set_name else item.get("set_name")
     cnum = card_number if card_number else item.get("card_number")
     rar = rarity if rarity else item.get("rarity")
+    var = variance if variance else item.get("variance") or ""
 
     # Update item
     updated = execute_returning("""
         UPDATE intake_items
         SET tcgplayer_id = %s, market_price = %s, offer_price = %s,
             unit_cost_basis = %s, is_mapped = TRUE,
-            product_name = %s, set_name = %s, card_number = %s, rarity = %s
+            product_name = %s, set_name = %s, card_number = %s, rarity = %s,
+            variance = %s
         WHERE id = %s
         RETURNING *
     """, (tcgplayer_id, market_price, offer_price, unit_cost_basis,
-          name, sname, cnum, rar, item_id))
+          name, sname, cnum, rar, var, item_id))
 
-    # Cache the mapping for future imports (use updated set/number/variance, not originals)
+    # Cache the mapping for future imports
     save_mapping(
         name, tcgplayer_id, item["product_type"],
-        sname, cnum, variance=item.get("variance") or ""
+        sname, cnum, variance=var
     )
 
     # Recalculate session totals

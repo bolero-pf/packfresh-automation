@@ -1041,6 +1041,7 @@ def map_item():
             set_name=data.get("set_name"),
             card_number=data.get("card_number"),
             rarity=data.get("rarity"),
+            variance=data.get("variance"),
         )
 
         # Auto-link other unmapped items in the same session with the same product_name
@@ -1481,13 +1482,24 @@ def update_condition(item_id):
         item = intake.update_item_condition(item_id, new_condition, session_id)
 
         # Try to re-price from PPT if we have a tcgplayer_id
+        # Skip re-pricing if caller sent skip_reprice (e.g., relink already set the price)
         tcg_id = item.get("tcgplayer_id")
-        if tcg_id and ppt:
+        skip_reprice = data.get("skip_reprice", False)
+        if tcg_id and ppt and not skip_reprice:
             try:
                 card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
                 if card_data:
                     variants = PPTClient.extract_variants(card_data)
-                    primary = PPTClient.get_primary_printing(card_data) or "Default"
+                    # Use the item's variance to find the right printing, fall back to primary
+                    item_variance = item.get("variance") or ""
+                    primary = None
+                    if item_variance:
+                        for vname in variants:
+                            if vname.lower() == item_variance.lower():
+                                primary = vname
+                                break
+                    if not primary:
+                        primary = PPTClient.get_primary_printing(card_data) or "Default"
                     if primary not in variants and variants:
                         primary = list(variants.keys())[0]
                     variant_data = variants.get(primary, {})
@@ -1498,7 +1510,7 @@ def update_condition(item_id):
                             item_id, Decimal(str(new_price)), session_id
                         )
                         app.logger.info(
-                            f"Condition change {item_id}: {new_condition} -> ${new_price}"
+                            f"Condition change {item_id}: {new_condition} -> ${new_price} (variant: {primary})"
                         )
             except Exception as e:
                 app.logger.warning(f"PPT re-price on condition change failed: {e}")

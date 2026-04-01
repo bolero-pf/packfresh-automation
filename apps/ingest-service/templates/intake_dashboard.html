@@ -3719,6 +3719,7 @@
                     override_price: price,
                     product_name: rs.newName, set_name: rs.setName,
                     card_number: rs.cardNum, rarity: rs.rarity,
+                    variance: rs.primary || '',
                     session_id: rs.sessionId,
                 };
                 const mapR = await fetch('/api/intake/map-item', {
@@ -3730,7 +3731,7 @@
                 if (modeRaw) {
                     await fetch('/api/intake/item/' + rs.itemId + '/update-condition', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ condition: selectedCond, session_id: rs.sessionId }),
+                        body: JSON.stringify({ condition: selectedCond, session_id: rs.sessionId, skip_reprice: true }),
                     });
                 } else {
                     const company = rs._relinkGradeCompany || 'PSA';
