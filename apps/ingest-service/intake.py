@@ -26,69 +26,73 @@ logger = logging.getLogger(__name__)
 # ==========================================
 
 def get_cached_mapping(collectr_name: str, product_type: str,
-                       set_name: str = None, card_number: str = None) -> Optional[int]:
+                       set_name: str = None, card_number: str = None,
+                       variance: str = None) -> Optional[int]:
     """Check if we have a saved mapping for this Collectr product.
 
-    For raw cards, requires name + set_name + card_number to all match
-    (prevents "Charizard ex" from SV:151 linking to one from Brilliant Stars).
+    For raw cards, requires name + set_name + card_number + variance to all match
+    (prevents "Charizard ex" from SV:151 linking to one from Brilliant Stars,
+     and "1st Edition Holofoil" from linking to "Unlimited Holofoil").
     For sealed products, name + type is sufficient.
     """
     sn = set_name or ""
     cn = card_number or ""
+    vr = variance or ""
 
-    if product_type == "raw" and (sn or cn):
-        # Raw card with set/number info: require exact match
+    if product_type == "raw" and (sn or cn or vr):
+        # Raw card with identifying info: require exact match
         row = query_one("""
             SELECT tcgplayer_id FROM product_mappings
             WHERE collectr_name = %s AND product_type = %s
               AND COALESCE(set_name, '') = %s
               AND COALESCE(card_number, '') = %s
-        """, (collectr_name, product_type, sn, cn))
+              AND COALESCE(variance, '') = %s
+        """, (collectr_name, product_type, sn, cn, vr))
     else:
-        # Sealed, or raw without set/number — match on name+type only
+        # Sealed, or raw without identifying info — match on name+type only
         row = query_one("""
             SELECT tcgplayer_id FROM product_mappings
             WHERE collectr_name = %s AND product_type = %s
         """, (collectr_name, product_type))
 
     if row:
-        # Bump usage stats
         execute("""
             UPDATE product_mappings
             SET use_count = use_count + 1, last_used = CURRENT_TIMESTAMP
             WHERE collectr_name = %s AND product_type = %s
               AND COALESCE(set_name, '') = %s
               AND COALESCE(card_number, '') = %s
-        """, (collectr_name, product_type, sn, cn))
+              AND COALESCE(variance, '') = %s
+        """, (collectr_name, product_type, sn, cn, vr))
         return row["tcgplayer_id"]
     return None
 
 
 def save_mapping(collectr_name: str, tcgplayer_id: Optional[int], product_type: str,
-                 set_name: str = None, card_number: str = None,
+                 set_name: str = None, card_number: str = None, variance: str = None,
                  shopify_product_id: int = None, shopify_product_name: str = None):
     """Save or update a product mapping for future imports.
     tcgplayer_id may be None when linking directly to a Shopify product with no PPT match.
 
-    Uses (collectr_name, product_type, set_name, card_number) as the composite key
-    so that different cards with the same name (e.g. "Charizard ex" from different sets)
-    each get their own mapping.
+    Uses (collectr_name, product_type, set_name, card_number, variance) as the composite key
+    so that different cards/printings each get their own mapping.
     """
     sn = set_name or ""
     cn = card_number or ""
+    vr = variance or ""
     execute("""
         INSERT INTO product_mappings
-            (collectr_name, tcgplayer_id, product_type, set_name, card_number,
+            (collectr_name, tcgplayer_id, product_type, set_name, card_number, variance,
              shopify_product_id, shopify_product_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (collectr_name, product_type, COALESCE(set_name, ''), COALESCE(card_number, ''))
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (collectr_name, product_type, COALESCE(set_name, ''), COALESCE(card_number, ''), COALESCE(variance, ''))
         DO UPDATE SET
             tcgplayer_id = COALESCE(EXCLUDED.tcgplayer_id, product_mappings.tcgplayer_id),
             shopify_product_id = COALESCE(EXCLUDED.shopify_product_id, product_mappings.shopify_product_id),
             shopify_product_name = COALESCE(EXCLUDED.shopify_product_name, product_mappings.shopify_product_name),
             last_used = CURRENT_TIMESTAMP,
             use_count = product_mappings.use_count + 1
-    """, (collectr_name, tcgplayer_id, product_type, sn, cn,
+    """, (collectr_name, tcgplayer_id, product_type, sn, cn, vr,
           shopify_product_id, shopify_product_name))
 
 
@@ -204,11 +208,11 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
     sql = """
         INSERT INTO intake_items
             (session_id, product_name, tcgplayer_id, product_type,
-             set_name, card_number, condition, rarity,
+             set_name, card_number, condition, rarity, variance,
              quantity, market_price, offer_price, unit_cost_basis, is_mapped,
              is_graded, grade_company, grade_value,
              shopify_product_id, shopify_product_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params_list = [
         (
@@ -220,6 +224,7 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             item.get("card_number"),
             item.get("condition"),
             item.get("rarity"),
+            item.get("variance") or "",
             item["quantity"],
             item["market_price"],
             item["offer_price"],
@@ -316,10 +321,10 @@ def map_item(item_id: str, tcgplayer_id: int,
     """, (tcgplayer_id, market_price, offer_price, unit_cost_basis,
           name, sname, cnum, rar, item_id))
 
-    # Cache the mapping for future imports (use updated set/number, not originals)
+    # Cache the mapping for future imports (use updated set/number/variance, not originals)
     save_mapping(
         name, tcgplayer_id, item["product_type"],
-        sname, cnum
+        sname, cnum, variance=item.get("variance") or ""
     )
 
     # Recalculate session totals
