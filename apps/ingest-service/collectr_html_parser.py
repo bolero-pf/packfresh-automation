@@ -154,24 +154,39 @@ def _parse_li_block(html: str, index: int) -> Optional[CollectrHTMLItem]:
     set_name = _clean(set_m.group(1)) if set_m else ""
 
     # ── Rarity + card number ─────────────────────────────────────────
-    # Structure: <div class="flex flex-col text-xs sm:text-sm text-muted-foreground">
-    #               <span>Holo Rare</span><span>9</span>
-    #            </div>
+    # Current Collectr structure (flex-row with bullet separators):
+    #   <div class="flex flex-row flex-wrap items-center space-x-1 text-muted-foreground sm:text-sm text-xs">
+    #       <span>Special Illustration Rare</span><span class="text-xs">•</span><span>199/165</span>
+    #   </div>
+    # Older structure (flex-col without bullets):
+    #   <div class="flex flex-col text-xs sm:text-sm text-muted-foreground">
+    #       <span>Holo Rare</span><span>9</span>
+    #   </div>
     rarity = ""
     card_number = ""
     muted_block_m = re.search(
-        r"flex flex-col text-xs sm:text-sm text-muted-foreground[^>]*>(.*?)</div>",
+        r"flex\s+flex-(?:row|col)[^>]*text-muted-foreground[^>]*>(.*?)</div>",
         html, re.DOTALL
     )
+    if not muted_block_m:
+        # Try alternate class order (text-muted-foreground before flex)
+        muted_block_m = re.search(
+            r"text-muted-foreground[^>]*flex\s+flex-(?:row|col)[^>]*>(.*?)</div>",
+            html, re.DOTALL
+        )
     if muted_block_m:
         spans = re.findall(r"<span[^>]*>(.*?)</span>", muted_block_m.group(1), re.DOTALL)
-        cleaned = [_clean(s) for s in spans if _clean(s)]
+        # Filter out bullet separators and empty spans
+        cleaned = [_clean(s) for s in spans if _clean(s) and _clean(s) not in ("•", "·", "|", "-")]
         if len(cleaned) >= 2:
             rarity = cleaned[0]
             card_number = cleaned[1]
         elif len(cleaned) == 1:
-            # Could be rarity-only or card-number-only; treat as rarity
-            rarity = cleaned[0]
+            # Could be rarity-only or card-number-only
+            if _is_card_number(cleaned[0]):
+                card_number = cleaned[0]
+            else:
+                rarity = cleaned[0]
 
     # ── Condition ───────────────────────────────────────────────────
     # <span class="font-medium text-xs sm:text-sm" style="color: rgb(...);">Near Mint</span>

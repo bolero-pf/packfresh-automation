@@ -25,12 +25,31 @@ logger = logging.getLogger(__name__)
 # PRODUCT MAPPING (collectr_name <-> tcgplayer_id)
 # ==========================================
 
-def get_cached_mapping(collectr_name: str, product_type: str) -> Optional[int]:
-    """Check if we have a saved mapping for this Collectr product name."""
-    row = query_one("""
-        SELECT tcgplayer_id FROM product_mappings
-        WHERE collectr_name = %s AND product_type = %s
-    """, (collectr_name, product_type))
+def get_cached_mapping(collectr_name: str, product_type: str,
+                       set_name: str = None, card_number: str = None) -> Optional[int]:
+    """Check if we have a saved mapping for this Collectr product.
+
+    For raw cards, requires name + set_name + card_number to all match
+    (prevents "Charizard ex" from SV:151 linking to one from Brilliant Stars).
+    For sealed products, name + type is sufficient.
+    """
+    sn = set_name or ""
+    cn = card_number or ""
+
+    if product_type == "raw" and (sn or cn):
+        # Raw card with set/number info: require exact match
+        row = query_one("""
+            SELECT tcgplayer_id FROM product_mappings
+            WHERE collectr_name = %s AND product_type = %s
+              AND COALESCE(set_name, '') = %s
+              AND COALESCE(card_number, '') = %s
+        """, (collectr_name, product_type, sn, cn))
+    else:
+        # Sealed, or raw without set/number — match on name+type only
+        row = query_one("""
+            SELECT tcgplayer_id FROM product_mappings
+            WHERE collectr_name = %s AND product_type = %s
+        """, (collectr_name, product_type))
 
     if row:
         # Bump usage stats
@@ -38,7 +57,9 @@ def get_cached_mapping(collectr_name: str, product_type: str) -> Optional[int]:
             UPDATE product_mappings
             SET use_count = use_count + 1, last_used = CURRENT_TIMESTAMP
             WHERE collectr_name = %s AND product_type = %s
-        """, (collectr_name, product_type))
+              AND COALESCE(set_name, '') = %s
+              AND COALESCE(card_number, '') = %s
+        """, (collectr_name, product_type, sn, cn))
         return row["tcgplayer_id"]
     return None
 
@@ -48,20 +69,26 @@ def save_mapping(collectr_name: str, tcgplayer_id: Optional[int], product_type: 
                  shopify_product_id: int = None, shopify_product_name: str = None):
     """Save or update a product mapping for future imports.
     tcgplayer_id may be None when linking directly to a Shopify product with no PPT match.
+
+    Uses (collectr_name, product_type, set_name, card_number) as the composite key
+    so that different cards with the same name (e.g. "Charizard ex" from different sets)
+    each get their own mapping.
     """
+    sn = set_name or ""
+    cn = card_number or ""
     execute("""
         INSERT INTO product_mappings
             (collectr_name, tcgplayer_id, product_type, set_name, card_number,
              shopify_product_id, shopify_product_name)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (collectr_name, product_type)
+        ON CONFLICT (collectr_name, product_type, COALESCE(set_name, ''), COALESCE(card_number, ''))
         DO UPDATE SET
             tcgplayer_id = COALESCE(EXCLUDED.tcgplayer_id, product_mappings.tcgplayer_id),
             shopify_product_id = COALESCE(EXCLUDED.shopify_product_id, product_mappings.shopify_product_id),
             shopify_product_name = COALESCE(EXCLUDED.shopify_product_name, product_mappings.shopify_product_name),
             last_used = CURRENT_TIMESTAMP,
             use_count = product_mappings.use_count + 1
-    """, (collectr_name, tcgplayer_id, product_type, set_name, card_number,
+    """, (collectr_name, tcgplayer_id, product_type, sn, cn,
           shopify_product_id, shopify_product_name))
 
 
@@ -289,10 +316,10 @@ def map_item(item_id: str, tcgplayer_id: int,
     """, (tcgplayer_id, market_price, offer_price, unit_cost_basis,
           name, sname, cnum, rar, item_id))
 
-    # Cache the mapping for future imports
+    # Cache the mapping for future imports (use updated set/number, not originals)
     save_mapping(
-        item["product_name"], tcgplayer_id, item["product_type"],
-        item.get("set_name"), item.get("card_number")
+        name, tcgplayer_id, item["product_type"],
+        sname, cnum
     )
 
     # Recalculate session totals

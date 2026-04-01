@@ -251,7 +251,9 @@ def upload_collectr():
         unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
 
         # Check for cached tcgplayer_id mapping and/or shopify link
-        tcgplayer_id = intake.get_cached_mapping(item.product_name, product_type)
+        tcgplayer_id = intake.get_cached_mapping(
+            item.product_name, product_type,
+            set_name=item.set_name, card_number=item.card_number)
         shopify_link = intake.get_cached_shopify_link(item.product_name, product_type)
         # If shopify link has a tcgplayer_id that our mapping table missed, use it
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
@@ -374,7 +376,9 @@ def upload_collectr_html():
         offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
         unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
 
-        tcgplayer_id = intake.get_cached_mapping(item.product_name, product_type)
+        tcgplayer_id = intake.get_cached_mapping(
+            item.product_name, product_type,
+            set_name=item.set_name, card_number=item.card_number)
         shopify_link = intake.get_cached_shopify_link(item.product_name, product_type)
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
             tcgplayer_id = shopify_link["tcgplayer_id"]
@@ -521,7 +525,9 @@ def upload_generic_csv():
         unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
 
         # Check for cached tcgplayer_id mapping (or use the one from CSV)
-        tcgplayer_id = item.tcgplayer_id or intake.get_cached_mapping(item.product_name, product_type)
+        tcgplayer_id = item.tcgplayer_id or intake.get_cached_mapping(
+            item.product_name, product_type,
+            set_name=item.set_name, card_number=item.card_number)
         shopify_link = intake.get_cached_shopify_link(item.product_name, product_type)
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
             tcgplayer_id = shopify_link["tcgplayer_id"]
@@ -1029,45 +1035,50 @@ def map_item():
         )
 
         # Auto-link other unmapped items in the same session with the same product_name
-        # AND same condition/grade — a PSA 9 and PSA 10 of the same card have different prices
+        # AND same set_name + card_number + condition/grade
         siblings_updated = 0
         session_id = data.get("session_id") or updated.get("session_id")
         if session_id and new_price is not None:
             # Fetch the source item to know its condition/grade for sibling matching
             source_item = db.query_one(
-                "SELECT is_graded, grade_company, grade_value, condition FROM intake_items WHERE id = %s",
+                "SELECT is_graded, grade_company, grade_value, condition, set_name, card_number FROM intake_items WHERE id = %s",
                 (item_id,)
             )
+            src_name = updated.get("product_name") or data.get("product_name", "")
+            src_set = updated.get("set_name") or (source_item or {}).get("set_name") or ""
+            src_num = updated.get("card_number") or (source_item or {}).get("card_number") or ""
             if source_item and source_item.get("is_graded"):
-                # Graded: only auto-link siblings with same company + grade
+                # Graded: only auto-link siblings with same name+set+number+company+grade
                 siblings = db.query("""
                     SELECT id FROM intake_items
                     WHERE session_id = %s
                       AND id != %s
                       AND product_name = %s
+                      AND COALESCE(set_name, '') = %s
+                      AND COALESCE(card_number, '') = %s
                       AND is_graded = TRUE
                       AND grade_company = %s
                       AND grade_value = %s
                       AND (tcgplayer_id IS NULL OR is_mapped = FALSE)
                       AND item_status IN ('good', 'damaged')
-                """, (session_id, item_id,
-                      updated.get("product_name") or data.get("product_name", ""),
+                """, (session_id, item_id, src_name, src_set, src_num,
                       source_item.get("grade_company", ""),
                       source_item.get("grade_value", "")))
             else:
-                # Raw: only auto-link siblings with same condition (and not graded)
+                # Raw: only auto-link siblings with same name+set+number+condition
                 source_cond = (source_item or {}).get("condition") or "NM"
                 siblings = db.query("""
                     SELECT id FROM intake_items
                     WHERE session_id = %s
                       AND id != %s
                       AND product_name = %s
+                      AND COALESCE(set_name, '') = %s
+                      AND COALESCE(card_number, '') = %s
                       AND (is_graded = FALSE OR is_graded IS NULL)
                       AND COALESCE(condition, 'NM') = %s
                       AND (tcgplayer_id IS NULL OR is_mapped = FALSE)
                       AND item_status IN ('good', 'damaged')
-                """, (session_id, item_id,
-                      updated.get("product_name") or data.get("product_name", ""),
+                """, (session_id, item_id, src_name, src_set, src_num,
                       source_cond))
             for sib in siblings:
                 try:
@@ -1147,6 +1158,8 @@ def accept_price_no_link(item_id):
         item["product_name"],
         tcgplayer_id or None,
         item.get("product_type", "sealed"),
+        set_name=item.get("set_name"),
+        card_number=item.get("card_number"),
         shopify_product_id=str(store_product_id) if store_product_id else None,
         shopify_product_name=store_product_name or None,
     )
@@ -2116,12 +2129,14 @@ def proxy_create_listing():
                     WHERE id = %s
                 """, (shopify_product_id, item_id))
                 # Also persist in product_mappings for future imports
-                item = db.query_one("SELECT product_name, product_type FROM intake_items WHERE id = %s", (item_id,))
+                item = db.query_one("SELECT product_name, product_type, set_name, card_number FROM intake_items WHERE id = %s", (item_id,))
                 if item:
                     intake.save_mapping(
                         item["product_name"],
                         int(tcgplayer_id),
                         item.get("product_type", "sealed"),
+                        set_name=item.get("set_name"),
+                        card_number=item.get("card_number"),
                         shopify_product_id=shopify_product_id,
                         shopify_product_name=product_name or item["product_name"],
                     )
