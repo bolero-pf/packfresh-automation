@@ -722,6 +722,7 @@ def update_item_condition(item_id: str, new_condition: str, session_id: str) -> 
         WHERE id = %s
     """, (new_condition, item_id))
 
+    _recalculate_session_totals(session_id)
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
