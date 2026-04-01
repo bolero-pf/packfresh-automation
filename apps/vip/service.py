@@ -63,11 +63,16 @@ def _push_vip_transition(customer_gid: str, transition: str):
             "vip_transition_at": datetime.now(timezone.utc).isoformat(),
         },
     )
+def _parse_date_loose(s: str) -> date:
+    """Parse dates like '2026-03-31', '2026-3-31', '2026/3/31', '2026-03-31T...'."""
+    parts = s.split("T")[0].replace("/", "-").split("-")
+    return date(int(parts[0]), int(parts[1]), int(parts[2]))
+
 def _days_to_date(yyyymmdd: str | None, today: date) -> int:
     if not yyyymmdd:
         return 0
     try:
-        d = date.fromisoformat(yyyymmdd)
+        d = _parse_date_loose(yyyymmdd)
         return max(0, (d - today).days)
     except Exception:
         return 0
@@ -599,7 +604,9 @@ def inside_lock(lock: dict, today_date=None) -> bool:
     if today_date is None:
         today_date = date.today()
     try:
-        return lock["start"] <= today_date.isoformat() <= lock["end"]
+        start = _parse_date_loose(lock["start"])
+        end = _parse_date_loose(lock["end"])
+        return start <= today_date <= end
     except Exception:
         return False
 

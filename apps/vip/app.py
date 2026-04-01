@@ -107,7 +107,8 @@ def api_recalculate():
     lock_end_date = None
     if current_lock.get("end"):
         try:
-            lock_end_date = date.fromisoformat(current_lock["end"])
+            _p = current_lock["end"].split("T")[0].replace("/", "-").split("-")
+            lock_end_date = date(int(_p[0]), int(_p[1]), int(_p[2]))
             lock_active = lock_end_date >= date.today()
         except Exception:
             pass
