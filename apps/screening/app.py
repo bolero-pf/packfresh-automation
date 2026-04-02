@@ -748,6 +748,66 @@ def api_egg_manual_assign():
     return jsonify(egg)
 
 
+@app.route("/api/egg-test-order", methods=["POST"])
+def api_egg_test_order():
+    """Test an order against egg eligibility without claiming a slot."""
+    data = request.get_json(silent=True) or {}
+    order_name = (data.get("order_name") or "").strip()
+    if not order_name:
+        return jsonify({"error": "order_name required"}), 400
+
+    from shopify_graphql import shopify_gql
+    from service import EASTER_EGG_MIN_SPEND, _order_has_collection_box
+
+    search = shopify_gql("""
+        query($q: String!) {
+          orders(first: 1, query: $q) {
+            edges { node {
+              id name
+              currentTotalPriceSet { shopMoney { amount } }
+              customer { id email }
+            } }
+          }
+        }
+    """, {"q": f"name:{order_name}"})
+
+    edges = search.get("data", {}).get("orders", {}).get("edges", [])
+    if not edges:
+        return jsonify({"error": f"Order {order_name} not found"}), 404
+
+    order = edges[0]["node"]
+    customer = order.get("customer") or {}
+    o_total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+    email = (customer.get("email") or "").strip()
+    order_gid = order["id"]
+
+    checks = {
+        "order_name": order.get("name", order_name),
+        "email": email,
+        "order_total": o_total,
+        "meets_min_spend": o_total >= EASTER_EGG_MIN_SPEND,
+        "has_collection_box": _order_has_collection_box(order_gid),
+        "has_customer": bool(customer.get("id") and email),
+    }
+    checks["would_qualify"] = all([
+        checks["meets_min_spend"],
+        checks["has_collection_box"],
+        checks["has_customer"],
+    ])
+
+    # Check if customer already has an egg
+    if email:
+        row = db.query_one(
+            "SELECT tier FROM easter_egg_pool WHERE claimed_by_email = %s",
+            (email,)
+        )
+        if row:
+            checks["already_assigned"] = row["tier"]
+            checks["would_qualify"] = False
+
+    return jsonify(checks)
+
+
 CONSOLE_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -944,7 +1004,8 @@ function renderEggHunt(d) {
       </span>
       <div style="margin-left:auto;display:flex;gap:6px;align-items:center;">
         <input id="egg-manual-order" type="text" placeholder="#1234" style="width:100px;padding:5px 10px;background:var(--s2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.82rem;">
-        <button class="btn btn-green btn-sm" onclick="manualAssignEgg()">🥚 Assign Egg</button>
+        <button class="btn btn-secondary btn-sm" onclick="testEggOrder()">🔍 Test</button>
+        <button class="btn btn-green btn-sm" onclick="manualAssignEgg()">🥚 Assign</button>
       </div>
     </div>
     <div class="egg-pool-grid">${poolHtml || '<div style="color:var(--dim)">Pool not seeded yet</div>'}</div>
@@ -958,6 +1019,30 @@ function renderEggHunt(d) {
       <tbody>${rowsHtml}</tbody>
     </table>` : '<div class="empty">No orders screened yet during this promo window.</div>'}
   `;
+}
+
+async function testEggOrder() {
+  const input = document.getElementById('egg-manual-order');
+  const name = (input.value || '').trim();
+  if (!name) { alert('Enter an order number'); return; }
+  try {
+    const r = await fetch('/api/egg-test-order', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ order_name: name }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    const lines = [
+      d.order_name + ' (' + (d.email || 'no email') + ')',
+      'Total: $' + (d.order_total || 0).toFixed(2) + (d.meets_min_spend ? ' ✅' : ' ❌ below $75'),
+      'Collection Box: ' + (d.has_collection_box ? '✅ yes' : '❌ no'),
+      'Customer: ' + (d.has_customer ? '✅' : '❌ missing'),
+    ];
+    if (d.already_assigned) lines.push('Already assigned: ' + d.already_assigned + ' egg');
+    lines.push('');
+    lines.push(d.would_qualify ? '✅ WOULD QUALIFY' : '❌ Would NOT qualify');
+    alert(lines.join('\n'));
+  } catch(e) { alert(e.message); }
 }
 
 async function manualAssignEgg() {
