@@ -32,48 +32,51 @@ db.execute("""
 db.execute("CREATE INDEX IF NOT EXISTS idx_customer_notes_email ON customer_notes(customer_email)")
 
 # Easter egg promo tables
-db.execute("""
-    CREATE TABLE IF NOT EXISTS easter_egg_pool (
-        id                SERIAL PRIMARY KEY,
-        tier              TEXT NOT NULL,
-        claimed_by_order  TEXT,
-        claimed_by_email  TEXT,
-        claimed_at        TIMESTAMPTZ
-    )
-""")
-db.execute("""
-    INSERT INTO easter_egg_pool (tier)
-    SELECT unnest(ARRAY[
-        'stink','stink','bronze','silver','bronze','bronze','bronze','bronze','stink','silver',
-        'stink','stink','silver','stink','stink','stink','stink','stink','gold','bronze',
-        'silver','silver','gold','silver','stink','stink','bronze','stink','bronze','stink',
-        'stink','stink','stink','stink','bronze','bronze','stink','stink','bronze','bronze',
-        'stink','bronze','bronze','silver','silver','stink','bronze','gold','silver','stink',
-        'stink','stink','stink','stink','stink','bronze','stink','bronze','stink','bronze',
-        'bronze','stink','silver','stink','silver','silver','stink','stink','stink','bronze',
-        'bronze','gold','stink','bronze','bronze','bronze','stink','stink','stink','stink',
-        'silver','stink','stink','silver','stink','bronze','bronze','bronze','stink','stink',
-        'stink','stink','bronze','silver','bronze','stink','bronze','gold','stink','stink'
-    ])
-    WHERE NOT EXISTS (SELECT 1 FROM easter_egg_pool LIMIT 1)
-""")
-db.execute("""
-    CREATE TABLE IF NOT EXISTS easter_egg_log (
-        id              SERIAL PRIMARY KEY,
-        order_gid       TEXT NOT NULL,
-        order_name      TEXT NOT NULL,
-        customer_email  TEXT,
-        order_total     NUMERIC(10,2),
-        has_collection_box BOOLEAN,
-        eligible        BOOLEAN NOT NULL,
-        ineligible_reason TEXT,
-        tier            TEXT,
-        was_live        BOOLEAN NOT NULL DEFAULT false,
-        logged_at       TIMESTAMPTZ DEFAULT NOW()
-    )
-""")
-db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_egg_log_order_gid ON easter_egg_log(order_gid)")
-db.execute("CREATE INDEX IF NOT EXISTS idx_egg_log_logged_at ON easter_egg_log(logged_at DESC)")
+try:
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS easter_egg_pool (
+            id                SERIAL PRIMARY KEY,
+            tier              TEXT NOT NULL,
+            claimed_by_order  TEXT,
+            claimed_by_email  TEXT,
+            claimed_at        TIMESTAMPTZ
+        )
+    """)
+    # Seed pool only if empty
+    existing = db.query_one("SELECT COUNT(*) AS cnt FROM easter_egg_pool")
+    if not existing or existing["cnt"] == 0:
+        db.execute("""
+            INSERT INTO easter_egg_pool (tier) VALUES
+            ('stink'),('stink'),('bronze'),('silver'),('bronze'),('bronze'),('bronze'),('bronze'),('stink'),('silver'),
+            ('stink'),('stink'),('silver'),('stink'),('stink'),('stink'),('stink'),('stink'),('gold'),('bronze'),
+            ('silver'),('silver'),('gold'),('silver'),('stink'),('stink'),('bronze'),('stink'),('bronze'),('stink'),
+            ('stink'),('stink'),('stink'),('stink'),('bronze'),('bronze'),('stink'),('stink'),('bronze'),('bronze'),
+            ('stink'),('bronze'),('bronze'),('silver'),('silver'),('stink'),('bronze'),('gold'),('silver'),('stink'),
+            ('stink'),('stink'),('stink'),('stink'),('stink'),('bronze'),('stink'),('bronze'),('stink'),('bronze'),
+            ('bronze'),('stink'),('silver'),('stink'),('silver'),('silver'),('stink'),('stink'),('stink'),('bronze'),
+            ('bronze'),('gold'),('stink'),('bronze'),('bronze'),('bronze'),('stink'),('stink'),('stink'),('stink'),
+            ('silver'),('stink'),('stink'),('silver'),('stink'),('bronze'),('bronze'),('bronze'),('stink'),('stink'),
+            ('stink'),('stink'),('bronze'),('silver'),('bronze'),('stink'),('bronze'),('gold'),('stink'),('stink')
+        """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS easter_egg_log (
+            id              SERIAL PRIMARY KEY,
+            order_gid       TEXT NOT NULL,
+            order_name      TEXT NOT NULL,
+            customer_email  TEXT,
+            order_total     NUMERIC(10,2),
+            has_collection_box BOOLEAN,
+            eligible        BOOLEAN NOT NULL,
+            ineligible_reason TEXT,
+            tier            TEXT,
+            was_live        BOOLEAN NOT NULL DEFAULT false,
+            logged_at       TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_egg_log_order_gid ON easter_egg_log(order_gid)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_egg_log_logged_at ON easter_egg_log(logged_at DESC)")
+except Exception as e:
+    print(f"[screening] Easter egg migration failed: {e}", flush=True)
 
 from auth import register_auth_hooks
 register_auth_hooks(app, roles=["owner", "manager"], public_prefixes=('/screening/',))
