@@ -785,6 +785,7 @@ def api_egg_test_order():
         "order_name": order.get("name", order_name),
         "email": email,
         "order_total": o_total,
+        "min_spend": EASTER_EGG_MIN_SPEND,
         "meets_min_spend": o_total >= EASTER_EGG_MIN_SPEND,
         "has_collection_box": _order_has_collection_box(order_gid),
         "has_customer": bool(customer.get("id") and email),
@@ -1034,7 +1035,7 @@ async function testEggOrder() {
     if (!r.ok) { alert(d.error); return; }
     const lines = [
       d.order_name + ' (' + (d.email || 'no email') + ')',
-      'Total: $' + (d.order_total || 0).toFixed(2) + (d.meets_min_spend ? ' ✅' : ' ❌ below $75'),
+      'Total: $' + (d.order_total || 0).toFixed(2) + (d.meets_min_spend ? ' ✅' : ' ❌ below $' + d.min_spend),
       'Collection Box: ' + (d.has_collection_box ? '✅ yes' : '❌ no'),
       'Customer: ' + (d.has_customer ? '✅' : '❌ missing'),
     ];
