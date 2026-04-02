@@ -185,11 +185,6 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
             comp.get("tcgplayer_id") is not None, "good", item_id,
         ))
 
-        # Save product mapping if we have a tcgplayer_id
-        if comp.get("tcgplayer_id"):
-            _save_mapping(comp["product_name"], int(comp["tcgplayer_id"]),
-                         "sealed", market_price, comp.get("set_name"))
-
         child = query_one("SELECT * FROM intake_items WHERE id = %s", (child_id,))
         child_items.append(child)
 
