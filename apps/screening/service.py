@@ -158,6 +158,15 @@ mutation TagsAdd($id: ID!, $tags: [String!]!) {
 }
 """
 
+CUSTOMER_TAGS_REMOVE = """
+mutation TagsRemove($id: ID!, $tags: [String!]!) {
+  tagsRemove(id: $id, tags: $tags) {
+    node { ... on Customer { id tags } }
+    userErrors { field message }
+  }
+}
+"""
+
 FULFILLMENT_ORDER_HOLD = """
 mutation FulfillmentOrderHold($fulfillmentHold: FulfillmentOrderHoldInput!, $id: ID!) {
   fulfillmentOrderHold(fulfillmentHold: $fulfillmentHold, id: $id) {
@@ -621,6 +630,21 @@ def screen_every_order(order_gid: str) -> dict:
         "signature": None,
         "customer_notes": None,
     }
+
+    # Easter egg — remove tag after redemption (customer placed a new order)
+    EGG_TAG_THRESHOLDS = {
+        "STINK_EGG": 0, "BRONZE_EGG": 0,
+        "SILVER_EGG": 50, "GOLDEN_EGG": 100,
+    }
+    if customer_gid:
+        cust_tags = set(customer.get("tags") or [])
+        for tag, min_total in EGG_TAG_THRESHOLDS.items():
+            if tag in cust_tags and order_total >= min_total:
+                try:
+                    shopify_gql(CUSTOMER_TAGS_REMOVE, {"id": customer_gid, "tags": [tag]})
+                    print(f"[easter_egg] Removed {tag} from {customer_gid} — order {order_name} ${order_total:.2f}", flush=True)
+                except Exception as e:
+                    print(f"[easter_egg] Failed to remove {tag}: {e}", flush=True)
 
     # 1b. Check for customer notes/holds
     customer_email = (customer.get("email") or "").strip().lower()
