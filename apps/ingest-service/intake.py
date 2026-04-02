@@ -253,8 +253,8 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
     Calculates offer_price and unit_cost_basis from the given offer_percentage.
     Returns the created intake_item row.
     """
-    offer_price = market_price * quantity * (offer_percentage / Decimal("100"))
-    unit_cost_basis = offer_price / quantity if quantity > 0 else Decimal("0")
+    offer_price, unit_cost_basis = calc_offer_price(
+        market_price, quantity, offer_percentage, product_type="raw")
 
     return execute_returning("""
         INSERT INTO intake_items
@@ -302,8 +302,9 @@ def map_item(item_id: str, tcgplayer_id: int,
     # Use new price if provided, otherwise keep existing
     market_price = new_market_price if new_market_price is not None else item["market_price"]
     offer_pct = session["offer_percentage"]
-    offer_price = market_price * item["quantity"] * (offer_pct / Decimal("100"))
-    unit_cost_basis = offer_price / item["quantity"] if item["quantity"] > 0 else Decimal("0")
+    offer_price, unit_cost_basis = calc_offer_price(
+        market_price, item["quantity"], offer_pct,
+        product_type=item.get("product_type", "raw"))
 
     # Build dynamic SET clause
     name = product_name if product_name else item["product_name"]
@@ -371,9 +372,15 @@ def update_offer_percentage(session_id: str, new_percentage: Decimal) -> dict:
     """, (new_percentage, session_id))
 
     # Recalculate every item's offer_price
+    # Raw cards under $2 get flat 25% regardless of session percentage
     execute("""
         UPDATE intake_items
-        SET offer_price = market_price * quantity * (%s / 100.0)
+        SET offer_price = market_price * quantity * (
+            CASE WHEN product_type = 'raw' AND market_price < 2.00
+                 THEN 25.0
+                 ELSE %s
+            END / 100.0
+        )
         WHERE session_id = %s
     """, (new_percentage, session_id))
 
@@ -389,11 +396,13 @@ def update_item_price(item_id: str, new_market_price: Decimal, session_id: str) 
 
     offer_pct = session["offer_percentage"]
 
-    item = query_one("SELECT quantity FROM intake_items WHERE id = %s", (item_id,))
+    item = query_one("SELECT quantity, product_type FROM intake_items WHERE id = %s", (item_id,))
     if not item:
         raise ValueError("Item not found")
 
-    offer_price = new_market_price * item["quantity"] * (offer_pct / Decimal("100"))
+    offer_price, _ = calc_offer_price(
+        new_market_price, item["quantity"], offer_pct,
+        product_type=item.get("product_type", "raw"))
 
     execute("""
         UPDATE intake_items
@@ -450,6 +459,26 @@ def rejuvenate_session(session_id: str) -> dict:
 # ==========================================
 
 DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
+BULK_THRESHOLD = Decimal("2")      # raw cards under $2 market are treated as bulk
+BULK_OFFER_PCT = Decimal("25")     # bulk raw cards get flat 25% of market
+
+
+def calc_offer_price(market_price: Decimal, quantity: int, offer_pct: Decimal,
+                     product_type: str = "raw", is_damaged: bool = False) -> tuple:
+    """
+    Calculate offer_price and unit_cost_basis for an item.
+    Raw cards under $2 market get a flat 25% regardless of session offer %.
+    Returns (offer_price, unit_cost_basis).
+    """
+    if product_type == "raw" and market_price < BULK_THRESHOLD:
+        effective_pct = BULK_OFFER_PCT
+    else:
+        effective_pct = offer_pct
+
+    discount = DAMAGE_DISCOUNT if is_damaged else Decimal("1")
+    offer_price = market_price * quantity * (effective_pct / Decimal("100")) * discount
+    unit_cost_basis = offer_price / quantity if quantity > 0 else Decimal("0")
+    return offer_price, unit_cost_basis
 
 
 def split_damaged(item_id: str, damaged_qty: int) -> dict:
@@ -476,7 +505,9 @@ def split_damaged(item_id: str, damaged_qty: int) -> dict:
 
     offer_pct = session["offer_percentage"]
     per_unit_market = item["market_price"]
-    per_unit_offer = per_unit_market * (offer_pct / Decimal("100"))
+    _, per_unit_offer = calc_offer_price(
+        per_unit_market, 1, offer_pct,
+        product_type=item.get("product_type", "raw"))
     damaged_per_unit_offer = per_unit_offer * DAMAGE_DISCOUNT
 
     if damaged_qty == original_qty:
@@ -582,7 +613,9 @@ def restore_item(item_id: str) -> dict:
     offer_pct = session["offer_percentage"]
 
     # Recalculate offer at normal rate
-    offer_price = item["market_price"] * item["quantity"] * (offer_pct / Decimal("100"))
+    offer_price, _ = calc_offer_price(
+        item["market_price"], item["quantity"], offer_pct,
+        product_type=item.get("product_type", "raw"))
 
     execute("""
         UPDATE intake_items 
@@ -615,8 +648,11 @@ def clone_item_with_overrides(source_item_id: str, session_id: str,
         raise ValueError("Session not found")
 
     offer_pct = session["offer_percentage"]
-    discount = DAMAGE_DISCOUNT if source.get("item_status") == "damaged" else Decimal("1")
-    offer_price = market_price * quantity * (offer_pct / Decimal("100")) * discount
+    is_damaged = source.get("item_status") == "damaged"
+    offer_price, unit_cost_basis = calc_offer_price(
+        market_price, quantity, offer_pct,
+        product_type=source.get("product_type", "raw"),
+        is_damaged=is_damaged)
 
     new_id = str(uuid.uuid4())
     execute("""
@@ -629,7 +665,7 @@ def clone_item_with_overrides(source_item_id: str, session_id: str,
         new_id, session_id,
         source["product_name"], source.get("tcgplayer_id"), source.get("product_type"),
         source.get("set_name"), quantity, market_price, offer_price,
-        source.get("unit_cost_basis"),
+        unit_cost_basis,
         source.get("is_mapped", False), source.get("item_status", "good"),
         source.get("listing_condition", "NM"), notes
     ))
@@ -649,11 +685,13 @@ def override_item_price(item_id: str, new_price: Decimal, note: str, session_id:
         raise ValueError("Item not found")
 
     offer_pct = session["offer_percentage"]
-    discount = DAMAGE_DISCOUNT if item.get("item_status") == "damaged" else Decimal("1")
-    offer_price = new_price * item["quantity"] * (offer_pct / Decimal("100")) * discount
+    offer_price, _ = calc_offer_price(
+        new_price, item["quantity"], offer_pct,
+        product_type=item.get("product_type", "raw"),
+        is_damaged=item.get("item_status") == "damaged")
 
     execute("""
-        UPDATE intake_items 
+        UPDATE intake_items
         SET market_price = %s, offer_price = %s, price_override_note = %s
         WHERE id = %s
     """, (new_price, offer_price, note, item_id))
@@ -692,11 +730,13 @@ def update_item_quantity(item_id: str, new_qty: int, session_id: str) -> dict:
         raise ValueError("Item not found")
 
     offer_pct = session["offer_percentage"]
-    discount = DAMAGE_DISCOUNT if item.get("item_status") == "damaged" else Decimal("1")
-    offer_price = item["market_price"] * new_qty * (offer_pct / Decimal("100")) * discount
+    offer_price, _ = calc_offer_price(
+        item["market_price"], new_qty, offer_pct,
+        product_type=item.get("product_type", "raw"),
+        is_damaged=item.get("item_status") == "damaged")
 
     execute("""
-        UPDATE intake_items 
+        UPDATE intake_items
         SET quantity = %s, offer_price = %s
         WHERE id = %s
     """, (new_qty, offer_price, item_id))
@@ -737,8 +777,8 @@ def add_sealed_item(session_id: str, product_name: str, tcgplayer_id: int = None
         raise ValueError("Cannot add items to this session")
 
     offer_pct = session["offer_percentage"]
-    offer_price = market_price * quantity * (offer_pct / Decimal("100"))
-    unit_cost = offer_price / quantity if quantity > 0 else Decimal("0")
+    offer_price, unit_cost = calc_offer_price(
+        market_price, quantity, offer_pct, product_type="sealed")
     is_mapped = tcgplayer_id is not None
 
     item_id = str(uuid4())

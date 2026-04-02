@@ -247,8 +247,8 @@ def upload_collectr():
     processed = []
     for item in result.items:
         product_type = effective_product_type or item.product_type
-        offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
-        unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
+        offer_price, unit_cost = intake.calc_offer_price(
+            item.market_price, item.quantity, offer_pct, product_type=product_type)
 
         # Check for cached tcgplayer_id mapping and/or shopify link
         item_variance = getattr(item, "variance", "") or ""
@@ -376,8 +376,8 @@ def upload_collectr_html():
     processed = []
     for item in result.items:
         product_type = effective_product_type or item.product_type
-        offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
-        unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
+        offer_price, unit_cost = intake.calc_offer_price(
+            item.market_price, item.quantity, offer_pct, product_type=product_type)
 
         item_variance = getattr(item, "variance", "") or ""
         tcgplayer_id = intake.get_cached_mapping(
@@ -527,8 +527,8 @@ def upload_generic_csv():
     processed = []
     for item in result.items:
         product_type = effective_product_type or item.product_type
-        offer_price = item.market_price * item.quantity * (offer_pct / Decimal("100"))
-        unit_cost = offer_price / item.quantity if item.quantity > 0 else Decimal("0")
+        offer_price, unit_cost = intake.calc_offer_price(
+            item.market_price, item.quantity, offer_pct, product_type=product_type)
 
         # Check for cached tcgplayer_id mapping (or use the one from CSV)
         item_variance = getattr(item, "variance", "") or ""
@@ -1145,8 +1145,9 @@ def accept_price_no_link(item_id):
 
     market_price = Decimal(str(override_price)) if override_price is not None else item["market_price"]
     offer_pct = session["offer_percentage"]
-    offer_price = market_price * item["quantity"] * (offer_pct / Decimal("100"))
-    unit_cost_basis = offer_price / item["quantity"] if item["quantity"] > 0 else Decimal("0")
+    offer_price, unit_cost_basis = intake.calc_offer_price(
+        market_price, item["quantity"], offer_pct,
+        product_type=item.get("product_type", "raw"))
 
     updated = db.execute_returning("""
         UPDATE intake_items
