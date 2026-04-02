@@ -1101,20 +1101,23 @@ def on_order_fulfilled(order_gid: str) -> dict:
             print(f"[screening] Klaviyo clear failed: {e}", flush=True)
 
     # Easter egg — assign for verification/fraud orders now cleared
-    order_name = order.get("name", "?")
-    cust_email = (customer.get("email") or "").strip()
-    cust_gid = customer.get("id")
-    o_total = float(order.get("currentTotalPriceSet", {})
-                    .get("shopMoney", {}).get("amount", 0))
-    if cust_email and cust_gid:
-        egg = assign_easter_egg(
-            order_gid=order_gid,
-            order_name=order_name,
-            order_total=o_total,
-            customer_gid=cust_gid,
-            email=cust_email,
-        )
-        result["easter_egg"] = egg
+    # Skip if the order is cancelled (api_cancel_order calls on_order_fulfilled for tag cleanup)
+    financial = (order.get("displayFinancialStatus") or "").upper()
+    if financial not in ("REFUNDED", "VOIDED"):
+        order_name = order.get("name", "?")
+        cust_email = (customer.get("email") or "").strip()
+        cust_gid = customer.get("id")
+        o_total = float(order.get("currentTotalPriceSet", {})
+                        .get("shopMoney", {}).get("amount", 0))
+        if cust_email and cust_gid:
+            egg = assign_easter_egg(
+                order_gid=order_gid,
+                order_name=order_name,
+                order_total=o_total,
+                customer_gid=cust_gid,
+                email=cust_email,
+            )
+            result["easter_egg"] = egg
 
     return result
 
