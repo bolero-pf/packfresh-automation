@@ -464,16 +464,41 @@ def _recalculate_session_totals(session_id: str):
 
 def _save_mapping(product_name: str, tcgplayer_id: int, product_type: str,
                   market_price: Decimal = None, set_name: str = None):
-    """Save a product name -> tcgplayer_id mapping."""
-    execute("""
-        INSERT INTO product_mappings (collectr_name, tcgplayer_id, product_type, set_name)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (collectr_name, product_type)
-        DO UPDATE SET
-            tcgplayer_id = EXCLUDED.tcgplayer_id,
-            last_used = CURRENT_TIMESTAMP,
-            use_count = product_mappings.use_count + 1
-    """, (product_name, tcgplayer_id, product_type, set_name))
+    """Save a product name -> tcgplayer_id mapping (non-critical, best-effort)."""
+    try:
+        execute("""
+            INSERT INTO product_mappings (collectr_name, tcgplayer_id, product_type, set_name)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (collectr_name, product_type)
+            DO UPDATE SET
+                tcgplayer_id = EXCLUDED.tcgplayer_id,
+                last_used = CURRENT_TIMESTAMP,
+                use_count = product_mappings.use_count + 1
+        """, (product_name, tcgplayer_id, product_type, set_name))
+    except Exception as e:
+        # Missing unique constraint — fall back to simple upsert logic
+        logger.warning("_save_mapping ON CONFLICT failed (%s), using fallback", e)
+        try:
+            existing = query_one("""
+                SELECT id FROM product_mappings
+                WHERE collectr_name = %s AND product_type = %s
+            """, (product_name, product_type))
+            if existing:
+                execute("""
+                    UPDATE product_mappings
+                    SET tcgplayer_id = %s, set_name = %s,
+                        last_used = CURRENT_TIMESTAMP,
+                        use_count = use_count + 1
+                    WHERE id = %s
+                """, (tcgplayer_id, set_name, existing["id"]))
+            else:
+                execute("""
+                    INSERT INTO product_mappings
+                        (collectr_name, tcgplayer_id, product_type, set_name)
+                    VALUES (%s, %s, %s, %s)
+                """, (product_name, tcgplayer_id, product_type, set_name))
+        except Exception as e2:
+            logger.warning("_save_mapping fallback also failed: %s", e2)
 
 
 
