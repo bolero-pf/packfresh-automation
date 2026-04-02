@@ -1041,7 +1041,7 @@ async function testEggOrder() {
     if (d.already_assigned) lines.push('Already assigned: ' + d.already_assigned + ' egg');
     lines.push('');
     lines.push(d.would_qualify ? '✅ WOULD QUALIFY' : '❌ Would NOT qualify');
-    alert(lines.join('\n'));
+    alert(lines.join(String.fromCharCode(10)));
   } catch(e) { alert(e.message); }
 }
 
