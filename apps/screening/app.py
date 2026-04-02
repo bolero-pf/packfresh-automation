@@ -1043,7 +1043,7 @@ function _fdSectionHtml(email, orderId) {
   if (!fd || !fd.configured || !fd.tickets || !fd.tickets.length) return '';
   const safeId = orderId.replace(/[^a-zA-Z0-9]/g, '_');
   let html = '<div class="fd-section">';
-  html += '<span class="fd-toggle" onclick="toggleFdConvos(\'' + safeId + '\')">💬 Freshdesk (' + fd.tickets.length + ' ticket' + (fd.tickets.length === 1 ? '' : 's') + ') <span id="fd-arrow-' + safeId + '">▸</span></span>';
+  html += '<span class="fd-toggle" onclick="toggleFdConvos(&apos;' + safeId + '&apos;)">💬 Freshdesk (' + fd.tickets.length + ' ticket' + (fd.tickets.length === 1 ? '' : 's') + ') <span id="fd-arrow-' + safeId + '">▸</span></span>';
   html += '<div class="fd-convos" id="fd-convos-' + safeId + '">';
   for (const t of fd.tickets) {
     html += '<div style="font-size:0.75rem;font-weight:600;margin:8px 0 4px;color:var(--text);">' + _esc(t.subject) + ' <span style="font-weight:400;color:var(--dim);">' + t.status_label + '</span></div>';
