@@ -26,6 +26,11 @@ SPIKE_RATIO         = float(os.environ.get("SPIKE_RATIO", "0.20"))
 SIGNATURE_THRESHOLD = float(os.environ.get("SIGNATURE_THRESHOLD", "500.00"))
 FIRSTTIME5_CODE     = os.environ.get("FIRSTTIME5_CODE", "FIRSTTIME5")
 
+# Easter egg promo config
+EASTER_EGG_ACTIVE = os.environ.get("EASTER_EGG_ACTIVE", "false").lower() == "true"
+EASTER_EGG_MIN_SPEND = float(os.environ.get("EASTER_EGG_MIN_SPEND", "75.00"))
+EASTER_EGG_COLLECTION_ID = os.environ.get("EASTER_EGG_COLLECTION_ID", "")
+
 from shopify_graphql import shopify_gql, shopify_metafields_set, gid_numeric
 from klaviyo import upsert_profile
 
@@ -831,6 +836,22 @@ def screen_every_order(order_gid: str) -> dict:
         (results[k] or {}).get("flagged", False)
         for k in ("verification", "spend_spike", "combine", "signature")
     )
+
+    # Easter egg — assign if no holds, OR if the only flag is combine shipping
+    only_combine = (results["any_flagged"]
+                    and (results["combine"] or {}).get("flagged", False)
+                    and not (results["verification"] or {}).get("flagged", False)
+                    and not (results["spend_spike"] or {}).get("flagged", False))
+    if (not results["any_flagged"] or only_combine) and customer_gid and customer_email:
+        egg = assign_easter_egg(
+            order_gid=order_gid,
+            order_name=order_name,
+            order_total=order_total,
+            customer_gid=customer_gid,
+            email=customer_email,
+        )
+        results["easter_egg"] = egg
+
     return results
 
 
@@ -994,6 +1015,37 @@ def on_order_cancelled(order_gid: str) -> dict:
     if not result["firsttime5_abuse"] and not result["verification_cleared"]:
         result["reason"] = "no_screening_tags"
 
+    # Easter egg — return slot if this order had one
+    from db import query_one, execute
+    egg_row = query_one(
+        "SELECT tier FROM easter_egg_pool WHERE claimed_by_order = %s",
+        (order_gid,)
+    )
+    if egg_row:
+        tier = egg_row["tier"]
+        tag = TIER_TO_TAG[tier]
+        execute("""
+            UPDATE easter_egg_pool
+            SET claimed_by_order = NULL,
+                claimed_by_email = NULL,
+                claimed_at       = NULL
+            WHERE claimed_by_order = %s
+        """, (order_gid,))
+        if customer_gid:
+            try:
+                shopify_gql("""
+                    mutation TagsRemove($id: ID!, $tags: [String!]!) {
+                      tagsRemove(id: $id, tags: $tags) {
+                        node { ... on Customer { id tags } }
+                        userErrors { field message }
+                      }
+                    }
+                """, {"id": customer_gid, "tags": [tag]})
+            except Exception as e:
+                print(f"[easter_egg] Tag removal failed on cancel for {customer_gid}: {e}", flush=True)
+        result["easter_egg_returned"] = tier
+        print(f"[easter_egg] Slot returned for cancelled order={order_name} tier={tier}", flush=True)
+
     return result
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1048,7 +1100,204 @@ def on_order_fulfilled(order_gid: str) -> dict:
         except Exception as e:
             print(f"[screening] Klaviyo clear failed: {e}", flush=True)
 
+    # Easter egg — assign for verification/fraud orders now cleared
+    order_name = order.get("name", "?")
+    cust_email = (customer.get("email") or "").strip()
+    cust_gid = customer.get("id")
+    o_total = float(order.get("currentTotalPriceSet", {})
+                    .get("shopMoney", {}).get("amount", 0))
+    if cust_email and cust_gid:
+        egg = assign_easter_egg(
+            order_gid=order_gid,
+            order_name=order_name,
+            order_total=o_total,
+            customer_gid=cust_gid,
+            email=cust_email,
+        )
+        result["easter_egg"] = egg
+
     return result
+
+# ═══════════════════════════════════════════════════════════════════════
+#  EASTER EGG PROMO
+# ═══════════════════════════════════════════════════════════════════════
+
+TIER_TO_TAG = {
+    "stink":  "STINK_EGG",
+    "bronze": "BRONZE_EGG",
+    "silver": "SILVER_EGG",
+    "gold":   "GOLDEN_EGG",
+}
+
+
+def _order_has_collection_box(order_gid: str) -> bool:
+    """Returns True if any line item belongs to the collection boxes collection."""
+    if not EASTER_EGG_COLLECTION_ID:
+        print("[easter_egg] EASTER_EGG_COLLECTION_ID not set — skipping collection check", flush=True)
+        return False
+
+    target_gid = f"gid://shopify/Collection/{EASTER_EGG_COLLECTION_ID}"
+
+    q = """
+    query OrderLineItems($id: ID!) {
+      order(id: $id) {
+        lineItems(first: 50) {
+          edges {
+            node {
+              product {
+                collections(first: 10) {
+                  edges { node { id } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    data = shopify_gql(q, {"id": order_gid})
+    edges = (data.get("data", {}).get("order", {})
+                 .get("lineItems", {}).get("edges", []))
+    for edge in edges:
+        product = (edge.get("node") or {}).get("product") or {}
+        coll_edges = product.get("collections", {}).get("edges", [])
+        for ce in coll_edges:
+            if (ce.get("node") or {}).get("id") == target_gid:
+                return True
+    return False
+
+
+def _log_egg_result(order_gid, order_name, email, order_total,
+                    has_box, eligible, ineligible_reason, tier, was_live):
+    try:
+        from db import execute
+        execute("""
+            INSERT INTO easter_egg_log
+                (order_gid, order_name, customer_email, order_total,
+                 has_collection_box, eligible, ineligible_reason, tier, was_live)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+        """, (order_gid, order_name, email, order_total,
+              has_box, eligible, ineligible_reason, tier, was_live))
+    except Exception as e:
+        print(f"[easter_egg] Log write failed: {e}", flush=True)
+
+
+def assign_easter_egg(order_gid, order_name, order_total,
+                      customer_gid, email, force_live=False) -> dict:
+    """
+    Attempt to assign an easter egg to a qualifying order.
+    Safe to call multiple times — checks for prior assignment.
+    force_live=True bypasses spend/collection/active checks (manual assign).
+    Returns dict with keys: skipped (bool), reason (str), tier (str|None)
+    """
+    result = {"skipped": True, "reason": None, "tier": None}
+    was_live = EASTER_EGG_ACTIVE or force_live
+
+    if not force_live:
+        # Check spend threshold
+        if order_total < EASTER_EGG_MIN_SPEND:
+            _log_egg_result(order_gid, order_name, email, order_total,
+                            None, False, "below_min_spend", None, was_live)
+            result["reason"] = f"below_min_spend ({order_total} < {EASTER_EGG_MIN_SPEND})"
+            return result
+
+        # Check collection box
+        has_box = _order_has_collection_box(order_gid)
+        if not has_box:
+            _log_egg_result(order_gid, order_name, email, order_total,
+                            False, False, "no_collection_box", None, was_live)
+            result["reason"] = "no_collection_box"
+            return result
+
+    if not customer_gid or not email:
+        _log_egg_result(order_gid, order_name, email, order_total,
+                        True, False, "no_customer", None, was_live)
+        result["reason"] = "no_customer"
+        return result
+
+    from db import query_one, execute_returning
+
+    # One egg per customer
+    existing = query_one(
+        "SELECT tier FROM easter_egg_pool WHERE claimed_by_email = %s",
+        (email,)
+    )
+    if existing:
+        _log_egg_result(order_gid, order_name, email, order_total,
+                        True, False, "already_assigned_this_customer",
+                        existing["tier"], was_live)
+        result["skipped"] = True
+        result["reason"] = "already_assigned_this_customer"
+        result["tier"] = existing["tier"]
+        return result
+
+    # ── DRY RUN (promo inactive) ──────────────────────────────────────
+    if not EASTER_EGG_ACTIVE and not force_live:
+        next_row = query_one(
+            "SELECT tier FROM easter_egg_pool "
+            "WHERE claimed_by_order IS NULL ORDER BY id ASC LIMIT 1"
+        )
+        simulated_tier = next_row["tier"] if next_row else "pool_empty"
+        _log_egg_result(order_gid, order_name, email, order_total,
+                        True, True, None, simulated_tier, False)
+        result["reason"] = "promo_inactive_simulated"
+        result["tier"] = simulated_tier
+        result["simulated"] = True
+        return result
+
+    # ── LIVE ASSIGNMENT ───────────────────────────────────────────────
+    row = execute_returning("""
+        UPDATE easter_egg_pool
+        SET claimed_by_order = %s,
+            claimed_by_email = %s,
+            claimed_at       = NOW()
+        WHERE id = (
+            SELECT id FROM easter_egg_pool
+            WHERE claimed_by_order IS NULL
+            ORDER BY id ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING tier, id
+    """, (order_gid, email))
+
+    if not row:
+        _log_egg_result(order_gid, order_name, email, order_total,
+                        True, False, "pool_exhausted", None, True)
+        result["reason"] = "pool_exhausted"
+        return result
+
+    tier = row["tier"]
+    tag = TIER_TO_TAG[tier]
+    external_id = customer_gid.split("/")[-1]
+
+    _log_egg_result(order_gid, order_name, email, order_total,
+                    True, True, None, tier, True)
+
+    try:
+        shopify_gql(CUSTOMER_TAGS_ADD, {"id": customer_gid, "tags": [tag]})
+    except Exception as e:
+        print(f"[easter_egg] Shopify tag failed for {customer_gid}: {e}", flush=True)
+        result["shopify_tag_error"] = str(e)
+
+    try:
+        upsert_profile(email=email, external_id=external_id, properties={
+            "easter_egg_tier":       tier,
+            "easter_egg_tag":        tag,
+            "easter_egg_order":      order_name,
+            "easter_egg_granted_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        print(f"[easter_egg] Klaviyo upsert failed for {email}: {e}", flush=True)
+        result["klaviyo_error"] = str(e)
+
+    result["skipped"] = False
+    result["reason"] = "assigned"
+    result["tier"] = tier
+    print(f"[easter_egg] Assigned {tier} to order={order_name} email={email}", flush=True)
+    return result
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  ENTRY POINTS (called by routes)

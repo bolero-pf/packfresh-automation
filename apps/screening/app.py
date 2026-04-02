@@ -31,6 +31,50 @@ db.execute("""
 """)
 db.execute("CREATE INDEX IF NOT EXISTS idx_customer_notes_email ON customer_notes(customer_email)")
 
+# Easter egg promo tables
+db.execute("""
+    CREATE TABLE IF NOT EXISTS easter_egg_pool (
+        id                SERIAL PRIMARY KEY,
+        tier              TEXT NOT NULL,
+        claimed_by_order  TEXT,
+        claimed_by_email  TEXT,
+        claimed_at        TIMESTAMPTZ
+    )
+""")
+db.execute("""
+    INSERT INTO easter_egg_pool (tier)
+    SELECT unnest(ARRAY[
+        'stink','stink','bronze','silver','bronze','bronze','bronze','bronze','stink','silver',
+        'stink','stink','silver','stink','stink','stink','stink','stink','gold','bronze',
+        'silver','silver','gold','silver','stink','stink','bronze','stink','bronze','stink',
+        'stink','stink','stink','stink','bronze','bronze','stink','stink','bronze','bronze',
+        'stink','bronze','bronze','silver','silver','stink','bronze','gold','silver','stink',
+        'stink','stink','stink','stink','stink','bronze','stink','bronze','stink','bronze',
+        'bronze','stink','silver','stink','silver','silver','stink','stink','stink','bronze',
+        'bronze','gold','stink','bronze','bronze','bronze','stink','stink','stink','stink',
+        'silver','stink','stink','silver','stink','bronze','bronze','bronze','stink','stink',
+        'stink','stink','bronze','silver','bronze','stink','bronze','gold','stink','stink'
+    ])
+    WHERE NOT EXISTS (SELECT 1 FROM easter_egg_pool LIMIT 1)
+""")
+db.execute("""
+    CREATE TABLE IF NOT EXISTS easter_egg_log (
+        id              SERIAL PRIMARY KEY,
+        order_gid       TEXT NOT NULL,
+        order_name      TEXT NOT NULL,
+        customer_email  TEXT,
+        order_total     NUMERIC(10,2),
+        has_collection_box BOOLEAN,
+        eligible        BOOLEAN NOT NULL,
+        ineligible_reason TEXT,
+        tier            TEXT,
+        was_live        BOOLEAN NOT NULL DEFAULT false,
+        logged_at       TIMESTAMPTZ DEFAULT NOW()
+    )
+""")
+db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_egg_log_order_gid ON easter_egg_log(order_gid)")
+db.execute("CREATE INDEX IF NOT EXISTS idx_egg_log_logged_at ON easter_egg_log(logged_at DESC)")
+
 from auth import register_auth_hooks
 register_auth_hooks(app, roles=["owner", "manager"], public_prefixes=('/screening/',))
 
@@ -400,6 +444,129 @@ def api_cancel_order():
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# Freshdesk integration — tickets, conversations, canned responses
+# ---------------------------------------------------------------------------
+
+@app.route("/api/freshdesk-tickets")
+def api_freshdesk_tickets():
+    """Fetch Freshdesk tickets + conversations for a customer email."""
+    import freshdesk as fd
+    if not fd.is_configured():
+        return jsonify({"configured": False, "tickets": []})
+
+    email = (request.args.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"configured": True, "tickets": []})
+
+    try:
+        raw_tickets = fd.search_tickets_by_email(email)
+    except Exception as e:
+        logging.warning("Freshdesk ticket search failed for %s: %s", email, e)
+        return jsonify({"configured": True, "tickets": [], "error": str(e)})
+
+    tickets = []
+    for t in raw_tickets:
+        tid = t.get("id")
+        # Only include open/pending/resolved tickets (skip deleted/spam)
+        status = t.get("status", 0)
+        if status >= 5 and status != 4:  # 5=closed is ok to skip, but include 4=resolved
+            continue
+        convos = []
+        try:
+            raw_convos = fd.get_ticket_conversations(tid)
+        except Exception as e:
+            logging.warning("Freshdesk conversations failed for ticket %s: %s", tid, e)
+            raw_convos = []
+
+        for c in raw_convos:
+            convos.append({
+                "id": c.get("id"),
+                "body_text": c.get("body_text", ""),
+                "body": c.get("body", ""),
+                "from_email": c.get("from_email", ""),
+                "incoming": c.get("incoming", False),
+                "created_at": c.get("created_at", ""),
+                "attachments": [
+                    {"name": a.get("name", ""), "url": a.get("attachment_url", "")}
+                    for a in (c.get("attachments") or [])
+                ],
+            })
+
+        tickets.append({
+            "id": tid,
+            "subject": t.get("subject", ""),
+            "status": status,
+            "status_label": {2: "Open", 3: "Pending", 4: "Resolved", 5: "Closed"}.get(status, f"Status {status}"),
+            "created_at": t.get("created_at", ""),
+            "updated_at": t.get("updated_at", ""),
+            "conversations": convos,
+            "has_customer_reply": any(c["incoming"] for c in convos),
+        })
+
+    # Sort: tickets with customer replies first, then by updated_at desc
+    tickets.sort(key=lambda t: (not t["has_customer_reply"], t.get("updated_at", "")), reverse=False)
+
+    return jsonify({"configured": True, "tickets": tickets})
+
+
+@app.route("/api/freshdesk-canned-responses")
+def api_freshdesk_canned_responses():
+    """Fetch canned response folders + responses for the reply dropdown."""
+    import freshdesk as fd
+    if not fd.is_configured():
+        return jsonify({"configured": False, "folders": []})
+
+    try:
+        folders = fd.list_canned_response_folders()
+    except Exception as e:
+        logging.warning("Freshdesk canned response folders failed: %s", e)
+        return jsonify({"configured": True, "folders": [], "error": str(e)})
+
+    result = []
+    for f in folders:
+        fid = f.get("id")
+        try:
+            responses = fd.list_canned_responses_in_folder(fid)
+        except Exception as e:
+            logging.warning("Freshdesk canned responses failed for folder %s: %s", fid, e)
+            responses = []
+
+        result.append({
+            "id": fid,
+            "name": f.get("name", ""),
+            "responses": [{"id": r.get("id"), "title": r.get("title", "")} for r in responses],
+        })
+
+    return jsonify({"configured": True, "folders": result})
+
+
+@app.route("/api/freshdesk-reply", methods=["POST"])
+def api_freshdesk_reply():
+    """Send a canned response reply on a Freshdesk ticket and resolve it."""
+    import freshdesk as fd
+    if not fd.is_configured():
+        return jsonify({"error": "Freshdesk not configured"}), 400
+
+    data = request.get_json(silent=True) or {}
+    ticket_id = data.get("ticket_id")
+    canned_response_id = data.get("canned_response_id")
+
+    if not ticket_id or not canned_response_id:
+        return jsonify({"error": "ticket_id and canned_response_id required"}), 400
+
+    try:
+        canned = fd.get_canned_response(canned_response_id)
+        body_html = canned.get("content", canned.get("body", ""))
+        if not body_html:
+            return jsonify({"error": "Canned response has no content"}), 400
+        fd.reply_and_resolve(ticket_id, body_html)
+        return jsonify({"ok": True})
+    except Exception as e:
+        logging.error("Freshdesk reply failed: %s", e)
+        return jsonify({"error": f"Freshdesk reply failed: {e}"}), 500
+
+
 @app.route("/api/customer-search")
 def api_customer_search():
     """Search Shopify customers by name or email."""
@@ -498,6 +665,86 @@ def api_delete_customer_note(note_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/egg-hunt")
+def api_egg_hunt():
+    """Egg hunt monitor — log of eligibility checks + pool status."""
+    rows = db.query("""
+        SELECT order_name, customer_email, order_total,
+               has_collection_box, eligible, ineligible_reason,
+               tier, was_live, logged_at
+        FROM easter_egg_log
+        ORDER BY logged_at DESC
+        LIMIT 100
+    """)
+
+    pool_status = db.query("""
+        SELECT tier,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE claimed_by_order IS NULL) AS remaining
+        FROM easter_egg_pool
+        GROUP BY tier
+        ORDER BY tier
+    """)
+
+    active = os.environ.get("EASTER_EGG_ACTIVE", "false").lower() == "true"
+
+    return jsonify({
+        "active": active,
+        "log": [dict(r) for r in rows],
+        "pool": [dict(r) for r in pool_status],
+    })
+
+
+@app.route("/api/egg-manual-assign", methods=["POST"])
+def api_egg_manual_assign():
+    """Manually assign an easter egg to an order by order name (e.g. #1234)."""
+    data = request.get_json(silent=True) or {}
+    order_name = (data.get("order_name") or "").strip()
+    if not order_name:
+        return jsonify({"error": "order_name required"}), 400
+
+    # Look up the order in Shopify by name
+    from shopify_graphql import shopify_gql
+    from service import assign_easter_egg
+
+    search = shopify_gql("""
+        query($q: String!) {
+          orders(first: 1, query: $q) {
+            edges { node {
+              id name
+              currentTotalPriceSet { shopMoney { amount } }
+              customer { id email }
+            } }
+          }
+        }
+    """, {"q": f"name:{order_name}"})
+
+    edges = search.get("data", {}).get("orders", {}).get("edges", [])
+    if not edges:
+        return jsonify({"error": f"Order {order_name} not found"}), 404
+
+    order = edges[0]["node"]
+    customer = order.get("customer") or {}
+    cust_gid = customer.get("id")
+    email = (customer.get("email") or "").strip()
+    if not cust_gid or not email:
+        return jsonify({"error": "Order has no customer/email"}), 400
+
+    order_gid = order["id"]
+    o_total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
+
+    # Force live assignment — skip spend/collection checks
+    egg = assign_easter_egg(
+        order_gid=order_gid,
+        order_name=order.get("name", order_name),
+        order_total=o_total,
+        customer_gid=cust_gid,
+        email=email,
+        force_live=True,
+    )
+    return jsonify(egg)
+
+
 CONSOLE_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -532,6 +779,50 @@ CONSOLE_HTML = """
 .spinner { width:24px; height:24px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; margin:30px auto; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .empty { color:var(--dim); text-align:center; padding:30px; }
+/* Egg Hunt tab */
+.egg-status-bar { display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
+.egg-status-pill { padding:6px 14px; border-radius:20px; font-size:0.8rem; font-weight:600; }
+.egg-pill-live { background:rgba(0,200,80,0.15); color:var(--green); border:1px solid var(--green); }
+.egg-pill-dry { background:rgba(255,170,0,0.12); color:var(--amber); border:1px solid var(--amber); }
+.egg-table { width:100%; border-collapse:collapse; font-size:0.82rem; }
+.egg-table th { text-align:left; color:var(--dim); font-weight:500; font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; padding:6px 10px; border-bottom:1px solid var(--border); }
+.egg-table td { padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.04); vertical-align:middle; }
+.egg-table tr:hover td { background:var(--s2); }
+.egg-tier { font-weight:700; font-size:0.8rem; }
+.egg-tier-stink      { color:#7a8450; }
+.egg-tier-bronze     { color:#cd7f32; }
+.egg-tier-silver     { color:#aaa; }
+.egg-tier-gold       { color:#f0b800; }
+.egg-ineligible      { color:var(--dim); font-style:italic; }
+.egg-simulated       { opacity:0.6; }
+.egg-pool-grid { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+.egg-pool-card { background:var(--s2); border-radius:8px; padding:10px 16px; min-width:110px; }
+.egg-pool-card .remaining { font-size:1.4rem; font-weight:700; }
+.egg-pool-card .label { font-size:0.72rem; color:var(--dim); margin-top:2px; }
+/* Freshdesk conversation UI */
+.fd-section { margin-top:8px; border-top:1px solid var(--border); padding-top:8px; }
+.fd-toggle { font-size:0.78rem; color:var(--accent); cursor:pointer; display:inline-flex; align-items:center; gap:4px; }
+.fd-toggle:hover { text-decoration:underline; }
+.fd-convos { margin-top:6px; display:none; }
+.fd-convos.open { display:block; }
+.fd-convo { padding:8px 12px; margin-bottom:6px; border-radius:6px; font-size:0.82rem; line-height:1.5; }
+.fd-convo.incoming { background:rgba(0,180,100,0.08); border-left:3px solid var(--green); }
+.fd-convo.outgoing { background:var(--s2); border-left:3px solid var(--dim); }
+.fd-convo-meta { font-size:0.72rem; color:var(--dim); margin-bottom:4px; }
+.fd-convo-body { white-space:pre-wrap; word-break:break-word; }
+.fd-attach { font-size:0.72rem; margin-top:4px; }
+.fd-attach a { color:var(--accent); }
+.fd-badge { font-size:0.7rem; padding:1px 7px; border-radius:10px; font-weight:500; }
+.fd-badge.reply { background:rgba(0,180,100,0.15); color:var(--green); }
+.fd-badge.waiting { background:rgba(255,170,0,0.12); color:var(--amber); }
+.fd-badge.none { background:var(--s2); color:var(--dim); }
+/* Freshdesk reply modal */
+.fd-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:100; display:flex; align-items:center; justify-content:center; }
+.fd-modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px 24px; width:90%; max-width:520px; max-height:80vh; overflow-y:auto; }
+.fd-modal h3 { margin:0 0 14px; font-size:1rem; }
+.fd-modal select { width:100%; padding:8px 10px; background:var(--s2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem; margin-bottom:12px; }
+.fd-modal-preview { background:var(--s2); border-radius:6px; padding:12px; font-size:0.82rem; max-height:200px; overflow-y:auto; margin-bottom:14px; color:var(--dim); }
+.fd-modal-actions { display:flex; gap:8px; justify-content:flex-end; }
 </style>
 </head>
 <body>
@@ -545,14 +836,20 @@ CONSOLE_HTML = """
     <button class="tab active" id="tab-verify" onclick="switchTab('verify')">🔍 Verification Queue</button>
     <button class="tab" id="tab-combine" onclick="switchTab('combine')">📦 Combine Shipping</button>
     <button class="tab" id="tab-notes" onclick="switchTab('notes')">👤 Customer Notes</button>
+    <button class="tab" id="tab-egg" onclick="switchTab('egg')">🥚 Egg Hunt</button>
   </div>
   <div id="pane-verify" class="pane active"><div class="spinner"></div></div>
   <div id="pane-combine" class="pane"><div class="spinner"></div></div>
   <div id="pane-notes" class="pane"></div>
+  <div id="pane-egg" class="pane"></div>
 </div>
 
 <script>
 let _data = null;
+let _fdTickets = {};  // email → { tickets: [...], configured }
+let _fdCanned = null; // { configured, folders: [...] }
+
+let _eggPollTimer = null;
 
 function switchTab(id) {
   document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
@@ -560,7 +857,126 @@ function switchTab(id) {
   document.getElementById('pane-' + id).classList.add('active');
   document.getElementById('tab-' + id).classList.add('active');
   if (id === 'notes') loadNotes();
-  else if (_data) renderAll();
+  else if (id === 'egg') { loadEggHunt(); startEggPoll(); }
+  else { stopEggPoll(); if (_data) renderAll(); }
+}
+
+function startEggPoll() {
+  stopEggPoll();
+  _eggPollTimer = setInterval(loadEggHunt, 30000);
+}
+
+function stopEggPoll() {
+  if (_eggPollTimer) { clearInterval(_eggPollTimer); _eggPollTimer = null; }
+}
+
+async function loadEggHunt() {
+  try {
+    const r = await fetch('/api/egg-hunt');
+    const d = await r.json();
+    renderEggHunt(d);
+  } catch(e) {
+    document.getElementById('pane-egg').innerHTML =
+      `<div class="empty">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderEggHunt(d) {
+  const TIER_EMOJI = { stink:'🤢', bronze:'🥉', silver:'🥈', gold:'🥇' };
+  const TIER_LABEL = { stink:'Stink Egg', bronze:'Bronze Egg', silver:'Silver Egg', gold:'Golden Egg' };
+
+  const poolHtml = (d.pool || []).map(p => {
+    const pct = Math.round((p.remaining / p.total) * 100);
+    const tier = p.tier;
+    return `
+      <div class="egg-pool-card">
+        <div class="remaining egg-tier egg-tier-${tier}">
+          ${TIER_EMOJI[tier] || '🥚'} ${p.remaining}<span style="font-size:0.75rem;font-weight:400;color:var(--dim)">/${p.total}</span>
+        </div>
+        <div class="label">${TIER_LABEL[tier] || tier} · ${pct}% left</div>
+      </div>`;
+  }).join('');
+
+  const rowsHtml = (d.log || []).map(row => {
+    const time = new Date(row.logged_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    const total = row.order_total ? '$' + parseFloat(row.order_total).toFixed(2) : '—';
+    const hasBox = row.has_collection_box === null ? '—'
+                 : row.has_collection_box ? '✅' : '❌';
+
+    let tierHtml = '—';
+    if (row.tier) {
+      const cls = `egg-tier egg-tier-${row.tier}`;
+      const label = (TIER_EMOJI[row.tier] || '') + ' ' + (TIER_LABEL[row.tier] || row.tier);
+      const simTag = !row.was_live ? ' <span style="font-size:0.68rem;color:var(--dim)">(sim)</span>' : '';
+      tierHtml = `<span class="${cls}">${label}</span>${simTag}`;
+    }
+
+    const eligibleHtml = row.eligible
+      ? '<span style="color:var(--green)">✅ Eligible</span>'
+      : `<span class="egg-ineligible">❌ ${(row.ineligible_reason || '').replace(/_/g,' ')}</span>`;
+
+    const rowCls = row.was_live ? '' : 'egg-simulated';
+
+    return `
+      <tr class="${rowCls}">
+        <td style="font-weight:600">${row.order_name}</td>
+        <td style="color:var(--dim)">${row.customer_email || '—'}</td>
+        <td>${total}</td>
+        <td style="text-align:center">${hasBox}</td>
+        <td>${eligibleHtml}</td>
+        <td>${tierHtml}</td>
+        <td style="color:var(--dim);font-size:0.75rem">${time}</td>
+      </tr>`;
+  }).join('');
+
+  const modeHtml = d.active
+    ? '<span class="egg-status-pill egg-pill-live">🟢 LIVE — Assigning eggs</span>'
+    : '<span class="egg-status-pill egg-pill-dry">🟡 DRY RUN — Simulating only</span>';
+
+  document.getElementById('pane-egg').innerHTML = `
+    <div class="egg-status-bar">
+      ${modeHtml}
+      <span style="font-size:0.8rem;color:var(--dim);align-self:center;">
+        Auto-refreshes every 30s
+      </span>
+      <div style="margin-left:auto;display:flex;gap:6px;align-items:center;">
+        <input id="egg-manual-order" type="text" placeholder="#1234" style="width:100px;padding:5px 10px;background:var(--s2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.82rem;">
+        <button class="btn btn-green btn-sm" onclick="manualAssignEgg()">🥚 Assign Egg</button>
+      </div>
+    </div>
+    <div class="egg-pool-grid">${poolHtml || '<div style="color:var(--dim)">Pool not seeded yet</div>'}</div>
+    ${d.log && d.log.length ? `
+    <table class="egg-table">
+      <thead><tr>
+        <th>Order</th><th>Email</th><th>Total</th>
+        <th style="text-align:center">Box?</th>
+        <th>Eligibility</th><th>Tier</th><th>Time</th>
+      </tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>` : '<div class="empty">No orders screened yet during this promo window.</div>'}
+  `;
+}
+
+async function manualAssignEgg() {
+  const input = document.getElementById('egg-manual-order');
+  const name = (input.value || '').trim();
+  if (!name) { alert('Enter an order number'); return; }
+  if (!confirm('Manually assign an egg to order ' + name + '? This bypasses spend/collection checks.')) return;
+  try {
+    const r = await fetch('/api/egg-manual-assign', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ order_name: name }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    if (d.skipped) {
+      toast(name + ': ' + (d.reason || 'skipped'), 'amber');
+    } else {
+      toast(name + ' → ' + (d.tier || '?') + ' egg assigned!', 'green');
+    }
+    input.value = '';
+    loadEggHunt();
+  } catch(e) { alert(e.message); }
 }
 
 async function loadOrders() {
@@ -570,17 +986,97 @@ async function loadOrders() {
     const r = await fetch('/api/held-orders');
     _data = await r.json();
     renderAll();
+    // Load Freshdesk data in background (non-blocking)
+    loadFreshdeskData();
   } catch(e) {
     document.getElementById('pane-verify').innerHTML = `<div class="empty">${e.message}</div>`;
+  }
+}
+
+async function loadFreshdeskData() {
+  // Fetch canned responses once
+  if (!_fdCanned) {
+    try {
+      const r = await fetch('/api/freshdesk-canned-responses');
+      _fdCanned = await r.json();
+    } catch(e) { _fdCanned = { configured: false, folders: [] }; }
+  }
+  if (!_fdCanned.configured) return;
+
+  // Fetch tickets for each unique email in verification queue
+  const emails = [...new Set((_data.verification || []).map(o => o.customer_email).filter(Boolean))];
+  const fetches = emails.filter(e => !_fdTickets[e]).map(async (email) => {
+    try {
+      const r = await fetch('/api/freshdesk-tickets?email=' + encodeURIComponent(email));
+      _fdTickets[email] = await r.json();
+    } catch(e) { _fdTickets[email] = { configured: true, tickets: [] }; }
+  });
+  if (fetches.length) {
+    await Promise.all(fetches);
+    // Re-render verification cards with Freshdesk data
+    renderVerification(_data.verification || []);
   }
 }
 
 function renderAll() {
   renderVerification(_data.verification || []);
   renderCombine(_data.combine_groups || []);
-  // Update tab badges
   document.getElementById('tab-verify').textContent = '🔍 Verification (' + (_data.verification||[]).length + ')';
   document.getElementById('tab-combine').textContent = '📦 Combine (' + (_data.combine_groups||[]).length + ')';
+}
+
+function _fdBadgeHtml(email) {
+  const fd = _fdTickets[email];
+  if (!fd || !fd.configured) return '';
+  const tickets = fd.tickets || [];
+  if (!tickets.length) return '<span class="fd-badge none">No ticket</span>';
+  const hasReply = tickets.some(t => t.has_customer_reply);
+  if (hasReply) return '<span class="fd-badge reply">Customer replied</span>';
+  return '<span class="fd-badge waiting">Awaiting response</span>';
+}
+
+function _fdSectionHtml(email, orderId) {
+  const fd = _fdTickets[email];
+  if (!fd || !fd.configured || !fd.tickets || !fd.tickets.length) return '';
+  const safeId = orderId.replace(/[^a-zA-Z0-9]/g, '_');
+  let html = '<div class="fd-section">';
+  html += '<span class="fd-toggle" onclick="toggleFdConvos(\'' + safeId + '\')">💬 Freshdesk (' + fd.tickets.length + ' ticket' + (fd.tickets.length === 1 ? '' : 's') + ') <span id="fd-arrow-' + safeId + '">▸</span></span>';
+  html += '<div class="fd-convos" id="fd-convos-' + safeId + '">';
+  for (const t of fd.tickets) {
+    html += '<div style="font-size:0.75rem;font-weight:600;margin:8px 0 4px;color:var(--text);">' + _esc(t.subject) + ' <span style="font-weight:400;color:var(--dim);">' + t.status_label + '</span></div>';
+    if (!t.conversations.length) {
+      html += '<div style="font-size:0.78rem;color:var(--dim);padding:4px 12px;">No replies yet</div>';
+    }
+    for (const c of t.conversations) {
+      const dir = c.incoming ? 'incoming' : 'outgoing';
+      const who = c.incoming ? 'Customer' : 'Agent';
+      const date = c.created_at ? new Date(c.created_at).toLocaleString() : '';
+      html += '<div class="fd-convo ' + dir + '">';
+      html += '<div class="fd-convo-meta">' + who + ' · ' + date + '</div>';
+      html += '<div class="fd-convo-body">' + _esc(c.body_text || '').substring(0, 500) + (c.body_text && c.body_text.length > 500 ? '...' : '') + '</div>';
+      if (c.attachments && c.attachments.length) {
+        html += '<div class="fd-attach">' + c.attachments.map(a => '<a href="' + a.url + '" target="_blank">' + _esc(a.name) + '</a>').join(' · ') + '</div>';
+      }
+      html += '</div>';
+    }
+  }
+  html += '</div></div>';
+  return html;
+}
+
+function _esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function toggleFdConvos(safeId) {
+  const el = document.getElementById('fd-convos-' + safeId);
+  const arrow = document.getElementById('fd-arrow-' + safeId);
+  if (el) { el.classList.toggle('open'); arrow.textContent = el.classList.contains('open') ? '▾' : '▸'; }
+}
+
+function _getTicketForOrder(email) {
+  const fd = _fdTickets[email];
+  if (!fd || !fd.configured || !fd.tickets || !fd.tickets.length) return null;
+  // Return the most recently updated open/pending ticket
+  return fd.tickets.find(t => t.status <= 3) || fd.tickets[0];
 }
 
 function renderVerification(orders) {
@@ -591,10 +1087,11 @@ function renderVerification(orders) {
       <div class="order-header">
         <a href="https://admin.shopify.com/store/{{ shopify_store }}/orders/${o.numeric_id}" target="_blank" class="order-name" style="color:var(--accent);text-decoration:none;">${o.name}</a>
         <span class="badge badge-amber">${o.check_type}</span>
+        ${_fdBadgeHtml(o.customer_email)}
         <span style="font-weight:700;">$${o.total.toFixed(2)}</span>
         <div style="margin-left:auto;display:flex;gap:6px;">
-          <button class="btn btn-green btn-sm" onclick="releaseHold('${o.id}','${o.name}')">✓ Verify & Release</button>
-          <button class="btn btn-sm" style="background:var(--red);color:#fff;" onclick="cancelOrder('${o.id}','${o.name}')">✕ Cancel & Refund</button>
+          <button class="btn btn-green btn-sm" onclick="releaseHold('${o.id}','${o.name}','${o.customer_email}')">✓ Verify & Release</button>
+          <button class="btn btn-sm" style="background:var(--red);color:#fff;" onclick="cancelOrder('${o.id}','${o.name}','${o.customer_email}')">✕ Cancel & Refund</button>
         </div>
       </div>
       <div class="order-meta">
@@ -603,6 +1100,7 @@ function renderVerification(orders) {
         ${o.note ? '<em style="color:var(--amber);">' + o.note + '</em>' : ''}
       </div>
       <div class="items-list">${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}</div>
+      ${_fdSectionHtml(o.customer_email, o.id)}
     </div>
   `).join('');
 }
@@ -667,8 +1165,29 @@ function renderCombine(groups) {
   `).join('');
 }
 
-async function cancelOrder(orderId, orderName) {
-  if (!confirm('Cancel ' + orderName + ' and issue full refund?')) return;
+async function cancelOrder(orderId, orderName, email) {
+  const ticket = _getTicketForOrder(email);
+  if (ticket && _fdCanned && _fdCanned.configured) {
+    showFdReplyModal(ticket, 'deny', async (ticketId, cannedId) => {
+      if (!confirm('Cancel ' + orderName + ' and issue full refund?')) return;
+      // Send Freshdesk reply first (non-blocking for the actual cancel)
+      if (ticketId && cannedId) {
+        try {
+          await fetch('/api/freshdesk-reply', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ ticket_id: ticketId, canned_response_id: cannedId }),
+          });
+        } catch(e) { console.warn('Freshdesk reply failed:', e); }
+      }
+      await _doCancelOrder(orderId, orderName);
+    });
+  } else {
+    if (!confirm('Cancel ' + orderName + ' and issue full refund?')) return;
+    await _doCancelOrder(orderId, orderName);
+  }
+}
+
+async function _doCancelOrder(orderId, orderName) {
   try {
     const r = await fetch('/api/cancel-order', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -677,12 +1196,33 @@ async function cancelOrder(orderId, orderName) {
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
     toast('Cancelled + refunded: ' + orderName, 'green');
+    _fdTickets = {};  // Clear ticket cache
     loadOrders();
   } catch(e) { alert(e.message); }
 }
 
-async function releaseHold(orderId, orderName) {
-  if (!confirm('Release hold on ' + orderName + '?')) return;
+async function releaseHold(orderId, orderName, email) {
+  const ticket = _getTicketForOrder(email);
+  if (ticket && _fdCanned && _fdCanned.configured) {
+    showFdReplyModal(ticket, 'approve', async (ticketId, cannedId) => {
+      if (!confirm('Release hold on ' + orderName + '?')) return;
+      if (ticketId && cannedId) {
+        try {
+          await fetch('/api/freshdesk-reply', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ ticket_id: ticketId, canned_response_id: cannedId }),
+          });
+        } catch(e) { console.warn('Freshdesk reply failed:', e); }
+      }
+      await _doReleaseHold(orderId, orderName);
+    });
+  } else {
+    if (!confirm('Release hold on ' + orderName + '?')) return;
+    await _doReleaseHold(orderId, orderName);
+  }
+}
+
+async function _doReleaseHold(orderId, orderName) {
   try {
     const r = await fetch('/api/release-hold', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -691,8 +1231,89 @@ async function releaseHold(orderId, orderName) {
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
     toast('Released: ' + orderName, 'green');
+    _fdTickets = {};
     loadOrders();
   } catch(e) { alert(e.message); }
+}
+
+function showFdReplyModal(ticket, action, onConfirm) {
+  const actionLabel = action === 'approve' ? 'Verify & Release' : 'Cancel & Refund';
+  const actionColor = action === 'approve' ? 'var(--green)' : 'var(--red)';
+  const actionTextColor = action === 'approve' ? '#000' : '#fff';
+
+  // Build canned response options
+  let optionsHtml = '<option value="">— Select a response —</option>';
+  for (const folder of (_fdCanned.folders || [])) {
+    if (!folder.responses.length) continue;
+    optionsHtml += '<optgroup label="' + _esc(folder.name) + '">';
+    for (const r of folder.responses) {
+      optionsHtml += '<option value="' + r.id + '">' + _esc(r.title) + '</option>';
+    }
+    optionsHtml += '</optgroup>';
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'fd-modal-overlay';
+  overlay.innerHTML = `
+    <div class="fd-modal">
+      <h3>Reply to Freshdesk Ticket</h3>
+      <div style="font-size:0.82rem;color:var(--dim);margin-bottom:12px;">
+        Ticket: <strong>${_esc(ticket.subject)}</strong> (#${ticket.id})
+      </div>
+      <label style="font-size:0.75rem;color:var(--dim);">Canned Response</label>
+      <select id="fd-canned-select" onchange="previewFdCanned(this.value)">
+        ${optionsHtml}
+      </select>
+      <div id="fd-canned-preview" class="fd-modal-preview" style="display:none;"></div>
+      <div class="fd-modal-actions">
+        <button class="btn btn-secondary btn-sm" onclick="this.closest('.fd-modal-overlay').remove()">Cancel</button>
+        <button class="btn btn-sm" style="color:var(--dim);" onclick="closeFdModalAndProceed(null, null)">Skip (no reply)</button>
+        <button id="fd-send-btn" class="btn btn-sm" style="background:${actionColor};color:${actionTextColor};" onclick="closeFdModalAndSend()">Send & ${actionLabel}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Close on backdrop click
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+  // Store callback
+  window._fdModalCallback = onConfirm;
+  window._fdModalTicketId = ticket.id;
+  window._fdModalOverlay = overlay;
+}
+
+async function previewFdCanned(responseId) {
+  const preview = document.getElementById('fd-canned-preview');
+  if (!responseId) { preview.style.display = 'none'; return; }
+  preview.style.display = 'block';
+  preview.innerHTML = '<div class="spinner" style="margin:10px auto;"></div>';
+  try {
+    const r = await fetch('/api/freshdesk-canned-responses');  // We already have this cached
+    // Fetch actual content for preview — need a dedicated endpoint or use the canned response API
+    // For now, show a placeholder indicating the selected response will be sent
+    preview.innerHTML = '<em>Response will be sent as the reply on this ticket.</em>';
+  } catch(e) {
+    preview.innerHTML = '<em style="color:var(--red);">Failed to load preview</em>';
+  }
+}
+
+function closeFdModalAndSend() {
+  const select = document.getElementById('fd-canned-select');
+  const cannedId = select ? parseInt(select.value) : null;
+  if (!cannedId) { alert('Select a canned response or click "Skip"'); return; }
+  const overlay = window._fdModalOverlay;
+  const callback = window._fdModalCallback;
+  const ticketId = window._fdModalTicketId;
+  if (overlay) overlay.remove();
+  if (callback) callback(ticketId, cannedId);
+}
+
+function closeFdModalAndProceed(ticketId, cannedId) {
+  const overlay = window._fdModalOverlay;
+  const callback = window._fdModalCallback;
+  if (overlay) overlay.remove();
+  if (callback) callback(null, null);
 }
 
 const _slipStyle = '<style>body{font-family:-apple-system,sans-serif;padding:24px;font-size:18px;}'
