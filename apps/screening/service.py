@@ -29,7 +29,7 @@ FIRSTTIME5_CODE     = os.environ.get("FIRSTTIME5_CODE", "FIRSTTIME5")
 # Easter egg promo config
 EASTER_EGG_ACTIVE = os.environ.get("EASTER_EGG_ACTIVE", "false").lower() == "true"
 EASTER_EGG_MIN_SPEND = float(os.environ.get("EASTER_EGG_MIN_SPEND", "75.00"))
-EASTER_EGG_COLLECTION_ID = os.environ.get("EASTER_EGG_COLLECTION_ID", "")
+EASTER_EGG_PRODUCT_TAG = os.environ.get("EASTER_EGG_PRODUCT_TAG", "collection box")
 
 from shopify_graphql import shopify_gql, shopify_metafields_set, gid_numeric
 from klaviyo import upsert_profile
@@ -1131,12 +1131,12 @@ TIER_TO_TAG = {
 
 
 def _order_has_collection_box(order_gid: str) -> bool:
-    """Returns True if any line item belongs to the collection boxes collection."""
-    if not EASTER_EGG_COLLECTION_ID:
-        print("[easter_egg] EASTER_EGG_COLLECTION_ID not set — skipping collection check", flush=True)
+    """Returns True if any line item's product has the 'collection box' tag."""
+    if not EASTER_EGG_PRODUCT_TAG:
+        print("[easter_egg] EASTER_EGG_PRODUCT_TAG not set — skipping tag check", flush=True)
         return False
 
-    target_gid = f"gid://shopify/Collection/{EASTER_EGG_COLLECTION_ID}"
+    target_tag = EASTER_EGG_PRODUCT_TAG.lower()
 
     q = """
     query OrderLineItems($id: ID!) {
@@ -1144,11 +1144,7 @@ def _order_has_collection_box(order_gid: str) -> bool:
         lineItems(first: 50) {
           edges {
             node {
-              product {
-                collections(first: 10) {
-                  edges { node { id } }
-                }
-              }
+              product { tags }
             }
           }
         }
@@ -1160,10 +1156,9 @@ def _order_has_collection_box(order_gid: str) -> bool:
                  .get("lineItems", {}).get("edges", []))
     for edge in edges:
         product = (edge.get("node") or {}).get("product") or {}
-        coll_edges = product.get("collections", {}).get("edges", [])
-        for ce in coll_edges:
-            if (ce.get("node") or {}).get("id") == target_gid:
-                return True
+        tags = [t.lower() for t in (product.get("tags") or [])]
+        if target_tag in tags:
+            return True
     return False
 
 
