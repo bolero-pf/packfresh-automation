@@ -43,6 +43,7 @@ query OrderDetail($id: ID!) {
   order(id: $id) {
     id
     name
+    note
     createdAt
     tags
     displayFinancialStatus
@@ -1105,6 +1106,28 @@ def on_order_fulfilled(order_gid: str) -> dict:
         result["holds_released"] = _release_fulfillment_holds(order_gid)
     except Exception as e:
         print(f"[screening] Failed to release holds for {order_gid}: {e}", flush=True)
+
+    # Clear screening notes from the order
+    try:
+        existing_note = (order.get("note") or "")
+        if existing_note:
+            cleaned_lines = [
+                l for l in existing_note.split("\n")
+                if "waiting on id verification" not in l.lower()
+                and "signature required" not in l.lower()
+                and "combine order" not in l.lower()
+                and "combine shipping" not in l.lower()
+            ]
+            cleaned_note = "\n".join(cleaned_lines).strip()
+            # Collapse leftover separators
+            while "\n---\n\n---\n" in cleaned_note:
+                cleaned_note = cleaned_note.replace("\n---\n\n---\n", "\n---\n")
+            cleaned_note = cleaned_note.strip().strip("-").strip()
+            if cleaned_note != existing_note.strip():
+                shopify_gql(ORDER_UPDATE_NOTE, {"input": {"id": order_gid, "note": cleaned_note}})
+                result["note_cleared"] = True
+    except Exception as e:
+        print(f"[screening] Failed to clear note from {order_gid}: {e}", flush=True)
 
     customer = order.get("customer") or {}
     customer_gid = customer.get("id")
