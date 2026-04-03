@@ -861,12 +861,12 @@ def screen_every_order(order_gid: str) -> dict:
         for k in ("verification", "spend_spike", "combine", "signature")
     )
 
-    # Easter egg — assign if no holds, OR if the only flag is combine shipping
-    only_combine = (results["any_flagged"]
-                    and (results["combine"] or {}).get("flagged", False)
-                    and not (results["verification"] or {}).get("flagged", False)
-                    and not (results["spend_spike"] or {}).get("flagged", False))
-    if (not results["any_flagged"] or only_combine) and customer_gid and customer_email:
+    # Easter egg — assign if no holds, OR if the only flags are combine/signature
+    # (combine is a shipping optimization, signature is a shipping instruction — neither is a trust issue)
+    has_verification = (results["verification"] or {}).get("flagged", False)
+    has_spike = (results["spend_spike"] or {}).get("flagged", False)
+    only_benign_flags = results["any_flagged"] and not has_verification and not has_spike
+    if (not results["any_flagged"] or only_benign_flags) and customer_gid and customer_email:
         egg = assign_easter_egg(
             order_gid=order_gid,
             order_name=order_name,
