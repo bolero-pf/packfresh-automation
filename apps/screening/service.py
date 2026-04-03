@@ -1114,9 +1114,6 @@ def on_order_fulfilled(order_gid: str) -> dict:
             cleaned_lines = [
                 l for l in existing_note.split("\n")
                 if "waiting on id verification" not in l.lower()
-                and "signature required" not in l.lower()
-                and "combine order" not in l.lower()
-                and "combine shipping" not in l.lower()
             ]
             cleaned_note = "\n".join(cleaned_lines).strip()
             # Collapse leftover separators
