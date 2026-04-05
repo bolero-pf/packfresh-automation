@@ -820,14 +820,15 @@ function _renderVerifyContent(data) {
     const sorted = _sortItems(allItems);
     const groups = _groupItems(sorted);
 
-    const verifiedCount = allItems.filter(i => i.verified_at || i.item_status === 'missing').length;
+    const isItemVerified = i => i.verified_at || i.item_status === 'missing' || i.item_status === 'broken_down' || i.pushed_at;
+    const verifiedCount = allItems.filter(isItemVerified).length;
     const totalCount = allItems.length;
     const pct = totalCount > 0 ? Math.round((verifiedCount / totalCount) * 100) : 0;
     const allVerified = verifiedCount === totalCount && totalCount > 0;
 
     // Split into unverified and verified
-    const unverifiedItems = allItems.filter(i => !i.verified_at && i.item_status !== 'missing');
-    const verifiedItems = allItems.filter(i => i.verified_at || i.item_status === 'missing');
+    const unverifiedItems = allItems.filter(i => !isItemVerified(i));
+    const verifiedItems = allItems.filter(isItemVerified);
     const sortedUnverified = _sortItems(unverifiedItems);
     const sortedVerified = _sortItems(verifiedItems);
     const unverifiedGroups = _groupItems(sortedUnverified);
@@ -926,12 +927,14 @@ function _renderVerifyRow(item, sessionId) {
     else if (isVerified) rowStyle = 'background:rgba(45,212,160,0.04);';
 
     const isPushed = !!item.pushed_at;
+    const isBrokenDown = (item.item_status === 'broken_down');
+    const isLocked = isPushed || isBrokenDown;
     let verifyCell = '';
-    if (isPushed) {
-        // Pushed items are locked — show status but no undo
-        const label = isMissing ? '✗ Missing' : isDamaged ? '⚠ Damaged' : '✓ Pushed';
-        const cls = isMissing ? 'verified-missing' : isDamaged ? 'verified-damaged' : 'verified';
-        verifyCell = `<span class="verify-btn ${cls}" style="cursor:default; opacity:0.6;" title="Already pushed to Shopify">${label} 🔒</span>`;
+    if (isLocked) {
+        // Pushed or broken-down items are locked
+        const label = isBrokenDown ? '🔨 Broken Down' : isMissing ? '✗ Missing' : isDamaged ? '⚠ Damaged' : '✓ Pushed';
+        const cls = isBrokenDown ? 'verified' : isMissing ? 'verified-missing' : isDamaged ? 'verified-damaged' : 'verified';
+        verifyCell = `<span class="verify-btn ${cls}" style="cursor:default; opacity:0.6;" title="${isBrokenDown ? 'Broken down into components' : 'Already pushed to Shopify'}">${label} 🔒</span>`;
     } else if (isMissing) {
         verifyCell = `<button class="verify-btn verified-missing" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✗ Missing</button>`;
     } else if (isDamaged && isVerified) {
