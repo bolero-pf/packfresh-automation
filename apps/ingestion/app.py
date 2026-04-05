@@ -480,6 +480,19 @@ def verify_item(item_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/ingest/item/<item_id>/undo-verify", methods=["POST"])
+def undo_verify(item_id):
+    """Reset an item back to unverified good status."""
+    try:
+        result = ingest.undo_verify(item_id)
+        return jsonify({"success": True, "item": _serialize(result)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Undo verify failed for item {item_id}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ingest/session/<session_id>/complete-verify", methods=["POST"])
 def complete_verify(session_id):
     """Complete the verification stage — transitions received → verified."""

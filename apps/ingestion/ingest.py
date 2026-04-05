@@ -424,6 +424,44 @@ def verify_item_missing(item_id: str, missing_qty: int = None) -> dict:
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
+def undo_verify(item_id: str) -> dict:
+    """
+    Reset an item back to unverified good status.
+    Restores damaged items to good. Does NOT rejoin split items.
+    """
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+    if item.get("pushed_at"):
+        raise ValueError("Cannot undo verification on a pushed item")
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    market_price = Decimal(str(item.get("market_price", 0)))
+    qty = item.get("quantity", 1)
+
+    if item["item_status"] == "missing":
+        # Restore to good with offer recalculated
+        full_offer = (market_price * offer_pct * qty).quantize(Decimal("0.01"))
+        execute("""
+            UPDATE intake_items SET item_status = 'good', offer_price = %s, verified_at = NULL
+            WHERE id = %s
+        """, (full_offer, item_id))
+    elif item["item_status"] == "damaged":
+        # Restore to good
+        full_offer = (market_price * offer_pct * qty).quantize(Decimal("0.01"))
+        execute("""
+            UPDATE intake_items SET item_status = 'good', offer_price = %s, verified_at = NULL
+            WHERE id = %s
+        """, (full_offer, item_id))
+    else:
+        # Good item — just clear verified_at
+        execute("UPDATE intake_items SET verified_at = NULL WHERE id = %s", (item_id,))
+
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
 def complete_verification(session_id: str) -> dict:
     """
     Transition session from received → verified.

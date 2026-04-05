@@ -825,6 +825,14 @@ function _renderVerifyContent(data) {
     const pct = totalCount > 0 ? Math.round((verifiedCount / totalCount) * 100) : 0;
     const allVerified = verifiedCount === totalCount && totalCount > 0;
 
+    // Split into unverified and verified
+    const unverifiedItems = allItems.filter(i => !i.verified_at && i.item_status !== 'missing');
+    const verifiedItems = allItems.filter(i => i.verified_at || i.item_status === 'missing');
+    const sortedUnverified = _sortItems(unverifiedItems);
+    const sortedVerified = _sortItems(verifiedItems);
+    const unverifiedGroups = _groupItems(sortedUnverified);
+    const verifiedGroups = _groupItems(sortedVerified);
+
     let html = `<div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
             <div style="display:flex; align-items:center; gap:10px;">
@@ -836,24 +844,54 @@ function _renderVerifyContent(data) {
         <div class="progress-bar" style="margin-bottom:12px;">
             <div class="fill" style="width:${pct}%; background:${allVerified ? 'var(--green)' : 'var(--accent)'};"></div>
         </div>
-        ${_renderSortToolbar()}
-        <div style="overflow-x:auto;">
+        ${_renderSortToolbar()}`;
+
+    // Unverified items — always visible
+    if (unverifiedItems.length > 0) {
+        html += `<div style="overflow-x:auto;">
         <table class="responsive-cards">
             <thead><tr>
                 <th>Product</th><th>Qty</th><th>Type</th><th>Store</th><th>COGS</th><th>Verify</th>
             </tr></thead>
             <tbody>`;
-
-    for (const group of groups) {
-        if (group.label) {
-            html += `<tr><td colspan="6" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+        for (const group of unverifiedGroups) {
+            if (group.label) {
+                html += `<tr><td colspan="6" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+            }
+            for (const item of group.items) {
+                html += _renderVerifyRow(item, sessionId);
+            }
         }
-        for (const item of group.items) {
-            html += _renderVerifyRow(item, sessionId);
-        }
+        html += `</tbody></table></div>`;
+    } else if (allVerified) {
+        html += `<div style="text-align:center; padding:20px; color:var(--green); font-weight:600;">All items verified</div>`;
     }
 
-    html += `</tbody></table></div></div>`;
+    // Verified items — collapsible
+    if (verifiedItems.length > 0) {
+        html += `<details style="margin-top:12px;" ${unverifiedItems.length === 0 ? 'open' : ''}>
+            <summary style="cursor:pointer; font-weight:600; font-size:0.9rem; color:var(--green); padding:8px 0; user-select:none;">
+                ✓ Verified (${verifiedItems.length}) — click to ${unverifiedItems.length === 0 ? 'collapse' : 'expand'}
+            </summary>
+            <div style="overflow-x:auto;">
+            <table class="responsive-cards">
+                <thead><tr>
+                    <th>Product</th><th>Qty</th><th>Type</th><th>Store</th><th>COGS</th><th>Verify</th>
+                </tr></thead>
+                <tbody>`;
+        for (const group of verifiedGroups) {
+            if (group.label) {
+                html += `<tr><td colspan="6" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+            }
+            for (const item of group.items) {
+                html += _renderVerifyRow(item, sessionId);
+            }
+        }
+        html += `</tbody></table></div>
+        </details>`;
+    }
+
+    html += `</div>`;
 
     // Complete button — show unless already ingested
     if (s.status !== 'ingested') {
@@ -887,13 +925,19 @@ function _renderVerifyRow(item, sessionId) {
     else if (isDamaged) rowStyle = 'background:rgba(255,170,0,0.06);';
     else if (isVerified) rowStyle = 'background:rgba(45,212,160,0.04);';
 
+    const isPushed = !!item.pushed_at;
     let verifyCell = '';
-    if (isMissing) {
-        verifyCell = `<span class="verify-btn verified-missing" style="cursor:default;">Missing</span>`;
+    if (isPushed) {
+        // Pushed items are locked — show status but no undo
+        const label = isMissing ? '✗ Missing' : isDamaged ? '⚠ Damaged' : '✓ Pushed';
+        const cls = isMissing ? 'verified-missing' : isDamaged ? 'verified-damaged' : 'verified';
+        verifyCell = `<span class="verify-btn ${cls}" style="cursor:default; opacity:0.6;" title="Already pushed to Shopify">${label} 🔒</span>`;
+    } else if (isMissing) {
+        verifyCell = `<button class="verify-btn verified-missing" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✗ Missing</button>`;
     } else if (isDamaged && isVerified) {
-        verifyCell = `<span class="verify-btn verified-damaged" style="cursor:default;">Damaged</span>`;
+        verifyCell = `<button class="verify-btn verified-damaged" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">⚠ Damaged</button>`;
     } else if (isVerified) {
-        verifyCell = `<span class="verify-btn verified" style="cursor:default;">✓ Here</span>`;
+        verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ Here</button>`;
     } else {
         verifyCell = `<div class="verify-btn-group">
             <button class="verify-btn here" onclick="verifyItem('${item.id}', '${sessionId}', 'here', ${item.quantity||1})">✓ Here</button>
@@ -961,6 +1005,13 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
                 body: JSON.stringify({ status }),
             });
         }
+        viewSession(sessionId, true);
+    } catch(err) { alert(err.message); }
+}
+
+async function undoVerify(itemId, sessionId) {
+    try {
+        await fetch(`/api/ingest/item/${itemId}/undo-verify`, { method: 'POST' });
         viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
