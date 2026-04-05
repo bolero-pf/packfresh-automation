@@ -603,18 +603,7 @@ let _currentSortBy = 'default';  // 'default' | 'alpha' | 'price-high' | 'price-
 let _currentGroupBy = 'none';    // 'none' | 'type' | 'set'
 
 function _classifyProductType(item) {
-    // Use store tags first (from inventory_product_cache.shopify_tags)
-    const tags = (item.store_tags || '').toLowerCase();
-    if (tags) {
-        if (tags.includes('etb') || tags.includes('elite trainer box')) return 'ETB';
-        if (tags.includes('booster box')) return 'Booster Box';
-        if (tags.includes('booster pack')) return 'Booster Pack';
-        if (tags.includes('collection box')) return 'Collection';
-        if (tags.includes('tin')) return 'Tin';
-        if (tags.includes('bundle')) return 'Bundle';
-        if (tags.includes('blister')) return 'Blister';
-    }
-    // Fallback: product type
+    // Product type first
     const ptype = (item.product_type || '').toLowerCase();
     if (ptype === 'raw') return 'Raw';
     if (item.is_graded) return 'Graded';

@@ -263,7 +263,7 @@ def get_session(session_id):
         try:
             ph = ",".join(["%s"] * len(tcg_ids))
             store_rows = db.query(
-                f"SELECT tcgplayer_id, shopify_price, shopify_qty, shopify_tags FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+                f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
                 tuple(tcg_ids))
             store_map = {r["tcgplayer_id"]: r for r in store_rows}
         except Exception:
@@ -295,7 +295,6 @@ def get_session(session_id):
         sp = store_map.get(i.get("tcgplayer_id"))
         d["store_price"] = float(sp["shopify_price"]) if sp and sp.get("shopify_price") else None
         d["store_qty"] = int(sp["shopify_qty"] or 0) if sp else None
-        d["store_tags"] = sp.get("shopify_tags") if sp else None
         vel = velocity_map.get(i.get("tcgplayer_id"))
         d["velocity"] = _serialize(vel) if vel else None
         serialized.append(d)
