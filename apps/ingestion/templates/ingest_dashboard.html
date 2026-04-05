@@ -237,6 +237,10 @@
 
             /* Session rows: single column */
             .session-row { grid-template-columns: 1fr; gap: 6px; }
+
+            /* Stage bar: hide numbers, just show text */
+            .stage-tab .stage-num { display: none; }
+            .stage-tab { font-size: 0.82rem; padding: 12px 4px; }
         }
         /* ─── STAGE STEPPER ─── */
         .stage-bar {
@@ -312,11 +316,19 @@
         .complete-stage-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
         @media (max-width: 768px) {
-            .stage-bar { flex-direction: row; font-size: 0.82rem; }
-            .stage-tab { padding: 10px 8px; font-size: 0.78rem; }
+            .stage-bar { font-size: 0.82rem; }
+            .stage-tab { padding: 10px 6px; font-size: 0.78rem; }
             .stage-tab .stage-num { width: 20px; height: 20px; line-height: 20px; font-size: 0.7rem; margin-right: 4px; }
-            .verify-btn { min-height: 44px; padding: 8px 12px; font-size: 0.82rem; }
-            .complete-stage-btn { min-height: 48px; }
+
+            /* Verify buttons: stack vertically for fat thumbs */
+            .verify-btn-group { flex-direction: column; width: 100%; }
+            .verify-btn { min-height: 44px; padding: 10px 14px; font-size: 0.85rem; width: 100%; text-align: center; }
+
+            /* Sort toolbar: wrap nicely */
+            .sort-toolbar { gap: 6px; }
+            .sort-toolbar select { flex: 1; min-width: 0; }
+
+            .complete-stage-btn { min-height: 52px; font-size: 1.05rem; }
         }
     </style>
     <link rel="stylesheet" href="/api/breakdown-cache/bd-static/breakdown_modal.css">
