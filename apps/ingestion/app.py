@@ -253,7 +253,8 @@ def get_session(session_id):
     session = ingest.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
-    items = ingest.get_session_items(session_id)
+    # Include missing items so Verify tab can display them
+    items = ingest.get_session_items(session_id, include_missing=True)
 
     # Enrich items with store prices from inventory_product_cache
     tcg_ids = list(set(int(i["tcgplayer_id"]) for i in items if i.get("tcgplayer_id")))
@@ -262,7 +263,7 @@ def get_session(session_id):
         try:
             ph = ",".join(["%s"] * len(tcg_ids))
             store_rows = db.query(
-                f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+                f"SELECT tcgplayer_id, shopify_price, shopify_qty, shopify_tags FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
                 tuple(tcg_ids))
             store_map = {r["tcgplayer_id"]: r for r in store_rows}
         except Exception:
@@ -294,6 +295,7 @@ def get_session(session_id):
         sp = store_map.get(i.get("tcgplayer_id"))
         d["store_price"] = float(sp["shopify_price"]) if sp and sp.get("shopify_price") else None
         d["store_qty"] = int(sp["shopify_qty"] or 0) if sp else None
+        d["store_tags"] = sp.get("shopify_tags") if sp else None
         vel = velocity_map.get(i.get("tcgplayer_id"))
         d["velocity"] = _serialize(vel) if vel else None
         serialized.append(d)
@@ -426,6 +428,76 @@ def add_item(session_id):
 
 
 # PPT search + breakdown-cache routes now served by shared breakdown blueprint
+
+
+# ═══════════════════════════════════════════════════════════════════
+# VERIFY STAGE
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/ingest/item/<item_id>/verify", methods=["POST"])
+def verify_item(item_id):
+    """Verify an item during the verify stage: here, missing, or damaged."""
+    data = request.get_json(silent=True) or {}
+    status = data.get("status")  # "here", "missing", "damaged"
+    if status not in ("here", "missing", "damaged"):
+        return jsonify({"error": "status must be 'here', 'missing', or 'damaged'"}), 400
+
+    try:
+        if status == "here":
+            qty_confirmed = data.get("qty_confirmed")
+            if qty_confirmed is not None:
+                qty_confirmed = int(qty_confirmed)
+            result = ingest.verify_item_here(item_id, qty_confirmed=qty_confirmed)
+            return jsonify({"success": True, "result": _serialize(result)})
+
+        elif status == "missing":
+            missing_qty = data.get("missing_qty")
+            if missing_qty is not None:
+                missing_qty = int(missing_qty)
+            result = ingest.verify_item_missing(item_id, missing_qty=missing_qty)
+            return jsonify({"success": True, "result": _serialize(result)})
+
+        else:  # damaged
+            damaged_qty = data.get("damaged_qty")
+            if damaged_qty is not None:
+                result = ingest.split_damaged(item_id, int(damaged_qty))
+                # Also stamp verified_at on both parts
+                if isinstance(result, dict) and "good_item" in result:
+                    db.execute("UPDATE intake_items SET verified_at = CURRENT_TIMESTAMP WHERE id IN (%s, %s)",
+                               (result["good_item"]["id"], result["damaged_item"]["id"]))
+                else:
+                    db.execute("UPDATE intake_items SET verified_at = CURRENT_TIMESTAMP WHERE id = %s", (item_id,))
+            else:
+                ingest.mark_item_damaged(item_id)
+                db.execute("UPDATE intake_items SET verified_at = CURRENT_TIMESTAMP WHERE id = %s", (item_id,))
+                result = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+            return jsonify({"success": True, "result": _serialize(result)})
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Verify failed for item {item_id}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ingest/session/<session_id>/complete-verify", methods=["POST"])
+def complete_verify(session_id):
+    """Complete the verification stage — transitions received → verified."""
+    try:
+        session = ingest.complete_verification(session_id)
+        return jsonify({"success": True, "session": _serialize(session)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/ingest/session/<session_id>/complete-breakdown", methods=["POST"])
+def complete_breakdown(session_id):
+    """Complete the breakdown stage — transitions verified → breakdown_complete."""
+    try:
+        session = ingest.complete_breakdown(session_id)
+        return jsonify({"success": True, "session": _serialize(session)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -580,8 +652,8 @@ def push_session_live(session_id):
     session = ingest.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
-    if session["status"] not in ("received", "partially_ingested"):
-        return jsonify({"error": f"Session must be 'received' or 'partially_ingested' (currently: {session['status']})"}), 400
+    if session["status"] not in ("received", "verified", "breakdown_complete", "partially_ingested"):
+        return jsonify({"error": f"Session cannot be pushed (currently: {session['status']})"}), 400
 
     data = request.get_json(silent=True) or {}
     requested_item_ids = set(str(x) for x in (data.get("item_ids") or []))

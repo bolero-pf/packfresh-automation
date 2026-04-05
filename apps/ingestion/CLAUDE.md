@@ -2,23 +2,30 @@
 > This is the **ingest/data ingestion** service (ingest.pack-fresh.com) despite the directory name suggesting otherwise. See root CLAUDE.md.
 
 ## Key Files
-- **app.py** — Flask routes: session list, session detail, item actions (damage, relink, qty, delete, break down), push to Shopify. Registers shared/breakdown_routes.py blueprint.
-- **ingest.py** — Business logic: session queries, item manipulation, breakdown execution (`break_down_item`, `split_then_break_down`), `get_breakdown_summary_for_items()` with JIT price refresh
-- **templates/ingest_dashboard.html** — Single-page app with two tabs: "Ready to Ingest" (pending) and "Completed" (ingested)
+- **app.py** — Flask routes: session list, session detail, item actions (damage, relink, qty, delete, break down), verify endpoints, stage transitions, push to Shopify. Registers shared/breakdown_routes.py blueprint.
+- **ingest.py** — Business logic: session queries, item manipulation, verification (verify_item_here, verify_item_missing, complete_verification, complete_breakdown), breakdown execution (`break_down_item`, `split_then_break_down`), `get_breakdown_summary_for_items()` with JIT price refresh
+- **templates/ingest_dashboard.html** — Single-page app with queue tabs (Pending/Completed) and 3-stage session detail (Verify → Breakdown → Push)
 - DB via shared/db.py (no local db.py)
 
-## Session Flow
+## Session Flow (4-Stage)
 ```
-received → partially_ingested → ingested
+received → verified → breakdown_complete → [partially_ingested →] ingested
 ```
-- Sessions arrive from intake with status `received`
-- Staff reviews items, approves them (checkbox), breaks down sealed products
-- "Push Live" sends approved items to Shopify → `partially_ingested` if some remain, `ingested` when all done
+- Sessions arrive from Deals (intake) with status `received`
+- **Stage 1 — Verify**: Staff confirms each item is here/missing/damaged. Persisted via `verified_at` column on intake_items. Partial qty supported (split into good + missing portions).
+- **Stage 2 — Breakdown**: Staff decides what to break down. Uses shared breakdown modal. Damaged items can be broken down to recover margin.
+- **Stage 3 — Push**: Push to Shopify. Dry run preview, partial push supported.
+- Stages are navigable — can go back to any completed stage to make changes
 - "Force Mark Ingested" closes without pushing
 
 ## Queue Structure
-- **Pending tab**: received + partially_ingested sessions as big clickable cards
+- **Pending tab**: received/verified/breakdown_complete/partially_ingested sessions as clickable cards
 - **Completed tab**: ingested sessions as compact table rows with date filter (7/14/30/90 days)
+
+## Grouping & Sorting
+All 3 stages support:
+- **Group by**: None, Product Type (from store tags or name parsing), Set
+- **Sort by**: Default, Alphabetical, Price High→Low, Price Low→High
 
 ## Breakdown Integration
 - Recipe CRUD + batch summaries via shared/breakdown_logic.py; API routes via shared/breakdown_routes.py blueprint
@@ -27,8 +34,10 @@ received → partially_ingested → ingested
 - `break_down_item()` creates children with `item_status = 'good'` and `parent_item_id` (execution logic stays in ingest.py)
 - Children CAN be broken down again if they have recipes (nested breakdown supported)
 - Parent gets `item_status = 'broken_down'` (blocks re-breakdown of same item)
+- **Breakdown modal shows store price as primary, market as secondary/fallback**
 
 ## Key Patterns
 - PPT client available as `ppt` global (initialized from `PPT_API_KEY` env var)
 - Uses `shared/ppt_client.py`, `shared/breakdown_helpers.py`
 - Breakdown recipes shared with intake and inventory via same DB tables
+- All state persisted to DB — no client-side session state (replaces old _approvedItems JS Set)

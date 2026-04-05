@@ -289,11 +289,19 @@
 
     function _renderParentInfoHTML() {
         var parts = [];
-        // Always show Store first, then Market
         var storeVal = parseFloat(_opts.parentStore || 0);
         var mktVal = parseFloat(_opts.parentMarket || 0);
-        parts.push('<span><span class="bd-price-label">Store:</span> <span class="bd-price-tag" style="color:' + (storeVal > 0 ? 'var(--green,#2dd4a0)' : 'var(--text-dim,#888)') + ';">' + (storeVal > 0 ? '$' + storeVal.toFixed(2) : 'not listed') + '</span></span>');
-        parts.push('<span><span class="bd-price-label">Market:</span> <span class="bd-price-tag">' + (mktVal > 0 ? '$' + mktVal.toFixed(2) : '\u2014') + '</span></span>');
+        // Store first (primary, green when available)
+        if (storeVal > 0) {
+            parts.push('<span><span class="bd-price-label">Store:</span> <span class="bd-price-tag" style="color:var(--green,#2dd4a0);">$' + storeVal.toFixed(2) + '</span></span>');
+            // Market as secondary/dimmed
+            if (mktVal > 0) {
+                parts.push('<span><span class="bd-price-label" style="color:var(--text-dim,#888);">Market:</span> <span class="bd-price-tag" style="color:var(--text-dim,#888);">$' + mktVal.toFixed(2) + '</span></span>');
+            }
+        } else {
+            // No store — market is primary
+            parts.push('<span><span class="bd-price-label">Market:</span> <span class="bd-price-tag">' + (mktVal > 0 ? '$' + mktVal.toFixed(2) : '\u2014') + '</span></span>');
+        }
         if (_opts.parentQty > 0) {
             parts.push('<span><span class="bd-price-label">Qty:</span> <span class="bd-price-tag">' + _opts.parentQty + '</span></span>');
         }
@@ -334,9 +342,10 @@
 
             html += '<div class="bd-config-card" data-variant-index="' + i + '">';
             html += '<div class="bd-config-name">' + _esc(v.variant_name || 'Standard') + '</div>';
-            html += '<div class="bd-config-meta">' + compCount + ' components &middot; $' + mkt.toFixed(2) + ' market</div>';
+            var priceLabel = _opts.parentStore ? 'store' : 'market';
+            html += '<div class="bd-config-meta">' + compCount + ' components &middot; $' + mkt.toFixed(2) + '</div>';
             if (parentRef > 0) {
-                html += '<div class="bd-config-value" style="color:' + deltaColor + ';">' + deltaStr + ' vs ' + (_opts.parentStore ? 'store' : 'market') + '</div>';
+                html += '<div class="bd-config-value" style="color:' + deltaColor + ';">' + deltaStr + ' vs ' + priceLabel + '</div>';
             }
             if (v.notes) {
                 html += '<div class="bd-config-meta" style="margin-top:2px;font-style:italic;">' + _esc(v.notes) + '</div>';
@@ -379,8 +388,9 @@
 
         var html = '<table class="bd-comp-table">';
         html += '<thead><tr>';
-        html += '<th>Component</th><th style="width:55px;">Qty</th><th style="width:75px;">Market</th>';
+        html += '<th>Component</th><th style="width:55px;">Qty</th>';
         if (hasStore) html += '<th style="width:160px;">Store</th>';
+        html += '<th style="width:75px;">' + (hasStore ? '<span style="color:var(--text-dim,#888);">Market</span>' : 'Market') + '</th>';
         html += '<th style="width:30px;"></th>';
         html += '</tr></thead><tbody>';
 
@@ -418,10 +428,7 @@
         // Qty
         html += '<td><input type="number" min="1" value="' + (c.quantity_per_parent || 1) + '" data-comp-idx="' + idx + '" data-field="qty"></td>';
 
-        // Market
-        html += '<td><input type="number" min="0" step="0.01" value="' + parseFloat(c.market_price || 0).toFixed(2) + '" data-comp-idx="' + idx + '" data-field="market"></td>';
-
-        // Store + Qty + Velocity
+        // Store + Qty + Velocity (before Market when store data available)
         if (hasStore) {
             var sp = c.tcgplayer_id ? _storePrices[c.tcgplayer_id] : null;
             html += '<td style="white-space:nowrap;">';
@@ -449,6 +456,10 @@
             }
             html += '</td>';
         }
+
+        // Market (dimmed when store is showing)
+        var mktStyle = hasStore ? ' style="opacity:0.5;"' : '';
+        html += '<td' + mktStyle + '><input type="number" min="0" step="0.01" value="' + parseFloat(c.market_price || 0).toFixed(2) + '" data-comp-idx="' + idx + '" data-field="market"></td>';
 
         // Delete
         html += '<td><button class="bd-delete-btn" data-comp-idx="' + idx + '">&times;</button></td>';
@@ -493,23 +504,7 @@
 
         var html = '<div class="bd-summary">';
 
-        // Market row
-        html += '<div class="bd-summary-row">';
-        html += '<span class="bd-summary-label">Market total:</span>';
-        html += '<span class="bd-summary-value">$' + totalMarket.toFixed(2) + '</span>';
-
-        // Market delta vs parent
-        var parentMarket = parseFloat(_opts.parentMarket || 0);
-        if (parentMarket > 0) {
-            var mktDelta = totalMarket - parentMarket;
-            var mktPct = (mktDelta / parentMarket * 100);
-            var mktClass = mktPct > 0 ? 'positive' : mktPct >= -15 ? 'neutral' : 'negative';
-            var mktSign = mktDelta >= 0 ? '+' : '';
-            html += '<span class="bd-summary-delta ' + mktClass + '">' + mktSign + '$' + Math.abs(mktDelta).toFixed(2) + ' (' + mktSign + mktPct.toFixed(1) + '%) vs parent market</span>';
-        }
-        html += '</div>';
-
-        // Store row
+        // Store row first (primary) — shown when we have store data
         if (hasStoreData && storeCount > 0) {
             html += '<div class="bd-summary-row">';
             html += '<span class="bd-summary-label">Store total:</span>';
@@ -528,6 +523,27 @@
             html += '<span style="color:var(--text-dim,#888);font-size:11px;">(' + storeCount + '/' + _components.length + ' in store)</span>';
             html += '</div>';
         }
+
+        // Market row (secondary / fallback when no store data)
+        html += '<div class="bd-summary-row">';
+        if (hasStoreData && storeCount > 0) {
+            // Dimmed when store is showing as primary
+            html += '<span class="bd-summary-label" style="color:var(--text-dim,#888);">Market total:</span>';
+            html += '<span class="bd-summary-value" style="color:var(--text-dim,#888);">$' + totalMarket.toFixed(2) + '</span>';
+        } else {
+            // Primary when no store data
+            html += '<span class="bd-summary-label">Market total:</span>';
+            html += '<span class="bd-summary-value">$' + totalMarket.toFixed(2) + '</span>';
+        }
+        var parentMarket = parseFloat(_opts.parentMarket || 0);
+        if (parentMarket > 0 && !(hasStoreData && storeCount > 0)) {
+            var mktDelta = totalMarket - parentMarket;
+            var mktPct = (mktDelta / parentMarket * 100);
+            var mktClass = mktPct > 0 ? 'positive' : mktPct >= -15 ? 'neutral' : 'negative';
+            var mktSign = mktDelta >= 0 ? '+' : '';
+            html += '<span class="bd-summary-delta ' + mktClass + '">' + mktSign + '$' + Math.abs(mktDelta).toFixed(2) + ' (' + mktSign + mktPct.toFixed(1) + '%) vs parent market</span>';
+        }
+        html += '</div>';
 
         html += '</div>';
         return html;

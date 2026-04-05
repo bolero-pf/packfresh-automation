@@ -32,10 +32,16 @@ def list_sessions(limit: int = 50) -> list[dict]:
         FROM intake_sessions s
         LEFT JOIN intake_items i ON i.session_id = s.id
             AND i.item_status IN ('good', 'damaged')
-        WHERE s.status IN ('received', 'ingested', 'partially_ingested')
+        WHERE s.status IN ('received', 'verified', 'breakdown_complete', 'ingested', 'partially_ingested')
         GROUP BY s.id
         ORDER BY
-            CASE s.status WHEN 'received' THEN 0 ELSE 1 END,
+            CASE s.status
+                WHEN 'received' THEN 0
+                WHEN 'verified' THEN 1
+                WHEN 'breakdown_complete' THEN 2
+                WHEN 'partially_ingested' THEN 3
+                ELSE 4
+            END,
             s.created_at DESC
         LIMIT %s
     """, (limit,))
@@ -50,10 +56,16 @@ def list_sessions_pending(limit: int = 50) -> list[dict]:
         FROM intake_sessions s
         LEFT JOIN intake_items i ON i.session_id = s.id
             AND i.item_status IN ('good', 'damaged')
-        WHERE s.status IN ('received', 'partially_ingested')
+        WHERE s.status IN ('received', 'verified', 'breakdown_complete', 'partially_ingested')
         GROUP BY s.id
         ORDER BY
-            CASE s.status WHEN 'received' THEN 0 ELSE 1 END,
+            CASE s.status
+                WHEN 'received' THEN 0
+                WHEN 'verified' THEN 1
+                WHEN 'breakdown_complete' THEN 2
+                WHEN 'partially_ingested' THEN 3
+                ELSE 4
+            END,
             s.created_at DESC
         LIMIT %s
     """, (limit,))
@@ -93,7 +105,12 @@ def get_session(session_id: str) -> Optional[dict]:
     return query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,))
 
 
-def get_session_items(session_id: str) -> list[dict]:
+def get_session_items(session_id: str, include_missing: bool = False) -> list[dict]:
+    if include_missing:
+        return query(
+            "SELECT * FROM intake_items WHERE session_id = %s AND item_status NOT IN ('rejected') ORDER BY created_at",
+            (session_id,)
+        )
     return query(
         "SELECT * FROM intake_items WHERE session_id = %s AND item_status NOT IN ('rejected', 'missing') ORDER BY created_at",
         (session_id,)
@@ -316,6 +333,144 @@ def mark_item_good(item_id: str) -> dict:
     )
     _recalculate_session_totals(item["session_id"])
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+
+# ==========================================
+# VERIFY STAGE
+# ==========================================
+
+def verify_item_here(item_id: str, qty_confirmed: int = None) -> dict:
+    """
+    Mark an item as verified (present).
+    If qty_confirmed < item.quantity, splits off the missing portion.
+    """
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    total_qty = item.get("quantity", 1)
+
+    if qty_confirmed is not None and qty_confirmed < total_qty:
+        if qty_confirmed < 0:
+            raise ValueError("qty_confirmed cannot be negative")
+        if qty_confirmed == 0:
+            # All missing
+            return verify_item_missing(item_id)
+
+        # Split: keep confirmed portion as good+verified, create missing remainder
+        session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+        offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+        market_price = Decimal(str(item.get("market_price", 0)))
+
+        # Update original to confirmed qty
+        good_offer = (market_price * offer_pct * qty_confirmed).quantize(Decimal("0.01"))
+        execute("""
+            UPDATE intake_items SET quantity = %s, offer_price = %s, verified_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (qty_confirmed, good_offer, item_id))
+
+        # Create missing split for remainder
+        missing_qty = total_qty - qty_confirmed
+        missing_id = str(uuid4())
+        execute("""
+            INSERT INTO intake_items (
+                id, session_id, product_name, set_name, tcgplayer_id,
+                quantity, market_price, offer_price, product_type,
+                is_mapped, item_status, verified_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'missing', CURRENT_TIMESTAMP)
+        """, (
+            missing_id, item["session_id"], item.get("product_name"), item.get("set_name"),
+            item.get("tcgplayer_id"), missing_qty, market_price,
+            Decimal("0"), item.get("product_type", "sealed"),
+            item.get("is_mapped", False),
+        ))
+
+        _recalculate_session_totals(item["session_id"])
+        return {
+            "good_item": query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,)),
+            "missing_item": query_one("SELECT * FROM intake_items WHERE id = %s", (missing_id,)),
+        }
+
+    # Full qty confirmed — just stamp verified_at
+    execute("UPDATE intake_items SET verified_at = CURRENT_TIMESTAMP WHERE id = %s", (item_id,))
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def verify_item_missing(item_id: str, missing_qty: int = None) -> dict:
+    """
+    Mark an item (or partial qty) as missing.
+    If missing_qty < total, splits: good portion stays, missing portion split off.
+    """
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    total_qty = item.get("quantity", 1)
+
+    if missing_qty is not None and missing_qty < total_qty:
+        if missing_qty < 1:
+            raise ValueError("missing_qty must be at least 1")
+        # Partial missing — keep the good portion, split off missing
+        confirmed_qty = total_qty - missing_qty
+        return verify_item_here(item_id, qty_confirmed=confirmed_qty)
+
+    # All missing
+    execute("""
+        UPDATE intake_items SET item_status = 'missing', offer_price = 0, verified_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+    """, (item_id,))
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def complete_verification(session_id: str) -> dict:
+    """
+    Transition session from received → verified.
+    Validates all non-missing items have verified_at set.
+    """
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,))
+    if not session:
+        raise ValueError("Session not found")
+    if session["status"] not in ("received", "verified", "breakdown_complete"):
+        raise ValueError(f"Session must be pre-ingested to complete verification (currently: {session['status']})")
+
+    # Check for unverified items (good/damaged items without verified_at)
+    unverified = query("""
+        SELECT id, product_name, quantity FROM intake_items
+        WHERE session_id = %s AND item_status IN ('good', 'damaged')
+          AND verified_at IS NULL
+    """, (session_id,))
+
+    if unverified:
+        names = [f"{u['product_name']} (×{u['quantity']})" for u in unverified[:5]]
+        remaining = len(unverified) - 5
+        msg = "Unverified items remain: " + ", ".join(names)
+        if remaining > 0:
+            msg += f" and {remaining} more"
+        raise ValueError(msg)
+
+    # Only advance status, never regress
+    if session["status"] == "received":
+        execute("UPDATE intake_sessions SET status = 'verified' WHERE id = %s", (session_id,))
+    return query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,))
+
+
+def complete_breakdown(session_id: str) -> dict:
+    """
+    Transition session from verified → breakdown_complete.
+    No validation — choosing not to break anything down is valid.
+    """
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,))
+    if not session:
+        raise ValueError("Session not found")
+    if session["status"] not in ("verified", "breakdown_complete"):
+        raise ValueError(f"Session must be at least 'verified' to complete breakdown (currently: {session['status']})")
+
+    # Only advance status, never regress
+    if session["status"] == "verified":
+        execute("UPDATE intake_sessions SET status = 'breakdown_complete' WHERE id = %s", (session_id,))
+    return query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,))
 
 
 def relink_item(item_id: str, data: dict) -> dict:
@@ -783,7 +938,7 @@ def add_item_to_session(session_id: str, data: dict) -> dict:
     session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (session_id,))
     if not session:
         raise ValueError("Session not found")
-    if session["status"] not in ("received", "partially_ingested"):
+    if session["status"] not in ("received", "verified", "breakdown_complete", "partially_ingested"):
         raise ValueError(f"Cannot add items — session is '{session['status']}'")
 
     product_name = data.get("product_name")

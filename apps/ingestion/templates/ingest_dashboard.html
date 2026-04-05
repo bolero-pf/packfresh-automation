@@ -238,6 +238,86 @@
             /* Session rows: single column */
             .session-row { grid-template-columns: 1fr; gap: 6px; }
         }
+        /* ─── STAGE STEPPER ─── */
+        .stage-bar {
+            display: flex; gap: 0; margin-bottom: 20px;
+            border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+        }
+        .stage-tab {
+            flex: 1; padding: 12px 16px; text-align: center;
+            background: var(--surface); border: none; cursor: pointer;
+            font-size: 0.9rem; color: var(--text-dim);
+            border-right: 1px solid var(--border);
+            transition: all 0.15s; position: relative;
+        }
+        .stage-tab:last-child { border-right: none; }
+        .stage-tab:hover { background: var(--surface-2); }
+        .stage-tab.active { background: var(--accent); color: #fff; font-weight: 600; }
+        .stage-tab.completed { background: rgba(45,212,160,0.1); color: var(--green); }
+        .stage-tab.disabled { opacity: 0.4; cursor: not-allowed; }
+        .stage-tab .stage-num {
+            display: inline-block; width: 22px; height: 22px; line-height: 22px;
+            border-radius: 50%; font-size: 0.75rem; font-weight: 700;
+            background: var(--border); color: var(--text-dim); margin-right: 6px;
+        }
+        .stage-tab.active .stage-num { background: rgba(255,255,255,0.3); color: #fff; }
+        .stage-tab.completed .stage-num { background: var(--green); color: #fff; }
+
+        /* ─── SORT/GROUP TOOLBAR ─── */
+        .sort-toolbar {
+            display: flex; gap: 8px; align-items: center; margin-bottom: 12px;
+            flex-wrap: wrap; font-size: 0.82rem;
+        }
+        .sort-toolbar label { color: var(--text-dim); }
+        .sort-toolbar select {
+            font-size: 0.82rem; padding: 4px 8px;
+            background: var(--surface-2); border: 1px solid var(--border);
+            color: var(--text); border-radius: 4px;
+        }
+
+        /* ─── VERIFY BUTTONS ─── */
+        .verify-btn-group { display: flex; gap: 4px; align-items: center; }
+        .verify-btn {
+            padding: 4px 10px; border-radius: 4px; font-size: 0.78rem;
+            border: 1px solid var(--border); background: none; cursor: pointer;
+            transition: all 0.15s; min-height: 32px;
+        }
+        .verify-btn:hover { background: var(--surface-2); }
+        .verify-btn.here { color: var(--green); border-color: var(--green); }
+        .verify-btn.here:hover { background: rgba(45,212,160,0.1); }
+        .verify-btn.missing { color: var(--red); border-color: var(--red); }
+        .verify-btn.missing:hover { background: rgba(240,82,82,0.1); }
+        .verify-btn.damaged { color: var(--amber); border-color: var(--amber); }
+        .verify-btn.damaged:hover { background: rgba(245,166,35,0.1); }
+        .verify-btn.verified {
+            background: var(--green); color: #fff; border-color: var(--green);
+        }
+        .verify-btn.verified-damaged {
+            background: var(--amber); color: #fff; border-color: var(--amber);
+        }
+        .verify-btn.verified-missing {
+            background: var(--red); color: #fff; border-color: var(--red);
+        }
+
+        /* ─── COMPLETE STAGE BUTTON ─── */
+        .complete-stage-btn {
+            display: flex; align-items: center; justify-content: center;
+            gap: 8px; width: 100%; padding: 14px;
+            font-size: 1rem; font-weight: 600;
+            border: 2px solid var(--green); border-radius: 8px;
+            background: rgba(45,212,160,0.08); color: var(--green);
+            cursor: pointer; transition: all 0.15s; margin-top: 16px;
+        }
+        .complete-stage-btn:hover { background: rgba(45,212,160,0.15); }
+        .complete-stage-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        @media (max-width: 768px) {
+            .stage-bar { flex-direction: row; font-size: 0.82rem; }
+            .stage-tab { padding: 10px 8px; font-size: 0.78rem; }
+            .stage-tab .stage-num { width: 20px; height: 20px; line-height: 20px; font-size: 0.7rem; margin-right: 4px; }
+            .verify-btn { min-height: 44px; padding: 8px 12px; font-size: 0.82rem; }
+            .complete-stage-btn { min-height: 48px; }
+        }
     </style>
     <link rel="stylesheet" href="/api/breakdown-cache/bd-static/breakdown_modal.css">
 </head>
@@ -426,8 +506,14 @@ async function loadSessions() {
         }
         el.innerHTML = sessions.map(s => {
             const status = s.status;
-            const badgeClass = status === 'received' ? 'badge-amber' : 'badge-blue';
-            const badgeLabel = status === 'received' ? 'Ready' : '📦 Partial';
+            const badgeClass = status === 'received' ? 'badge-amber'
+                : status === 'verified' ? 'badge-blue'
+                : status === 'breakdown_complete' ? 'badge-green'
+                : 'badge-blue';
+            const badgeLabel = status === 'received' ? 'Verify'
+                : status === 'verified' ? 'Breakdown'
+                : status === 'breakdown_complete' ? 'Ready to Push'
+                : '📦 Partial';
             const date = new Date(s.created_at).toLocaleDateString();
             return `<div class="session-row" onclick="viewSession('${s.id}')">
                 <div>
@@ -498,6 +584,136 @@ function showList() {
 // SESSION DETAIL
 // ═══════════════════════════════════════════════════════════════════
 
+// ── STAGE STATE ──────────────────────────────────────────────────────────
+let _currentStage = 'verify';  // 'verify' | 'breakdown' | 'push'
+let _currentSessionData = null;
+let _currentSortBy = 'default';  // 'default' | 'alpha' | 'price-high' | 'price-low'
+let _currentGroupBy = 'none';    // 'none' | 'type' | 'set'
+
+function _classifyProductType(item) {
+    // Use store tags first (from inventory_product_cache.shopify_tags)
+    const tags = (item.store_tags || '').toLowerCase();
+    if (tags) {
+        if (tags.includes('etb') || tags.includes('elite trainer box')) return 'ETB';
+        if (tags.includes('booster box')) return 'Booster Box';
+        if (tags.includes('booster pack')) return 'Booster Pack';
+        if (tags.includes('collection box')) return 'Collection';
+        if (tags.includes('tin')) return 'Tin';
+        if (tags.includes('bundle')) return 'Bundle';
+        if (tags.includes('blister')) return 'Blister';
+    }
+    // Fallback: product type
+    const ptype = (item.product_type || '').toLowerCase();
+    if (ptype === 'raw') return 'Raw';
+    if (item.is_graded) return 'Graded';
+    // Fallback: parse name
+    const n = (item.product_name || '').toLowerCase();
+    if (n.includes('elite trainer box') || n.includes(' etb')) return 'ETB';
+    if (n.includes('booster box') || n.includes('bb ')) return 'Booster Box';
+    if (n.includes('booster pack') || n.includes('sleeved booster')) return 'Booster Pack';
+    if (n.includes(' tin') || n.includes('tin ')) return 'Tin';
+    if (n.includes('bundle') || n.includes('trainer kit')) return 'Bundle';
+    if (n.includes('collection') || n.includes('premium collection') || n.includes('ultra premium')) return 'Collection';
+    if (n.includes('blister')) return 'Blister';
+    return 'Other';
+}
+
+function _sortItems(items) {
+    const sorted = [...items];
+    if (_currentSortBy === 'alpha') sorted.sort((a, b) => (a.product_name || '').localeCompare(b.product_name || ''));
+    else if (_currentSortBy === 'price-high') sorted.sort((a, b) => (b.market_price || 0) - (a.market_price || 0));
+    else if (_currentSortBy === 'price-low') sorted.sort((a, b) => (a.market_price || 0) - (b.market_price || 0));
+    return sorted;
+}
+
+function _groupItems(items) {
+    if (_currentGroupBy === 'none') return [{ label: null, items }];
+    const groups = {};
+    items.forEach(i => {
+        const key = _currentGroupBy === 'type' ? _classifyProductType(i) : (i.set_name || 'Unknown Set');
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(i);
+    });
+    return Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0])).map(([label, items]) => ({ label, items }));
+}
+
+function _renderSortToolbar() {
+    return `<div class="sort-toolbar">
+        <label>Group:</label>
+        <select onchange="_currentGroupBy=this.value; _rerenderStage();">
+            <option value="none" ${_currentGroupBy==='none'?'selected':''}>None</option>
+            <option value="type" ${_currentGroupBy==='type'?'selected':''}>Product Type</option>
+            <option value="set" ${_currentGroupBy==='set'?'selected':''}>Set</option>
+        </select>
+        <label style="margin-left:8px;">Sort:</label>
+        <select onchange="_currentSortBy=this.value; _rerenderStage();">
+            <option value="default" ${_currentSortBy==='default'?'selected':''}>Default</option>
+            <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>Alphabetical</option>
+            <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price (High→Low)</option>
+            <option value="price-low" ${_currentSortBy==='price-low'?'selected':''}>Price (Low→High)</option>
+        </select>
+    </div>`;
+}
+
+function _rerenderStage() {
+    if (!_currentSessionData) return;
+    const container = document.getElementById('stage-content');
+    if (!container) return;
+    if (_currentStage === 'verify') container.innerHTML = _renderVerifyContent(_currentSessionData);
+    else if (_currentStage === 'breakdown') container.innerHTML = _renderBreakdownContent(_currentSessionData);
+    else if (_currentStage === 'push') container.innerHTML = _renderPushContent(_currentSessionData);
+    _postRenderStage();
+}
+
+function _postRenderStage() {
+    if (!_currentSessionData) return;
+    const { session: s, items } = _currentSessionData;
+    const sessionId = s.id;
+    if (_currentStage === 'breakdown') {
+        _lastRenderedItems = items;
+        _enrichBreakdownSummaries(items, sessionId, true);
+    }
+    if (_currentStage === 'push') {
+        _loadSessionBarcodes(sessionId);
+    }
+}
+
+function switchStage(stage) {
+    if (!_currentSessionData) return;
+    const s = _currentSessionData.session;
+    // Allow navigating back to completed stages, and forward only if status allows
+    const stageOrder = { verify: 0, breakdown: 1, push: 2 };
+    const statusToStage = {
+        received: 0,
+        verified: 1,
+        breakdown_complete: 2,
+        partially_ingested: 2,
+        ingested: 2,
+    };
+    const maxStage = statusToStage[s.status] ?? 0;
+    if (stageOrder[stage] > maxStage) return;
+    _currentStage = stage;
+    _rerenderStage();
+    _updateStageTabs();
+}
+
+function _updateStageTabs() {
+    if (!_currentSessionData) return;
+    const s = _currentSessionData.session;
+    const statusToStage = { received: 0, verified: 1, breakdown_complete: 2, partially_ingested: 2, ingested: 2 };
+    const maxStage = statusToStage[s.status] ?? 0;
+    const stageOrder = { verify: 0, breakdown: 1, push: 2 };
+
+    document.querySelectorAll('.stage-tab').forEach(tab => {
+        const stage = tab.dataset.stage;
+        const idx = stageOrder[stage];
+        tab.classList.remove('active', 'completed', 'disabled');
+        if (stage === _currentStage) tab.classList.add('active');
+        else if (idx < maxStage) tab.classList.add('completed');
+        else if (idx > maxStage) tab.classList.add('disabled');
+    });
+}
+
 async function viewSession(sessionId, _preserveScroll) {
     _currentSessionId = sessionId;
     document.getElementById('session-list-view').style.display = 'none';
@@ -512,29 +728,40 @@ async function viewSession(sessionId, _preserveScroll) {
         const s = data.session;
         const items = data.items;
 
-        const isReceived = s.status === 'received' || s.status === 'partially_ingested';
+        _currentSessionData = data;
+
+        // Track pushed items
+        _pushedItemIds = new Set(items.filter(i => i.pushed_at).map(i => i.id));
+
+        // Determine default stage from session status
+        const statusToStage = {
+            received: 'verify',
+            verified: 'breakdown',
+            breakdown_complete: 'push',
+            partially_ingested: 'push',
+            ingested: 'push',
+        };
+        if (!_preserveScroll) {
+            _currentStage = statusToStage[s.status] || 'verify';
+        }
+
         const activeItems = items.filter(i => ['good','damaged'].includes(i.item_status || 'good'));
-        const brokenItems = items.filter(i => i.item_status === 'broken_down');
-        const childItems = items.filter(i => i.parent_item_id);
         const totalQty = activeItems.reduce((sum, i) => sum + (i.quantity || 1), 0);
 
-        // Pre-populate approvals from DB: items already pushed get a locked ✓
-        // Items approved in this session (preserve-scroll reload) keep their state
-        if (!_preserveScroll) {
-            // Fresh load — seed from pushed_at (persists across sessions/refreshes)
-            _approvedItems.clear();
-            items.forEach(i => { if (i.pushed_at) _approvedItems.add(i.id); });
-        }
-        // Track which IDs are locked (already pushed to Shopify)
-        _pushedItemIds = new Set(items.filter(i => i.pushed_at).map(i => i.id));
+        const statusBadge = {
+            received: { cls: 'badge-amber', label: 'Verify' },
+            verified: { cls: 'badge-blue', label: 'Breakdown' },
+            breakdown_complete: { cls: 'badge-green', label: 'Ready to Push' },
+            partially_ingested: { cls: 'badge-blue', label: '📦 Partial' },
+            ingested: { cls: 'badge-green', label: 'Ingested' },
+        }[s.status] || { cls: 'badge-dim', label: s.status };
 
         let html = `
             <div class="card">
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
-                    <h2 style="margin:0;">${s.customer_name || 'Unknown'}</h2>
-                    <span class="badge ${s.status === 'received' ? 'badge-amber' : s.status === 'partially_ingested' ? 'badge-blue' : 'badge-green'}">${s.status === 'received' ? 'Ready to Ingest' : s.status === 'partially_ingested' ? '📦 Partially Ingested' : 'Ingested'}</span>
+                    <h2 style="margin:0;">${s.customer_name || 'Unknown'} <small style="color:var(--text-dim);font-weight:400;font-size:0.8rem;">${s.session_type || 'sealed'}</small></h2>
+                    <span class="badge ${statusBadge.cls}">${statusBadge.label}</span>
                 </div>
-
                 <div class="stats">
                     <div class="stat">
                         <div class="stat-label">Items</div>
@@ -557,184 +784,368 @@ async function viewSession(sessionId, _preserveScroll) {
 
             <div id="offer-adjustment-card"></div>
 
-            <div class="card">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
-                    <div style="display:flex; align-items:center; gap:10px;">
-                        <h2 style="margin:0;">📦 Items</h2>
-                        ${isReceived ? `<button class="btn btn-sm btn-secondary" style="font-size:0.78rem;padding:3px 10px;" onclick="openAddItem('${sessionId}')">➕ Add Item</button>` : ''}
-                    </div>
-                    ${isReceived ? `<div style="display:flex; align-items:center; gap:12px; font-size:0.82rem;">
-                        <span id="approve-stats" style="color:var(--text-dim);">0/${activeItems.filter(i => !i.pushed_at).length} approved</span>
-                        <label style="display:flex; align-items:center; gap:6px; color:var(--text-dim); cursor:pointer;">
-                            <input type="checkbox" id="hide-approved-cb" onchange="toggleHideApproved(this)" ${_hideApproved ? 'checked' : ''}> Hide approved
-                        </label>
-                    </div>` : ''}
-                </div>
-                <div style="overflow-x:auto;">
-                <table class="responsive-cards">
-                    <thead><tr>
-                        <th>Product</th><th>Qty</th><th>Status</th><th>Store</th><th>COGS</th>
-                        ${isReceived ? '<th>Actions</th>' : ''}
-                    </tr></thead>
-                    <tbody>`;
+            <div class="stage-bar">
+                <button class="stage-tab" data-stage="verify" onclick="switchStage('verify')">
+                    <span class="stage-num">1</span> Verify
+                </button>
+                <button class="stage-tab" data-stage="breakdown" onclick="switchStage('breakdown')">
+                    <span class="stage-num">2</span> Breakdown
+                </button>
+                <button class="stage-tab" data-stage="push" onclick="switchStage('push')">
+                    <span class="stage-num">3</span> Push
+                </button>
+            </div>
 
-        // Show items — parents first, then all descendants grouped
-        // Build a map for fast child lookup
-        const childrenOf = {};
-        items.forEach(i => {
-            if (i.parent_item_id) {
-                if (!childrenOf[i.parent_item_id]) childrenOf[i.parent_item_id] = [];
-                childrenOf[i.parent_item_id].push(i);
-            }
-        });
-
-        // Recursively render an item and all its descendants
-        function renderWithDescendants(item, depth) {
-            const isChild = depth > 0;
-            let rows = renderItemRow(item, isReceived, sessionId, isChild);
-            const kids = childrenOf[item.id] || [];
-            for (const kid of kids) {
-                rows += renderWithDescendants(kid, depth + 1);
-            }
-            return rows;
-        }
-
-        const topLevel = items.filter(i => !i.parent_item_id);
-        for (const item of topLevel) {
-            html += renderWithDescendants(item, 0);
-        }
-
-        html += `</tbody></table></div></div>`;
-
-        // Store Check section
-        html += `
-            <div class="card">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                    <h2 style="margin:0;">🏪 Store Match Preview</h2>
-                    <button class="btn btn-secondary btn-sm" onclick="runStoreCheck('${sessionId}')">Check Store</button>
-                </div>
-                <div id="store-check-results">
-                    <p style="color:var(--text-dim);">Click "Check Store" to see what matches your Shopify inventory.</p>
-                </div>
-            </div>`;
-
-        // Push Live button (only for received)
-        if (isReceived) {
-            html += `
-                <div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
-                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
-                        <div>
-                            <h2 style="margin:0; color:var(--green);">🚀 Push Live</h2>
-                            <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
-                                Increment inventory for matched items, create damaged listings, and mark session as ingested.
-                            </p>
-                        </div>
-                        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-                            <button class="btn btn-secondary" onclick="pushDryRun('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;">
-                                🔍 Debug Dry Run
-                            </button>
-                            <button class="btn btn-success" id="push-live-btn" onclick="pushLive('${sessionId}')" style="font-size:1.05rem; padding:12px 28px;">
-                                🚀 Push Live to Shopify
-                            </button>
-                            <button class="btn btn-sm" style="font-size:0.75rem; padding:6px 12px; background:var(--surface-2); color:var(--text-dim); border:1px solid var(--border);" onclick="forceIngested('${sessionId}')">
-                                ⚡ Force Mark Ingested
-                            </button>
-                        </div>
-                    </div>
-                    <div id="push-live-results" style="margin-top:16px;"></div>
-                </div>`;
-        }
-
-        // Barcode section — always shown if session has raw cards (persists after ingestion)
-        html += `<div id="session-barcode-section"></div>`;
+            <div id="stage-content"></div>
+            <div id="session-barcode-section"></div>`;
 
         el.innerHTML = html;
+        _updateStageTabs();
+        _rerenderStage();
+
         if (scrollY) requestAnimationFrame(() => window.scrollTo(0, scrollY));
-        // Restore hide-approved state and update counter after re-render
-        _refreshApprovedVisibility();
-        _updateApproveStats();
-        // Enrich items with breakdown summaries after render
-        _lastRenderedItems = items;
-        _enrichBreakdownSummaries(items, sessionId, isReceived);
-        // Load raw card barcodes for this session (persists across refreshes)
-        _loadSessionBarcodes(sessionId);
-        // Load offer adjustment summary (if changes exist)
         _loadOfferAdjustment(sessionId);
+        _loadSessionBarcodes(sessionId);
     } catch(err) {
         el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
 }
 
-// ── APPROVE SYSTEM ──────────────────────────────────────────────────────────
-let _approvedItems = new Set();
-let _pushedItemIds = new Set();
-let _hideApproved = true;
+// ── VERIFY STAGE ──────────────────────────────────────────────────────────
+function _renderVerifyContent(data) {
+    const { session: s, items } = data;
+    const sessionId = s.id;
+    // Show all items including missing for verify
+    const allItems = items.filter(i => i.item_status !== 'rejected' && !i.parent_item_id);
+    const sorted = _sortItems(allItems);
+    const groups = _groupItems(sorted);
 
-function toggleApproved(itemId) {
-    if (_approvedItems.has(itemId)) {
-        _approvedItems.delete(itemId);
-    } else {
-        _approvedItems.add(itemId);
+    const verifiedCount = allItems.filter(i => i.verified_at || i.item_status === 'missing').length;
+    const totalCount = allItems.length;
+    const pct = totalCount > 0 ? Math.round((verifiedCount / totalCount) * 100) : 0;
+    const allVerified = verifiedCount === totalCount && totalCount > 0;
+
+    let html = `<div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+            <div style="display:flex; align-items:center; gap:10px;">
+                <h2 style="margin:0;">Verify Items</h2>
+                <button class="btn btn-sm btn-secondary" style="font-size:0.78rem;padding:3px 10px;" onclick="openAddItem('${sessionId}')">➕ Unexpected Item</button>
+            </div>
+            <span style="color:${allVerified ? 'var(--green)' : 'var(--text-dim)'}; font-size:0.85rem; font-weight:600;">${verifiedCount}/${totalCount} verified</span>
+        </div>
+        <div class="progress-bar" style="margin-bottom:12px;">
+            <div class="fill" style="width:${pct}%; background:${allVerified ? 'var(--green)' : 'var(--accent)'};"></div>
+        </div>
+        ${_renderSortToolbar()}
+        <div style="overflow-x:auto;">
+        <table class="responsive-cards">
+            <thead><tr>
+                <th>Product</th><th>Qty</th><th>Type</th><th>Store</th><th>COGS</th><th>Verify</th>
+            </tr></thead>
+            <tbody>`;
+
+    for (const group of groups) {
+        if (group.label) {
+            html += `<tr><td colspan="6" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+        }
+        for (const item of group.items) {
+            html += _renderVerifyRow(item, sessionId);
+        }
     }
-    _refreshApprovedVisibility();
-    _updateApproveStats();
+
+    html += `</tbody></table></div></div>`;
+
+    // Complete button — show unless already ingested
+    if (s.status !== 'ingested') {
+        html += `<button class="complete-stage-btn" ${!allVerified ? 'disabled' : ''} onclick="completeVerify('${sessionId}')">
+            ${allVerified ? '✓ Complete Verification → Breakdown' : `Verify all items first (${totalCount - verifiedCount} remaining)`}
+        </button>`;
+    }
+
+    return html;
 }
 
-function _refreshApprovedVisibility() {
-    document.querySelectorAll('tr[data-item-id]').forEach(row => {
-        const id = row.dataset.itemId;
-        const isBrokenDown = row.dataset.itemStatus === 'broken_down';
-        const isPushed = _pushedItemIds.has(id);
-        const isApproved = _approvedItems.has(id);
+function _renderVerifyRow(item, sessionId) {
+    const st = item.item_status || 'good';
+    const isMissing = st === 'missing';
+    const isDamaged = st === 'damaged';
+    const isVerified = !!item.verified_at;
+    const name = item.product_name || 'Unknown';
+    const escName = name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    const ptype = item.product_type || 'sealed';
 
-        // Hide/show for "Hide approved" checkbox
-        if (_hideApproved && (isApproved || isBrokenDown)) {
-            row.style.display = 'none';
+    let rowStyle = '';
+    if (isMissing) rowStyle = 'opacity:0.4; text-decoration:line-through;';
+    else if (isDamaged) rowStyle = 'background:rgba(255,170,0,0.06);';
+    else if (isVerified) rowStyle = 'background:rgba(45,212,160,0.04);';
+
+    let verifyCell = '';
+    if (isMissing) {
+        verifyCell = `<span class="verify-btn verified-missing" style="cursor:default;">Missing</span>`;
+    } else if (isDamaged && isVerified) {
+        verifyCell = `<span class="verify-btn verified-damaged" style="cursor:default;">Damaged</span>`;
+    } else if (isVerified) {
+        verifyCell = `<span class="verify-btn verified" style="cursor:default;">✓ Here</span>`;
+    } else {
+        verifyCell = `<div class="verify-btn-group">
+            <button class="verify-btn here" onclick="verifyItem('${item.id}', '${sessionId}', 'here', ${item.quantity||1})">✓ Here</button>
+            <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
+            <button class="verify-btn damaged" onclick="verifyItem('${item.id}', '${sessionId}', 'damaged', ${item.quantity||1})">⚠ Damaged</button>
+        </div>`;
+    }
+
+    return `<tr style="${rowStyle}" data-item-id="${item.id}">
+        <td class="name-cell" data-label="">${name}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
+        <td data-label="Qty">${item.quantity || 1}</td>
+        <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype.toUpperCase()}</span></td>
+        <td data-label="Store">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);">$' + (item.market_price || 0).toFixed(2) + '*</span>'}</td>
+        <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}</td>
+        <td data-label="Verify">${verifyCell}</td>
+    </tr>`;
+}
+
+async function verifyItem(itemId, sessionId, status, totalQty) {
+    try {
+        if (status === 'here' && totalQty > 1) {
+            const input = await themedPrompt('Verify Quantity', `How many are here? (expected: ${totalQty})`, totalQty);
+            if (input === null) return;
+            const confirmed = parseInt(input);
+            if (isNaN(confirmed) || confirmed < 0 || confirmed > totalQty) {
+                alert(`Must be between 0 and ${totalQty}`);
+                return;
+            }
+            await fetch(`/api/ingest/item/${itemId}/verify`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ status: 'here', qty_confirmed: confirmed }),
+            });
+        } else if (status === 'missing' && totalQty > 1) {
+            const input = await themedPrompt('Missing Quantity', `How many are missing? (of ${totalQty})`, totalQty);
+            if (input === null) return;
+            const missing = parseInt(input);
+            if (isNaN(missing) || missing < 1 || missing > totalQty) {
+                alert(`Must be between 1 and ${totalQty}`);
+                return;
+            }
+            await fetch(`/api/ingest/item/${itemId}/verify`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ status: 'missing', missing_qty: missing }),
+            });
+        } else if (status === 'damaged') {
+            let damaged_qty = null;
+            if (totalQty > 1) {
+                const input = await themedPrompt('Damaged Quantity', `How many are damaged? (1–${totalQty})`, totalQty);
+                if (input === null) return;
+                damaged_qty = parseInt(input);
+                if (isNaN(damaged_qty) || damaged_qty < 1 || damaged_qty > totalQty) {
+                    alert(`Must be between 1 and ${totalQty}`);
+                    return;
+                }
+            }
+            const body = { status: 'damaged' };
+            if (damaged_qty !== null) body.damaged_qty = damaged_qty;
+            await fetch(`/api/ingest/item/${itemId}/verify`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body),
+            });
         } else {
-            row.style.display = '';
+            await fetch(`/api/ingest/item/${itemId}/verify`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ status }),
+            });
         }
+        viewSession(sessionId, true);
+    } catch(err) { alert(err.message); }
+}
 
-        // Update row opacity (skip broken-down rows which have their own styling)
-        if (!isBrokenDown) {
-            row.style.opacity = isApproved ? '0.5' : '';
+async function completeVerify(sessionId) {
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/complete-verify`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Failed'); return; }
+        _currentStage = 'breakdown';
+        viewSession(sessionId, false);
+    } catch(err) { alert(err.message); }
+}
+
+// ── BREAKDOWN STAGE ──────────────────────────────────────────────────────────
+function _renderBreakdownContent(data) {
+    const { session: s, items } = data;
+    const sessionId = s.id;
+    // Show good + damaged items (not missing, not rejected) — including breakdown families
+    const activeItems = items.filter(i => ['good','damaged','broken_down'].includes(i.item_status));
+
+    // Build child map
+    const childrenOf = {};
+    activeItems.forEach(i => {
+        if (i.parent_item_id) {
+            if (!childrenOf[i.parent_item_id]) childrenOf[i.parent_item_id] = [];
+            childrenOf[i.parent_item_id].push(i);
         }
+    });
 
-        // Update approve button style (skip pushed items — they stay locked)
-        if (!isPushed) {
-            const btn = row.querySelector('button[title="Mark as reviewed"]');
-            if (btn) {
-                btn.style.background = isApproved ? 'var(--green)' : '';
-                btn.style.color = isApproved ? '#000' : 'var(--text-dim)';
-                btn.style.borderColor = isApproved ? 'var(--green)' : 'var(--border)';
+    const topLevel = activeItems.filter(i => !i.parent_item_id);
+    const sorted = _sortItems(topLevel);
+    const groups = _groupItems(sorted);
+
+    let html = `<div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+            <div style="display:flex; align-items:center; gap:10px;">
+                <h2 style="margin:0;">Breakdown Decisions</h2>
+                <button class="btn btn-sm btn-secondary" style="font-size:0.78rem;padding:3px 10px;" onclick="openAddItem('${sessionId}')">➕ Add Item</button>
+            </div>
+            <span style="color:var(--text-dim); font-size:0.82rem;">Break down what you want, skip the rest</span>
+        </div>
+        ${_renderSortToolbar()}
+        <div style="overflow-x:auto;">
+        <table class="responsive-cards">
+            <thead><tr>
+                <th>Product</th><th>Qty</th><th>Status</th><th>Store</th><th>COGS</th><th>Actions</th>
+            </tr></thead>
+            <tbody>`;
+
+    for (const group of groups) {
+        if (group.label) {
+            html += `<tr><td colspan="6" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+        }
+        for (const item of group.items) {
+            html += renderItemRow(item, true, sessionId, false);
+            // Render children
+            const kids = childrenOf[item.id] || [];
+            for (const kid of kids) {
+                html += renderItemRow(kid, true, sessionId, true);
+                // Nested children
+                const grandkids = childrenOf[kid.id] || [];
+                for (const gk of grandkids) {
+                    html += renderItemRow(gk, true, sessionId, true);
+                }
             }
         }
-    });
-}
-
-function _updateApproveStats() {
-    const el = document.getElementById('approve-stats');
-    if (!el) return;
-    // Count only unpushed, non-broken-down items (the ones still actionable)
-    let total = 0;
-    document.querySelectorAll('tr[data-item-id]').forEach(row => {
-        if (_pushedItemIds.has(row.dataset.itemId)) return;
-        if (row.dataset.itemStatus === 'broken_down') return;
-        total++;
-    });
-    const pushed = _pushedItemIds.size;
-    const pendingApproved = [..._approvedItems].filter(id => !_pushedItemIds.has(id)).length;
-    if (pushed > 0) {
-        el.innerHTML = `<span style="color:var(--green)">✓${pushed} pushed</span> · ${pendingApproved} pending · ${total - pendingApproved} unapproved`;
-    } else {
-        el.textContent = `${pendingApproved}/${total} approved`;
     }
-    el.style.color = pendingApproved === total ? 'var(--green)' : 'var(--text-dim)';
+
+    html += `</tbody></table></div></div>`;
+
+    // Complete button — show unless already past breakdown or ingested
+    if (['received', 'verified'].includes(s.status)) {
+        html += `<button class="complete-stage-btn" onclick="completeBreakdown('${sessionId}')">
+            ✓ Done with Breakdowns → Push
+        </button>`;
+    }
+
+    return html;
 }
 
-function toggleHideApproved(cb) {
-    _hideApproved = cb.checked;
-    _refreshApprovedVisibility();
+async function completeBreakdown(sessionId) {
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/complete-breakdown`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Failed'); return; }
+        _currentStage = 'push';
+        viewSession(sessionId, false);
+    } catch(err) { alert(err.message); }
 }
+
+// ── PUSH STAGE ──────────────────────────────────────────────────────────
+function _renderPushContent(data) {
+    const { session: s, items } = data;
+    const sessionId = s.id;
+    const isActive = ['received', 'verified', 'breakdown_complete', 'partially_ingested'].includes(s.status);
+
+    // Show final state items (good + damaged, not broken_down parents)
+    const pushableItems = items.filter(i => ['good','damaged'].includes(i.item_status) && i.is_mapped && !i.pushed_at);
+    const pushedItems = items.filter(i => i.pushed_at);
+    const sorted = _sortItems(pushableItems);
+    const groups = _groupItems(sorted);
+
+    let html = `<div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+            <h2 style="margin:0;">Push Summary</h2>
+            <span style="color:var(--text-dim); font-size:0.82rem;">${pushableItems.length} items ready · ${pushedItems.length} already pushed</span>
+        </div>
+        ${_renderSortToolbar()}
+        <div style="overflow-x:auto;">
+        <table class="responsive-cards">
+            <thead><tr>
+                <th>Product</th><th>Qty</th><th>Status</th><th>Store</th><th>COGS</th>
+            </tr></thead>
+            <tbody>`;
+
+    for (const group of groups) {
+        if (group.label) {
+            html += `<tr><td colspan="5" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+        }
+        for (const item of group.items) {
+            const st = item.item_status || 'good';
+            const isDamaged = st === 'damaged';
+            const name = item.product_name || 'Unknown';
+            const isChild = !!item.parent_item_id;
+            let badges = '';
+            if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
+            if (isChild) badges += ' <span class="badge badge-blue" style="font-size:0.65rem;">FROM BREAKDOWN</span>';
+            const ptype = item.product_type || 'sealed';
+            html += `<tr style="${isDamaged ? 'background:rgba(255,170,0,0.06);' : ''}" data-item-id="${item.id}" data-item-status="${st}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${(item.product_name||'').replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
+                <td data-label="">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
+                <td data-label="Qty">${item.quantity || 1}</td>
+                <td data-label="Status"><span class="badge ${isDamaged ? 'badge-amber' : 'badge-green'}">${ptype}</span></td>
+                <td data-label="Store">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);">$' + (item.market_price || 0).toFixed(2) + '*</span>'}</td>
+                <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}</td>
+            </tr>`;
+        }
+    }
+
+    html += `</tbody></table></div></div>`;
+
+    // Store check
+    html += `<div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h2 style="margin:0;">🏪 Store Match Preview</h2>
+            <button class="btn btn-secondary btn-sm" onclick="runStoreCheck('${sessionId}')">Check Store</button>
+        </div>
+        <div id="store-check-results">
+            <p style="color:var(--text-dim);">Click "Check Store" to see what matches your Shopify inventory.</p>
+        </div>
+    </div>`;
+
+    // Push Live
+    if (isActive) {
+        html += `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                <div>
+                    <h2 style="margin:0; color:var(--green);">🚀 Push Live</h2>
+                    <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
+                        Increment inventory for matched items, create damaged listings, and mark session as ingested.
+                    </p>
+                </div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <button class="btn btn-secondary" onclick="pushDryRun('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;">
+                        🔍 Debug Dry Run
+                    </button>
+                    <button class="btn btn-success" id="push-live-btn" onclick="pushLive('${sessionId}')" style="font-size:1.05rem; padding:12px 28px;">
+                        🚀 Push Live to Shopify
+                    </button>
+                    <button class="btn btn-sm" style="font-size:0.75rem; padding:6px 12px; background:var(--surface-2); color:var(--text-dim); border:1px solid var(--border);" onclick="forceIngested('${sessionId}')">
+                        ⚡ Force Mark Ingested
+                    </button>
+                </div>
+            </div>
+            <div id="push-live-results" style="margin-top:16px;"></div>
+        </div>`;
+    }
+
+    return html;
+}
+
+// ── LEGACY APPROVE SYSTEM (kept for backward compat with renderItemRow) ─────
+let _approvedItems = new Set();
+let _pushedItemIds = new Set();
+let _hideApproved = false;
+
+function toggleApproved(itemId) {
+    if (_approvedItems.has(itemId)) _approvedItems.delete(itemId);
+    else _approvedItems.add(itemId);
+}
+function _refreshApprovedVisibility() {}
+function _updateApproveStats() {}
+function toggleHideApproved(cb) {}
 
 // ── BREAKDOWN SUMMARY ENRICHMENT (uses shared breakdown_inline.js) ──────────
 async function _enrichBreakdownSummaries(items, sessionId, isReceived) {
@@ -1281,7 +1692,7 @@ function openBdModal(itemId, sessionId, productName, parentQty, parentTcgId, par
         parentQty: parseInt(parentQty) || 1,
         parentMarket: parseFloat(parentMarket) || 0,
         apiBase: '/api/breakdown-cache',
-        priceMode: 'best',
+        priceMode: 'store',
         showQtySelector: (parseInt(parentQty) || 1) > 1,
         onExecute: async function(variantId, qtyToBreak, components) {
             const payload = {
@@ -1378,8 +1789,8 @@ async function pushDryRun(sessionId) {
     panel.innerHTML = '<div class="loading"><span class="spinner"></span> Running dry run...</div>';
 
     try {
-        const pendingApproved = [..._approvedItems].filter(id => !_pushedItemIds.has(id));
-        const bodyData = pendingApproved.length > 0 ? { item_ids: pendingApproved } : {};
+        // Push all unpushed items (no more approval gating — verification handles that)
+        const bodyData = {};
         const r = await fetch(`/api/ingest/session/${sessionId}/push-dry-run`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -1388,9 +1799,7 @@ async function pushDryRun(sessionId) {
         const d = await r.json();
         if (!r.ok) { panel.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
-        const scopeNote = pendingApproved.length > 0
-            ? ` Scoped to <strong>${pendingApproved.length}</strong> approved item(s).`
-            : ' All items included (none specifically approved).';
+        const scopeNote = ' All verified items included.';
 
         let html = `<div class="alert" style="background:rgba(79,125,249,0.1); border-color:var(--accent); color:var(--accent);">🔍 <strong>DRY RUN</strong> — No changes made.${scopeNote}</div>`;
 
@@ -1530,9 +1939,7 @@ async function _pollPushJob(jobId, total, panel) {
 
 
 async function pushLive(sessionId) {
-    const pendingApproved = [..._approvedItems].filter(id => !_pushedItemIds.has(id));
-
-    // Separate graded items from sealed/raw — graded get their own cert-entry flow
+    // All unpushed items are candidates (verification replaces old approval gating)
     const allItemRows = [...document.querySelectorAll('tr[data-item-id]')];
     const gradedIds = new Set();
     const sealedRawIds = new Set();
@@ -1540,16 +1947,13 @@ async function pushLive(sessionId) {
         const id = row.getAttribute('data-item-id');
         if (_pushedItemIds.has(id)) return;
         if (row.getAttribute('data-item-status') === 'broken_down') return;
-        if (pendingApproved.length > 0 && !pendingApproved.includes(id)) return;
         if (row.getAttribute('data-is-graded') === 'true') gradedIds.add(id);
         else sealedRawIds.add(id);
     });
     const totalPending = gradedIds.size + sealedRawIds.size;
-    const isPartial = pendingApproved.length > 0 && pendingApproved.length < totalPending;
+    const isPartial = false;
 
-    const confirmMsg = isPartial
-        ? `Push ${pendingApproved.length} approved items (${gradedIds.size} graded, ${sealedRawIds.size} sealed/raw)?`
-        : `Push ${totalPending} items (${gradedIds.size} graded slabs, ${sealedRawIds.size} sealed/raw). Cannot be easily undone.`;
+    const confirmMsg = `Push ${totalPending} items (${gradedIds.size} graded slabs, ${sealedRawIds.size} sealed/raw). Cannot be easily undone.`;
 
     const ok = await themedConfirm('🚀 Push Live', confirmMsg,
         { confirmText: `Push ${totalPending} Items`, dangerous: true });
