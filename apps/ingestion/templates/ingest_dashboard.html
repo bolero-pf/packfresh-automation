@@ -1022,8 +1022,24 @@ async function completeVerify(sessionId) {
 function _renderBreakdownContent(data) {
     const { session: s, items } = data;
     const sessionId = s.id;
-    // Show good + damaged items (not missing, not rejected) — including breakdown families
-    const activeItems = items.filter(i => ['good','damaged','broken_down'].includes(i.item_status));
+    // Show unpushed items only. For broken_down parents, check if all children are pushed.
+    const childrenByParent = {};
+    items.forEach(i => {
+        if (i.parent_item_id) {
+            if (!childrenByParent[i.parent_item_id]) childrenByParent[i.parent_item_id] = [];
+            childrenByParent[i.parent_item_id].push(i);
+        }
+    });
+    const activeItems = items.filter(i => {
+        if (!['good','damaged','broken_down'].includes(i.item_status)) return false;
+        if (i.pushed_at) return false;
+        // Hide broken_down parents whose children are ALL pushed
+        if (i.item_status === 'broken_down') {
+            const kids = childrenByParent[i.id] || [];
+            if (kids.length > 0 && kids.every(k => k.pushed_at)) return false;
+        }
+        return true;
+    });
 
     // Build child map
     const childrenOf = {};
