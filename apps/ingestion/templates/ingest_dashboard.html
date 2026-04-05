@@ -1134,18 +1134,8 @@ function _renderPushContent(data) {
     return html;
 }
 
-// ── LEGACY APPROVE SYSTEM (kept for backward compat with renderItemRow) ─────
-let _approvedItems = new Set();
+// ── PUSHED ITEMS TRACKING ────────────────────────────────────────────────────
 let _pushedItemIds = new Set();
-let _hideApproved = false;
-
-function toggleApproved(itemId) {
-    if (_approvedItems.has(itemId)) _approvedItems.delete(itemId);
-    else _approvedItems.add(itemId);
-}
-function _refreshApprovedVisibility() {}
-function _updateApproveStats() {}
-function toggleHideApproved(cb) {}
 
 // ── BREAKDOWN SUMMARY ENRICHMENT (uses shared breakdown_inline.js) ──────────
 async function _enrichBreakdownSummaries(items, sessionId, isReceived) {
@@ -1193,22 +1183,11 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
 
     let actionCell = '';
     if (isReceived && !isBroken && !isChild) {
-        const isPushed = _pushedItemIds.has(item.id);
-        const isApproved = _approvedItems.has(item.id);
-        const approveStyle = isPushed
-            ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;opacity:0.6;cursor:default;'
-            : isApproved
-                ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;'
-                : 'color:var(--text-dim);border-color:var(--border);width:32px;';
-        const approveBtn = isPushed
-            ? `<button class="btn btn-sm approve-mobile" style="${approveStyle}" title="Already pushed to Shopify" disabled>✓</button>`
-            : `<button class="btn btn-sm approve-mobile" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>`;
         const damageToggle = isDamaged
             ? `<button onclick="markGood('${item.id}', '${sessionId}')">✅ Mark Good</button>`
             : `<button onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠️ Mark Damaged</button>`;
         actionCell = `
             <div style="display:flex; align-items:center; gap:6px;">
-                ${approveBtn}
                 <button class="btn btn-sm btn-primary" style="font-size:0.78rem;padding:3px 10px;" onclick="openBdModal('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button>
                 <div class="action-dropdown-container" style="position:relative;display:inline-block;">
                     <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.78rem;padding:3px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
@@ -1224,28 +1203,17 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     } else if (isReceived && isBroken) {
         actionCell = `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;border-color:var(--amber);" onclick="undoBreakdown('${item.id}', '${sessionId}')">↩ Undo</button>`;
     } else if (isReceived && isChild) {
-        const isPushed = _pushedItemIds.has(item.id);
-        const isApproved = _approvedItems.has(item.id);
-        const approveStyle = isPushed
-            ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;opacity:0.6;cursor:default;'
-            : isApproved
-                ? 'background:var(--green);color:#000;border-color:var(--green);width:32px;'
-                : 'color:var(--text-dim);border-color:var(--border);width:32px;';
-        const approveBtn = isPushed
-            ? `<button class="btn btn-sm approve-mobile" style="${approveStyle}" title="Already pushed to Shopify" disabled>✓</button>`
-            : `<button class="btn btn-sm approve-mobile" style="${approveStyle}" onclick="toggleApproved('${item.id}')" title="Mark as reviewed">✓</button>`;
         const childBreakBtn = item.tcgplayer_id
             ? `<button class="btn btn-sm btn-primary" style="font-size:0.72rem;padding:3px 8px;" onclick="openBdModal('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button>`
             : '';
         actionCell = `<div style="display:flex;gap:6px;align-items:center;">
-            ${approveBtn}
             ${childBreakBtn}
             <button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Qty</button>
             <button class="btn btn-sm" style="font-size:0.72rem;padding:3px 8px;color:var(--red);" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕</button>
         </div>`;
     }
 
-    const approvedStyle = _approvedItems.has(item.id) ? 'opacity:0.5;' : '';
+    const approvedStyle = '';
     return `<tr style="${rowStyle}${approvedStyle}" data-item-id="${item.id}" data-item-status="${st}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${(item.product_name||'').replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
         <td class="name-cell" data-label="">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}${(() => {
             const v = item.velocity;
