@@ -692,18 +692,7 @@ function _postRenderStage() {
 
 function switchStage(stage) {
     if (!_currentSessionData) return;
-    const s = _currentSessionData.session;
-    // Allow navigating back to completed stages, and forward only if status allows
-    const stageOrder = { verify: 0, breakdown: 1, push: 2 };
-    const statusToStage = {
-        received: 0,
-        verified: 1,
-        breakdown_complete: 2,
-        partially_ingested: 2,
-        ingested: 2,
-    };
-    const maxStage = statusToStage[s.status] ?? 0;
-    if (stageOrder[stage] > maxStage) return;
+    // All tabs always navigable — Complete buttons are bookmarks, not gates
     _currentStage = stage;
     _rerenderStage();
     _updateStageTabs();
@@ -719,10 +708,9 @@ function _updateStageTabs() {
     document.querySelectorAll('.stage-tab').forEach(tab => {
         const stage = tab.dataset.stage;
         const idx = stageOrder[stage];
-        tab.classList.remove('active', 'completed', 'disabled');
+        tab.classList.remove('active', 'completed');
         if (stage === _currentStage) tab.classList.add('active');
         else if (idx < maxStage) tab.classList.add('completed');
-        else if (idx > maxStage) tab.classList.add('disabled');
     });
 }
 
@@ -869,9 +857,17 @@ function _renderVerifyContent(data) {
 
     // Complete button — show unless already ingested
     if (s.status !== 'ingested') {
-        html += `<button class="complete-stage-btn" ${!allVerified ? 'disabled' : ''} onclick="completeVerify('${sessionId}')">
-            ${allVerified ? '✓ Complete Verification → Breakdown' : `Verify all items first (${totalCount - verifiedCount} remaining)`}
-        </button>`;
+        if (allVerified) {
+            html += `<button class="complete-stage-btn" onclick="completeVerify('${sessionId}')">
+                ✓ Complete Verification → Breakdown
+            </button>`;
+        } else {
+            html += `<div style="display:flex; gap:8px; margin-top:16px; flex-wrap:wrap;">
+                <button class="complete-stage-btn" style="flex:1; border-color:var(--accent); background:rgba(124,147,245,0.08); color:var(--accent);" onclick="switchStage('breakdown')">
+                    Skip to Breakdown → (${verifiedCount}/${totalCount} verified)
+                </button>
+            </div>`;
+        }
     }
 
     return html;
