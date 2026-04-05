@@ -794,21 +794,24 @@ def _push_session_worker(job_id, session_id, active):
             cache_mgr.record_tool_push()
 
         # Determine final session status
+        # Transition even when there are errors — if some items pushed, reflect that
         all_items_after = ingest.get_session_items(session_id)
         remaining_unpushed = [i for i in all_items_after
                               if i.get("item_status") in ("good", "damaged")
                               and i.get("is_mapped") and not i.get("pushed_at")]
+        any_pushed = any(i.get("pushed_at") for i in all_items_after
+                         if i.get("item_status") in ("good", "damaged"))
 
         partially_ingested = False
-        if not errors:
-            if remaining_unpushed:
-                db.execute(
-                    "UPDATE intake_sessions SET status = 'partially_ingested' WHERE id = %s",
-                    (session_id,)
-                )
-                partially_ingested = True
-            else:
-                ingest.mark_session_ingested(session_id)
+        if not remaining_unpushed and not errors:
+            ingest.mark_session_ingested(session_id)
+        elif any_pushed:
+            # Some items pushed (even with errors) — mark partial so it doesn't look stuck
+            db.execute(
+                "UPDATE intake_sessions SET status = 'partially_ingested' WHERE id = %s AND status != 'ingested'",
+                (session_id,)
+            )
+            partially_ingested = True
 
         # Notify intake cache
         if not errors:
