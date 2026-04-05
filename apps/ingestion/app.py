@@ -892,7 +892,7 @@ def _push_raw_item(item: dict) -> dict:
     tcg_id    = item.get("tcgplayer_id")
     card_name = item.get("product_name", "Unknown")
     set_name  = item.get("set_name", "")
-    condition = item.get("condition", "NM")
+    condition = item.get("condition") or "NM"
     qty       = item.get("quantity", 1)
     cost      = float(item.get("offer_price", 0)) / max(qty, 1)
     card_type = "pokemon"  # default; could be inferred from tags later
