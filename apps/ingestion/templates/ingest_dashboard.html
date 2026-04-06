@@ -935,9 +935,29 @@ function _renderVerifyRow(item, sessionId) {
         verifyCell = `<button class="verify-btn verified-missing" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✗ Missing</button>`;
     } else if (isDamaged && isVerified) {
         verifyCell = `<button class="verify-btn verified-damaged" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">⚠ Damaged</button>`;
+    } else if (isVerified && ptype === 'raw') {
+        const cond = item.condition || 'NM';
+        verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ ${cond}</button>`;
+    } else if (isVerified && item.is_graded) {
+        const co = item.grade_company || 'PSA';
+        const gr = item.grade_value || '?';
+        verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ ${co} ${gr}</button>`;
     } else if (isVerified) {
         verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ Here</button>`;
+    } else if (ptype === 'raw') {
+        // Raw cards: Here with condition picker, or Missing
+        verifyCell = `<div class="verify-btn-group">
+            <button class="verify-btn here" onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✓ Here</button>
+            <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
+        </div>`;
+    } else if (item.is_graded) {
+        // Graded slabs: Here with grade verification, or Missing
+        verifyCell = `<div class="verify-btn-group">
+            <button class="verify-btn here" onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${item.grade_company||'PSA'}', '${item.grade_value||''}')">✓ Verify Grade</button>
+            <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
+        </div>`;
     } else {
+        // Sealed: Here / Missing / Damaged
         verifyCell = `<div class="verify-btn-group">
             <button class="verify-btn here" onclick="verifyItem('${item.id}', '${sessionId}', 'here', ${item.quantity||1})">✓ Here</button>
             <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
@@ -1004,6 +1024,96 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
                 body: JSON.stringify({ status }),
             });
         }
+        viewSession(sessionId, true);
+    } catch(err) { alert(err.message); }
+}
+
+async function verifyRawCard(itemId, sessionId, totalQty) {
+    // For raw cards: pick condition, then verify
+    const conditions = ['NM', 'LP', 'MP', 'HP', 'DMG'];
+    const overlay = document.getElementById('prompt-overlay');
+    document.getElementById('prompt-title').textContent = 'Card Condition';
+    document.getElementById('prompt-msg').textContent = totalQty > 1 ? `Condition for ${totalQty} cards:` : 'What condition?';
+    const area = document.getElementById('prompt-input-area');
+    area.innerHTML = conditions.map(c =>
+        `<button class="btn btn-sm" style="margin:4px; min-width:60px; padding:8px 16px; font-size:0.9rem;" onclick="document.getElementById('prompt-input-area').dataset.val='${c}'; document.getElementById('prompt-ok').click();">${c}</button>`
+    ).join('');
+    overlay.style.display = 'flex';
+
+    const condition = await new Promise(resolve => {
+        document.getElementById('prompt-ok').onclick = () => {
+            overlay.style.display = 'none';
+            resolve(area.dataset.val || 'NM');
+        };
+        document.getElementById('prompt-cancel').onclick = () => {
+            overlay.style.display = 'none';
+            resolve(null);
+        };
+    });
+    if (condition === null) return;
+
+    try {
+        // Verify as here + set condition
+        let qtyConfirmed = totalQty;
+        if (totalQty > 1) {
+            const input = await themedPrompt('Verify Quantity', `How many are here? (expected: ${totalQty})`, totalQty);
+            if (input === null) return;
+            qtyConfirmed = parseInt(input);
+            if (isNaN(qtyConfirmed) || qtyConfirmed < 0 || qtyConfirmed > totalQty) {
+                alert(`Must be between 0 and ${totalQty}`);
+                return;
+            }
+        }
+        await fetch(`/api/ingest/item/${itemId}/verify`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ status: 'here', qty_confirmed: qtyConfirmed, condition }),
+        });
+        viewSession(sessionId, true);
+    } catch(err) { alert(err.message); }
+}
+
+async function verifyGradedSlab(itemId, sessionId, currentCompany, currentGrade) {
+    // Let user confirm or change grade company + value
+    const overlay = document.getElementById('prompt-overlay');
+    document.getElementById('prompt-title').textContent = 'Verify Grade';
+    document.getElementById('prompt-msg').textContent = 'Confirm or update the grade:';
+    const area = document.getElementById('prompt-input-area');
+    area.innerHTML = `
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+            <select id="grade-company-input" style="font-size:0.9rem; padding:6px;">
+                <option value="PSA" ${currentCompany==='PSA'?'selected':''}>PSA</option>
+                <option value="CGC" ${currentCompany==='CGC'?'selected':''}>CGC</option>
+                <option value="BGS" ${currentCompany==='BGS'?'selected':''}>BGS</option>
+                <option value="SGC" ${currentCompany==='SGC'?'selected':''}>SGC</option>
+                <option value="AGS" ${currentCompany==='AGS'?'selected':''}>AGS</option>
+            </select>
+            <input id="grade-value-input" type="text" value="${currentGrade}" placeholder="e.g. 10, 9.5" style="width:80px; font-size:0.9rem; padding:6px;">
+        </div>`;
+    overlay.style.display = 'flex';
+    setTimeout(() => document.getElementById('grade-value-input').focus(), 50);
+
+    const result = await new Promise(resolve => {
+        const ok = () => {
+            overlay.style.display = 'none';
+            resolve({
+                company: document.getElementById('grade-company-input').value,
+                grade: document.getElementById('grade-value-input').value.trim(),
+            });
+        };
+        document.getElementById('prompt-ok').onclick = ok;
+        document.getElementById('prompt-cancel').onclick = () => {
+            overlay.style.display = 'none';
+            resolve(null);
+        };
+        document.getElementById('grade-value-input').onkeydown = (e) => { if (e.key === 'Enter') ok(); };
+    });
+    if (!result) return;
+
+    try {
+        await fetch(`/api/ingest/item/${itemId}/verify`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ status: 'here', grade_company: result.company, grade_value: result.grade }),
+        });
         viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }

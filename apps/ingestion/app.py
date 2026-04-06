@@ -448,6 +448,29 @@ def verify_item(item_id):
             if qty_confirmed is not None:
                 qty_confirmed = int(qty_confirmed)
             result = ingest.verify_item_here(item_id, qty_confirmed=qty_confirmed)
+
+            # Update condition (raw cards) or grade (graded slabs) if provided
+            condition = data.get("condition")
+            grade_company = data.get("grade_company")
+            grade_value = data.get("grade_value")
+            if condition:
+                db.execute("UPDATE intake_items SET condition = %s WHERE id = %s", (condition, item_id))
+            if grade_company or grade_value:
+                updates = []
+                params = []
+                if grade_company:
+                    updates.append("grade_company = %s")
+                    params.append(grade_company)
+                if grade_value:
+                    updates.append("grade_value = %s")
+                    params.append(grade_value)
+                params.append(item_id)
+                db.execute(f"UPDATE intake_items SET {', '.join(updates)} WHERE id = %s", tuple(params))
+
+            # Re-fetch if we updated extra fields
+            if condition or grade_company or grade_value:
+                if isinstance(result, dict) and "id" in result:
+                    result = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
             return jsonify({"success": True, "result": _serialize(result)})
 
         elif status == "missing":
