@@ -965,10 +965,20 @@ function _renderVerifyRow(item, sessionId) {
         </div>`;
     }
 
+    // Show condition/grade inline for raw/graded items
+    let typeLabel = ptype.toUpperCase();
+    if (ptype === 'raw') {
+        const cond = item.condition || 'NM';
+        const condColor = cond === 'NM' ? 'var(--green)' : cond === 'LP' ? 'var(--accent)' : cond === 'MP' ? 'var(--amber)' : 'var(--red)';
+        typeLabel = `<span style="color:${condColor};">${cond}</span>`;
+    } else if (item.is_graded) {
+        typeLabel = `${item.grade_company || 'PSA'} ${item.grade_value || '?'}`;
+    }
+
     return `<tr style="${rowStyle}" data-item-id="${item.id}">
         <td class="name-cell" data-label="">${name}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
         <td data-label="Qty">${item.quantity || 1}</td>
-        <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype.toUpperCase()}</span></td>
+        <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${typeLabel}</span></td>
         <td data-label="Store">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);" title="Market price (not in store)">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
         <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}</td>
         <td data-label="Verify">${verifyCell}</td>

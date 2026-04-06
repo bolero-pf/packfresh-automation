@@ -301,6 +301,41 @@ def undo_break_down(item_id: str) -> dict:
 
 DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
 
+# Condition multipliers for raw cards (applied to market price before offer %)
+CONDITION_MULTIPLIERS = {
+    "NM": Decimal("1.00"),
+    "LP": Decimal("0.80"),
+    "MP": Decimal("0.60"),
+    "HP": Decimal("0.40"),
+    "DMG": Decimal("0.25"),
+}
+
+
+def update_item_condition(item_id: str, condition: str) -> dict:
+    """Update a raw card's condition and recalculate its offer price."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    condition = condition.upper().strip()
+    if condition not in CONDITION_MULTIPLIERS:
+        raise ValueError(f"Invalid condition: {condition}. Must be NM, LP, MP, HP, or DMG")
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    market_price = Decimal(str(item.get("market_price", 0)))
+    qty = item.get("quantity", 1)
+    multiplier = CONDITION_MULTIPLIERS[condition]
+
+    new_offer = (market_price * multiplier * offer_pct * qty).quantize(Decimal("0.01"))
+
+    execute("""
+        UPDATE intake_items SET condition = %s, offer_price = %s WHERE id = %s
+    """, (condition, new_offer, item_id))
+
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
 
 def mark_item_damaged(item_id: str) -> dict:
     """Mark an entire item as damaged and apply damage discount to offer."""
