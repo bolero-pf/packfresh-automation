@@ -71,8 +71,31 @@ def list_sessions_pending(limit: int = 50) -> list[dict]:
     """, (limit,))
 
 
-def list_sessions_completed(limit: int = 50, days: int = None) -> list[dict]:
-    """List fully ingested sessions, optionally filtered by recency."""
+def list_sessions_completed(limit: int = 50, days: int = None, search: str = None) -> list[dict]:
+    """List fully ingested sessions, optionally filtered by recency and/or product search."""
+    # When searching, find sessions that contain items matching the search term
+    if search:
+        search_pattern = f"%{search}%"
+        params = [search_pattern]
+        days_clause = ""
+        if days:
+            days_clause = "AND s.ingested_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'"
+            params.append(days)
+        params.append(limit)
+        return query(f"""
+            SELECT s.*,
+                   COUNT(DISTINCT i.id) AS item_count,
+                   COALESCE(SUM(i.quantity), 0) AS total_qty
+            FROM intake_sessions s
+            JOIN intake_items i ON i.session_id = s.id
+            WHERE s.status = 'ingested'
+              AND i.product_name ILIKE %s
+              {days_clause}
+            GROUP BY s.id
+            ORDER BY s.ingested_at DESC
+            LIMIT %s
+        """, tuple(params))
+
     if days:
         return query("""
             SELECT s.*,

@@ -241,8 +241,9 @@ def list_sessions():
     status = request.args.get("status", "pending")  # 'pending' or 'completed'
     limit = int(request.args.get("limit", 50))
     days = request.args.get("days")  # for completed: filter by recency
+    search = request.args.get("search", "").strip()
     if status == "completed":
-        sessions = ingest.list_sessions_completed(limit=limit, days=int(days) if days else None)
+        sessions = ingest.list_sessions_completed(limit=limit, days=int(days) if days else None, search=search or None)
     else:
         sessions = ingest.list_sessions_pending(limit=limit)
     return jsonify([_serialize(s) for s in sessions])

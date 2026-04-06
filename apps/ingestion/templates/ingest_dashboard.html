@@ -361,6 +361,12 @@
             </div>
             <div id="tab-completed" style="display:none;">
                 <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap;">
+                    <div style="flex:1; min-width:180px; position:relative;">
+                        <input type="text" id="completed-search" placeholder="Search products..."
+                               style="width:100%; font-size:0.85rem; padding:6px 10px;"
+                               onkeydown="if(event.key==='Enter') loadCompletedSessions()">
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="loadCompletedSessions()" style="height:34px; font-size:0.82rem;">Search</button>
                     <select id="completed-days" onchange="loadCompletedSessions()" style="font-size:0.85rem; padding:4px 8px;">
                         <option value="7">Last 7 days</option>
                         <option value="14">Last 14 days</option>
@@ -549,9 +555,10 @@ async function loadCompletedSessions() {
     const el = document.getElementById('completed-sessions-list');
     const countEl = document.getElementById('completed-count');
     const days = document.getElementById('completed-days').value;
+    const search = (document.getElementById('completed-search')?.value || '').trim();
     el.innerHTML = '<div class="loading"><span class="spinner"></span> Loading...</div>';
     try {
-        const url = `/api/ingest/sessions?status=completed&limit=100${days ? '&days=' + days : ''}`;
+        const url = `/api/ingest/sessions?status=completed&limit=100${days ? '&days=' + days : ''}${search ? '&search=' + encodeURIComponent(search) : ''}`;
         const r = await fetch(url);
         const sessions = await r.json();
         if (countEl) countEl.textContent = `${sessions.length} session${sessions.length !== 1 ? 's' : ''}`;
@@ -1162,6 +1169,49 @@ function _renderPushContent(data) {
     }
 
     html += `</tbody></table></div></div>`;
+
+    // Pushed items — collapsible history
+    if (pushedItems.length > 0) {
+        const sortedPushed = _sortItems(pushedItems.filter(i => ['good','damaged'].includes(i.item_status)));
+        const pushedGroups = _groupItems(sortedPushed);
+        html += `<div class="card">
+        <details ${pushableItems.length === 0 ? 'open' : ''}>
+            <summary style="cursor:pointer; font-weight:600; font-size:0.9rem; color:var(--green); padding:4px 0; user-select:none;">
+                ✓ Already Pushed (${pushedItems.length}) — click to ${pushableItems.length === 0 ? 'collapse' : 'expand'}
+            </summary>
+            <div style="overflow-x:auto; margin-top:8px;">
+            <table class="responsive-cards">
+                <thead><tr>
+                    <th>Product</th><th>Qty</th><th>Type</th><th>Price</th><th>COGS</th><th>Pushed</th>
+                </tr></thead>
+                <tbody>`;
+        for (const group of pushedGroups) {
+            if (group.label) {
+                html += `<tr><td colspan="6" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+            }
+            for (const item of group.items) {
+                const st = item.item_status || 'good';
+                const isDamaged = st === 'damaged';
+                const name = item.product_name || 'Unknown';
+                const isChild = !!item.parent_item_id;
+                const ptype = item.product_type || 'sealed';
+                let badges = '';
+                if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
+                if (isChild) badges += ' <span class="badge badge-blue" style="font-size:0.65rem;">FROM BREAKDOWN</span>';
+                const pushedDate = item.pushed_at ? new Date(item.pushed_at).toLocaleDateString() : '';
+                html += `<tr style="opacity:0.7;">
+                    <td data-label="">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
+                    <td data-label="Qty">${item.quantity || 1}</td>
+                    <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype}</span></td>
+                    <td data-label="Price">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
+                    <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}</td>
+                    <td data-label="Pushed" style="color:var(--green); font-size:0.8rem;">${pushedDate}</td>
+                </tr>`;
+            }
+        }
+        html += `</tbody></table></div>
+        </details></div>`;
+    }
 
     // Store check
     html += `<div class="card">
