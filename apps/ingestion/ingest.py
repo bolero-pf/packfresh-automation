@@ -121,6 +121,33 @@ def get_session_items(session_id: str, include_missing: bool = False) -> list[di
 # BREAK DOWN
 # ==========================================
 
+import re
+
+_CARD_NUMBER_RE = re.compile(
+    r' - \d{2,3}(/\d{2,3})?$'   # "- 073" or "- 153/214"
+    r'|SWSH\d{2,3}$'            # "SWSH136"
+    r'|TG\d{2,3}$'              # "TG15"
+    r'| - [A-Z]{2,4}\d{2,4}$'   # "- SV046"
+)
+_SEALED_KEYWORDS = ['booster pack', 'booster box', 'etb', 'elite trainer box',
+                    'tin', 'bundle', 'blister', 'collection box', 'build & battle',
+                    'mini tins', 'premium collection']
+
+def _looks_like_single_card(name: str) -> bool:
+    """
+    Detect if a breakdown component name is a single card vs sealed product.
+    Logic: if the name contains a sealed keyword, it's sealed. Otherwise it's a card.
+    Breakdown children are either packs/boxes/tins (sealed) or individual cards (raw).
+    """
+    if not name:
+        return False
+    n = name.lower()
+    if any(kw in n for kw in _SEALED_KEYWORDS):
+        return False
+    # No sealed keywords → it's a single card
+    return True
+
+
 def break_down_item(item_id: str, components: list[dict]) -> dict:
     """
     Break down a sealed product into its component items.
@@ -187,8 +214,17 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
         allocated_offer += comp_offer
 
         child_id = str(uuid4())
-        # Promos are raw cards (barcoded + binned), not sealed products
-        child_product_type = "raw" if comp.get("component_type") == "promo" else "sealed"
+        # Determine if child is a raw card or sealed product.
+        # Promos are always raw. For "sealed" components, detect single cards
+        # by card number patterns (e.g. "- 073", "- 153/214", "SWSH136").
+        comp_type = comp.get("component_type", "sealed")
+        comp_name = comp.get("product_name", "")
+        if comp_type in ("promo", "raw"):
+            child_product_type = "raw"
+        elif _looks_like_single_card(comp_name):
+            child_product_type = "raw"
+        else:
+            child_product_type = "sealed"
         execute("""
             INSERT INTO intake_items (
                 id, session_id, product_name, set_name, tcgplayer_id,
