@@ -1132,19 +1132,43 @@ function _renderPushContent(data) {
     // Show final state items (good + damaged, not broken_down parents)
     const pushableItems = items.filter(i => ['good','damaged'].includes(i.item_status) && i.is_mapped && !i.pushed_at);
     const pushedItems = items.filter(i => i.pushed_at);
-    const sorted = _sortItems(pushableItems);
+
+    // Consolidate by product identity (tcgplayer_id + damaged status)
+    function _consolidateItems(itemList) {
+        const map = {};
+        for (const item of itemList) {
+            const isDamaged = item.item_status === 'damaged';
+            const key = (item.tcgplayer_id || item.id) + (isDamaged ? '_dmg' : '');
+            if (!map[key]) {
+                map[key] = {
+                    ...item,
+                    totalQty: 0,
+                    totalCogs: 0,
+                    itemIds: [],
+                };
+            }
+            map[key].totalQty += (item.quantity || 1);
+            map[key].totalCogs += (item.offer_price || 0);
+            map[key].itemIds.push(item.id);
+        }
+        return Object.values(map);
+    }
+
+    const consolidated = _consolidateItems(pushableItems);
+    const sorted = _sortItems(consolidated);
     const groups = _groupItems(sorted);
+    const totalUnits = consolidated.reduce((s, c) => s + c.totalQty, 0);
 
     let html = `<div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
             <h2 style="margin:0;">Push Summary</h2>
-            <span style="color:var(--text-dim); font-size:0.82rem;">${pushableItems.length} items ready · ${pushedItems.length} already pushed</span>
+            <span style="color:var(--text-dim); font-size:0.82rem;">${consolidated.length} products · ${totalUnits} units · ${pushedItems.length} already pushed</span>
         </div>
         ${_renderSortToolbar()}
         <div style="overflow-x:auto;">
         <table class="responsive-cards">
             <thead><tr>
-                <th>Product</th><th>Qty</th><th>Status</th><th>Price</th><th>COGS</th>
+                <th>Product</th><th>Qty</th><th>Type</th><th>Price</th><th>COGS</th>
             </tr></thead>
             <tbody>`;
 
@@ -1153,62 +1177,57 @@ function _renderPushContent(data) {
             html += `<tr><td colspan="5" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
         }
         for (const item of group.items) {
-            const st = item.item_status || 'good';
-            const isDamaged = st === 'damaged';
+            const isDamaged = item.item_status === 'damaged';
             const name = item.product_name || 'Unknown';
-            const isChild = !!item.parent_item_id;
+            const ptype = item.product_type || 'sealed';
             let badges = '';
             if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
-            if (isChild) badges += ' <span class="badge badge-blue" style="font-size:0.65rem;">FROM BREAKDOWN</span>';
-            const ptype = item.product_type || 'sealed';
-            html += `<tr style="${isDamaged ? 'background:rgba(255,170,0,0.06);' : ''}" data-item-id="${item.id}" data-item-status="${st}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${(item.product_name||'').replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
-                <td data-label="">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
-                <td data-label="Qty">${item.quantity || 1}</td>
-                <td data-label="Status"><span class="badge ${isDamaged ? 'badge-amber' : 'badge-green'}">${ptype}</span></td>
-                <td data-label="Store">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);" title="Market price (not in store)">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
-                <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}</td>
+            // data attrs use first item's ID for pushLive DOM queries
+            html += `<tr style="${isDamaged ? 'background:rgba(255,170,0,0.06);' : ''}" data-item-id="${item.itemIds[0]}" data-item-status="${item.item_status}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${name.replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
+                <td data-label="">${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
+                <td data-label="Qty" style="font-weight:600;">${item.totalQty}</td>
+                <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype}</span></td>
+                <td data-label="Price">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);" title="Market price (not in store)">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
+                <td data-label="COGS">$${item.totalCogs.toFixed(2)}${item.totalQty > 1 ? '<br><small style="color:var(--text-dim);">$' + (item.totalCogs / item.totalQty).toFixed(2) + '/ea</small>' : ''}</td>
             </tr>`;
         }
     }
 
     html += `</tbody></table></div></div>`;
 
-    // Pushed items — collapsible history
+    // Pushed items — collapsible history, consolidated
     if (pushedItems.length > 0) {
-        const sortedPushed = _sortItems(pushedItems.filter(i => ['good','damaged'].includes(i.item_status)));
+        const consolidatedPushed = _consolidateItems(pushedItems.filter(i => ['good','damaged'].includes(i.item_status)));
+        const sortedPushed = _sortItems(consolidatedPushed);
         const pushedGroups = _groupItems(sortedPushed);
+        const pushedUnits = consolidatedPushed.reduce((s, c) => s + c.totalQty, 0);
         html += `<div class="card">
         <details ${pushableItems.length === 0 ? 'open' : ''}>
             <summary style="cursor:pointer; font-weight:600; font-size:0.9rem; color:var(--green); padding:4px 0; user-select:none;">
-                ✓ Already Pushed (${pushedItems.length}) — click to ${pushableItems.length === 0 ? 'collapse' : 'expand'}
+                ✓ Already Pushed (${consolidatedPushed.length} products · ${pushedUnits} units)
             </summary>
             <div style="overflow-x:auto; margin-top:8px;">
             <table class="responsive-cards">
                 <thead><tr>
-                    <th>Product</th><th>Qty</th><th>Type</th><th>Price</th><th>COGS</th><th>Pushed</th>
+                    <th>Product</th><th>Qty</th><th>Type</th><th>Price</th><th>COGS</th>
                 </tr></thead>
                 <tbody>`;
         for (const group of pushedGroups) {
             if (group.label) {
-                html += `<tr><td colspan="6" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+                html += `<tr><td colspan="5" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
             }
             for (const item of group.items) {
-                const st = item.item_status || 'good';
-                const isDamaged = st === 'damaged';
+                const isDamaged = item.item_status === 'damaged';
                 const name = item.product_name || 'Unknown';
-                const isChild = !!item.parent_item_id;
                 const ptype = item.product_type || 'sealed';
                 let badges = '';
                 if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
-                if (isChild) badges += ' <span class="badge badge-blue" style="font-size:0.65rem;">FROM BREAKDOWN</span>';
-                const pushedDate = item.pushed_at ? new Date(item.pushed_at).toLocaleDateString() : '';
                 html += `<tr style="opacity:0.7;">
-                    <td data-label="">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
-                    <td data-label="Qty">${item.quantity || 1}</td>
+                    <td data-label="">${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
+                    <td data-label="Qty" style="font-weight:600;">${item.totalQty}</td>
                     <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype}</span></td>
                     <td data-label="Price">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
-                    <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}</td>
-                    <td data-label="Pushed" style="color:var(--green); font-size:0.8rem;">${pushedDate}</td>
+                    <td data-label="COGS">$${item.totalCogs.toFixed(2)}${item.totalQty > 1 ? '<br><small style="color:var(--text-dim);">$' + (item.totalCogs / item.totalQty).toFixed(2) + '/ea</small>' : ''}</td>
                 </tr>`;
             }
         }
@@ -2029,21 +2048,15 @@ async function _pollPushJob(jobId, total, panel) {
 
 
 async function pushLive(sessionId) {
-    // All unpushed items are candidates (verification replaces old approval gating)
-    const allItemRows = [...document.querySelectorAll('tr[data-item-id]')];
-    const gradedIds = new Set();
-    const sealedRawIds = new Set();
-    allItemRows.forEach(row => {
-        const id = row.getAttribute('data-item-id');
-        if (_pushedItemIds.has(id)) return;
-        if (row.getAttribute('data-item-status') === 'broken_down') return;
-        if (row.getAttribute('data-is-graded') === 'true') gradedIds.add(id);
-        else sealedRawIds.add(id);
-    });
-    const totalPending = gradedIds.size + sealedRawIds.size;
-    const isPartial = false;
+    // Count from session data, not DOM (Push tab has consolidated rows)
+    const items = _currentSessionData ? _currentSessionData.items : [];
+    const unpushed = items.filter(i => ['good','damaged'].includes(i.item_status) && i.is_mapped && !i.pushed_at);
+    const gradedItems = unpushed.filter(i => i.is_graded);
+    const sealedRawItems = unpushed.filter(i => !i.is_graded);
+    const gradedIds = new Set(gradedItems.map(i => i.id));
+    const totalPending = unpushed.length;
 
-    const confirmMsg = `Push ${totalPending} items (${gradedIds.size} graded slabs, ${sealedRawIds.size} sealed/raw). Cannot be easily undone.`;
+    const confirmMsg = `Push ${totalPending} items (${gradedItems.length} graded slabs, ${sealedRawItems.length} sealed/raw). Cannot be easily undone.`;
 
     const ok = await themedConfirm('🚀 Push Live', confirmMsg,
         { confirmText: `Push ${totalPending} Items`, dangerous: true });
@@ -2052,10 +2065,11 @@ async function pushLive(sessionId) {
     const panel = document.getElementById('push-live-results');
 
     // ── Step 1: Push sealed + raw items (background job with polling) ────────
-    if (sealedRawIds.size > 0) {
+    if (sealedRawItems.length > 0) {
         panel.innerHTML = '<div class="loading"><span class="spinner"></span> Starting push...</div>';
         try {
-            const body = JSON.stringify({ item_ids: [...sealedRawIds] });
+            // Send no item_ids — backend pushes all unpushed mapped items
+            const body = JSON.stringify({});
             const r = await fetch(`/api/ingest/session/${sessionId}/push-live`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
             });
@@ -2081,8 +2095,8 @@ async function pushLive(sessionId) {
     }
 
     // ── Step 2: Graded slabs — cert-entry UI ──────────────────────────────────
-    if (gradedIds.size > 0) {
-        await _showGradedCertPanel(sessionId, [...gradedIds], panel, sealedRawIds.size > 0);
+    if (gradedItems.length > 0) {
+        await _showGradedCertPanel(sessionId, gradedItems.map(i => i.id), panel, sealedRawItems.length > 0);
     }
 }
 
@@ -2231,16 +2245,20 @@ function printAllBarcodes() {
 }
 
 async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
-    // Build cert-entry cards for each graded item
+    // Build cert-entry cards from session data (not DOM — Push tab has consolidated rows)
+    const itemsMap = {};
+    if (_currentSessionData) {
+        _currentSessionData.items.forEach(i => { itemsMap[i.id] = i; });
+    }
     const gradedRows = gradedItemIds.map(id => {
-        const row = document.querySelector(`tr[data-item-id="${id}"]`);
-        if (!row) return null;
+        const item = itemsMap[id];
+        if (!item) return null;
         return {
             id,
-            name:    row.getAttribute('data-product-name') || 'Unknown',
-            company: row.getAttribute('data-grade-company') || 'PSA',
-            grade:   row.getAttribute('data-grade-value') || '?',
-            price:   row.getAttribute('data-price') || '0',
+            name:    item.product_name || 'Unknown',
+            company: item.grade_company || 'PSA',
+            grade:   item.grade_value || '?',
+            price:   item.market_price || '0',
         };
     }).filter(Boolean);
 
