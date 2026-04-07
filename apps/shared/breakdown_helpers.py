@@ -59,9 +59,14 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
                 "name": row.get("product_name") or "",
             }
 
-    # Fetch fresh prices from PPT
+    # Fetch fresh prices from PPT — cap per request to avoid nuking the rate limit
+    MAX_PPT_CALLS = 15
     fresh_prices = {}
+    call_count = 0
     for tcg_id, comp in unique_components.items():
+        if call_count >= MAX_PPT_CALLS:
+            logger.info(f"PPT refresh capped at {MAX_PPT_CALLS} calls — {len(unique_components) - call_count} remaining will refresh next time")
+            break
         if ppt.should_throttle():
             logger.warning("PPT rate limit reached — stopping component price refresh")
             break
@@ -71,9 +76,11 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
             else:
                 data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id, product_name=comp["name"])
             price = ppt.extract_market_price(data)
+            call_count += 1
             if price is not None:
                 fresh_prices[tcg_id] = price
         except Exception as e:
+            call_count += 1
             logger.warning(f"Failed to fetch price for component TCG#{tcg_id}: {e}")
 
     if not fresh_prices:
