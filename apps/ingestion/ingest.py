@@ -305,7 +305,8 @@ DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
 def update_item_condition(item_id: str, condition: str, ppt_client=None, price_override: float = None) -> dict:
     """
     Update a raw card's condition and recalculate its offer price.
-    Uses price_override if provided, then PPT condition pricing, then fallback multipliers.
+    Only adjusts price if condition actually changed or price_override is set.
+    Uses price_override > PPT condition pricing > fallback multipliers.
     """
     from ppt_client import PPTClient, FALLBACK_MULTIPLIERS
 
@@ -318,6 +319,14 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
     if condition not in valid:
         raise ValueError(f"Invalid condition: {condition}. Must be NM, LP, MP, HP, or DMG")
 
+    old_condition = (item.get("condition") or "NM").upper().strip()
+    condition_changed = condition != old_condition
+
+    # If condition didn't change and no price override, just update the column (no-op on price)
+    if not condition_changed and price_override is None:
+        execute("UPDATE intake_items SET condition = %s WHERE id = %s", (condition, item_id))
+        return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
     session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     qty = item.get("quantity", 1)
@@ -325,8 +334,8 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
 
     if price_override is not None:
         new_market = Decimal(str(price_override)).quantize(Decimal("0.01"))
-    else:
-        # Try PPT for real condition pricing
+    elif condition_changed:
+        # Only look up new price when condition actually changed
         condition_market = None
         if tcg_id and ppt_client:
             try:
@@ -340,9 +349,19 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
         if condition_market is not None:
             new_market = condition_market
         else:
-            nm_market = Decimal(str(item.get("market_price", 0)))
-            mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
-            new_market = (nm_market * mult).quantize(Decimal("0.01"))
+            # Fallback: adjust deal-time price proportionally
+            deal_market = Decimal(str(item.get("market_price", 0)))
+            old_mult = FALLBACK_MULTIPLIERS.get(old_condition, Decimal("1.00"))
+            new_mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
+            # Derive NM price from current market, then apply new condition
+            if old_mult > 0:
+                nm_price = deal_market / old_mult
+            else:
+                nm_price = deal_market
+            new_market = (nm_price * new_mult).quantize(Decimal("0.01"))
+    else:
+        # No change needed
+        return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
     new_offer = (new_market * offer_pct * qty).quantize(Decimal("0.01"))
 
@@ -369,6 +388,16 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
     company = grade_company or item.get("grade_company", "PSA")
     grade = grade_value or item.get("grade_value", "")
 
+    old_company = (item.get("grade_company") or "PSA").upper()
+    old_grade = str(item.get("grade_value") or "")
+    grade_changed = company.upper() != old_company or str(grade) != old_grade
+
+    # If grade didn't change and no price override, just update columns
+    if not grade_changed and price_override is None:
+        execute("UPDATE intake_items SET grade_company = %s, grade_value = %s WHERE id = %s",
+                (company, grade, item_id))
+        return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
     session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     qty = item.get("quantity", 1)
@@ -377,7 +406,8 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
     new_market = None
     if price_override is not None:
         new_market = Decimal(str(price_override)).quantize(Decimal("0.01"))
-    elif tcg_id and ppt_client:
+    elif grade_changed and tcg_id and ppt_client:
+        # Only look up price when grade actually changed
         try:
             card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
             if card_data:
