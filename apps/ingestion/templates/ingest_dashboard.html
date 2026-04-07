@@ -2369,10 +2369,10 @@ function _renderSealedRawResults(d, sessionId, panel) {
         html += '</tbody></table>';
     }
 
-    // ── Barcode labels for raw cards ─────────────────────────────────────────
+    // ── Barcode labels for raw cards (sorted) ──────────────────────────────────
     const rawResults = (d.results||[]).filter(r => r.action === 'raw_card_ingested' && r.barcodes?.length);
     if (rawResults.length) {
-        const allBarcodes = rawResults.flatMap(r => r.barcodes || []);
+        const allBarcodes = _sortBarcodeCards(rawResults.flatMap(r => r.barcodes || []));
         html += `<div style="margin-top:16px; border-top:1px solid var(--border); padding-top:14px;">
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
                 <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${allBarcodes.length})</div>
@@ -2403,6 +2403,18 @@ function _renderSealedRawResults(d, sessionId, panel) {
     panel.innerHTML = html;
 }
 
+// Sort barcode cards using the current sort preference
+function _sortBarcodeCards(cards) {
+    const sorted = [...cards];
+    if (_currentSortBy === 'alpha') sorted.sort((a, b) => (a.card_name || '').localeCompare(b.card_name || ''));
+    else if (_currentSortBy === 'price-high') sorted.sort((a, b) => (b.current_price || 0) - (a.current_price || 0));
+    else if (_currentSortBy === 'price-low') sorted.sort((a, b) => (a.current_price || 0) - (b.current_price || 0));
+    return sorted;
+}
+
+// Store cards for print-all (sorted)
+let _sessionBarcodeCards = [];
+
 async function _loadSessionBarcodes(sessionId) {
     try {
         const r = await fetch(`/api/raw-cards/session/${sessionId}`);
@@ -2411,51 +2423,80 @@ async function _loadSessionBarcodes(sessionId) {
         const cards = d.cards || [];
         if (!cards.length) return;
 
+        _sessionBarcodeCards = cards;
+
         const panel = document.getElementById('session-barcode-section');
         if (!panel) return;
 
-        // Build barcode grid from DB records — use reprint endpoint for images
-        const grid = cards.map(c => `
-            <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px;">
-                <img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:100%; border-radius:4px; background:#fff;" alt="barcode" loading="lazy">
-                <div style="font-size:0.78rem; color:var(--text-dim);">
-                    <strong style="color:var(--text);">${c.card_name||''}</strong><br>
-                    ${c.set_name||''} · ${c.condition||''} · <span style="color:var(--accent); font-family:monospace;">${c.bin_label||'?'}</span>
-                </div>
-                <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" onclick="printOneBarcode('${c.barcode}')">🖨 Print</button>
-            </div>
-        `).join('');
-
-        const barcodeSection = document.createElement('div');
-        barcodeSection.className = 'card';
-        barcodeSection.innerHTML = `
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-                <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${cards.length})</div>
-                <button class="btn btn-primary btn-sm" onclick="printAllBarcodesFromSession('${sessionId}')" style="font-size:0.78rem;">🖨 Print All</button>
-            </div>
-            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-                ${grid}
-            </div>
-        `;
-
-        // Append to push-live-results if empty, otherwise replace any existing barcode section
-        const existing = panel.querySelector('.barcode-session-section');
-        if (existing) existing.remove();
-        barcodeSection.classList.add('barcode-session-section');
-        panel.appendChild(barcodeSection);
+        _renderBarcodeSection(panel, sessionId);
     } catch(e) { /* silent — barcodes are bonus UI */ }
 }
 
+function _renderBarcodeSection(panel, sessionId) {
+    const sorted = _sortBarcodeCards(_sessionBarcodeCards);
+
+    const grid = sorted.map(c => `
+        <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px;">
+            <img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:100%; border-radius:4px; background:#fff;" alt="barcode" loading="lazy">
+            <div style="font-size:0.78rem; color:var(--text-dim);">
+                <strong style="color:var(--text);">${c.card_name||''}</strong><br>
+                ${c.set_name||''} · ${c.condition||''} · <span style="color:var(--accent); font-family:monospace;">${c.bin_label||'?'}</span>
+            </div>
+            <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" onclick="printOneBarcode('${c.barcode}')">🖨 Print</button>
+        </div>
+    `).join('');
+
+    const barcodeSection = document.createElement('div');
+    barcodeSection.className = 'card barcode-session-section';
+    barcodeSection.innerHTML = `
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+            <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${sorted.length})</div>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <select onchange="_currentSortBy=this.value; _renderBarcodeSection(document.getElementById('session-barcode-section'), '${sessionId}');" style="font-size:0.82rem; padding:4px 8px;">
+                    <option value="default" ${_currentSortBy==='default'?'selected':''}>Default</option>
+                    <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>A→Z</option>
+                    <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price ↓</option>
+                    <option value="price-low" ${_currentSortBy==='price-low'?'selected':''}>Price ↑</option>
+                </select>
+                <button class="btn btn-primary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All</button>
+            </div>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+            ${grid}
+        </div>
+    `;
+
+    const existing = panel.querySelector('.barcode-session-section');
+    if (existing) existing.remove();
+    panel.appendChild(barcodeSection);
+}
+
+function printBarcodesInOrder() {
+    const sorted = _sortBarcodeCards(_sessionBarcodeCards);
+    if (!sorted.length) return;
+    const win = window.open('', '_blank');
+    const imgs = sorted.map(c =>
+        `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
+    ).join('');
+    win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
+    win.document.close();
+}
+
 async function printAllBarcodesFromSession(sessionId) {
+    // Legacy fallback — use sorted version if available
+    if (_sessionBarcodeCards.length) {
+        printBarcodesInOrder();
+        return;
+    }
     try {
         const r = await fetch(`/api/raw-cards/session/${sessionId}`);
         const d = await r.json();
         const cards = d.cards || [];
         if (!cards.length) return;
+        const sorted = _sortBarcodeCards(cards);
         const win = window.open('', '_blank');
-        // Use reprint endpoint URLs — browser will fetch them
-        const imgs = cards.map(c =>
-            `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:62mm; display:block; page-break-after:always;">`
+        const imgs = sorted.map(c =>
+            `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
         ).join('');
         win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
         win.document.close();
@@ -2475,7 +2516,7 @@ function printOneBarcode(barcodeId) {
 }
 
 function printAllBarcodes() {
-    const barcodes = window._lastBarcodes || [];
+    const barcodes = _sortBarcodeCards(window._lastBarcodes || []);
     if (!barcodes.length) return;
     const win = window.open('', '_blank');
     const imgs = barcodes.map(b =>
