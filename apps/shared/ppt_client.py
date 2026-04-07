@@ -181,21 +181,18 @@ class PPTClient:
                     raise PPTError("PPT daily limit reached", 429, {"retry_after": retry_after, "daily_exhausted": True})
                 raise PPTError(f"PPT rate limited — retry in {retry_after}s", 429, {"retry_after": retry_after})
 
-            if r.status_code == 403:
+            # 4xx errors are client errors — retrying won't help, don't waste quota
+            if 400 <= r.status_code < 500:
                 try:
                     body = r.json()
                 except Exception:
-                    body = r.text
-                raise PPTError(f"PPT 403 Forbidden", 403, body)
+                    body = r.text[:500] if r.text else None
+                logger.warning(f"PPT {r.status_code} response body: {body}")
+                raise PPTError(f"PPT {r.status_code}: {body}", r.status_code, body)
 
-            # Log the response body on non-retryable errors so we can diagnose
-            try:
-                err_body = r.json()
-            except Exception:
-                err_body = r.text[:500] if r.text else None
-            logger.warning(f"PPT {r.status_code} response body: {err_body}")
-
+            # 5xx — retry
             last_err = r
+            logger.warning(f"PPT {r.status_code} (attempt {attempt}/{max_tries})")
             time.sleep(1.0 * attempt)
 
         status = last_err.status_code if last_err else "UNKNOWN"
