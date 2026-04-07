@@ -90,6 +90,66 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
     return assignments
 
 
+def assign_display(count: int, db) -> list[dict]:
+    """
+    Assign cards to binder display locations (location_type='binder').
+
+    Fills earliest binder with room first, same sequential pattern as assign_bins().
+    Returns [] if no binder capacity available (caller should fall back to storage).
+    """
+    if count <= 0:
+        return []
+
+    binders = db.query("""
+        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
+               (sl.capacity - sl.current_count) AS available
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sr.location_type = 'binder'
+          AND sl.current_count < sl.capacity
+        ORDER BY sl.bin_label ASC
+    """)
+
+    if not binders:
+        return []
+
+    total_available = sum(b["available"] for b in binders)
+    if total_available < count:
+        # Partial assignment: fill what we can, caller handles the rest
+        if total_available == 0:
+            return []
+
+    assignments = []
+    remaining = count
+
+    for b in binders:
+        if remaining <= 0:
+            break
+        take = min(remaining, b["available"])
+        assignments.append({
+            "bin_id":    str(b["id"]),
+            "bin_label": b["bin_label"],
+            "count":     take,
+        })
+        remaining -= take
+
+    logger.info(f"Assigned {count - remaining} cards to binder(s): "
+                f"{[a['bin_label'] for a in assignments]}")
+    return assignments
+
+
+def get_binder_capacity(db) -> list[dict]:
+    """Return binder locations with current capacity info."""
+    return [dict(r) for r in db.query("""
+        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
+               (sl.capacity - sl.current_count) AS available
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sr.location_type = 'binder'
+        ORDER BY sl.bin_label ASC
+    """)]
+
+
 def release_bins(assignments: list[dict], db) -> None:
     """
     Return cards to bins (undo an assignment — e.g. on push-live rollback).

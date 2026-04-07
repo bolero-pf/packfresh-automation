@@ -30,10 +30,10 @@ except ImportError:
     psa_client = None
     PSAQuotaHit = Exception
 try:
-    from storage import assign_bins, release_bins, _canonical_card_type
+    from storage import assign_bins, release_bins, _canonical_card_type, assign_display, get_binder_capacity
 except ImportError as e:
     logger.error(f"storage import failed: {e} — raw card push will not work")
-    assign_bins = release_bins = _canonical_card_type = None
+    assign_bins = release_bins = _canonical_card_type = assign_display = get_binder_capacity = None
 try:
     from barcode_gen import generate_barcode_id, generate_barcode_image
 except ImportError as e:
@@ -569,13 +569,21 @@ def push_dry_run(session_id):
 
     # Raw cards — show what would be inserted into raw_cards table
     for item in raw_items:
+        dest = item.get("routing_destination") or "storage"
+        dest_notes = {
+            "storage": "Barcode + bin assignment",
+            "display": "Barcode + binder assignment",
+            "grade":   "Marked for grading — no barcode",
+            "bulk":    "Bulk — no tracking",
+        }
         results.append({
             "product_name": item.get("product_name"),
             "quantity": item.get("quantity", 1),
             "action": "would_ingest_raw",
             "new_title": item.get("product_name"),
             "listing_price": float(item.get("market_price", 0)),
-            "note": "Barcode generated + assigned to bin — no Shopify listing",
+            "note": f"→ {dest.upper()}: {dest_notes.get(dest, dest)}",
+            "routing_destination": dest,
         })
 
     # Graded slabs — show cert entry required
@@ -753,12 +761,20 @@ def _push_session_worker(job_id, session_id, active):
             })
             job["progress"] += 1
 
-        # Raw cards
+        # Raw cards — route by destination
         for item in raw_items:
             item_dict = dict(item)
             item_dict["session_id"] = session_id
+            dest = item.get("routing_destination") or "storage"
             try:
-                r = _push_raw_item(item_dict)
+                if dest == "bulk":
+                    r = _push_raw_to_bulk(item_dict)
+                elif dest == "display":
+                    r = _push_raw_to_display(item_dict)
+                elif dest == "grade":
+                    r = _push_raw_to_grade(item_dict)
+                else:
+                    r = _push_raw_item(item_dict)
                 results.append(r)
                 db.execute("UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",
                            (item["id"],))
@@ -995,10 +1011,187 @@ def _push_raw_item(item: dict) -> dict:
 
     return {
         "action":      "raw_card_ingested",
+        "destination":  "storage",
         "product_name": card_name,
         "quantity":    qty,
         "barcodes":    results,
         "bins":        [a["bin_label"] for a in assignments],
+    }
+
+
+def _fetch_ppt_data(tcg_id, card_name, set_name):
+    """Shared PPT lookup for raw card push functions."""
+    image_url = None
+    ppt_card_number = None
+    if tcg_id and ppt:
+        try:
+            card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+            if card_data:
+                image_url = (card_data.get("imageCdnUrl800")
+                             or card_data.get("imageCdnUrl")
+                             or card_data.get("imageCdnUrl400"))
+                card_name = card_data.get("name") or card_name
+                set_name  = card_data.get("setName") or set_name
+                ppt_card_number = card_data.get("cardNumber") or card_data.get("number")
+        except Exception as e:
+            logger.warning(f"PPT fetch for raw card TCG#{tcg_id} failed: {e}")
+    return card_name, set_name, image_url, ppt_card_number
+
+
+def _push_raw_to_display(item: dict) -> dict:
+    """Push raw card to a binder display location. Barcode + label generated."""
+    if not generate_barcode_id or not assign_display:
+        raise RuntimeError("barcode_gen or storage module not available")
+
+    tcg_id    = item.get("tcgplayer_id")
+    card_name = item.get("product_name", "Unknown")
+    set_name  = item.get("set_name", "")
+    condition = item.get("condition") or "NM"
+    qty       = item.get("quantity", 1)
+    cost      = float(item.get("offer_price", 0)) / max(qty, 1)
+
+    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name)
+
+    assignments = assign_display(qty, db)
+    if not assignments:
+        # No binder capacity — fall back to storage
+        logger.info(f"No binder capacity for {card_name} — falling back to storage")
+        return _push_raw_item(item)
+
+    assigned_qty = sum(a["count"] for a in assignments)
+
+    results = []
+    for assignment in assignments:
+        bin_id    = assignment["bin_id"]
+        bin_label = assignment["bin_label"]
+        count     = assignment["count"]
+
+        for _ in range(count):
+            barcode_id = generate_barcode_id()
+            db.execute("""
+                INSERT INTO raw_cards (
+                    barcode, tcgplayer_id, card_name, set_name,
+                    card_number, condition, rarity,
+                    state, cost_basis, current_price, last_price_update,
+                    bin_id, image_url,
+                    is_graded, grade_company, grade_value,
+                    variant, language,
+                    intake_session_id, stored_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    'DISPLAY', %s, %s, CURRENT_TIMESTAMP,
+                    %s, %s,
+                    FALSE, NULL, NULL,
+                    %s, 'EN',
+                    %s, CURRENT_TIMESTAMP
+                )
+            """, (
+                barcode_id, tcg_id, card_name, set_name,
+                ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
+                cost, float(item.get("market_price", cost)),
+                bin_id, image_url,
+                item.get("variant"),
+                item.get("session_id"),
+            ))
+
+            png_bytes = generate_barcode_image(
+                barcode_id,
+                card_name=card_name,
+                set_name=set_name,
+                condition=condition,
+                card_number=ppt_card_number or item.get("card_number") or "",
+            )
+
+            results.append({
+                "barcode":    barcode_id,
+                "bin_label":  bin_label,
+                "card_name":  card_name,
+                "set_name":   set_name,
+                "condition":  condition,
+                "png_b64":    __import__("base64").b64encode(png_bytes).decode(),
+            })
+
+    # If binders couldn't hold all cards, push remainder to storage
+    if assigned_qty < qty:
+        overflow_item = dict(item)
+        overflow_item["quantity"] = qty - assigned_qty
+        overflow_result = _push_raw_item(overflow_item)
+        results.extend(overflow_result.get("barcodes", []))
+
+    return {
+        "action":      "raw_card_ingested",
+        "destination":  "display",
+        "product_name": card_name,
+        "quantity":    qty,
+        "barcodes":    results,
+        "bins":        [a["bin_label"] for a in assignments],
+    }
+
+
+def _push_raw_to_grade(item: dict) -> dict:
+    """Mark raw card as sent for grading. No barcode, no bin assignment."""
+    tcg_id    = item.get("tcgplayer_id")
+    card_name = item.get("product_name", "Unknown")
+    set_name  = item.get("set_name", "")
+    condition = item.get("condition") or "NM"
+    qty       = item.get("quantity", 1)
+    cost      = float(item.get("offer_price", 0)) / max(qty, 1)
+
+    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name)
+
+    for _ in range(qty):
+        barcode_id = generate_barcode_id() if generate_barcode_id else str(_uuid.uuid4())[:20]
+        db.execute("""
+            INSERT INTO raw_cards (
+                barcode, tcgplayer_id, card_name, set_name,
+                card_number, condition, rarity,
+                state, cost_basis, current_price, last_price_update,
+                bin_id, image_url,
+                is_graded, grade_company, grade_value,
+                variant, language,
+                intake_session_id, removal_reason, removal_date
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                'REMOVED', %s, %s, CURRENT_TIMESTAMP,
+                NULL, %s,
+                FALSE, NULL, NULL,
+                %s, 'EN',
+                %s, 'GRADING', CURRENT_TIMESTAMP
+            )
+        """, (
+            barcode_id, tcg_id, card_name, set_name,
+            ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
+            cost, float(item.get("market_price", cost)),
+            image_url,
+            item.get("variant"),
+            item.get("session_id"),
+        ))
+
+    return {
+        "action":      "raw_card_graded",
+        "destination":  "grade",
+        "product_name": card_name,
+        "quantity":    qty,
+        "barcodes":    [],
+        "bins":        [],
+    }
+
+
+def _push_raw_to_bulk(item: dict) -> dict:
+    """Bulk cards — no individual tracking, no barcode, no raw_cards row."""
+    card_name = item.get("product_name", "Unknown")
+    qty       = item.get("quantity", 1)
+
+    # We don't insert into raw_cards — these are not individually tracked
+    logger.info(f"Bulk routed: {qty}x {card_name}")
+
+    return {
+        "action":      "raw_card_bulk",
+        "destination":  "bulk",
+        "product_name": card_name,
+        "quantity":    qty,
+        "barcodes":    [],
+        "bins":        [],
     }
 
 
@@ -1322,15 +1515,155 @@ def push_graded_item(item_id):
     return jsonify({"success": True, **result})
 
 
+# ═══════════════════════════════════════════════════════════════════
+# RAW CARD ROUTING
+# ═══════════════════════════════════════════════════════════════════
+
+ROUTING_DESTINATIONS = {"storage", "display", "grade", "bulk"}
+
+
+@app.route("/api/ingest/session/<session_id>/auto-route", methods=["POST"])
+def auto_route_session(session_id):
+    """
+    Apply price-based routing rules to all raw items in a session.
+    Rules: <$1 = bulk, $1-$5 = display (if binder capacity), else storage.
+    Does NOT overwrite items that have already been manually routed.
+    """
+    items = db.query("""
+        SELECT id, market_price, quantity, routing_destination
+        FROM intake_items
+        WHERE session_id = %s
+          AND product_type = 'raw'
+          AND is_graded IS NOT TRUE
+          AND item_status IN ('good', 'damaged')
+          AND is_mapped = TRUE
+          AND pushed_at IS NULL
+        ORDER BY COALESCE(market_price, 0) ASC
+    """, (session_id,))
+
+    if not items:
+        return jsonify({"error": "No raw items to route"}), 400
+
+    # Get total binder capacity
+    binder_remaining = 0
+    if get_binder_capacity:
+        binders = get_binder_capacity(db)
+        binder_remaining = sum(b["available"] for b in binders)
+
+    routed = {"storage": 0, "display": 0, "grade": 0, "bulk": 0}
+
+    for item in items:
+        price = float(item.get("market_price") or 0)
+        qty = item.get("quantity", 1)
+
+        if price < 1.00:
+            dest = "bulk"
+        elif price < 5.00 and binder_remaining >= qty:
+            dest = "display"
+            binder_remaining -= qty
+        else:
+            dest = "storage"
+
+        db.execute("""
+            UPDATE intake_items SET routing_destination = %s WHERE id = %s
+        """, (dest, item["id"]))
+        routed[dest] += qty
+
+    return jsonify({"success": True, "routed": routed, "binder_remaining": binder_remaining})
+
+
+@app.route("/api/ingest/session/<session_id>/route-card", methods=["POST"])
+def route_card(session_id):
+    """Set routing destination for a single item."""
+    data = request.get_json(silent=True) or {}
+    item_id = data.get("item_id")
+    destination = data.get("destination")
+
+    if not item_id or destination not in ROUTING_DESTINATIONS:
+        return jsonify({"error": f"item_id required, destination must be one of {ROUTING_DESTINATIONS}"}), 400
+
+    db.execute("""
+        UPDATE intake_items SET routing_destination = %s
+        WHERE id = %s AND session_id = %s
+    """, (destination, item_id, session_id))
+
+    return jsonify({"success": True})
+
+
+@app.route("/api/ingest/session/<session_id>/route-batch", methods=["POST"])
+def route_batch(session_id):
+    """Batch route multiple items to the same destination."""
+    data = request.get_json(silent=True) or {}
+    item_ids = data.get("item_ids", [])
+    destination = data.get("destination")
+
+    if not item_ids or destination not in ROUTING_DESTINATIONS:
+        return jsonify({"error": "item_ids and valid destination required"}), 400
+
+    for item_id in item_ids:
+        db.execute("""
+            UPDATE intake_items SET routing_destination = %s
+            WHERE id = %s AND session_id = %s
+        """, (destination, item_id, session_id))
+
+    return jsonify({"success": True, "count": len(item_ids)})
+
+
+@app.route("/api/ingest/session/<session_id>/route-summary")
+def route_summary(session_id):
+    """Get routing status for a session's raw items."""
+    items = db.query("""
+        SELECT id, product_name, set_name, condition, market_price, quantity,
+               routing_destination, image_url, tcgplayer_id, card_number
+        FROM intake_items
+        WHERE session_id = %s
+          AND product_type = 'raw'
+          AND is_graded IS NOT TRUE
+          AND item_status IN ('good', 'damaged')
+          AND is_mapped = TRUE
+          AND pushed_at IS NULL
+        ORDER BY COALESCE(market_price, 0) ASC
+    """, (session_id,))
+
+    by_dest = {"storage": 0, "display": 0, "grade": 0, "bulk": 0}
+    for item in items:
+        dest = item.get("routing_destination") or "storage"
+        qty = item.get("quantity", 1)
+        by_dest[dest] = by_dest.get(dest, 0) + qty
+
+    total_qty = sum(i.get("quantity", 1) for i in items)
+
+    # Binder capacity
+    binder_capacity = []
+    if get_binder_capacity:
+        binder_capacity = get_binder_capacity(db)
+
+    return jsonify({
+        "items": [dict(i) for i in items],
+        "total_items": len(items),
+        "total_qty": total_qty,
+        "by_destination": by_dest,
+        "binder_capacity": binder_capacity,
+    })
+
+
+@app.route("/api/ingest/binder-locations")
+def binder_locations():
+    """List binder locations with capacity."""
+    if not get_binder_capacity:
+        return jsonify({"error": "Storage module not available"}), 503
+    return jsonify({"binders": get_binder_capacity(db)})
+
+
 @app.route("/api/ingest/session/<session_id>/push-raw", methods=["POST"])
 def push_raw_items(session_id):
     """
     Push all unmapped raw (non-graded) items in a session to internal inventory.
-    Generates barcodes, assigns bins, inserts raw_cards rows.
+    Routes cards based on routing_destination: storage, display, grade, or bulk.
 
     POST body (optional): { "item_ids": [...] }  — subset of items to push
 
-    Returns list of barcode results with PNG data (base64) for printing.
+    Returns list of results grouped by destination.
     """
     session = ingest.get_session(session_id)
     if not session:
@@ -1361,8 +1694,16 @@ def push_raw_items(session_id):
     for item in items:
         item_dict = dict(item)
         item_dict["session_id"] = session_id
+        dest = item.get("routing_destination") or "storage"
         try:
-            r = _push_raw_item(item_dict)
+            if dest == "bulk":
+                r = _push_raw_to_bulk(item_dict)
+            elif dest == "display":
+                r = _push_raw_to_display(item_dict)
+            elif dest == "grade":
+                r = _push_raw_to_grade(item_dict)
+            else:
+                r = _push_raw_item(item_dict)  # storage (original)
             results.append(r)
             db.execute(
                 "UPDATE intake_items SET pushed_at = CURRENT_TIMESTAMP WHERE id = %s",

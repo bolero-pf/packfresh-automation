@@ -604,7 +604,7 @@ function showList() {
 // ═══════════════════════════════════════════════════════════════════
 
 // ── STAGE STATE ──────────────────────────────────────────────────────────
-let _currentStage = 'verify';  // 'verify' | 'breakdown' | 'push'
+let _currentStage = 'verify';  // 'verify' | 'breakdown' | 'route' | 'push'
 let _currentSessionData = null;
 let _currentSortBy = 'default';  // 'default' | 'alpha' | 'price-high' | 'price-low'
 let _currentGroupBy = 'none';    // 'none' | 'type' | 'set'
@@ -669,6 +669,7 @@ function _rerenderStage() {
     if (!container) return;
     if (_currentStage === 'verify') container.innerHTML = _renderVerifyContent(_currentSessionData);
     else if (_currentStage === 'breakdown') container.innerHTML = _renderBreakdownContent(_currentSessionData);
+    else if (_currentStage === 'route') container.innerHTML = _renderRouteContent(_currentSessionData);
     else if (_currentStage === 'push') container.innerHTML = _renderPushContent(_currentSessionData);
     _postRenderStage();
 }
@@ -680,6 +681,9 @@ function _postRenderStage() {
     if (_currentStage === 'breakdown') {
         _lastRenderedItems = items;
         _enrichBreakdownSummaries(items, sessionId, true);
+    }
+    if (_currentStage === 'route') {
+        _loadRouteData(s.id);
     }
     if (_currentStage === 'push') {
         _loadSessionBarcodes(sessionId);
@@ -697,9 +701,9 @@ function switchStage(stage) {
 function _updateStageTabs() {
     if (!_currentSessionData) return;
     const s = _currentSessionData.session;
-    const statusToStage = { received: 0, verified: 1, breakdown_complete: 2, partially_ingested: 2, ingested: 2 };
+    const statusToStage = { received: 0, verified: 1, breakdown_complete: 2, partially_ingested: 3, ingested: 3 };
     const maxStage = statusToStage[s.status] ?? 0;
-    const stageOrder = { verify: 0, breakdown: 1, push: 2 };
+    const stageOrder = { verify: 0, breakdown: 1, route: 2, push: 3 };
 
     document.querySelectorAll('.stage-tab').forEach(tab => {
         const stage = tab.dataset.stage;
@@ -733,7 +737,7 @@ async function viewSession(sessionId, _preserveScroll) {
         const statusToStage = {
             received: 'verify',
             verified: 'breakdown',
-            breakdown_complete: 'push',
+            breakdown_complete: 'route',
             partially_ingested: 'push',
             ingested: 'push',
         };
@@ -747,7 +751,7 @@ async function viewSession(sessionId, _preserveScroll) {
         const statusBadge = {
             received: { cls: 'badge-amber', label: 'Verify' },
             verified: { cls: 'badge-blue', label: 'Breakdown' },
-            breakdown_complete: { cls: 'badge-green', label: 'Ready to Push' },
+            breakdown_complete: { cls: 'badge-accent', label: 'Route' },
             partially_ingested: { cls: 'badge-blue', label: '📦 Partial' },
             ingested: { cls: 'badge-green', label: 'Ingested' },
         }[s.status] || { cls: 'badge-dim', label: s.status };
@@ -787,8 +791,11 @@ async function viewSession(sessionId, _preserveScroll) {
                 <button class="stage-tab" data-stage="breakdown" onclick="switchStage('breakdown')">
                     <span class="stage-num">2</span> Breakdown
                 </button>
+                <button class="stage-tab" data-stage="route" onclick="switchStage('route')">
+                    <span class="stage-num">3</span> Route
+                </button>
                 <button class="stage-tab" data-stage="push" onclick="switchStage('push')">
-                    <span class="stage-num">3</span> Push
+                    <span class="stage-num">4</span> Push
                 </button>
             </div>
 
@@ -1363,6 +1370,168 @@ async function completeBreakdown(sessionId) {
         viewSession(sessionId, false);
     } catch(err) { alert(err.message); }
 }
+
+// ── ROUTE STAGE ─────────────────────────────────────────────────────────
+let _routeData = null;  // { items, by_destination, binder_capacity }
+
+async function _loadRouteData(sessionId) {
+    const container = document.getElementById('stage-content');
+    if (!container) return;
+
+    // Check if session has raw items
+    const rawItems = (_currentSessionData?.items || []).filter(i =>
+        i.product_type === 'raw' && !i.is_graded &&
+        ['good','damaged'].includes(i.item_status) && i.is_mapped && !i.pushed_at
+    );
+
+    if (!rawItems.length) {
+        container.innerHTML = `<div class="card">
+            <p style="color:var(--text-dim);">No raw cards to route in this session.</p>
+            <button class="btn btn-primary" onclick="switchStage('push')">Continue to Push</button>
+        </div>`;
+        return;
+    }
+
+    container.innerHTML = '<div class="loading"><span class="spinner"></span> Loading routing data...</div>';
+
+    try {
+        // Auto-route first (sets defaults), then get summary
+        await fetch(`/api/ingest/session/${sessionId}/auto-route`, { method: 'POST' });
+        const r = await fetch(`/api/ingest/session/${sessionId}/route-summary`);
+        const data = await r.json();
+        _routeData = data;
+        _renderRouteCards(sessionId, data);
+    } catch(e) {
+        container.innerHTML = `<div class="alert alert-error">Failed to load routing: ${e.message}</div>`;
+    }
+}
+
+function _renderRouteContent(data) {
+    // Placeholder — real content loaded by _loadRouteData via _postRenderStage
+    return `<div class="loading"><span class="spinner"></span> Loading routing...</div>`;
+}
+
+function _renderRouteCards(sessionId, data) {
+    const container = document.getElementById('stage-content');
+    if (!container) return;
+
+    const items = _sortItems(data.items || []);
+    const byDest = data.by_destination || {};
+    const totalQty = data.total_qty || 0;
+    const binders = data.binder_capacity || [];
+    const binderAvail = binders.reduce((s, b) => s + (b.available || 0), 0);
+
+    // Summary bar
+    let html = `<div class="card" style="position:sticky; top:0; z-index:10; border-color:var(--accent);">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+            <div class="stats" style="margin:0; flex:1;">
+                <div class="stat"><div class="stat-label">Total</div><div class="stat-value">${totalQty}</div></div>
+                <div class="stat"><div class="stat-label">Storage</div><div class="stat-value" style="color:var(--accent);">${byDest.storage||0}</div></div>
+                <div class="stat"><div class="stat-label">Binder</div><div class="stat-value" style="color:var(--green);">${byDest.display||0}</div></div>
+                <div class="stat"><div class="stat-label">Grade</div><div class="stat-value" style="color:var(--accent2);">${byDest.grade||0}</div></div>
+                <div class="stat"><div class="stat-label">Bulk</div><div class="stat-value" style="color:var(--text-dim);">${byDest.bulk||0}</div></div>
+            </div>
+            <button class="btn btn-success" onclick="switchStage('push')" style="font-size:1rem; padding:10px 24px; white-space:nowrap;">
+                Push All &rarr;
+            </button>
+        </div>
+        <div style="font-size:0.75rem; color:var(--text-dim); margin-top:6px;">
+            Binder capacity: ${binderAvail} slots remaining
+        </div>
+    </div>`;
+
+    // Sort toolbar
+    html += `<div class="card" style="padding:8px 12px;">
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <label style="font-size:0.82rem;">Sort:</label>
+            <select onchange="_currentSortBy=this.value; _renderRouteCards('${sessionId}', _routeData);" style="font-size:0.82rem; padding:4px 8px;">
+                <option value="default" ${_currentSortBy==='default'?'selected':''}>Default (Price Low→High)</option>
+                <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>Alphabetical</option>
+                <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price (High→Low)</option>
+                <option value="price-low" ${_currentSortBy==='price-low'?'selected':''}>Price (Low→High)</option>
+            </select>
+        </div>
+    </div>`;
+
+    // Card list
+    html += '<div id="route-card-list" style="display:flex; flex-direction:column; gap:6px;">';
+    for (const item of items) {
+        const price = parseFloat(item.market_price || 0);
+        const dest = item.routing_destination || 'storage';
+        const qty = item.quantity || 1;
+        const imgSrc = item.image_url || '';
+        const priceStr = `$${price.toFixed(2)}`;
+
+        // Auto-reason tag
+        let autoTag = '';
+        if (price < 1) autoTag = '<span style="font-size:0.65rem; color:var(--text-dim); margin-left:4px;">auto: &lt;$1</span>';
+        else if (price < 5) autoTag = '<span style="font-size:0.65rem; color:var(--text-dim); margin-left:4px;">auto: $1-$5</span>';
+
+        html += `<div class="card" style="padding:8px 10px; display:flex; gap:8px; align-items:center;" data-item-id="${item.id}">
+            ${imgSrc ? `<img src="${imgSrc}" style="width:40px; height:56px; object-fit:cover; border-radius:4px; flex-shrink:0;" loading="lazy">` : '<div style="width:40px; height:56px; background:var(--surface-2); border-radius:4px; flex-shrink:0;"></div>'}
+            <div style="flex:1; min-width:0;">
+                <div style="font-size:0.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                    ${item.product_name || 'Unknown'}
+                </div>
+                <div style="font-size:0.72rem; color:var(--text-dim);">
+                    ${item.set_name||''} ${item.card_number ? '#'+item.card_number : ''} · ${item.condition||'NM'} · <strong>${priceStr}</strong>${qty > 1 ? ' x'+qty : ''}
+                </div>
+            </div>
+            <div class="route-radios" style="display:flex; gap:2px; flex-shrink:0; flex-wrap:wrap;">
+                ${_routeRadio(sessionId, item.id, 'bulk', 'Bulk', dest)}
+                ${_routeRadio(sessionId, item.id, 'display', 'Binder', dest)}
+                ${_routeRadio(sessionId, item.id, 'storage', 'Storage', dest)}
+                ${_routeRadio(sessionId, item.id, 'grade', 'Grade', dest)}
+            </div>
+            ${autoTag}
+        </div>`;
+    }
+    html += '</div>';
+
+    container.innerHTML = html;
+}
+
+function _routeRadio(sessionId, itemId, value, label, current) {
+    const checked = current === value;
+    const colors = { bulk: 'var(--text-dim)', display: 'var(--green)', storage: 'var(--accent)', grade: 'var(--accent2)' };
+    const color = colors[value] || 'var(--text)';
+    return `<label style="display:flex; align-items:center; gap:3px; font-size:0.72rem; padding:4px 8px;
+                border-radius:6px; cursor:pointer; min-height:36px;
+                background:${checked ? color+'22' : 'transparent'};
+                border:1.5px solid ${checked ? color : 'var(--border)'};
+                color:${checked ? color : 'var(--text-dim)'};"
+                onclick="event.preventDefault(); _setRoute('${sessionId}','${itemId}','${value}');">
+        <input type="radio" name="route-${itemId}" value="${value}" ${checked?'checked':''}
+            style="display:none;">
+        <span style="font-weight:${checked?'700':'400'};">${label}</span>
+    </label>`;
+}
+
+async function _setRoute(sessionId, itemId, destination) {
+    try {
+        await fetch(`/api/ingest/session/${sessionId}/route-card`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: itemId, destination }),
+        });
+        // Update local data and re-render
+        if (_routeData) {
+            const item = _routeData.items.find(i => i.id === itemId);
+            if (item) {
+                const oldDest = item.routing_destination || 'storage';
+                const qty = item.quantity || 1;
+                item.routing_destination = destination;
+                // Update counts
+                _routeData.by_destination[oldDest] = (_routeData.by_destination[oldDest] || 0) - qty;
+                _routeData.by_destination[destination] = (_routeData.by_destination[destination] || 0) + qty;
+            }
+            _renderRouteCards(sessionId, _routeData);
+        }
+    } catch(e) {
+        console.error('Route failed:', e);
+    }
+}
+
 
 // ── PUSH STAGE ──────────────────────────────────────────────────────────
 function _renderPushContent(data) {
@@ -2358,10 +2527,14 @@ function _renderSealedRawResults(d, sessionId, panel) {
         html += allResults.map(r => {
             const color = r.action==='inventory_incremented' ? 'var(--green)'
                 : r.action==='raw_card_ingested' ? 'var(--green)'
+                : r.action==='raw_card_graded' ? 'var(--accent2)'
+                : r.action==='raw_card_bulk' ? 'var(--text-dim)'
                 : r.action==='graded_pending_cert' ? 'var(--accent2)'
                 : r.action?.startsWith('created') ? 'var(--accent)' : 'var(--red)';
             const label = r.action==='inventory_incremented' ? '✅ +'+r.quantity
-                : r.action==='raw_card_ingested' ? `🏷 ${r.quantity} barcode(s) · ${(r.bins||[]).join(', ')}`
+                : r.action==='raw_card_ingested' ? `🏷 ${r.quantity} barcode(s) · ${(r.destination==='display'?'Binder':'Bin')} ${(r.bins||[]).join(', ')}`
+                : r.action==='raw_card_graded' ? `📦 ${r.quantity} → Grade`
+                : r.action==='raw_card_bulk' ? `📦 ${r.quantity} → Bulk`
                 : r.action==='graded_pending_cert' ? `🏅 ${r.note||'Enter cert below'}`
                 : r.action?.startsWith('created') ? '🆕 '+( r.new_title||'New Listing') : '❌ '+(r.error||'Error');
             return `<tr><td>${r.product_name||''}</td><td>${r.quantity||1}</td><td style="color:${color};font-size:0.85rem;">${label}</td></tr>`;
