@@ -1188,6 +1188,8 @@ function _renderBreakdownContent(data) {
     const activeItems = items.filter(i => {
         if (!['good','damaged','broken_down'].includes(i.item_status)) return false;
         if (i.pushed_at) return false;
+        // Raw cards and graded slabs don't get broken down
+        if (i.item_status !== 'broken_down' && (i.product_type === 'raw' || i.is_graded)) return false;
         // Must be verified (or broken_down which implies it was)
         if (i.item_status !== 'broken_down' && !i.verified_at) return false;
         // Hide broken_down items whose entire tree is pushed
