@@ -1614,7 +1614,7 @@ def route_summary(session_id):
     """Get routing status for a session's raw items."""
     items = db.query("""
         SELECT id, product_name, set_name, condition, market_price, quantity,
-               routing_destination, image_url, tcgplayer_id, card_number
+               routing_destination, tcgplayer_id, card_number, offer_price
         FROM intake_items
         WHERE session_id = %s
           AND product_type = 'raw'
