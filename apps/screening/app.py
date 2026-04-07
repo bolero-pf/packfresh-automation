@@ -1902,9 +1902,16 @@ async function loadHistory(page) {
   if (page != null) _historyPage = page;
   const el = document.getElementById('pane-history');
 
-  // Preserve filters if already rendered, otherwise build fresh
+  // Preserve filters if already rendered, otherwise build fresh with defaults
   if (!document.getElementById('hist-event')) {
     el.innerHTML = _historyFiltersHtml() + '<div id="hist-results"><div class="spinner"></div></div>';
+    // Set defaults: Combine + Hold + last 30 days
+    document.getElementById('hist-event').value = 'hold';
+    document.getElementById('hist-check').value = 'combine';
+    const now = new Date();
+    document.getElementById('hist-to').value = now.toISOString().slice(0, 10);
+    const ago = new Date(now.getTime() - 30 * 86400000);
+    document.getElementById('hist-from').value = ago.toISOString().slice(0, 10);
   } else {
     document.getElementById('hist-results').innerHTML = '<div class="spinner"></div>';
   }
