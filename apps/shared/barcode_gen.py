@@ -85,7 +85,8 @@ def generate_barcode_image(barcode_id: str, *,
     width_px  = int(width_mm  / 25.4 * dpi)   # 1051px for 89mm
     height_px = int(height_mm / 25.4 * dpi)   # 331px for 28mm
 
-    PAD = 10
+    PAD      = 10          # vertical / right padding
+    LEFT_PAD = 60          # ~5mm left margin — Dymo clips the first ~3-4mm
 
     # 28mm tall is a strip — tight layout
     # Text (name + detail) across the top ~35%, barcode ~50%, ID text ~15%
@@ -113,11 +114,11 @@ def generate_barcode_image(barcode_id: str, *,
     # Card name — truncate to fit width
     if card_name:
         name = card_name
-        while name and draw.textlength(name, font=font_name) > (width_px - PAD * 2):
+        while name and draw.textlength(name, font=font_name) > (width_px - LEFT_PAD - PAD):
             name = name[:-1]
         if name != card_name:
             name = name[:-1] + "…"
-        draw.text((PAD, y), name, fill="black", font=font_name)
+        draw.text((LEFT_PAD, y), name, fill="black", font=font_name)
         y += name_size + 6
 
     # Card number + condition
@@ -130,11 +131,11 @@ def generate_barcode_image(barcode_id: str, *,
         parts.append(set_name[:25])
     if parts:
         detail = "  •  ".join(parts)
-        draw.text((PAD, y), detail, fill="#222222", font=font_detail)
+        draw.text((LEFT_PAD, y), detail, fill="#222222", font=font_detail)
 
     # ── Dividing line ─────────────────────────────────────────────────────────
     div_y = text_zone_h
-    draw.line([(PAD, div_y), (width_px - PAD, div_y)], fill="#cccccc", width=1)
+    draw.line([(LEFT_PAD, div_y), (width_px - PAD, div_y)], fill="#cccccc", width=1)
 
     # ── Barcode zone ──────────────────────────────────────────────────────────
     code128 = barcode.get("code128", barcode_id, writer=ImageWriter())
@@ -152,13 +153,13 @@ def generate_barcode_image(barcode_id: str, *,
 
     bc_y = div_y + 4
     bc_h = barcode_zone_h - 8
-    bc_w = width_px - PAD * 2
+    bc_w = width_px - LEFT_PAD - PAD
     barcode_resized = barcode_img.resize((bc_w, bc_h), Image.Resampling.NEAREST)
-    label.paste(barcode_resized, (PAD, bc_y))
+    label.paste(barcode_resized, (LEFT_PAD, bc_y))
 
     # ── Barcode ID text ────────────────────────────────────────────────────────
     id_y = div_y + barcode_zone_h + 2
-    draw.text((PAD, id_y), barcode_id, fill="#555555", font=font_code)
+    draw.text((LEFT_PAD, id_y), barcode_id, fill="#555555", font=font_code)
 
     output = io.BytesIO()
     label.save(output, format="PNG", dpi=(dpi, dpi))
