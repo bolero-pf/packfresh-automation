@@ -1796,7 +1796,7 @@
             const r = await fetch(endpoint, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+                body: JSON.stringify({ tcgplayer_id: parseInt(tcgId), product_name: document.getElementById('map-product-name').textContent }),
             });
             const d = await r.json();
             if (r.ok) {

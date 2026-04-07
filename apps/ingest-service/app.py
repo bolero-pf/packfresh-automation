@@ -811,17 +811,17 @@ def refresh_session_prices(session_id):
     items = intake.get_session_items(session_id)
     linked = [i for i in items if i.get("tcgplayer_id") and i.get("item_status", "good") in ("good", "damaged")]
 
-    # Deduplicate: unique (tcg_id, ptype, is_graded, grade_company, grade_value)
+    # Deduplicate: unique (tcg_id, ptype, is_graded, grade_company, grade_value, product_name)
     seen = set()
     unique_lookups = []
     for item in linked:
         is_graded = bool(item.get("is_graded"))
         grade_co = (item.get("grade_company") or "").upper() if is_graded else ""
         grade_val = (item.get("grade_value") or "").upper() if is_graded else ""
-        key = (item["tcgplayer_id"], item.get("product_type", "sealed"), is_graded, grade_co, grade_val)
-        if key not in seen:
-            seen.add(key)
-            unique_lookups.append(key)
+        dedup_key = (item["tcgplayer_id"], item.get("product_type", "sealed"), is_graded, grade_co, grade_val)
+        if dedup_key not in seen:
+            seen.add(dedup_key)
+            unique_lookups.append(dedup_key + (item.get("product_name", ""),))
 
     # Fetch starting from offset
     price_cache = {}
@@ -830,7 +830,7 @@ def refresh_session_prices(session_id):
     fetched_count = 0
 
     for idx in range(offset, len(unique_lookups)):
-        tcg_id, ptype, is_graded, grade_co, grade_val = unique_lookups[idx]
+        tcg_id, ptype, is_graded, grade_co, grade_val, pname = unique_lookups[idx]
 
         # Check rate limit BEFORE making the request — never trigger a 429
         if ppt.should_throttle():
@@ -848,7 +848,7 @@ def refresh_session_prices(session_id):
 
         try:
             if ptype == "sealed":
-                ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+                ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id, product_name=pname)
             else:
                 ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
 

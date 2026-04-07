@@ -456,7 +456,8 @@ def add_item_page():
 def ppt_sealed_lookup(tcgplayer_id):
     ppt = _get_ppt_client()
     if ppt is None: return jsonify({"error": "PPT not configured"}), 503
-    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    name = request.args.get("product_name", "")
+    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=name)
     if not item: return jsonify({"error": f"No PPT product for {tcgplayer_id}"}), 404
     return jsonify(item)
 
