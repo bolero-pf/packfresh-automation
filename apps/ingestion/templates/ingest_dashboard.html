@@ -1404,9 +1404,32 @@ async function _loadRouteData(sessionId) {
 
     try {
         // Auto-route first (sets defaults), then get summary
-        await fetch(`/api/ingest/session/${sessionId}/auto-route`, { method: 'POST' });
+        const autoR = await fetch(`/api/ingest/session/${sessionId}/auto-route`, { method: 'POST' });
+        if (!autoR.ok) {
+            const err = await autoR.json().catch(() => ({}));
+            console.warn('Auto-route returned', autoR.status, err);
+            // Non-fatal — items may just not have routing_destination set yet
+        }
         const r = await fetch(`/api/ingest/session/${sessionId}/route-summary`);
+        if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            container.innerHTML = `<div class="alert alert-error">Route summary failed (${r.status}): ${err.error || 'Unknown error'}</div>`;
+            return;
+        }
         const data = await r.json();
+        if (!data.items || !data.items.length) {
+            // Debug: show what the backend sees vs what the client sees
+            const clientRaw = (_currentSessionData?.items || []).filter(i =>
+                i.product_type === 'raw' && !i.is_graded
+            );
+            container.innerHTML = `<div class="card">
+                <p style="color:var(--text-dim);">Backend found 0 routable raw items.</p>
+                <p style="font-size:0.8rem; color:var(--text-dim);">Client sees ${clientRaw.length} raw items.
+                ${clientRaw.length ? 'First item product_type: "' + clientRaw[0].product_type + '", is_mapped: ' + clientRaw[0].is_mapped + ', item_status: "' + clientRaw[0].item_status + '"' : ''}</p>
+                <button class="btn btn-primary" onclick="switchStage('push')" style="margin-top:8px;">Continue to Push</button>
+            </div>`;
+            return;
+        }
         _routeData = data;
         _renderRouteCards(sessionId, data);
     } catch(e) {
