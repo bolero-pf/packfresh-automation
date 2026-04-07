@@ -1569,7 +1569,7 @@ def auto_route_session(session_id):
         """, (dest, item["id"]))
         routed[dest] += qty
 
-    return jsonify({"success": True, "routed": routed, "binder_remaining": binder_remaining})
+    return jsonify(_serialize({"success": True, "routed": routed, "binder_remaining": binder_remaining}))
 
 
 @app.route("/api/ingest/session/<session_id>/route-card", methods=["POST"])
@@ -1638,13 +1638,13 @@ def route_summary(session_id):
     if get_binder_capacity:
         binder_capacity = get_binder_capacity(db)
 
-    return jsonify({
+    return jsonify(_serialize({
         "items": [dict(i) for i in items],
         "total_items": len(items),
         "total_qty": total_qty,
         "by_destination": by_dest,
         "binder_capacity": binder_capacity,
-    })
+    }))
 
 
 @app.route("/api/ingest/binder-locations")
@@ -1652,7 +1652,7 @@ def binder_locations():
     """List binder locations with capacity."""
     if not get_binder_capacity:
         return jsonify({"error": "Storage module not available"}), 503
-    return jsonify({"binders": get_binder_capacity(db)})
+    return jsonify(_serialize({"binders": get_binder_capacity(db)}))
 
 
 @app.route("/api/ingest/session/<session_id>/push-raw", methods=["POST"])
