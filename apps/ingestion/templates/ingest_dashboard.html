@@ -743,6 +743,14 @@ async function viewSession(sessionId, _preserveScroll) {
         };
         if (!_preserveScroll) {
             _currentStage = statusToStage[s.status] || 'verify';
+            // Skip Route stage for sessions with no raw cards
+            if (_currentStage === 'route') {
+                const hasRawCards = items.some(i =>
+                    i.product_type === 'raw' && !i.is_graded &&
+                    ['good','damaged'].includes(i.item_status) && i.is_mapped && !i.pushed_at
+                );
+                if (!hasRawCards) _currentStage = 'push';
+            }
         }
 
         const activeItems = items.filter(i => ['good','damaged'].includes(i.item_status || 'good'));
