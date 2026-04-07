@@ -115,6 +115,18 @@ class PPTClient:
             self.minute_remaining = None
             self.minute_reset = None
 
+        # If minute_remaining hit 0 but we have no reset timestamp,
+        # clear it after 60s to avoid permanent throttle
+        if (self.minute_remaining is not None and self.minute_remaining <= 1
+                and not self.minute_reset):
+            if not hasattr(self, '_throttle_since'):
+                self._throttle_since = time.time()
+            elif time.time() - self._throttle_since > 65:
+                logger.info("PPT clearing stale minute throttle (no reset timestamp)")
+                self.minute_remaining = None
+                self._throttle_since = None
+                return False
+
         if self.minute_remaining is not None and self.minute_remaining <= 1:
             return True
         if self.daily_remaining is not None and self.daily_remaining <= 0:
@@ -148,6 +160,9 @@ class PPTClient:
         if self.should_throttle():
             rl = self.get_rate_limit_info()
             retry_after = rl.get("retry_after") or 60
+            logger.warning(f"PPT throttled: minute_remaining={self.minute_remaining} "
+                           f"daily_remaining={self.daily_remaining} "
+                           f"minute_reset={self.minute_reset} now={time.time()}")
             raise PPTError(f"PPT rate limited — retry in {retry_after}s", 429, {"retry_after": retry_after})
         last_err = None
         for attempt in range(1, max_tries + 1):
