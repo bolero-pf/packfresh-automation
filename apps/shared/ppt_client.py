@@ -93,6 +93,7 @@ class PPTClient:
         self.minute_remaining = None
         self.minute_reset = None      # epoch timestamp
         self.daily_remaining = None
+        self.banned_until = None       # epoch timestamp — set on 403, blocks all calls
 
     def get_rate_limit_info(self) -> dict:
         """Return current rate limit state."""
@@ -110,8 +111,16 @@ class PPTClient:
 
     def should_throttle(self) -> bool:
         """Return True if caller should NOT make another request right now."""
+        now = time.time()
+
+        # 403 ban cooldown — stop all calls until it expires
+        if self.banned_until and now < self.banned_until:
+            return True
+        elif self.banned_until:
+            self.banned_until = None
+
         # If the minute window has reset, clear stale limits
-        if self.minute_reset and time.time() >= self.minute_reset:
+        if self.minute_reset and now >= self.minute_reset:
             self.minute_remaining = None
             self.minute_reset = None
 
@@ -177,17 +186,43 @@ class PPTClient:
 
             if r.status_code == 429:
                 retry_after = self.get_rate_limit_info()["retry_after"] or 60
+                # Daily limit — no point retrying, just block until tomorrow
                 if self.daily_remaining is not None and self.daily_remaining <= 0:
+                    logger.error(f"PPT daily limit exhausted — all calls blocked")
                     raise PPTError("PPT daily limit reached", 429, {"retry_after": retry_after, "daily_exhausted": True})
+                # Minute limit — ensure throttle state is set even without headers
+                if self.minute_remaining is None or self.minute_remaining > 1:
+                    self.minute_remaining = 0
+                if not self.minute_reset:
+                    self.minute_reset = time.time() + retry_after
+                # Sleep and retry if we have attempts left
+                if attempt < max_tries:
+                    wait = min(retry_after, 30)  # cap wait at 30s per attempt
+                    logger.warning(f"PPT 429 — sleeping {wait}s before retry (attempt {attempt}/{max_tries})")
+                    time.sleep(wait)
+                    continue
                 raise PPTError(f"PPT rate limited — retry in {retry_after}s", 429, {"retry_after": retry_after})
 
             if r.status_code == 403:
+                # Set 5-minute cooldown — stop hammering a banned endpoint
+                self.banned_until = time.time() + 300
+                logger.error(f"PPT 403 Forbidden — blocking all calls for 5 minutes")
                 try:
                     body = r.json()
                 except Exception:
                     body = r.text
-                raise PPTError(f"PPT 403 Forbidden", 403, body)
+                raise PPTError(f"PPT 403 Forbidden — calls blocked for 5m", 403, body)
 
+            # Other 4xx — don't retry, it won't help
+            if 400 <= r.status_code < 500:
+                try:
+                    body = r.json()
+                except Exception:
+                    body = r.text
+                logger.warning(f"PPT {r.status_code} — not retrying: {body}")
+                raise PPTError(f"PPT {r.status_code}", r.status_code, body)
+
+            # 5xx — sleep and retry
             last_err = r
             time.sleep(1.0 * attempt)
 
