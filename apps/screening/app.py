@@ -105,6 +105,73 @@ def index():
     return render_template_string(CONSOLE_HTML, shopify_store=store)
 
 
+@app.route("/api/screening-history")
+def api_screening_history():
+    """Query screening_log with filters: event_type, check_type, date range, search, pagination."""
+    from datetime import datetime, timedelta
+
+    event_type = request.args.get("event_type", "").strip()
+    check_type = request.args.get("check_type", "").strip()
+    date_from = request.args.get("date_from", "").strip()
+    date_to = request.args.get("date_to", "").strip()
+    search = request.args.get("q", "").strip()
+    page = max(1, int(request.args.get("page", "1")))
+    per_page = 50
+
+    conditions = []
+    params = []
+
+    if event_type:
+        conditions.append("event_type = %s")
+        params.append(event_type)
+    if check_type:
+        conditions.append("check_type = %s")
+        params.append(check_type)
+    if date_from:
+        conditions.append("created_at >= %s")
+        params.append(date_from)
+    if date_to:
+        # Include the full end day
+        conditions.append("created_at < %s::date + interval '1 day'")
+        params.append(date_to)
+    if search:
+        conditions.append("(order_name ILIKE %s OR customer_email ILIKE %s)")
+        params.extend([f"%{search}%", f"%{search}%"])
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    count_row = db.query_one(f"SELECT COUNT(*) AS cnt FROM screening_log {where}", tuple(params))
+    total = count_row["cnt"] if count_row else 0
+
+    rows = db.query(
+        f"SELECT * FROM screening_log {where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        tuple(params) + (per_page, (page - 1) * per_page),
+    )
+
+    # Serialize
+    import json
+    events = []
+    for r in rows:
+        events.append({
+            "id": r["id"],
+            "order_gid": r["order_gid"],
+            "order_name": r["order_name"],
+            "customer_email": r["customer_email"],
+            "event_type": r["event_type"],
+            "check_type": r["check_type"],
+            "details": r["details"] if isinstance(r["details"], dict) else json.loads(r["details"] or "{}"),
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        })
+
+    return jsonify({
+        "events": events,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": max(1, -(-total // per_page)),
+    })
+
+
 @app.route("/api/held-orders")
 def api_held_orders():
     """Fetch all orders with hold-for-review tag."""
@@ -929,6 +996,26 @@ CONSOLE_HTML = """
 .fd-modal select { width:100%; padding:8px 10px; background:var(--s2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem; margin-bottom:12px; }
 .fd-modal-preview { background:var(--s2); border-radius:6px; padding:12px; font-size:0.82rem; max-height:200px; overflow-y:auto; margin-bottom:14px; color:var(--dim); }
 .fd-modal-actions { display:flex; gap:8px; justify-content:flex-end; }
+/* History tab */
+.history-filters { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; align-items:flex-end; }
+.history-filters label { font-size:0.72rem; color:var(--dim); display:block; margin-bottom:2px; }
+.history-filters select, .history-filters input { padding:6px 10px; background:var(--s2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.82rem; font-family:inherit; }
+.history-filters input[type="date"] { width:130px; }
+.history-filters input[type="text"] { width:160px; }
+.history-table { width:100%; border-collapse:collapse; font-size:0.82rem; }
+.history-table th { text-align:left; color:var(--dim); font-weight:500; font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; padding:6px 10px; border-bottom:1px solid var(--border); }
+.history-table td { padding:8px 10px; border-bottom:1px solid rgba(255,255,255,0.04); vertical-align:middle; }
+.history-table tr:hover td { background:var(--s2); }
+.history-pagination { display:flex; gap:8px; align-items:center; justify-content:center; margin-top:16px; font-size:0.82rem; }
+.history-pagination button { padding:4px 12px; }
+.history-event { font-weight:600; font-size:0.78rem; padding:2px 8px; border-radius:10px; }
+.history-event-hold { background:rgba(255,170,0,0.12); color:var(--amber); }
+.history-event-release { background:rgba(0,200,80,0.12); color:var(--green); }
+.history-event-cancel { background:rgba(255,60,60,0.12); color:var(--red); }
+.history-event-auto_cancel { background:rgba(255,60,60,0.2); color:var(--red); }
+.history-event-uncombine { background:rgba(130,130,255,0.12); color:#99f; }
+.history-event-upgrade { background:rgba(0,180,255,0.12); color:#5cf; }
+.history-details { font-size:0.75rem; color:var(--dim); max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -943,11 +1030,13 @@ CONSOLE_HTML = """
     <button class="tab" id="tab-combine" onclick="switchTab('combine')">📦 Combine Shipping</button>
     <button class="tab" id="tab-notes" onclick="switchTab('notes')">👤 Customer Notes</button>
     <button class="tab" id="tab-egg" onclick="switchTab('egg')">🥚 Egg Hunt</button>
+    <button class="tab" id="tab-history" onclick="switchTab('history')">📊 History</button>
   </div>
   <div id="pane-verify" class="pane active"><div class="spinner"></div></div>
   <div id="pane-combine" class="pane"><div class="spinner"></div></div>
   <div id="pane-notes" class="pane"></div>
   <div id="pane-egg" class="pane"></div>
+  <div id="pane-history" class="pane"></div>
 </div>
 
 <script>
@@ -964,6 +1053,7 @@ function switchTab(id) {
   document.getElementById('tab-' + id).classList.add('active');
   if (id === 'notes') loadNotes();
   else if (id === 'egg') { loadEggHunt(); startEggPoll(); }
+  else if (id === 'history') { stopEggPoll(); loadHistory(); }
   else { stopEggPoll(); if (_data) renderAll(); }
 }
 
@@ -1718,6 +1808,177 @@ document.addEventListener('click', (e) => {
     results.style.display = 'none';
   }
 });
+
+// ── History Tab ──
+let _historyPage = 1;
+
+function _historyFiltersHtml() {
+  return `
+    <div class="history-filters">
+      <div>
+        <label>Event Type</label>
+        <select id="hist-event" onchange="loadHistory(1)">
+          <option value="">All Events</option>
+          <option value="hold">Hold</option>
+          <option value="release">Release</option>
+          <option value="cancel">Cancel</option>
+          <option value="auto_cancel">Auto-Cancel</option>
+          <option value="uncombine">Uncombine</option>
+          <option value="upgrade">Upgrade</option>
+        </select>
+      </div>
+      <div>
+        <label>Check Type</label>
+        <select id="hist-check" onchange="loadHistory(1)">
+          <option value="">All Checks</option>
+          <option value="tier1">Tier 1 ($700+)</option>
+          <option value="tier2">Tier 2 ($1000+)</option>
+          <option value="fraud_medium">Medium Fraud</option>
+          <option value="fraud_high">High Fraud</option>
+          <option value="spend_spike">Spend Spike</option>
+          <option value="combine">Combine</option>
+          <option value="firsttime5">FIRSTTIME5</option>
+          <option value="customer_hold">Customer Hold</option>
+        </select>
+      </div>
+      <div>
+        <label>From</label>
+        <input type="date" id="hist-from" onchange="loadHistory(1)">
+      </div>
+      <div>
+        <label>To</label>
+        <input type="date" id="hist-to" onchange="loadHistory(1)">
+      </div>
+      <div>
+        <label>Search</label>
+        <input type="text" id="hist-search" placeholder="Order # or email" onkeyup="if(event.key==='Enter')loadHistory(1)">
+      </div>
+      <div style="display:flex;align-items:flex-end;gap:6px;">
+        <button class="btn btn-secondary btn-sm" onclick="loadHistory(1)">Search</button>
+        <button class="btn btn-secondary btn-sm" onclick="clearHistoryFilters()">Clear</button>
+      </div>
+    </div>`;
+}
+
+function clearHistoryFilters() {
+  document.getElementById('hist-event').value = '';
+  document.getElementById('hist-check').value = '';
+  document.getElementById('hist-from').value = '';
+  document.getElementById('hist-to').value = '';
+  document.getElementById('hist-search').value = '';
+  loadHistory(1);
+}
+
+const CHECK_LABELS = {
+  tier1: 'Tier 1 ($700+)', tier2: 'Tier 2 ($1000+)',
+  fraud_medium: 'Medium Fraud', fraud_high: 'High Fraud',
+  spend_spike: 'Spend Spike', combine: 'Combine',
+  firsttime5: 'FIRSTTIME5', customer_hold: 'Customer Hold',
+};
+
+const EVENT_LABELS = {
+  hold: 'Hold', release: 'Release', cancel: 'Cancel',
+  auto_cancel: 'Auto-Cancel', uncombine: 'Uncombine', upgrade: 'Upgrade',
+};
+
+function _detailsSummary(details) {
+  if (!details || !Object.keys(details).length) return '';
+  const parts = [];
+  if (details.cumulative_total != null) parts.push('cumulative $' + parseFloat(details.cumulative_total).toFixed(2));
+  if (details.order_total != null) parts.push('order $' + parseFloat(details.order_total).toFixed(2));
+  if (details.sibling_count != null) parts.push(details.sibling_count + ' sibling' + (details.sibling_count === 1 ? '' : 's'));
+  if (details.siblings) parts.push(details.siblings.map(s => s.name).join(', '));
+  if (details.from_tier != null) parts.push('from tier ' + details.from_tier);
+  if (details.max_previous != null) parts.push('max prev $' + parseFloat(details.max_previous).toFixed(2));
+  if (details.match_count != null) parts.push(details.match_count + ' match(es)');
+  if (details.remaining != null) parts.push(details.remaining + ' remaining');
+  if (details.group_size != null) parts.push('group of ' + details.group_size);
+  if (details.note_text) parts.push(details.note_text);
+  if (details.is_first_order) parts.push('first order');
+  return parts.join(' · ');
+}
+
+async function loadHistory(page) {
+  if (page != null) _historyPage = page;
+  const el = document.getElementById('pane-history');
+
+  // Preserve filters if already rendered, otherwise build fresh
+  if (!document.getElementById('hist-event')) {
+    el.innerHTML = _historyFiltersHtml() + '<div id="hist-results"><div class="spinner"></div></div>';
+  } else {
+    document.getElementById('hist-results').innerHTML = '<div class="spinner"></div>';
+  }
+
+  const params = new URLSearchParams();
+  const ev = document.getElementById('hist-event').value;
+  const ch = document.getElementById('hist-check').value;
+  const df = document.getElementById('hist-from').value;
+  const dt = document.getElementById('hist-to').value;
+  const q = document.getElementById('hist-search').value.trim();
+  if (ev) params.set('event_type', ev);
+  if (ch) params.set('check_type', ch);
+  if (df) params.set('date_from', df);
+  if (dt) params.set('date_to', dt);
+  if (q) params.set('q', q);
+  params.set('page', _historyPage);
+
+  try {
+    const r = await fetch('/api/screening-history?' + params.toString());
+    const d = await r.json();
+    renderHistory(d);
+  } catch(e) {
+    document.getElementById('hist-results').innerHTML = '<div class="empty">' + e.message + '</div>';
+  }
+}
+
+function renderHistory(d) {
+  const el = document.getElementById('hist-results');
+  if (!d.events.length) {
+    el.innerHTML = '<div class="empty">No screening events match these filters.</div>';
+    return;
+  }
+
+  const rows = d.events.map(e => {
+    const time = new Date(e.created_at).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+    const eventCls = 'history-event history-event-' + e.event_type;
+    const detailStr = _detailsSummary(e.details);
+    return `<tr>
+      <td style="white-space:nowrap;">${time}</td>
+      <td><strong>${_esc(e.order_name || '—')}</strong></td>
+      <td style="color:var(--dim);">${_esc(e.customer_email || '—')}</td>
+      <td><span class="${eventCls}">${EVENT_LABELS[e.event_type] || e.event_type}</span></td>
+      <td>${CHECK_LABELS[e.check_type] || e.check_type}</td>
+      <td class="history-details" title="${_esc(detailStr)}">${_esc(detailStr)}</td>
+    </tr>`;
+  }).join('');
+
+  let paginationHtml = '';
+  if (d.pages > 1) {
+    paginationHtml = '<div class="history-pagination">';
+    if (d.page > 1) paginationHtml += '<button class="btn btn-secondary btn-sm" onclick="loadHistory(' + (d.page - 1) + ')">← Prev</button>';
+    paginationHtml += '<span>Page ' + d.page + ' of ' + d.pages + ' (' + d.total + ' events)</span>';
+    if (d.page < d.pages) paginationHtml += '<button class="btn btn-secondary btn-sm" onclick="loadHistory(' + (d.page + 1) + ')">Next →</button>';
+    paginationHtml += '</div>';
+  } else {
+    paginationHtml = '<div class="history-pagination"><span>' + d.total + ' event' + (d.total === 1 ? '' : 's') + '</span></div>';
+  }
+
+  el.innerHTML = `
+    <table class="history-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Order</th>
+          <th>Customer</th>
+          <th>Event</th>
+          <th>Check</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${paginationHtml}`;
+}
 
 loadOrders();
 </script>
