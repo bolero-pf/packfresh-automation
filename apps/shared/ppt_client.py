@@ -239,12 +239,41 @@ class PPTClient:
 
     # ── sealed product endpoints ─────────────────────────────────────
 
-    def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
-        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1}
+    def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False,
+                                              product_name=None):
+        """Look up a sealed product by tcgPlayerId.
+
+        PPT dropped tcgPlayerId as a query param on /v2/sealed-products.
+        Workaround: search by product_name, then match tcgPlayerId in results.
+        Falls back to name-only match if tcgPlayerId isn't in the response.
+        """
+        tcg_id = int(tcgplayer_id)
+
+        if not product_name:
+            logger.warning(f"get_sealed_product_by_tcgplayer_id called without product_name for TCG#{tcg_id} — cannot search")
+            return None
+
+        params = {"search": product_name, "limit": 10}
         if include_history:
             params["includeHistory"] = "true"
         items = self._extract_data(self._get(f"{self.base_url}/v2/sealed-products", params))
-        return items[0] if items else None
+
+        if not items:
+            return None
+
+        # Try exact tcgPlayerId match first
+        for item in items:
+            if item.get("tcgPlayerId") == tcg_id:
+                return item
+
+        # Fallback: exact product name match (PPT may have dropped tcgPlayerId from response too)
+        for item in items:
+            if (item.get("productName") or item.get("name", "")).lower() == product_name.lower():
+                return item
+
+        # Last resort: return first result if search was specific enough
+        logger.warning(f"PPT search for '{product_name}' returned {len(items)} results but no tcgPlayerId={tcg_id} match — using first result")
+        return items[0]
 
     def search_sealed_products(self, query, *, set_name=None, limit=5):
         """Search sealed products by name, optionally filtered by set."""

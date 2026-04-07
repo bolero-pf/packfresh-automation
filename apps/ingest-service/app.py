@@ -1027,7 +1027,7 @@ def map_item():
         if item:
             try:
                 if item["product_type"] == "sealed":
-                    ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+                    ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=data.get("product_name"))
                 else:
                     ppt_data = ppt.get_card_by_tcgplayer_id(tcgplayer_id)
                 new_price = PPTClient.extract_market_price(ppt_data)
@@ -1865,7 +1865,7 @@ def ppt_lookup_sealed():
         return jsonify({"error": "tcgplayer_id required"}), 400
 
     try:
-        product_data = ppt.get_sealed_product_by_tcgplayer_id(int(tcgplayer_id))
+        product_data = ppt.get_sealed_product_by_tcgplayer_id(int(tcgplayer_id), product_name=data.get("product_name"))
         if not product_data:
             return jsonify({"error": "Sealed product not found in PPT"}), 404
 

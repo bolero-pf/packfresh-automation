@@ -585,7 +585,7 @@ def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cac
         product_name = item.get("product_name", "Unknown Product")
         our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
 
-        ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id else None
+        ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id, product_name=product_name) if tcg_id else None
         if not ppt_item:
             # PPT lookup failed — build synthetic ppt_item from what we know
             # so enrichment still sets tags, vendor, weight, metafields, AI fields, etc.
@@ -977,7 +977,7 @@ def enrich_existing_product():
     if not product_gid or not tcgplayer_id:
         return jsonify({"error": "product_gid and tcgplayer_id required"}), 400
 
-    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=data.get("product_name"))
     if not ppt_item:
         return jsonify({"error": f"PPT item not found for tcgplayer_id {tcgplayer_id}"}), 404
 
@@ -1005,7 +1005,7 @@ def create_listing():
     if not tcgplayer_id:
         return jsonify({"error": "tcgplayer_id required"}), 400
 
-    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=data.get("product_name"))
     if not ppt_item:
         return jsonify({"error": f"PPT item not found for tcgplayer_id {tcgplayer_id}"}), 404
 

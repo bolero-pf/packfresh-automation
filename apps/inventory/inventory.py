@@ -482,7 +482,7 @@ def create_listing():
     if ppt is None:
         return jsonify({"error": "PPT not configured"}), 503
 
-    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=data.get("product_name"))
     if not ppt_item:
         return jsonify({"error": f"No PPT product for TCGPlayer ID {tcgplayer_id}"}), 404
 
