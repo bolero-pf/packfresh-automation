@@ -86,7 +86,7 @@ def generate_barcode_image(barcode_id: str, *,
     height_px = int(height_mm / 25.4 * dpi)   # 331px for 28mm
 
     PAD      = 10          # vertical / right padding
-    LEFT_PAD = 60          # ~5mm left margin — Dymo clips the first ~3-4mm
+    LEFT_PAD = 90          # ~7.5mm left margin — Dymo clips the first ~5-6mm
 
     # 28mm tall is a strip — tight layout
     # Text (name + detail) across the top ~35%, barcode ~50%, ID text ~15%
