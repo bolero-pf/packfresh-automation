@@ -934,34 +934,76 @@ function _renderVerifyRow(item, sessionId) {
     } else if (isMissing) {
         verifyCell = `<button class="verify-btn verified-missing" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✗ Missing</button>`;
     } else if (isDamaged && isVerified) {
-        verifyCell = `<button class="verify-btn verified-damaged" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">⚠ Damaged</button>`;
+        verifyCell = `<div style="display:flex;gap:4px;align-items:center;">
+            <span class="verify-btn verified-damaged" style="cursor:default;">⚠ Damaged</span>
+            <div class="action-dropdown-container" style="position:relative;display:inline-block;">
+                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <div class="action-dropdown">
+                    <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
+                </div>
+            </div>
+        </div>`;
     } else if (isVerified && item.is_graded) {
         const co = item.grade_company || 'PSA';
         const gr = item.grade_value || '?';
-        verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ ${co} ${gr}</button>`;
+        verifyCell = `<div style="display:flex;gap:4px;align-items:center;">
+            <span class="verify-btn verified" style="cursor:default;">✓ ${co} ${gr}</span>
+            <div class="action-dropdown-container" style="position:relative;display:inline-block;">
+                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <div class="action-dropdown">
+                    <button onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${co}', '${gr}')">✏️ Change Grade</button>
+                    <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
+                </div>
+            </div>
+        </div>`;
     } else if (isVerified && ptype === 'raw') {
         const cond = item.condition || 'NM';
-        verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ ${cond}</button>`;
-    } else if (isVerified) {
-        verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ Here</button>`;
-    } else if (item.is_graded) {
-        // Graded slabs: Here with grade verification, or Missing
-        verifyCell = `<div class="verify-btn-group">
-            <button class="verify-btn here" onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${item.grade_company||'PSA'}', '${item.grade_value||''}')">✓ Verify Grade</button>
-            <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
+        verifyCell = `<div style="display:flex;gap:4px;align-items:center;">
+            <span class="verify-btn verified" style="cursor:default;">✓ ${cond}</span>
+            <div class="action-dropdown-container" style="position:relative;display:inline-block;">
+                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <div class="action-dropdown">
+                    <button onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Change Condition</button>
+                    <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
+                </div>
+            </div>
         </div>`;
-    } else if (ptype === 'raw') {
-        // Raw cards: Here with condition picker, or Missing
-        verifyCell = `<div class="verify-btn-group">
-            <button class="verify-btn here" onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✓ Here</button>
-            <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
+    } else if (isVerified) {
+        verifyCell = `<div style="display:flex;gap:4px;align-items:center;">
+            <span class="verify-btn verified" style="cursor:default;">✓ Here</span>
+            <div class="action-dropdown-container" style="position:relative;display:inline-block;">
+                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <div class="action-dropdown">
+                    <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
+                </div>
+            </div>
         </div>`;
     } else {
-        // Sealed: Here / Missing / Damaged
-        verifyCell = `<div class="verify-btn-group">
-            <button class="verify-btn here" onclick="verifyItem('${item.id}', '${sessionId}', 'here', ${item.quantity||1})">✓ Here</button>
-            <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
-            <button class="verify-btn damaged" onclick="verifyItem('${item.id}', '${sessionId}', 'damaged', ${item.quantity||1})">⚠ Damaged</button>
+        // Primary action: one-tap confirm
+        const confirmBtn = `<button class="verify-btn here" onclick="verifyItem('${item.id}', '${sessionId}', 'here', ${item.quantity||1})">✓</button>`;
+        // Secondary actions in a dropdown
+        let extraActions = '';
+        if (item.is_graded) {
+            extraActions = `
+                <button onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${item.grade_company||'PSA'}', '${item.grade_value||''}')">✏️ Change Grade</button>
+                <button onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>`;
+        } else if (ptype === 'raw') {
+            extraActions = `
+                <button onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Change Condition</button>
+                <button onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>`;
+        } else {
+            extraActions = `
+                <button onclick="verifyItem('${item.id}', '${sessionId}', 'damaged', ${item.quantity||1})">⚠️ Damaged</button>
+                <button onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>`;
+        }
+        verifyCell = `<div class="verify-btn-group" style="flex-direction:row;">
+            ${confirmBtn}
+            <div class="action-dropdown-container" style="position:relative;display:inline-block;">
+                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <div class="action-dropdown">
+                    ${extraActions}
+                </div>
+            </div>
         </div>`;
     }
 
