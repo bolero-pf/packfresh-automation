@@ -1039,31 +1039,41 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
 }
 
 async function verifyRawCard(itemId, sessionId, totalQty) {
-    // For raw cards: pick condition, then verify
+    // For raw cards: pick condition + optional price override
     const conditions = ['NM', 'LP', 'MP', 'HP', 'DMG'];
     const overlay = document.getElementById('prompt-overlay');
     document.getElementById('prompt-title').textContent = 'Card Condition';
-    document.getElementById('prompt-msg').textContent = totalQty > 1 ? `Condition for ${totalQty} cards:` : 'What condition?';
+    document.getElementById('prompt-msg').textContent = totalQty > 1 ? `Condition for ${totalQty} cards:` : 'What condition? Price looked up from PPT — override if needed.';
     const area = document.getElementById('prompt-input-area');
-    area.innerHTML = conditions.map(c =>
-        `<button class="btn btn-sm" style="margin:4px; min-width:60px; padding:8px 16px; font-size:0.9rem;" onclick="document.getElementById('prompt-input-area').dataset.val='${c}'; document.getElementById('prompt-ok').click();">${c}</button>`
-    ).join('');
+    area.innerHTML = `
+        <div style="margin-bottom:8px;">
+            ${conditions.map(c =>
+                `<button class="btn btn-sm" style="margin:4px; min-width:60px; padding:8px 16px; font-size:0.9rem;" onclick="document.getElementById('prompt-input-area').dataset.val='${c}'; this.parentElement.querySelectorAll('button').forEach(b=>b.style.background=''); this.style.background='var(--accent)'; this.style.color='#fff';">${c}</button>`
+            ).join('')}
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+            <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
+            <input id="raw-price-override" type="number" step="0.01" min="0" placeholder="leave blank for PPT" style="flex:1; font-size:0.9rem; padding:6px;">
+        </div>`;
     overlay.style.display = 'flex';
 
-    const condition = await new Promise(resolve => {
+    const result = await new Promise(resolve => {
         document.getElementById('prompt-ok').onclick = () => {
             overlay.style.display = 'none';
-            resolve(area.dataset.val || 'NM');
+            const priceVal = document.getElementById('raw-price-override')?.value?.trim();
+            resolve({
+                condition: area.dataset.val || 'NM',
+                price_override: priceVal ? parseFloat(priceVal) : null,
+            });
         };
         document.getElementById('prompt-cancel').onclick = () => {
             overlay.style.display = 'none';
             resolve(null);
         };
     });
-    if (condition === null) return;
+    if (result === null) return;
 
     try {
-        // Verify as here + set condition
         let qtyConfirmed = totalQty;
         if (totalQty > 1) {
             const input = await themedPrompt('Verify Quantity', `How many are here? (expected: ${totalQty})`, totalQty);
@@ -1074,22 +1084,24 @@ async function verifyRawCard(itemId, sessionId, totalQty) {
                 return;
             }
         }
+        const body = { status: 'here', qty_confirmed: qtyConfirmed, condition: result.condition };
+        if (result.price_override !== null) body.price_override = result.price_override;
         await fetch(`/api/ingest/item/${itemId}/verify`, {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ status: 'here', qty_confirmed: qtyConfirmed, condition }),
+            body: JSON.stringify(body),
         });
         viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
 
 async function verifyGradedSlab(itemId, sessionId, currentCompany, currentGrade) {
-    // Let user confirm or change grade company + value
+    // Let user confirm or change grade company + value, with price override
     const overlay = document.getElementById('prompt-overlay');
     document.getElementById('prompt-title').textContent = 'Verify Grade';
-    document.getElementById('prompt-msg').textContent = 'Confirm or update the grade:';
+    document.getElementById('prompt-msg').textContent = 'Confirm or update the grade. Price will be looked up from PPT — override if needed.';
     const area = document.getElementById('prompt-input-area');
     area.innerHTML = `
-        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
             <select id="grade-company-input" style="font-size:0.9rem; padding:6px;">
                 <option value="PSA" ${currentCompany==='PSA'?'selected':''}>PSA</option>
                 <option value="CGC" ${currentCompany==='CGC'?'selected':''}>CGC</option>
@@ -1098,6 +1110,10 @@ async function verifyGradedSlab(itemId, sessionId, currentCompany, currentGrade)
                 <option value="AGS" ${currentCompany==='AGS'?'selected':''}>AGS</option>
             </select>
             <input id="grade-value-input" type="text" value="${currentGrade}" placeholder="e.g. 10, 9.5" style="width:80px; font-size:0.9rem; padding:6px;">
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+            <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
+            <input id="grade-price-input" type="number" step="0.01" min="0" placeholder="leave blank for PPT lookup" style="flex:1; font-size:0.9rem; padding:6px;">
         </div>`;
     overlay.style.display = 'flex';
     setTimeout(() => document.getElementById('grade-value-input').focus(), 50);
@@ -1105,9 +1121,11 @@ async function verifyGradedSlab(itemId, sessionId, currentCompany, currentGrade)
     const result = await new Promise(resolve => {
         const ok = () => {
             overlay.style.display = 'none';
+            const priceVal = document.getElementById('grade-price-input').value.trim();
             resolve({
                 company: document.getElementById('grade-company-input').value,
                 grade: document.getElementById('grade-value-input').value.trim(),
+                price_override: priceVal ? parseFloat(priceVal) : null,
             });
         };
         document.getElementById('prompt-ok').onclick = ok;
@@ -1116,13 +1134,16 @@ async function verifyGradedSlab(itemId, sessionId, currentCompany, currentGrade)
             resolve(null);
         };
         document.getElementById('grade-value-input').onkeydown = (e) => { if (e.key === 'Enter') ok(); };
+        document.getElementById('grade-price-input').onkeydown = (e) => { if (e.key === 'Enter') ok(); };
     });
     if (!result) return;
 
     try {
+        const body = { status: 'here', grade_company: result.company, grade_value: result.grade };
+        if (result.price_override !== null) body.price_override = result.price_override;
         await fetch(`/api/ingest/item/${itemId}/verify`, {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ status: 'here', grade_company: result.company, grade_value: result.grade }),
+            body: JSON.stringify(body),
         });
         viewSession(sessionId, true);
     } catch(err) { alert(err.message); }

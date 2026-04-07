@@ -453,20 +453,22 @@ def verify_item(item_id):
             condition = data.get("condition")
             grade_company = data.get("grade_company")
             grade_value = data.get("grade_value")
+            price_override = data.get("price_override")  # manual price override
+
             if condition:
-                result = ingest.update_item_condition(item_id, condition, ppt_client=ppt)
-            if grade_company or grade_value:
-                updates = []
-                params = []
-                if grade_company:
-                    updates.append("grade_company = %s")
-                    params.append(grade_company)
-                if grade_value:
-                    updates.append("grade_value = %s")
-                    params.append(grade_value)
-                params.append(item_id)
-                db.execute(f"UPDATE intake_items SET {', '.join(updates)} WHERE id = %s", tuple(params))
-                result = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+                result = ingest.update_item_condition(
+                    item_id, condition, ppt_client=ppt,
+                    price_override=float(price_override) if price_override is not None else None)
+            elif grade_company or grade_value:
+                result = ingest.update_item_grade(
+                    item_id,
+                    grade_company=grade_company,
+                    grade_value=grade_value,
+                    ppt_client=ppt,
+                    price_override=float(price_override) if price_override is not None else None)
+            elif price_override is not None:
+                # Pure price override without condition/grade change
+                result = ingest.override_item_price(item_id, float(price_override))
             return jsonify({"success": True, "result": _serialize(result)})
 
         elif status == "missing":

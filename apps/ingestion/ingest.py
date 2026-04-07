@@ -302,10 +302,10 @@ def undo_break_down(item_id: str) -> dict:
 DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
 
 # Condition multipliers for raw cards (applied to market price before offer %)
-def update_item_condition(item_id: str, condition: str, ppt_client=None) -> dict:
+def update_item_condition(item_id: str, condition: str, ppt_client=None, price_override: float = None) -> dict:
     """
     Update a raw card's condition and recalculate its offer price.
-    Uses PPT condition pricing when available, falls back to multipliers.
+    Uses price_override if provided, then PPT condition pricing, then fallback multipliers.
     """
     from ppt_client import PPTClient, FALLBACK_MULTIPLIERS
 
@@ -323,31 +323,101 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None) -> dict
     qty = item.get("quantity", 1)
     tcg_id = item.get("tcgplayer_id")
 
-    # Try PPT for real condition pricing
-    condition_market = None
-    if tcg_id and ppt_client:
-        try:
-            card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
-            if card_data:
-                condition_market = PPTClient.extract_condition_price(
-                    card_data, condition, variant=item.get("variant"))
-        except Exception as e:
-            logger.warning(f"PPT condition lookup failed for TCG#{tcg_id}: {e}")
-
-    if condition_market is not None:
-        # Use PPT's actual condition price
-        new_market = condition_market
+    if price_override is not None:
+        new_market = Decimal(str(price_override)).quantize(Decimal("0.01"))
     else:
-        # Fallback: multiply NM market price
-        nm_market = Decimal(str(item.get("market_price", 0)))
-        mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
-        new_market = (nm_market * mult).quantize(Decimal("0.01"))
+        # Try PPT for real condition pricing
+        condition_market = None
+        if tcg_id and ppt_client:
+            try:
+                card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+                if card_data:
+                    condition_market = PPTClient.extract_condition_price(
+                        card_data, condition, variant=item.get("variant"))
+            except Exception as e:
+                logger.warning(f"PPT condition lookup failed for TCG#{tcg_id}: {e}")
+
+        if condition_market is not None:
+            new_market = condition_market
+        else:
+            nm_market = Decimal(str(item.get("market_price", 0)))
+            mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
+            new_market = (nm_market * mult).quantize(Decimal("0.01"))
 
     new_offer = (new_market * offer_pct * qty).quantize(Decimal("0.01"))
 
     execute("""
         UPDATE intake_items SET condition = %s, market_price = %s, offer_price = %s WHERE id = %s
     """, (condition, new_market, new_offer, item_id))
+
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def update_item_grade(item_id: str, grade_company: str = None, grade_value: str = None,
+                      ppt_client=None, price_override: float = None) -> dict:
+    """
+    Update a graded slab's company/grade and recalculate its offer price.
+    Uses price_override if provided, then PPT graded pricing, then keeps existing price.
+    """
+    from ppt_client import PPTClient
+
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    company = grade_company or item.get("grade_company", "PSA")
+    grade = grade_value or item.get("grade_value", "")
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    qty = item.get("quantity", 1)
+    tcg_id = item.get("tcgplayer_id")
+
+    new_market = None
+    if price_override is not None:
+        new_market = Decimal(str(price_override)).quantize(Decimal("0.01"))
+    elif tcg_id and ppt_client:
+        try:
+            card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+            if card_data:
+                graded_price = PPTClient.get_graded_price(card_data, company, grade)
+                if graded_price is not None:
+                    new_market = graded_price
+        except Exception as e:
+            logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
+
+    updates = ["grade_company = %s", "grade_value = %s"]
+    params = [company, grade]
+
+    if new_market is not None:
+        new_offer = (new_market * offer_pct * qty).quantize(Decimal("0.01"))
+        updates.extend(["market_price = %s", "offer_price = %s"])
+        params.extend([new_market, new_offer])
+
+    params.append(item_id)
+    execute(f"UPDATE intake_items SET {', '.join(updates)} WHERE id = %s", tuple(params))
+
+    if new_market is not None:
+        _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
+def override_item_price(item_id: str, price: float) -> dict:
+    """Override an item's market price and recalculate offer."""
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    qty = item.get("quantity", 1)
+    new_market = Decimal(str(price)).quantize(Decimal("0.01"))
+    new_offer = (new_market * offer_pct * qty).quantize(Decimal("0.01"))
+
+    execute("""
+        UPDATE intake_items SET market_price = %s, offer_price = %s WHERE id = %s
+    """, (new_market, new_offer, item_id))
 
     _recalculate_session_totals(item["session_id"])
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
