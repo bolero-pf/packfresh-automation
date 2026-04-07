@@ -1027,8 +1027,29 @@ function _renderVerifyRow(item, sessionId) {
     </tr>`;
 }
 
+// Update local session data for an item (avoids full reload)
+function _updateLocalItem(itemId, updates) {
+    if (!_currentSessionData) return;
+    const item = _currentSessionData.items.find(i => i.id === itemId);
+    if (item) Object.assign(item, updates);
+}
+
 async function verifyItem(itemId, sessionId, status, totalQty) {
     try {
+        // Simple confirm (here, qty=1, no split) → optimistic local update
+        if (status === 'here' && totalQty <= 1) {
+            // Fire-and-forget API call
+            fetch(`/api/ingest/item/${itemId}/verify`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ status: 'here' }),
+            });
+            // Optimistic: mark verified locally and re-render in place
+            _updateLocalItem(itemId, { verified_at: new Date().toISOString() });
+            _rerenderStage();
+            return;
+        }
+
+        // Simple confirm with qty > 1 but full qty confirmed
         if (status === 'here' && totalQty > 1) {
             const input = await themedPrompt('Verify Quantity', `How many are here? (expected: ${totalQty})`, totalQty);
             if (input === null) return;
@@ -1037,11 +1058,27 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
                 alert(`Must be between 0 and ${totalQty}`);
                 return;
             }
+            if (confirmed === totalQty) {
+                // Full qty — optimistic update
+                fetch(`/api/ingest/item/${itemId}/verify`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ status: 'here', qty_confirmed: confirmed }),
+                });
+                _updateLocalItem(itemId, { verified_at: new Date().toISOString() });
+                _rerenderStage();
+                return;
+            }
+            // Partial qty — server creates new items, need full reload
             await fetch(`/api/ingest/item/${itemId}/verify`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ status: 'here', qty_confirmed: confirmed }),
             });
-        } else if (status === 'missing' && totalQty > 1) {
+            viewSession(sessionId, true);
+            return;
+        }
+
+        // Missing with qty > 1 — may split, need reload
+        if (status === 'missing' && totalQty > 1) {
             const input = await themedPrompt('Missing Quantity', `How many are missing? (of ${totalQty})`, totalQty);
             if (input === null) return;
             const missing = parseInt(input);
@@ -1053,7 +1090,23 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ status: 'missing', missing_qty: missing }),
             });
-        } else if (status === 'damaged') {
+            viewSession(sessionId, true);
+            return;
+        }
+
+        // Missing qty=1 — optimistic
+        if (status === 'missing' && totalQty <= 1) {
+            fetch(`/api/ingest/item/${itemId}/verify`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ status: 'missing' }),
+            });
+            _updateLocalItem(itemId, { item_status: 'missing', verified_at: new Date().toISOString(), offer_price: 0 });
+            _rerenderStage();
+            return;
+        }
+
+        // Damaged — may split, always reload
+        if (status === 'damaged') {
             let damaged_qty = null;
             if (totalQty > 1) {
                 const input = await themedPrompt('Damaged Quantity', `How many are damaged? (1–${totalQty})`, totalQty);
@@ -1070,12 +1123,15 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(body),
             });
-        } else {
-            await fetch(`/api/ingest/item/${itemId}/verify`, {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ status }),
-            });
+            viewSession(sessionId, true);
+            return;
         }
+
+        // Fallback
+        await fetch(`/api/ingest/item/${itemId}/verify`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ status }),
+        });
         viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
