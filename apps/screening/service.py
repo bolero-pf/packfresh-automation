@@ -1073,9 +1073,13 @@ def on_order_cancelled(order_gid: str) -> dict:
         "spend-spike-review": "spend_spike", "fraud-medium": "fraud_medium",
         "FIRSTTIME5-review": "firsttime5", "customer-hold": "customer_hold",
     }
+    logged_any = False
     for tag, check in TAG_TO_CHECK.items():
         if tag in order_tags:
             _log_screening(order_gid, order_name, email, "cancel", check)
+            logged_any = True
+    if not logged_any and "combine" in (order.get("note") or "").lower():
+        _log_screening(order_gid, order_name, email, "cancel", "combine")
 
     # If this was a FIRSTTIME5 abuse cancellation, set the abuse properties
     if "FIRSTTIME5-review" in order_tags:
@@ -1179,10 +1183,15 @@ def on_order_fulfilled(order_gid: str) -> dict:
         "spend-spike-review": "spend_spike", "fraud-medium": "fraud_medium",
         "FIRSTTIME5-review": "firsttime5", "customer-hold": "customer_hold",
     }
+    logged_any = False
     for tag in tags_to_remove:
         check = TAG_TO_CHECK.get(tag)
         if check:
             _log_screening(order_gid, order_name, email, "release", check)
+            logged_any = True
+    # Combine orders have no specific tag — detect via order note
+    if not logged_any and "combine" in (order.get("note") or "").lower():
+        _log_screening(order_gid, order_name, email, "release", "combine")
 
     try:
         shopify_gql(ORDER_TAGS_REMOVE, {"id": order_gid, "tags": tags_to_remove})

@@ -511,7 +511,7 @@ def api_cancel_order():
 
     # Log cancel events before we clear everything
     try:
-        odata = shopify_gql("query($id:ID!){order(id:$id){name tags customer{email}}}", {"id": order_gid})
+        odata = shopify_gql("query($id:ID!){order(id:$id){name tags note customer{email}}}", {"id": order_gid})
         o = odata.get("data", {}).get("order", {})
         _oname = o.get("name", "?")
         _oemail = ((o.get("customer") or {}).get("email") or "").strip()
@@ -521,9 +521,13 @@ def api_cancel_order():
             "spend-spike-review": "spend_spike", "fraud-medium": "fraud_medium",
             "FIRSTTIME5-review": "firsttime5", "customer-hold": "customer_hold",
         }
+        _logged = False
         for _tag, _check in _TAG_MAP.items():
             if _tag in _otags:
                 _log_screening(order_gid, _oname, _oemail, "cancel", _check)
+                _logged = True
+        if not _logged and "combine" in (o.get("note") or "").lower():
+            _log_screening(order_gid, _oname, _oemail, "cancel", "combine")
     except Exception:
         pass  # don't block cancel if logging fails
 
