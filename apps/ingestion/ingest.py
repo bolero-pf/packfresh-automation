@@ -302,36 +302,52 @@ def undo_break_down(item_id: str) -> dict:
 DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
 
 # Condition multipliers for raw cards (applied to market price before offer %)
-CONDITION_MULTIPLIERS = {
-    "NM": Decimal("1.00"),
-    "LP": Decimal("0.80"),
-    "MP": Decimal("0.60"),
-    "HP": Decimal("0.40"),
-    "DMG": Decimal("0.25"),
-}
+def update_item_condition(item_id: str, condition: str, ppt_client=None) -> dict:
+    """
+    Update a raw card's condition and recalculate its offer price.
+    Uses PPT condition pricing when available, falls back to multipliers.
+    """
+    from ppt_client import PPTClient, FALLBACK_MULTIPLIERS
 
-
-def update_item_condition(item_id: str, condition: str) -> dict:
-    """Update a raw card's condition and recalculate its offer price."""
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
         raise ValueError("Item not found")
 
     condition = condition.upper().strip()
-    if condition not in CONDITION_MULTIPLIERS:
+    valid = {"NM", "LP", "MP", "HP", "DMG"}
+    if condition not in valid:
         raise ValueError(f"Invalid condition: {condition}. Must be NM, LP, MP, HP, or DMG")
 
     session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
-    market_price = Decimal(str(item.get("market_price", 0)))
     qty = item.get("quantity", 1)
-    multiplier = CONDITION_MULTIPLIERS[condition]
+    tcg_id = item.get("tcgplayer_id")
 
-    new_offer = (market_price * multiplier * offer_pct * qty).quantize(Decimal("0.01"))
+    # Try PPT for real condition pricing
+    condition_market = None
+    if tcg_id and ppt_client:
+        try:
+            card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+            if card_data:
+                condition_market = PPTClient.extract_condition_price(
+                    card_data, condition, variant=item.get("variant"))
+        except Exception as e:
+            logger.warning(f"PPT condition lookup failed for TCG#{tcg_id}: {e}")
+
+    if condition_market is not None:
+        # Use PPT's actual condition price
+        new_market = condition_market
+    else:
+        # Fallback: multiply NM market price
+        nm_market = Decimal(str(item.get("market_price", 0)))
+        mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
+        new_market = (nm_market * mult).quantize(Decimal("0.01"))
+
+    new_offer = (new_market * offer_pct * qty).quantize(Decimal("0.01"))
 
     execute("""
-        UPDATE intake_items SET condition = %s, offer_price = %s WHERE id = %s
-    """, (condition, new_offer, item_id))
+        UPDATE intake_items SET condition = %s, market_price = %s, offer_price = %s WHERE id = %s
+    """, (condition, new_market, new_offer, item_id))
 
     _recalculate_session_totals(item["session_id"])
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))

@@ -935,25 +935,25 @@ function _renderVerifyRow(item, sessionId) {
         verifyCell = `<button class="verify-btn verified-missing" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✗ Missing</button>`;
     } else if (isDamaged && isVerified) {
         verifyCell = `<button class="verify-btn verified-damaged" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">⚠ Damaged</button>`;
-    } else if (isVerified && ptype === 'raw') {
-        const cond = item.condition || 'NM';
-        verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ ${cond}</button>`;
     } else if (isVerified && item.is_graded) {
         const co = item.grade_company || 'PSA';
         const gr = item.grade_value || '?';
         verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ ${co} ${gr}</button>`;
+    } else if (isVerified && ptype === 'raw') {
+        const cond = item.condition || 'NM';
+        verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ ${cond}</button>`;
     } else if (isVerified) {
         verifyCell = `<button class="verify-btn verified" onclick="undoVerify('${item.id}', '${sessionId}')" title="Click to undo">✓ Here</button>`;
-    } else if (ptype === 'raw') {
-        // Raw cards: Here with condition picker, or Missing
-        verifyCell = `<div class="verify-btn-group">
-            <button class="verify-btn here" onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✓ Here</button>
-            <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
-        </div>`;
     } else if (item.is_graded) {
         // Graded slabs: Here with grade verification, or Missing
         verifyCell = `<div class="verify-btn-group">
             <button class="verify-btn here" onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${item.grade_company||'PSA'}', '${item.grade_value||''}')">✓ Verify Grade</button>
+            <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
+        </div>`;
+    } else if (ptype === 'raw') {
+        // Raw cards: Here with condition picker, or Missing
+        verifyCell = `<div class="verify-btn-group">
+            <button class="verify-btn here" onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✓ Here</button>
             <button class="verify-btn missing" onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>
         </div>`;
     } else {
@@ -965,14 +965,14 @@ function _renderVerifyRow(item, sessionId) {
         </div>`;
     }
 
-    // Show condition/grade inline for raw/graded items
+    // Show condition/grade inline — graded check first (graded items have product_type='raw')
     let typeLabel = ptype.toUpperCase();
-    if (ptype === 'raw') {
+    if (item.is_graded) {
+        typeLabel = `${item.grade_company || 'PSA'} ${item.grade_value || '?'}`;
+    } else if (ptype === 'raw') {
         const cond = item.condition || 'NM';
         const condColor = cond === 'NM' ? 'var(--green)' : cond === 'LP' ? 'var(--accent)' : cond === 'MP' ? 'var(--amber)' : 'var(--red)';
         typeLabel = `<span style="color:${condColor};">${cond}</span>`;
-    } else if (item.is_graded) {
-        typeLabel = `${item.grade_company || 'PSA'} ${item.grade_value || '?'}`;
     }
 
     return `<tr style="${rowStyle}" data-item-id="${item.id}">

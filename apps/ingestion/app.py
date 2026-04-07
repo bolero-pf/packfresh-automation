@@ -454,7 +454,7 @@ def verify_item(item_id):
             grade_company = data.get("grade_company")
             grade_value = data.get("grade_value")
             if condition:
-                result = ingest.update_item_condition(item_id, condition)
+                result = ingest.update_item_condition(item_id, condition, ppt_client=ppt)
             if grade_company or grade_value:
                 updates = []
                 params = []
