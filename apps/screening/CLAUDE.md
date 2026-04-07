@@ -42,11 +42,25 @@ Four tabs:
 - Controlled by `EASTER_EGG_ACTIVE` env var (no code deploy to start/stop)
 - Tags customer in Shopify + sets Klaviyo properties for email flow
 
+## Verification Precedence
+- **tier2 ($1000+ selfie) always wins** — supersedes tier1 and fraud-medium
+- tier1 ($700 ID check) and fraud-medium have the same requirements, just different emails
+- Tracked via `active_verification_tier` (0/1/2) across sibling orders
+- When a second order pushes cumulative past $1000 but existing verification is tier1, the new order gets tier2 (upgrade)
+- tier2 clears `fraud_verification_required` in Klaviyo to prevent fraud email from stealing the selfie flow
+
 ## Database
 - Uses shared/db.py (PostgreSQL via DATABASE_URL)
 - Table: `customer_notes` (auto-created on startup)
+- Table: `screening_log` — append-only event log for analytics (hold/release/cancel/uncombine/upgrade events with check_type and jsonb details)
 - Table: `easter_egg_pool` — 100 pre-shuffled slots, claimed atomically via FOR UPDATE SKIP LOCKED
 - Table: `easter_egg_log` — every eligibility check logged (live and simulated)
+
+## History Tab (Console)
+- Fifth tab in the screening console — queries `screening_log` table
+- Filters: event type, check type, date range, order/email search
+- Defaults to Combine + Hold, last 30 days (Stuart's primary use case)
+- API: `/api/screening-history` with pagination (50 per page)
 
 ## Webhook Endpoints
 | Endpoint | Trigger | Checks |

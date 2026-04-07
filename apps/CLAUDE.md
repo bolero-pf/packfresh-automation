@@ -35,8 +35,8 @@
 - **shopify_graphql.py** — Shopify Admin GraphQL client with retry (used by vip, screening)
 - **klaviyo.py** — Klaviyo profile upsert with duplicate resolution
 - **webhook_verify.py** — X-Flow-Secret validation for Shopify Flow webhooks
-- **ppt_client.py** — PokemonPriceTracker API client
-- **breakdown_helpers.py** — JIT component price refresh from PPT
+- **ppt_client.py** — PokemonPriceTracker API client (see PPT workaround below)
+- **breakdown_helpers.py** — JIT component price refresh from PPT (capped at 15 calls/request)
 - **breakdown_logic.py** — Unified breakdown recipe CRUD + batch summaries (used by ingestion, intake, inventory)
 - **breakdown_routes.py** — Flask Blueprint for breakdown API (registered by all 3 breakdown services)
 - **static/** — Shared UI components (breakdown_inline.js, breakdown_modal.js, breakdown_modal.css)
@@ -51,6 +51,22 @@
 - Klaviyo for email flows (shared/klaviyo.py)
 - Each service has its own Railway deployment with watch paths
 - JWT auth across all staff services via shared cookie
+
+## PPT Sealed Lookup Workaround (REVERT WHEN FIXED)
+> **Context**: On 2026-04-07, PPT removed `tcgPlayerId` as a query parameter on `/v2/sealed-products`. The cards endpoint (`/v2/cards`) still supports it. PPT dev has been contacted but hasn't responded.
+
+**What changed**: `get_sealed_product_by_tcgplayer_id()` in `ppt_client.py` now searches by `product_name` (the `search` param) with `limit=5`, then matches results by `tcgPlayerId` or exact product name. All callers across ingest-service, ingestion, and inventory were updated to pass `product_name=`.
+
+**Known issues with the workaround**:
+- Costs 5 rate-limit credits per call instead of 1 (PPT charges per `limit`)
+- Name matching can fail if PPT's stored name doesn't exactly match ours
+- Returns `None` (no price) if no exact match — intentional, wrong prices are worse
+
+**To revert when PPT restores `tcgPlayerId`**:
+1. In `ppt_client.py` `get_sealed_product_by_tcgplayer_id()`: replace the search+match logic with the original direct lookup: `params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1}`
+2. The `product_name` kwarg can stay (backwards compatible) — callers don't need to change
+3. In `breakdown_helpers.py`: the 15-call cap (`MAX_PPT_CALLS`) can be removed or raised — it was added because the search workaround is expensive
+4. The 4xx no-retry fix and stale throttle clearing in `_request()` / `should_throttle()` are permanent improvements — do NOT revert those
 
 ## Rules
 - Do NOT modify files outside your assigned service directory
