@@ -188,6 +188,13 @@ class PPTClient:
                     body = r.text
                 raise PPTError(f"PPT 403 Forbidden", 403, body)
 
+            # Log the response body on non-retryable errors so we can diagnose
+            try:
+                err_body = r.json()
+            except Exception:
+                err_body = r.text[:500] if r.text else None
+            logger.warning(f"PPT {r.status_code} response body: {err_body}")
+
             last_err = r
             time.sleep(1.0 * attempt)
 
