@@ -265,7 +265,7 @@ class PPTClient:
             logger.warning(f"get_sealed_product_by_tcgplayer_id called without product_name for TCG#{tcg_id} — cannot search")
             return None
 
-        params = {"search": product_name, "limit": 10}
+        params = {"search": product_name, "limit": 1}
         if include_history:
             params["includeHistory"] = "true"
         items = self._extract_data(self._get(f"{self.base_url}/v2/sealed-products", params))
