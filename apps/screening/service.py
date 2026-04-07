@@ -424,20 +424,28 @@ def _apply_verification(order_gid: str, order_name: str, customer: dict,
             if is_first_order:
                 # First-time: use the original tier-specific properties
                 klaviyo_prop = "id_selfie_required" if tier >= 2 else "id_verification_required"
-                upsert_profile(email=email, external_id=external_id, properties={
+                props = {
                     klaviyo_prop: True,
                     f"{klaviyo_prop}_order": order_name,
                     f"{klaviyo_prop}_amount": cumulative_total,
                     f"{klaviyo_prop}_requested_at": datetime.now(timezone.utc).isoformat(),
-                })
+                }
+                # Tier2 supersedes fraud-medium — clear fraud Klaviyo if it fired first
+                if tier >= 2:
+                    props["fraud_verification_required"] = False
+                upsert_profile(email=email, external_id=external_id, properties=props)
             else:
                 # Multi-order: use cumulative property
-                upsert_profile(email=email, external_id=external_id, properties={
+                props = {
                     "cumulative_verification_required": True,
                     "cumulative_verification_required_order": order_name,
                     "cumulative_verification_required_amount": cumulative_total,
                     "cumulative_verification_required_requested_at": datetime.now(timezone.utc).isoformat(),
-                })
+                }
+                # Tier2 supersedes fraud-medium — clear fraud Klaviyo if it fired first
+                if tier >= 2:
+                    props["fraud_verification_required"] = False
+                upsert_profile(email=email, external_id=external_id, properties=props)
         except Exception as e:
             print(f"[screening] Klaviyo flag failed for {customer_gid}: {e}", flush=True)
 
@@ -672,7 +680,7 @@ def screen_every_order(order_gid: str) -> dict:
 
     # 3. Classify all orders
     has_delivered = False
-    has_active_verification = False  # any non-cancelled order with a verification tag?
+    active_verification_tier = 0     # highest tier among sibling orders (1 or 2)
     non_cancelled_totals = []       # all orders that aren't cancelled (for cumulative)
     max_previous_total = 0.0        # for spend spike
     unfulfilled_siblings = []       # for combine
@@ -695,9 +703,12 @@ def screen_every_order(order_gid: str) -> dict:
             # Track max previous order (not current) for spike
             if nid != order_gid and total > max_previous_total:
                 max_previous_total = total
-            # Check if any active order already has a verification tag
+            # Track highest verification tier among sibling orders
             if nid != order_gid and (tags & {t.lower() for t in VERIFICATION_TAGS}):
-                has_active_verification = True
+                if "high-value-tier2" in tags:
+                    active_verification_tier = max(active_verification_tier, 2)
+                else:
+                    active_verification_tier = max(active_verification_tier, 1)
 
         # Unfulfilled/on-hold siblings for combine — must match shipping address
         if nid != order_gid and status in ("UNFULFILLED", "ON_HOLD") and financial not in CANCELLED_STATUSES:
@@ -715,27 +726,30 @@ def screen_every_order(order_gid: str) -> dict:
 
     # ── CHECK: Cumulative verification (no delivered orders yet) ──
     if not has_delivered:
-        # Skip if another active (non-cancelled) order already has a verification tag
-        if not has_active_verification and cumulative_total >= TIER1_THRESHOLD:
+        if cumulative_total >= TIER1_THRESHOLD:
             tier = 2 if cumulative_total >= TIER2_THRESHOLD else 1
-            if tier >= 2:
-                desc = "photo ID + selfie + shipping address confirmation"
+
+            # Only apply if this tier is higher than what's already being verified
+            if tier > active_verification_tier:
+                note_text = f"🪪 Waiting on ID Verification (${cumulative_total:.2f})"
+
+                order_count = int(customer.get("numberOfOrders", 0) or 0)
+                _apply_verification(order_gid, order_name, customer, tier, cumulative_total, note_text,
+                                    is_first_order=(order_count <= 1))
+                results["verification"] = {
+                    "flagged": True, "reason": f"cumulative_tier{tier}",
+                    "tier": tier, "cumulative_total": cumulative_total,
+                    "upgraded_from_tier": active_verification_tier if active_verification_tier else None,
+                }
             else:
-                desc = "photo ID + shipping address confirmation"
-
-            note_text = f"🪪 Waiting on ID Verification (${cumulative_total:.2f})"
-
-            order_count = int(customer.get("numberOfOrders", 0) or 0)
-            _apply_verification(order_gid, order_name, customer, tier, cumulative_total, note_text,
-                                is_first_order=(order_count <= 1))
-            results["verification"] = {
-                "flagged": True, "reason": f"cumulative_tier{tier}",
-                "tier": tier, "cumulative_total": cumulative_total,
-            }
+                results["verification"] = {
+                    "flagged": False, "reason": "active_verification_exists",
+                    "cumulative_total": cumulative_total,
+                    "active_tier": active_verification_tier,
+                }
         else:
             results["verification"] = {
-                "flagged": False,
-                "reason": "active_verification_exists" if has_active_verification else "below_threshold",
+                "flagged": False, "reason": "below_threshold",
                 "cumulative_total": cumulative_total,
                 "has_delivered": False,
             }
