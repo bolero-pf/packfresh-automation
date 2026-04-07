@@ -585,7 +585,7 @@ def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cac
         product_name = item.get("product_name", "Unknown Product")
         our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
 
-        ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id, product_name=product_name) if tcg_id else None
+        ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id else None
         if not ppt_item:
             # PPT lookup failed — build synthetic ppt_item from what we know
             # so enrichment still sets tags, vendor, weight, metafields, AI fields, etc.
@@ -922,8 +922,7 @@ def enrich_page():
 @app.route("/api/ppt/sealed/<int:tcgplayer_id>")
 def ppt_sealed_lookup(tcgplayer_id):
     """Fetch a sealed product from PPT by TCGPlayer ID — used by the preview page."""
-    name = request.args.get("product_name", "")
-    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=name)
+    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not item:
         return jsonify({"error": f"No PPT product found for TCGPlayer ID {tcgplayer_id}"}), 404
     return jsonify(item)
@@ -932,8 +931,7 @@ def ppt_sealed_lookup(tcgplayer_id):
 @app.route("/api/ppt/sealed/<int:tcgplayer_id>/raw")
 def ppt_sealed_raw(tcgplayer_id):
     """Return the raw PPT response for debugging — shows all available fields."""
-    name = request.args.get("product_name", "")
-    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=name)
+    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not item:
         return jsonify({"error": f"No PPT product found for TCGPlayer ID {tcgplayer_id}"}), 404
     return jsonify({"keys": list(item.keys()), "data": item})
@@ -979,7 +977,7 @@ def enrich_existing_product():
     if not product_gid or not tcgplayer_id:
         return jsonify({"error": "product_gid and tcgplayer_id required"}), 400
 
-    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=data.get("product_name"))
+    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not ppt_item:
         return jsonify({"error": f"PPT item not found for tcgplayer_id {tcgplayer_id}"}), 404
 
@@ -1007,7 +1005,7 @@ def create_listing():
     if not tcgplayer_id:
         return jsonify({"error": "tcgplayer_id required"}), 400
 
-    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=data.get("product_name"))
+    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not ppt_item:
         return jsonify({"error": f"PPT item not found for tcgplayer_id {tcgplayer_id}"}), 404
 

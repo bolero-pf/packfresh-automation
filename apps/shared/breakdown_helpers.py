@@ -39,7 +39,7 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
     stale = db.query(f"""
         SELECT id, variant_id, tcgplayer_id,
                COALESCE(component_type, 'sealed') AS component_type,
-               product_name, market_price
+               market_price
         FROM sealed_breakdown_components
         WHERE variant_id IN ({ph})
           AND tcgplayer_id IS NOT NULL
@@ -54,33 +54,23 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
     for row in stale:
         tcg_id = int(row["tcgplayer_id"])
         if tcg_id not in unique_components:
-            unique_components[tcg_id] = {
-                "type": row["component_type"],
-                "name": row.get("product_name") or "",
-            }
+            unique_components[tcg_id] = row["component_type"]
 
-    # Fetch fresh prices from PPT — cap per request to avoid nuking the rate limit
-    MAX_PPT_CALLS = 15
+    # Fetch fresh prices from PPT
     fresh_prices = {}
-    call_count = 0
-    for tcg_id, comp in unique_components.items():
-        if call_count >= MAX_PPT_CALLS:
-            logger.info(f"PPT refresh capped at {MAX_PPT_CALLS} calls — {len(unique_components) - call_count} remaining will refresh next time")
-            break
+    for tcg_id, comp_type in unique_components.items():
         if ppt.should_throttle():
             logger.warning("PPT rate limit reached — stopping component price refresh")
             break
         try:
-            if comp["type"] == "promo":
+            if comp_type == "promo":
                 data = ppt.get_card_by_tcgplayer_id(tcg_id)
             else:
-                data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id, product_name=comp["name"])
+                data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
             price = ppt.extract_market_price(data)
-            call_count += 1
             if price is not None:
                 fresh_prices[tcg_id] = price
         except Exception as e:
-            call_count += 1
             logger.warning(f"Failed to fetch price for component TCG#{tcg_id}: {e}")
 
     if not fresh_prices:

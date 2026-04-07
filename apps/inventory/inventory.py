@@ -428,8 +428,7 @@ def ppt_sealed_lookup(tcgplayer_id):
     ppt = _get_ppt_client()
     if ppt is None:
         return jsonify({"error": "PPT not configured"}), 503
-    name = request.args.get("product_name", "")
-    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=name)
+    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not item:
         return jsonify({"error": f"No PPT product found for TCGPlayer ID {tcgplayer_id}"}), 404
     return jsonify(item)
@@ -483,7 +482,7 @@ def create_listing():
     if ppt is None:
         return jsonify({"error": "PPT not configured"}), 503
 
-    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id, product_name=data.get("product_name"))
+    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not ppt_item:
         return jsonify({"error": f"No PPT product for TCGPlayer ID {tcgplayer_id}"}), 404
 

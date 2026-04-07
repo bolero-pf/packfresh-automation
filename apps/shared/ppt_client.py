@@ -115,18 +115,6 @@ class PPTClient:
             self.minute_remaining = None
             self.minute_reset = None
 
-        # If minute_remaining hit 0 but we have no reset timestamp,
-        # clear it after 60s to avoid permanent throttle
-        if (self.minute_remaining is not None and self.minute_remaining <= 1
-                and not self.minute_reset):
-            if not hasattr(self, '_throttle_since'):
-                self._throttle_since = time.time()
-            elif time.time() - self._throttle_since > 65:
-                logger.info("PPT clearing stale minute throttle (no reset timestamp)")
-                self.minute_remaining = None
-                self._throttle_since = None
-                return False
-
         if self.minute_remaining is not None and self.minute_remaining <= 1:
             return True
         if self.daily_remaining is not None and self.daily_remaining <= 0:
@@ -160,9 +148,6 @@ class PPTClient:
         if self.should_throttle():
             rl = self.get_rate_limit_info()
             retry_after = rl.get("retry_after") or 60
-            logger.warning(f"PPT throttled: minute_remaining={self.minute_remaining} "
-                           f"daily_remaining={self.daily_remaining} "
-                           f"minute_reset={self.minute_reset} now={time.time()}")
             raise PPTError(f"PPT rate limited — retry in {retry_after}s", 429, {"retry_after": retry_after})
         last_err = None
         for attempt in range(1, max_tries + 1):
@@ -196,18 +181,14 @@ class PPTClient:
                     raise PPTError("PPT daily limit reached", 429, {"retry_after": retry_after, "daily_exhausted": True})
                 raise PPTError(f"PPT rate limited — retry in {retry_after}s", 429, {"retry_after": retry_after})
 
-            # 4xx errors are client errors — retrying won't help, don't waste quota
-            if 400 <= r.status_code < 500:
+            if r.status_code == 403:
                 try:
                     body = r.json()
                 except Exception:
-                    body = r.text[:500] if r.text else None
-                logger.warning(f"PPT {r.status_code} response body: {body}")
-                raise PPTError(f"PPT {r.status_code}: {body}", r.status_code, body)
+                    body = r.text
+                raise PPTError(f"PPT 403 Forbidden", 403, body)
 
-            # 5xx — retry
             last_err = r
-            logger.warning(f"PPT {r.status_code} (attempt {attempt}/{max_tries})")
             time.sleep(1.0 * attempt)
 
         status = last_err.status_code if last_err else "UNKNOWN"
@@ -251,44 +232,12 @@ class PPTClient:
 
     # ── sealed product endpoints ─────────────────────────────────────
 
-    def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False,
-                                              product_name=None):
-        """Look up a sealed product by tcgPlayerId.
-
-        PPT dropped tcgPlayerId as a query param on /v2/sealed-products.
-        Workaround: search by product_name, then match tcgPlayerId in results.
-        Falls back to name-only match if tcgPlayerId isn't in the response.
-        """
-        tcg_id = int(tcgplayer_id)
-
-        if not product_name:
-            logger.warning(f"get_sealed_product_by_tcgplayer_id called without product_name for TCG#{tcg_id} — cannot search")
-            return None
-
-        params = {"search": product_name, "limit": 5}
+    def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
+        params = {"tcgPlayerId": str(int(tcgplayer_id)), "limit": 1}
         if include_history:
             params["includeHistory"] = "true"
         items = self._extract_data(self._get(f"{self.base_url}/v2/sealed-products", params))
-
-        if not items:
-            return None
-
-        # Try exact tcgPlayerId match first
-        for item in items:
-            if item.get("tcgPlayerId") == tcg_id:
-                return item
-
-        # Fallback: exact product name match — critical to avoid partial matches
-        # e.g. "Booster Pack" vs "Booster Pack Art Bundle [Set of 4]"
-        name_lower = product_name.lower()
-        for item in items:
-            item_name = (item.get("productName") or item.get("name", "")).lower()
-            if item_name == name_lower:
-                return item
-
-        # No exact match — don't guess, return None to avoid wrong prices
-        logger.warning(f"PPT search for '{product_name}' returned {len(items)} results but no exact match (tcgPlayerId={tcg_id})")
-        return None
+        return items[0] if items else None
 
     def search_sealed_products(self, query, *, set_name=None, limit=5):
         """Search sealed products by name, optionally filtered by set."""
