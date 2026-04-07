@@ -78,6 +78,23 @@ try:
 except Exception as e:
     print(f"[screening] Easter egg migration failed: {e}", flush=True)
 
+# Screening event log — append-only, never updated/deleted
+db.execute("""
+    CREATE TABLE IF NOT EXISTS screening_log (
+        id              SERIAL PRIMARY KEY,
+        order_gid       TEXT NOT NULL,
+        order_name      TEXT,
+        customer_email  TEXT,
+        event_type      TEXT NOT NULL,
+        check_type      TEXT NOT NULL,
+        details         JSONB DEFAULT '{}',
+        created_at      TIMESTAMPTZ DEFAULT NOW()
+    )
+""")
+db.execute("CREATE INDEX IF NOT EXISTS idx_screening_log_order ON screening_log(order_gid)")
+db.execute("CREATE INDEX IF NOT EXISTS idx_screening_log_type ON screening_log(event_type, check_type)")
+db.execute("CREATE INDEX IF NOT EXISTS idx_screening_log_created ON screening_log(created_at DESC)")
+
 from auth import register_auth_hooks
 register_auth_hooks(app, roles=["owner", "manager"], public_prefixes=('/screening/',))
 
@@ -370,7 +387,7 @@ def api_uncombine_order():
     if not order_gid:
         return jsonify({"error": "order_id required"}), 400
 
-    from service import _release_fulfillment_holds, SIGNATURE_THRESHOLD
+    from service import _release_fulfillment_holds, _log_screening, SIGNATURE_THRESHOLD
     from shopify_graphql import shopify_gql
 
     # Figure out which orders to uncombine vs which stay combined
@@ -386,6 +403,11 @@ def api_uncombine_order():
     for oid in orders_to_release:
         r = _uncombine_single_order(oid, shopify_gql, _release_fulfillment_holds, SIGNATURE_THRESHOLD)
         released.append(r)
+        # Log uncombine for each released order
+        oname = next((o.get("name", "") for o in group_orders if o["id"] == oid), order_name)
+        _log_screening(oid, oname, "", "uncombine", "combine", {
+            "group_size": len(group_orders), "remaining": len(remaining),
+        })
 
     # 2. Update remaining siblings' notes to remove references to uncombined orders
     released_names = {order_name}
@@ -418,6 +440,26 @@ def api_cancel_order():
         return jsonify({"error": "order_id required"}), 400
 
     from shopify_graphql import shopify_gql
+    from service import _log_screening
+
+    # Log cancel events before we clear everything
+    try:
+        odata = shopify_gql("query($id:ID!){order(id:$id){name tags customer{email}}}", {"id": order_gid})
+        o = odata.get("data", {}).get("order", {})
+        _oname = o.get("name", "?")
+        _oemail = ((o.get("customer") or {}).get("email") or "").strip()
+        _otags = set(o.get("tags") or [])
+        _TAG_MAP = {
+            "high-value-tier1": "tier1", "high-value-tier2": "tier2",
+            "spend-spike-review": "spend_spike", "fraud-medium": "fraud_medium",
+            "FIRSTTIME5-review": "firsttime5", "customer-hold": "customer_hold",
+        }
+        for _tag, _check in _TAG_MAP.items():
+            if _tag in _otags:
+                _log_screening(order_gid, _oname, _oemail, "cancel", _check)
+    except Exception:
+        pass  # don't block cancel if logging fails
+
     # Cancel with full refund
     try:
         shopify_gql("""

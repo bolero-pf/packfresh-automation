@@ -274,6 +274,20 @@ def _extract_signals(order_node: dict) -> dict:
 #  SHARED HELPERS
 # ═══════════════════════════════════════════════════════════════════════
 
+def _log_screening(order_gid: str, order_name: str, customer_email: str,
+                    event_type: str, check_type: str, details: dict | None = None):
+    """Append-only screening event log. Never fails loudly."""
+    try:
+        from db import execute
+        execute("""
+            INSERT INTO screening_log (order_gid, order_name, customer_email, event_type, check_type, details)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (order_gid, order_name, customer_email or "", event_type, check_type,
+              json.dumps(details or {})))
+    except Exception as e:
+        print(f"[screening] Log write failed: {e}", flush=True)
+
+
 def _add_order_note(order_gid: str, note_text: str):
     data = shopify_gql("""
         query($id: ID!) { order(id: $id) { id note } }
@@ -399,6 +413,11 @@ def _apply_verification(order_gid: str, order_name: str, customer: dict,
     """
     customer_gid = customer.get("id")
     email = (customer.get("email") or "").strip()
+
+    check = f"tier{tier}"
+    _log_screening(order_gid, order_name, email, "hold", check, {
+        "cumulative_total": cumulative_total, "is_first_order": is_first_order,
+    })
 
     tag = "high-value-tier2" if tier >= 2 else "high-value-tier1"
     hold_reason = f"Cumulative ${cumulative_total:.2f} — verification required"
@@ -544,6 +563,14 @@ def check_firsttime5_abuse(order_gid: str) -> dict:
     note_text = "\n".join(lines)
 
     customer_gid = signals["customer_gid"]
+    order_name = order.get("name", "?")
+    email = signals["email"]
+
+    _log_screening(order_gid, order_name, email, "hold", "firsttime5", {
+        "match_count": len(matches),
+        "top_confidence": matches[0]["confidence"] if matches else None,
+    })
+
     if customer_gid:
         try:
             shopify_gql(CUSTOMER_TAGS_ADD, {"id": customer_gid, "tags": ["FIRSTTIME5-review"]})
@@ -608,6 +635,9 @@ def _apply_customer_notes(order_gid: str, order_name: str, customer_email: str) 
                     shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["hold-for-review", "customer-hold"]})
                     _hold_fulfillment(order_gid, f"Customer hold: {note_text}")
                     held = True
+                    _log_screening(order_gid, order_name, customer_email, "hold", "customer_hold", {
+                        "note_text": note_text,
+                    })
                 except Exception as e:
                     print(f"[screening] customer hold failed for {order_name}: {e}", flush=True)
 
@@ -736,6 +766,10 @@ def screen_every_order(order_gid: str) -> dict:
                 order_count = int(customer.get("numberOfOrders", 0) or 0)
                 _apply_verification(order_gid, order_name, customer, tier, cumulative_total, note_text,
                                     is_first_order=(order_count <= 1))
+                if active_verification_tier:
+                    _log_screening(order_gid, order_name, customer_email, "upgrade", f"tier{tier}", {
+                        "from_tier": active_verification_tier, "cumulative_total": cumulative_total,
+                    })
                 results["verification"] = {
                     "flagged": True, "reason": f"cumulative_tier{tier}",
                     "tier": tier, "cumulative_total": cumulative_total,
@@ -800,6 +834,10 @@ def screen_every_order(order_gid: str) -> dict:
                 except Exception as e:
                     print(f"[screening] Failed to tag customer: {e}", flush=True)
 
+            _log_screening(order_gid, order_name, customer_email, "hold", "spend_spike", {
+                "order_total": order_total, "max_previous": max_previous_total,
+            })
+
             results["spend_spike"] = {
                 "flagged": True, "reason": "spend_spike",
                 "total": order_total, "max_previous": max_previous_total,
@@ -851,6 +889,12 @@ def screen_every_order(order_gid: str) -> dict:
                     f"📦 Combine Order ({order_name})")
             except Exception as e:
                 print(f"[screening] Failed to note sibling {s['order_gid']}: {e}", flush=True)
+
+        _log_screening(order_gid, order_name, customer_email, "hold", "combine", {
+            "order_total": order_total,
+            "sibling_count": len(unfulfilled_siblings),
+            "siblings": [{"name": s["order_name"], "total": s["total"]} for s in unfulfilled_siblings],
+        })
 
         results["combine"] = {
             "flagged": True, "reason": "combine_orders",
@@ -967,11 +1011,17 @@ def check_fraud_risk(order_gid: str) -> dict:
         except Exception as e: print(f"[screening] Note failed: {e}", flush=True)
         try: _cancel_order(order_gid, staff_note="Auto-cancelled: Shopify high fraud risk", notify_customer=False)
         except Exception as e: print(f"[screening] Cancel failed: {e}", flush=True)
+        _log_screening(order_gid, order_name, email, "auto_cancel", "fraud_high", {
+            "order_total": total,
+        })
         return {"flagged": True, "reason": "fraud_high_auto_cancelled",
                 "risk_level": risk_level, "order_name": order_name, "note": note_text}
 
     # MEDIUM
     note_text = "🚨 Medium Fraud Verification"
+    _log_screening(order_gid, order_name, email, "hold", "fraud_medium", {
+        "order_total": total,
+    })
     try: shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": ["fraud-medium", "hold-for-review"]})
     except Exception as e: print(f"[screening] Tag failed: {e}", flush=True)
     if customer_gid:
@@ -1016,6 +1066,16 @@ def on_order_cancelled(order_gid: str) -> dict:
 
     result = {"order_gid": order_gid, "order_name": order_name,
               "firsttime5_abuse": False, "klaviyo_set": False, "verification_cleared": False}
+
+    # Log cancel events for each check type on this order
+    TAG_TO_CHECK = {
+        "high-value-tier1": "tier1", "high-value-tier2": "tier2",
+        "spend-spike-review": "spend_spike", "fraud-medium": "fraud_medium",
+        "FIRSTTIME5-review": "firsttime5", "customer-hold": "customer_hold",
+    }
+    for tag, check in TAG_TO_CHECK.items():
+        if tag in order_tags:
+            _log_screening(order_gid, order_name, email, "cancel", check)
 
     # If this was a FIRSTTIME5 abuse cancellation, set the abuse properties
     if "FIRSTTIME5-review" in order_tags:
@@ -1109,6 +1169,20 @@ def on_order_fulfilled(order_gid: str) -> dict:
     if not tags_to_remove:
         result["reason"] = "no_screening_tags"
         return result
+
+    # Log release events for each check type being cleared
+    order_name = order.get("name", "?")
+    customer = order.get("customer") or {}
+    email = (customer.get("email") or "").strip()
+    TAG_TO_CHECK = {
+        "high-value-tier1": "tier1", "high-value-tier2": "tier2",
+        "spend-spike-review": "spend_spike", "fraud-medium": "fraud_medium",
+        "FIRSTTIME5-review": "firsttime5", "customer-hold": "customer_hold",
+    }
+    for tag in tags_to_remove:
+        check = TAG_TO_CHECK.get(tag)
+        if check:
+            _log_screening(order_gid, order_name, email, "release", check)
 
     try:
         shopify_gql(ORDER_TAGS_REMOVE, {"id": order_gid, "tags": tags_to_remove})
