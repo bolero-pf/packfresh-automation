@@ -265,7 +265,7 @@ class PPTClient:
             logger.warning(f"get_sealed_product_by_tcgplayer_id called without product_name for TCG#{tcg_id} — cannot search")
             return None
 
-        params = {"search": product_name, "limit": 1}
+        params = {"search": product_name, "limit": 5}
         if include_history:
             params["includeHistory"] = "true"
         items = self._extract_data(self._get(f"{self.base_url}/v2/sealed-products", params))
@@ -278,14 +278,17 @@ class PPTClient:
             if item.get("tcgPlayerId") == tcg_id:
                 return item
 
-        # Fallback: exact product name match (PPT may have dropped tcgPlayerId from response too)
+        # Fallback: exact product name match — critical to avoid partial matches
+        # e.g. "Booster Pack" vs "Booster Pack Art Bundle [Set of 4]"
+        name_lower = product_name.lower()
         for item in items:
-            if (item.get("productName") or item.get("name", "")).lower() == product_name.lower():
+            item_name = (item.get("productName") or item.get("name", "")).lower()
+            if item_name == name_lower:
                 return item
 
-        # Last resort: return first result if search was specific enough
-        logger.warning(f"PPT search for '{product_name}' returned {len(items)} results but no tcgPlayerId={tcg_id} match — using first result")
-        return items[0]
+        # No exact match — don't guess, return None to avoid wrong prices
+        logger.warning(f"PPT search for '{product_name}' returned {len(items)} results but no exact match (tcgPlayerId={tcg_id})")
+        return None
 
     def search_sealed_products(self, query, *, set_name=None, limit=5):
         """Search sealed products by name, optionally filtered by set."""
