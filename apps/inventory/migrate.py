@@ -38,6 +38,7 @@ def run_migration():
             inventory_item_id   BIGINT,
             tcgplayer_id        BIGINT,
             is_damaged          BOOLEAN DEFAULT FALSE,
+            unit_cost           NUMERIC(10,2),
             last_synced         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (shopify_product_id, shopify_variant_id)
         )

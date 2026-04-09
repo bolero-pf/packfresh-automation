@@ -138,6 +138,7 @@ class ShopifyClient:
                 variants(first: 10) {
                   edges { node { id price sku inventoryQuantity
                     inventoryItem { id
+                      unitCost { amount }
                       inventoryLevels(first: 1) {
                         edges { node { quantities(names: ["committed"]) { name quantity } } }
                       }
@@ -184,8 +185,15 @@ class ShopifyClient:
                 for var_edge in node["variants"]["edges"]:
                     variant = var_edge["node"]
                     inv_item_id = None
+                    unit_cost = None
                     if variant.get("inventoryItem"):
                         inv_item_id = variant["inventoryItem"]["id"].split("/")[-1]
+                        cost_data = variant["inventoryItem"].get("unitCost")
+                        if cost_data and cost_data.get("amount"):
+                            try:
+                                unit_cost = float(cost_data["amount"])
+                            except (ValueError, TypeError):
+                                pass
                     page_products.append({
                         "product_gid":        node["id"],
                         "shopify_product_id": int(node["id"].split("/")[-1]),
@@ -201,6 +209,7 @@ class ShopifyClient:
                         "tcgplayer_id":       tcg_id,
                         "is_damaged":         is_damaged,
                         "tags_csv":           tags_csv,
+                        "unit_cost":          unit_cost,
                     })
 
             has_next = data["products"]["pageInfo"]["hasNextPage"]

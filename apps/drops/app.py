@@ -53,19 +53,25 @@ def api_search():
 @app.route("/api/candidates")
 def deal_candidates():
     min_qty = int(request.args.get("min_qty", 10))
-    limit = int(request.args.get("limit", 50))
-    rows = db.query("""
+    limit = int(request.args.get("limit", 100))
+    search = request.args.get("search", "").strip()
+    where = ["c.shopify_qty >= %s", "c.is_damaged = FALSE"]
+    params = [min_qty]
+    if search:
+        where.append("c.title ILIKE %s")
+        params.append(f"%{search}%")
+    params.append(limit)
+    rows = db.query(f"""
         SELECT c.shopify_variant_id, c.shopify_product_id, c.title,
                c.shopify_qty, c.shopify_price, c.tcgplayer_id,
-               a.velocity_score, a.units_sold_90d, a.avg_days_to_sell,
-               sc.avg_cogs
+               c.unit_cost,
+               a.velocity_score, a.units_sold_90d, a.avg_days_to_sell
         FROM inventory_product_cache c
         LEFT JOIN sku_analytics a ON a.shopify_variant_id = c.shopify_variant_id
-        LEFT JOIN sealed_cogs sc ON sc.tcgplayer_id = c.tcgplayer_id
-        WHERE c.shopify_qty >= %s AND c.is_damaged = FALSE
+        WHERE {' AND '.join(where)}
         ORDER BY c.shopify_qty DESC
         LIMIT %s
-    """, (min_qty, limit))
+    """, tuple(params))
     return jsonify({"candidates": [_ser(r) for r in rows]})
 
 
@@ -190,6 +196,11 @@ def list_drops():
     db.execute("""
         UPDATE drop_events SET status = 'active'
         WHERE status = 'scheduled' AND drop_date < CURRENT_DATE
+    """)
+    # Auto-complete active drops whose date has passed
+    db.execute("""
+        UPDATE drop_events SET status = 'completed'
+        WHERE status = 'active' AND drop_date < CURRENT_DATE
     """)
     status = request.args.get("status", "all")
     if status == "all":
@@ -424,7 +435,11 @@ DASHBOARD_HTML = """
       <div class="form-row">
         <div class="form-group">
           <span class="form-label">Min Qty</span>
-          <input class="form-input" id="cand-min" type="number" value="10">
+          <input class="form-input" id="cand-min" type="number" value="10" style="width:80px;">
+        </div>
+        <div class="form-group" style="flex:1;">
+          <span class="form-label">Search</span>
+          <input class="form-input" id="cand-search" type="text" placeholder="Filter by title..." onkeydown="if(event.key==='Enter')loadCandidates()">
         </div>
         <button class="btn btn-primary" onclick="loadCandidates()">Search</button>
       </div>
@@ -650,17 +665,20 @@ async function deleteDrop(id) {
 async function loadCandidates() {
   const el = document.getElementById('candidates-list');
   const min = document.getElementById('cand-min').value || 10;
+  const search = document.getElementById('cand-search').value.trim();
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    const r = await fetch('/api/candidates?min_qty='+min);
+    let url = '/api/candidates?min_qty='+min;
+    if (search) url += '&search=' + encodeURIComponent(search);
+    const r = await fetch(url);
     const d = await r.json();
     const items = d.candidates||[];
-    if (!items.length) { el.innerHTML = '<div style="color:var(--dim);padding:20px;">No items with qty >= '+min+'</div>'; return; }
+    if (!items.length) { el.innerHTML = '<div style="color:var(--dim);padding:20px;">No items matching filters</div>'; return; }
     el.innerHTML = `<table><thead><tr>
       <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Sold 90d</th><th>Days to Sell</th><th></th>
     </tr></thead><tbody>${items.map(i => {
-      const cogs = i.avg_cogs ? '$'+i.avg_cogs.toFixed(2) : '—';
-      const margin = (i.avg_cogs && i.shopify_price) ? ((1 - i.avg_cogs/i.shopify_price)*100).toFixed(0)+'%' : '—';
+      const cogs = i.unit_cost ? '$'+i.unit_cost.toFixed(2) : '—';
+      const margin = (i.unit_cost && i.shopify_price) ? ((1 - i.unit_cost/i.shopify_price)*100).toFixed(0)+'%' : '—';
       return `<tr>
         <td><strong>${i.title||'—'}</strong></td>
         <td style="font-weight:700;">${i.shopify_qty}</td>
@@ -785,8 +803,8 @@ async function loadFpCandidates() {
     el.innerHTML = `<table><thead><tr>
       <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Sold 90d</th><th>Days to Sell</th><th></th>
     </tr></thead><tbody>${items.map(i => {
-      const cogs = i.avg_cogs ? '$'+i.avg_cogs.toFixed(2) : '—';
-      const margin = (i.avg_cogs && i.shopify_price) ? ((1 - i.avg_cogs/i.shopify_price)*100).toFixed(0)+'%' : '—';
+      const cogs = i.unit_cost ? '$'+i.unit_cost.toFixed(2) : '—';
+      const margin = (i.unit_cost && i.shopify_price) ? ((1 - i.unit_cost/i.shopify_price)*100).toFixed(0)+'%' : '—';
       const gid = 'gid://shopify/Product/'+i.shopify_product_id;
       return `<tr>
         <td><strong>${i.title||'—'}</strong></td>
