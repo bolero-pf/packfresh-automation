@@ -247,10 +247,18 @@ def _build_recommendations(in_stock_only=True):
                 variant_comp_map[vid] = []
             if c["component_tcg_id"]:
                 variant_comp_map[vid].append(int(c["component_tcg_id"]))
+        # Pre-build quantity_per_parent lookup by variant (eliminates per-item queries)
+        comp_qty_by_variant = {}
+        for avc in all_variant_comps:
+            _vid = str(avc["variant_id"])
+            _cid = avc["comp_tcg_id"]
+            if _cid:
+                comp_qty_by_variant.setdefault(_vid, {})[int(_cid)] = int(avc["quantity_per_parent"] or 1)
     else:
         child_qty_map = {}
         variant_comp_map = {}
         child_bd_map = {}
+        comp_qty_by_variant = {}
 
     results = []
     for row in inventory:
@@ -274,12 +282,8 @@ def _build_recommendations(in_stock_only=True):
                 # qty_per_parent comes from components lookup — need per-component qty
                 child_store_vals.append((cid, sp))
 
-        # Get quantity_per_parent for each component in this variant (one query, reused below)
-        comp_qty_rows = db.query("""
-            SELECT tcgplayer_id, quantity_per_parent
-            FROM sealed_breakdown_components WHERE variant_id = %s
-        """, (vid,))
-        comp_qty_map = {int(r["tcgplayer_id"]): int(r["quantity_per_parent"]) for r in comp_qty_rows}
+        # quantity_per_parent lookup from pre-built dict (no per-item DB query)
+        comp_qty_map = comp_qty_by_variant.get(vid, {})
 
         # Compute store-based bd value using per-component qtys from recipe
         bd_value_store = 0.0
@@ -483,9 +487,10 @@ def execute_breakdown():
     if qty_to_break > current_qty:
         return jsonify({"error": f"Cannot break down {qty_to_break} — only {current_qty} in stock"}), 400
 
-    # Fetch components
+    # Fetch components (include market_price for COGS allocation)
     components = db.query("""
         SELECT sbc.tcgplayer_id, sbc.product_name, sbc.quantity_per_parent,
+               sbc.market_price AS comp_market_price,
                ipc.shopify_variant_id AS child_variant_id,
                ipc.inventory_item_id  AS child_inv_item_id,
                ipc.shopify_qty        AS child_current_qty,
@@ -498,6 +503,31 @@ def execute_breakdown():
 
     if not components:
         return jsonify({"error": "No components found for this variant"}), 404
+
+    # Fetch parent COGS for redistribution to children
+    parent_unit_cost = None
+    try:
+        parent_cost_data = sc.get_inventory_item_cost_and_qty(str(parent_inv_item_id))
+        parent_unit_cost = parent_cost_data[0]  # unit cost per parent
+    except Exception as e:
+        logger.warning(f"Could not fetch parent COGS for redistribution: {e}")
+
+    # Pre-compute each child's share of parent COGS based on market values
+    child_cogs = {}  # child_variant_id -> unit cost to set
+    if parent_unit_cost and parent_unit_cost > 0:
+        total_comp_market = sum(
+            float(c.get("comp_market_price") or 0) * int(c["quantity_per_parent"])
+            for c in components
+        )
+        if total_comp_market > 0:
+            for comp in components:
+                comp_market = float(comp.get("comp_market_price") or 0)
+                comp_qty = int(comp["quantity_per_parent"])
+                share = (comp_market * comp_qty) / total_comp_market
+                # COGS per child unit = (parent_cost * share) / qty_per_parent
+                child_unit_cost = (parent_unit_cost * share) / max(comp_qty, 1)
+                if comp.get("child_variant_id"):
+                    child_cogs[comp["child_variant_id"]] = round(child_unit_cost, 2)
 
     results = {"parent": {}, "children": [], "errors": []}
 
@@ -539,6 +569,19 @@ def execute_breakdown():
             })
         else:
             try:
+                # Update COGS: weighted average of existing cost + parent's allocated cost
+                if child_vid in child_cogs:
+                    try:
+                        existing_cost, existing_qty = sc.get_inventory_item_cost_and_qty(str(child_inv_id))
+                        our_cost = child_cogs[child_vid]
+                        if not existing_cost or existing_qty <= 0:
+                            new_cost = our_cost
+                        else:
+                            new_cost = (existing_cost * existing_qty + our_cost * add_qty) / (existing_qty + add_qty)
+                        sc.set_unit_cost(str(child_inv_id), new_cost)
+                    except Exception as e:
+                        logger.warning(f"Could not update COGS for child {child_vid}: {e}")
+
                 sc.set_inventory_level(int(child_inv_id), int(LOCATION_ID), new_child_qty)
                 db.execute("UPDATE inventory_product_cache SET shopify_qty=%s WHERE shopify_variant_id=%s",
                            (new_child_qty, child_vid))
@@ -739,6 +782,63 @@ def inventory_search():
     return jsonify({"items": [dict(r) for r in rows]})
 
 
+@bp.route("/api/component-search")
+@requires_auth
+def component_search():
+    """Search breakdown components by name and return parent products that contain them."""
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"results": []})
+    rows = db.query("""
+        SELECT sbc.tcgplayer_id AS parent_tcg_id,
+               sbc.product_name AS parent_name,
+               sbcomp.product_name AS component_name,
+               sbcomp.quantity_per_parent,
+               sbcomp.market_price AS component_market_price,
+               sbv.variant_name,
+               sbv.total_component_market,
+               ipc.shopify_qty AS parent_store_qty,
+               ipc.shopify_price AS parent_store_price,
+               ipc.shopify_variant_id AS parent_variant_id,
+               ipc.inventory_item_id AS parent_inv_item_id,
+               ipc.status AS parent_status
+        FROM sealed_breakdown_components sbcomp
+        JOIN sealed_breakdown_variants sbv ON sbv.id = sbcomp.variant_id
+        JOIN sealed_breakdown_cache sbc ON sbc.id = sbv.breakdown_id
+        LEFT JOIN inventory_product_cache ipc ON ipc.tcgplayer_id = sbc.tcgplayer_id
+          AND ipc.is_damaged = FALSE
+        WHERE LOWER(sbcomp.product_name) LIKE %s
+        ORDER BY sbc.product_name, sbcomp.quantity_per_parent DESC
+    """, (f"%{q.lower()}%",))
+
+    results = []
+    for r in rows:
+        parent_qty = int(r["parent_store_qty"] or 0)
+        qty_per = int(r["quantity_per_parent"] or 1)
+        parent_price = float(r["parent_store_price"] or 0)
+        bd_value = float(r["total_component_market"] or 0)
+        comp_price = float(r["component_market_price"] or 0)
+        results.append({
+            "parent_tcg_id": r["parent_tcg_id"],
+            "parent_name": r["parent_name"],
+            "component_name": r["component_name"],
+            "quantity_per_parent": qty_per,
+            "component_market_price": round(comp_price, 2),
+            "component_total_value": round(comp_price * qty_per, 2),
+            "variant_name": r["variant_name"],
+            "bd_value": round(bd_value, 2),
+            "parent_store_qty": parent_qty,
+            "parent_store_price": round(parent_price, 2),
+            "parent_variant_id": r["parent_variant_id"],
+            "parent_inv_item_id": r["parent_inv_item_id"],
+            "parent_status": r["parent_status"],
+            "total_available": parent_qty * qty_per,
+            "bd_pl": round(bd_value - parent_price, 2) if parent_price > 0 else None,
+            "bd_pl_pct": round((bd_value - parent_price) / parent_price * 100, 1) if parent_price > 0 else None,
+        })
+    return jsonify({"results": results})
+
+
 @bp.route("/api/base-component", methods=["POST"])
 @requires_auth
 def mark_base_component():
@@ -883,6 +983,7 @@ input[type=text],input[type=number],textarea,select{{
     <button class="tab-btn" onclick="switchTab('recipes',this)">📖 Known Recipes</button>
     <button class="tab-btn" onclick="switchTab('ignored',this)">🚫 Ignored SKUs</button>
     <button class="tab-btn" onclick="switchTab('norecipe',this)">📋 No Recipe</button>
+    <button class="tab-btn" onclick="switchTab('compsearch',this)">🔎 Find Components</button>
   </div>
 
   <!-- ═══ RECOMMENDATIONS TAB ════════════════════════════════════════════ -->
@@ -991,6 +1092,35 @@ input[type=text],input[type=number],textarea,select{{
   </div>
 </div>
 
+  <!-- ═══ FIND COMPONENTS TAB ═══════════════════════════════════════════ -->
+  <div id="tab-compsearch" class="tab-pane">
+    <div class="card">
+      <h3 style="margin-bottom:4px">Search for components across all recipes</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
+        Find which products you can break down to get a specific component (e.g., "destined rivals booster")
+      </p>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input type="text" id="cs-search" placeholder="Search component name…" style="flex:1"
+               onkeydown="if(event.key==='Enter') searchComponents()">
+        <button class="btn btn-primary" onclick="searchComponents()">Search</button>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px" id="cs-filters" style="display:none">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="cs-in-stock" checked onchange="renderComponentResults()" style="width:15px;height:15px;accent-color:var(--accent)">
+          In Stock Only
+        </label>
+        <select id="cs-sort" style="width:auto" onchange="renderComponentResults()">
+          <option value="available">Sort: Most Available</option>
+          <option value="pl">Sort: Best Breakdown P/L</option>
+          <option value="name">Sort: Parent Name</option>
+          <option value="qty_per">Sort: Qty per Unit</option>
+        </select>
+        <span id="cs-count" style="font-size:12px;color:var(--text-dim);margin-left:auto"></span>
+      </div>
+      <div id="cs-results"></div>
+    </div>
+  </div>
+
 <!-- Shared breakdown modal is injected by breakdown_modal.js -->
 
 <script>
@@ -1052,7 +1182,7 @@ function switchTab(id, btn) {{
 
 function restoreTab() {{
   const hash = location.hash.replace('#', '');
-  const valid = ['recommendations','search','ignored','norecipe','recipes'];
+  const valid = ['recommendations','search','ignored','norecipe','recipes','compsearch'];
   const id = valid.includes(hash) ? hash : 'recommendations';
   const btn = document.querySelector(`.tab-btn[onclick*="'${{id}}'"]`);
   switchTab(id, btn);
@@ -1434,6 +1564,98 @@ document.addEventListener('keydown', e => {{
 // ══════════════════════════════════════════════════════════════════
 restoreFilters();
 restoreTab();
+</script>
+
+<!-- Component Search tab -->
+<script>
+let _compSearchResults = [];
+
+async function searchComponents() {{
+  const q = document.getElementById('cs-search').value.trim();
+  const panel = document.getElementById('cs-results');
+  if (!q) return;
+  panel.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+  try {{
+    const r = await fetch('/inventory/breakdown/api/component-search?q=' + encodeURIComponent(q));
+    const d = await r.json();
+    if (!r.ok) {{ panel.innerHTML = `<div class="alert alert-error">${{d.error}}</div>`; return; }}
+    _compSearchResults = d.results || [];
+    renderComponentResults();
+  }} catch(e) {{ panel.innerHTML = `<div class="alert alert-error">${{e.message}}</div>`; }}
+}}
+
+function renderComponentResults() {{
+  const panel = document.getElementById('cs-results');
+  const countEl = document.getElementById('cs-count');
+  const inStockOnly = document.getElementById('cs-in-stock')?.checked;
+  const sort = document.getElementById('cs-sort')?.value || 'available';
+
+  let items = [..._compSearchResults];
+  if (inStockOnly) items = items.filter(i => i.parent_store_qty > 0);
+
+  if (sort === 'available') items.sort((a,b) => b.total_available - a.total_available);
+  else if (sort === 'pl') items.sort((a,b) => (b.bd_pl || -9999) - (a.bd_pl || -9999));
+  else if (sort === 'qty_per') items.sort((a,b) => b.quantity_per_parent - a.quantity_per_parent);
+  else items.sort((a,b) => (a.parent_name||'').localeCompare(b.parent_name||''));
+
+  if (countEl) countEl.textContent = `${{items.length}} result${{items.length !== 1 ? 's' : ''}}`;
+
+  if (!items.length) {{
+    panel.innerHTML = `<div style="color:var(--text-dim);padding:20px;text-align:center">
+      ${{_compSearchResults.length > 0
+        ? '🔍 No in-stock results. Uncheck "In Stock Only" to see all.'
+        : '🔍 No recipes contain components matching that search.'}}
+    </div>`;
+    return;
+  }}
+
+  panel.innerHTML = `<div style="overflow-x:auto"><table>
+    <thead><tr>
+      <th>Parent Product</th>
+      <th>Component</th>
+      <th>Qty/Unit</th>
+      <th>Total Available</th>
+      <th>Parent Price</th>
+      <th>BD Value</th>
+      <th>P/L</th>
+      <th></th>
+    </tr></thead>
+    <tbody>
+    ${{items.map(i => {{
+      const plClass = i.bd_pl_pct == null ? '' : i.bd_pl_pct >= 5 ? 'delta-pos' : i.bd_pl_pct >= -10 ? 'delta-neutral' : 'delta-neg';
+      const plStr = i.bd_pl != null
+        ? `<span class="${{plClass}}" style="font-weight:600">${{i.bd_pl >= 0 ? '+' : ''}}$${{i.bd_pl.toFixed(2)}} <small>(${{i.bd_pl_pct >= 0 ? '+' : ''}}${{i.bd_pl_pct.toFixed(1)}}%)</small></span>`
+        : '<span style="color:var(--text-dim)">—</span>';
+      const qtyColor = i.parent_store_qty > 0 ? 'var(--green)' : 'var(--red)';
+      const availColor = i.total_available > 0 ? 'var(--green)' : i.parent_store_qty > 0 ? 'var(--amber)' : 'var(--text-dim)';
+      const safeName = (i.parent_name || '').replace(/'/g, '').replace(/"/g, '');
+      return `<tr>
+        <td>
+          <strong style="font-size:13px">${{i.parent_name}}</strong><br>
+          <small style="color:var(--text-dim)">TCG#${{i.parent_tcg_id}}</small>
+          <br><small style="color:var(--text-dim)">${{i.variant_name}}</small>
+        </td>
+        <td>${{i.component_name}}<br><small style="color:var(--text-dim)">$${{i.component_market_price.toFixed(2)}} ea</small></td>
+        <td style="font-weight:600">${{i.quantity_per_parent}}</td>
+        <td style="font-weight:600;color:${{availColor}}">
+          ${{i.total_available}}
+          <small style="color:var(--text-dim);font-weight:400">(${{i.parent_store_qty}} × ${{i.quantity_per_parent}})</small>
+        </td>
+        <td>${{i.parent_store_price > 0 ? '$$' + i.parent_store_price.toFixed(2) : '<span style="color:var(--text-dim)">—</span>'}}</td>
+        <td>${{i.bd_value > 0 ? '$$' + i.bd_value.toFixed(2) : '<span style="color:var(--text-dim)">—</span>'}}</td>
+        <td>${{plStr}}</td>
+        <td>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            ${{i.parent_store_qty > 0 && i.parent_variant_id && i.parent_inv_item_id
+              ? `<button class="btn btn-primary btn-sm" onclick="openExecuteModal(this,${{i.parent_tcg_id}},'${{safeName}}', ${{i.parent_store_price}}, ${{i.parent_store_qty}}, ${{i.parent_variant_id}}, ${{i.parent_inv_item_id}})">▶ Break Down</button>`
+              : ''}}
+            <button class="btn btn-secondary btn-sm" onclick="openRecipeEditor(${{i.parent_tcg_id}},'${{safeName}}', ${{i.parent_store_price}}, ${{i.parent_store_qty||0}})">✎ Recipe</button>
+          </div>
+        </td>
+      </tr>`;
+    }}).join('')}}
+    </tbody></table></div>`;
+}}
 </script>
 
 <!-- Known Recipes tab -->

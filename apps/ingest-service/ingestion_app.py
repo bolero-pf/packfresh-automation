@@ -458,7 +458,7 @@ def push_session_live(session_id):
     errors = []
 
     # ── Consolidate items by (tcg_id, is_damaged) to minimize Shopify API calls ──
-    consolidated = {}  # (tcg_id, is_damaged) -> {total_qty, items[], ...}
+    consolidated = {}  # (tcg_id, is_damaged) -> {total_qty, total_cost, items[], ...}
     for item in active:
         tcg_id = item["tcgplayer_id"]
         is_damaged = item.get("item_status") == "damaged"
@@ -468,10 +468,13 @@ def push_session_live(session_id):
                 "tcg_id": tcg_id,
                 "is_damaged": is_damaged,
                 "total_qty": 0,
+                "total_cost": 0.0,
                 "items": [],
                 "product_name": item.get("product_name"),
             }
-        consolidated[key]["total_qty"] += item.get("quantity", 1)
+        item_qty = item.get("quantity", 1)
+        consolidated[key]["total_qty"] += item_qty
+        consolidated[key]["total_cost"] += float(item.get("offer_price") or 0)
         consolidated[key]["items"].append(item)
 
     for key, group in consolidated.items():
@@ -486,11 +489,16 @@ def push_session_live(session_id):
             "consolidated_from": len(group["items"]),
         }
 
+        # Weighted unit cost across all consolidated items
+        consolidated_unit_cost = group["total_cost"] / max(qty, 1)
+
         try:
             if not is_damaged:
-                entry = _push_normal_item(entry, tcg_id, qty, group["items"][0], normal_cache)
+                entry = _push_normal_item(entry, tcg_id, qty, group["items"][0], normal_cache,
+                                          consolidated_unit_cost=consolidated_unit_cost)
             else:
-                entry = _push_damaged_item(entry, tcg_id, qty, group["items"][0], normal_cache, damaged_cache)
+                entry = _push_damaged_item(entry, tcg_id, qty, group["items"][0], normal_cache, damaged_cache,
+                                           consolidated_unit_cost=consolidated_unit_cost)
         except Exception as e:
             entry.update(action="error", error=str(e))
             errors.append(entry)
@@ -560,14 +568,16 @@ def _compute_weighted_cost(current_cost, current_qty, our_unit_cost, adding_qty)
     return (current_cost * current_qty + our_unit_cost * adding_qty) / (current_qty + adding_qty)
 
 
-def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cache: dict) -> dict:
+def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cache: dict,
+                      consolidated_unit_cost: float = None) -> dict:
     """Push a normal (non-damaged) item: find variant and increment, or create new listing."""
     cache_row = normal_cache.get(tcg_id)
     if cache_row and cache_row.get("shopify_variant_id"):
         inv_item_id = shopify.get_inventory_item_id(cache_row["shopify_variant_id"])
         if inv_item_id:
             # Weighted average COGS before adjusting inventory
-            our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
+            our_unit_cost = consolidated_unit_cost if consolidated_unit_cost is not None else (
+                float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1))
             try:
                 current_cost, current_qty = shopify.get_inventory_item_cost_and_qty(inv_item_id)
                 new_cost = _compute_weighted_cost(current_cost, current_qty, our_unit_cost, qty)
@@ -583,7 +593,8 @@ def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cac
     else:
         # No Shopify match — create fully enriched draft listing via enrichment pipeline
         product_name = item.get("product_name", "Unknown Product")
-        our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
+        our_unit_cost = consolidated_unit_cost if consolidated_unit_cost is not None else (
+            float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1))
 
         ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id else None
         if not ppt_item:
@@ -626,7 +637,8 @@ def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cac
 
 
 def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
-                       normal_cache: dict, damaged_cache: dict) -> dict:
+                       normal_cache: dict, damaged_cache: dict,
+                       consolidated_unit_cost: float = None) -> dict:
     """Push a damaged item: increment existing damaged listing or create one."""
     cache_row = damaged_cache.get(tcg_id)
 
@@ -634,7 +646,8 @@ def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
         # Damaged listing exists — increment inventory
         inv_item_id = shopify.get_inventory_item_id(cache_row["shopify_variant_id"])
         if inv_item_id:
-            our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
+            our_unit_cost = consolidated_unit_cost if consolidated_unit_cost is not None else (
+                float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1))
             try:
                 current_cost, current_qty = shopify.get_inventory_item_cost_and_qty(inv_item_id)
                 new_cost = _compute_weighted_cost(current_cost, current_qty, our_unit_cost, qty)

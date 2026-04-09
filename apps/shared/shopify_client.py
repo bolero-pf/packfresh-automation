@@ -254,14 +254,15 @@ class ShopifyClient:
         return inv.get("id", "").split("/")[-1] or None
 
     def get_inventory_item_cost_and_qty(self, inventory_item_id: str) -> tuple[float | None, int]:
-        """Fetch current unitCost and total available qty for an inventory item."""
+        """Fetch current unitCost and total on_hand qty for an inventory item.
+        Uses on_hand (not available) so committed orders don't skew COGS weighted average."""
         inv_gid = f"gid://shopify/InventoryItem/{inventory_item_id}"
         data = self._gql("""
             query($id: ID!) {
                 inventoryItem(id: $id) {
                     unitCost { amount }
                     inventoryLevels(first: 10) {
-                        edges { node { quantities(names: ["available"]) { name quantity } } }
+                        edges { node { quantities(names: ["on_hand"]) { name quantity } } }
                     }
                 }
             }
@@ -273,7 +274,7 @@ class ShopifyClient:
         current_qty = 0
         for edge in levels:
             for q in edge.get("node", {}).get("quantities", []):
-                if q.get("name") == "available":
+                if q.get("name") == "on_hand":
                     current_qty += q.get("quantity", 0)
         return unit_cost, current_qty
 
