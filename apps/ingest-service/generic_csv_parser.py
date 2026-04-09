@@ -180,12 +180,14 @@ def _guess_type(row: dict, mapping: dict) -> str:
             return "sealed"
 
     # If card number + rarity present, it's raw
+    # Card numbers can be numeric (26/83), alphanumeric promos (SWSH039, SM102),
+    # or special subsets (GG28/GG70, RC8/RC32, TG15/TG30, XY123)
     card_col = mapping.get("card_number")
     rarity_col = mapping.get("rarity")
     if card_col and rarity_col:
         card_num = (row.get(card_col) or "").strip()
         rarity = (row.get(rarity_col) or "").strip()
-        if card_num and rarity and re.match(r"^[\d]+(/[\d]+)?$", card_num):
+        if card_num and rarity:
             return "raw"
 
     return "sealed"
