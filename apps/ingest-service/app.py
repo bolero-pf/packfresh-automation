@@ -1312,6 +1312,24 @@ def cancel_session(session_id):
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/api/intake/merge-sessions", methods=["POST"])
+def merge_sessions():
+    """Merge source session into target, combining duplicate items."""
+    data = request.get_json(silent=True) or {}
+    target_id = data.get("target_session_id")
+    source_id = data.get("source_session_id")
+    if not target_id or not source_id:
+        return jsonify({"error": "target_session_id and source_session_id required"}), 400
+    try:
+        result = intake.merge_sessions(target_id, source_id)
+        return jsonify({"success": True, "session": _serialize(result), "merge_stats": result.get("merge_stats", {})})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception("merge_sessions error")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/intake/item/<item_id>/damage", methods=["POST"])
 def damage_item(item_id):
     """Split item into good + damaged quantities."""

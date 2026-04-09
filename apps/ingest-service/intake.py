@@ -454,6 +454,72 @@ def rejuvenate_session(session_id: str) -> dict:
     return get_session(session_id)
 
 
+def merge_sessions(target_session_id: str, source_session_id: str) -> dict:
+    """Merge source session into target. Combines duplicate items, moves the rest, cancels source."""
+    target = get_session(target_session_id)
+    source = get_session(source_session_id)
+    if not target:
+        raise ValueError("Target session not found")
+    if not source:
+        raise ValueError("Source session not found")
+    if target["status"] != "in_progress":
+        raise ValueError(f"Target session must be in_progress (currently: {target['status']})")
+    if source["status"] != "in_progress":
+        raise ValueError(f"Source session must be in_progress (currently: {source['status']})")
+
+    # Get items from both sessions
+    target_items = query(
+        "SELECT id, tcgplayer_id, condition, product_type, quantity, market_price, offer_price "
+        "FROM intake_items WHERE session_id = %s", (target_session_id,))
+    source_items = query(
+        "SELECT id, tcgplayer_id, condition, product_type, quantity, market_price, offer_price "
+        "FROM intake_items WHERE session_id = %s", (source_session_id,))
+
+    # Build lookup of target items by (tcgplayer_id, condition, product_type)
+    target_lookup = {}
+    for item in target_items:
+        if item["tcgplayer_id"]:
+            key = (item["tcgplayer_id"], item["condition"], item["product_type"])
+            target_lookup[key] = item
+
+    merged_count = 0
+    moved_count = 0
+
+    for src_item in source_items:
+        key = (src_item["tcgplayer_id"], src_item["condition"], src_item["product_type"]) if src_item["tcgplayer_id"] else None
+        match = target_lookup.get(key) if key else None
+
+        if match:
+            # Duplicate — combine quantities and sum offer prices
+            new_qty = match["quantity"] + src_item["quantity"]
+            new_offer = match["offer_price"] + src_item["offer_price"]
+            execute(
+                "UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s",
+                (new_qty, new_offer, match["id"]))
+            execute("DELETE FROM intake_items WHERE id = %s", (src_item["id"],))
+            match["quantity"] = new_qty
+            match["offer_price"] = new_offer
+            merged_count += 1
+        else:
+            # No match — move to target session
+            execute(
+                "UPDATE intake_items SET session_id = %s WHERE id = %s",
+                (target_session_id, src_item["id"]))
+            moved_count += 1
+
+    _recalculate_session_totals(target_session_id)
+
+    # Cancel the now-empty source session
+    execute(
+        "UPDATE intake_sessions SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP, "
+        "cancel_reason = 'Merged into session ' || %s WHERE id = %s",
+        (target_session_id[:8], source_session_id))
+
+    result = get_session(target_session_id)
+    result["merge_stats"] = {"merged": merged_count, "moved": moved_count}
+    return result
+
+
 # ==========================================
 # ITEM STATUS CHANGES (damage, missing, rejected)
 # ==========================================

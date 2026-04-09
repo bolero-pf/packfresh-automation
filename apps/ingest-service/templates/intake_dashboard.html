@@ -557,6 +557,7 @@
                                onkeydown="if(event.key==='Enter') loadFilteredActive()">
                     </div>
                     <button class="btn btn-sm btn-secondary" onclick="loadFilteredActive()" style="height:32px; font-size:0.8rem;">Filter</button>
+                    <button id="merge-sessions-btn" class="btn btn-sm" style="height:32px; font-size:0.8rem; background:#7c3aed; color:#fff; border:none; display:none;" onclick="mergeSessions()">Merge Selected</button>
                 </div>
                 <div id="active-sessions-list" class="loading"><span class="spinner"></span> Loading...</div>
             </div>
@@ -1367,8 +1368,10 @@
             const d = await r.json();
             if (!d.sessions.length) { c.innerHTML = '<p style="color:var(--text-dim);">No sessions found.</p>'; return; }
 
+            const isActive = containerId === 'active-sessions-list';
             c.innerHTML = `<table class="responsive-cards">
                 <thead><tr>
+                    ${isActive ? '<th style="width:30px;"></th>' : ''}
                     <th>Customer</th><th>Type</th><th>Status</th><th>Items</th><th>Offer</th>
                     <th>Accepted Details</th><th>Created</th><th></th>
                 </tr></thead>
@@ -1405,6 +1408,7 @@
                         details = '📬 no tracking';
                     }
                     return `<tr>
+                    ${isActive ? `<td><input type="checkbox" class="merge-check" data-session-id="${s.id}" data-customer="${s.customer_name || 'Unknown'}" onchange="updateMergeBtn()"></td>` : ''}
                     <td data-label="Customer">${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''}</td>
                     <td data-label="Type"><span class="badge badge-blue">${s.session_type}</span></td>
                     <td data-label="Status"><span class="badge" style="${statusStyle}">${statusLabel}</span></td>
@@ -1423,6 +1427,47 @@
             </table>`;
         } catch(err) {
             c.innerHTML = `<div class="alert alert-error">Failed to load: ${err.message}</div>`;
+        }
+    }
+
+    // ═══════════════════════════════ MERGE SESSIONS ═══════════════════════════════
+
+    function updateMergeBtn() {
+        const checked = document.querySelectorAll('.merge-check:checked');
+        const btn = document.getElementById('merge-sessions-btn');
+        btn.style.display = checked.length === 2 ? 'inline-block' : 'none';
+    }
+
+    async function mergeSessions() {
+        const checked = [...document.querySelectorAll('.merge-check:checked')];
+        if (checked.length !== 2) return;
+
+        const s1 = { id: checked[0].dataset.sessionId, name: checked[0].dataset.customer };
+        const s2 = { id: checked[1].dataset.sessionId, name: checked[1].dataset.customer };
+
+        const pick = prompt(
+            `Merge sessions:\n  1) ${s1.name} (${s1.id.slice(0,8)}...)\n  2) ${s2.name} (${s2.id.slice(0,8)}...)\n\n` +
+            `Which session should KEEP? Enter 1 or 2:`, '1');
+        if (!pick || !['1','2'].includes(pick.trim())) return;
+
+        const target = pick.trim() === '1' ? s1 : s2;
+        const source = pick.trim() === '1' ? s2 : s1;
+
+        if (!confirm(`Merge "${source.name}" into "${target.name}"?\n\nDuplicate items will be combined. The source session will be cancelled.`)) return;
+
+        try {
+            const r = await fetch('/api/intake/merge-sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ target_session_id: target.id, source_session_id: source.id }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            const stats = d.merge_stats || {};
+            alert(`Merged! ${stats.merged || 0} items combined, ${stats.moved || 0} items moved.`);
+            loadFilteredActive();
+        } catch(err) {
+            alert('Merge failed: ' + err.message);
         }
     }
 
