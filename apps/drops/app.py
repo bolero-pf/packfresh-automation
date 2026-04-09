@@ -474,6 +474,10 @@ DASHBOARD_HTML = """
             <span class="form-label">Min Qty</span>
             <input class="form-input" id="fp-cand-min" type="number" value="4" style="width:80px;">
           </div>
+          <div class="form-group" style="flex:1;">
+            <span class="form-label">Search</span>
+            <input class="form-input" id="fp-cand-search" type="text" placeholder="Filter by title..." onkeydown="if(event.key==='Enter')loadFpCandidates()">
+          </div>
           <button class="btn btn-sm btn-primary" onclick="loadFpCandidates()" style="align-self:end;">Load</button>
         </div>
       </div>
@@ -800,12 +804,15 @@ async function submitFounderPick() {
 async function loadFpCandidates() {
   const el = document.getElementById('fp-candidates-list');
   const min = document.getElementById('fp-cand-min').value || 4;
+  const search = document.getElementById('fp-cand-search').value.trim();
   el.innerHTML = '<div class="spinner"></div>';
   try {
-    const r = await fetch('/api/candidates?min_qty='+min+'&limit=80');
+    let url = '/api/candidates?min_qty='+min+'&limit=100';
+    if (search) url += '&search=' + encodeURIComponent(search);
+    const r = await fetch(url);
     const d = await r.json();
     const items = d.candidates||[];
-    if (!items.length) { el.innerHTML = '<div style="color:var(--dim);padding:8px;">No items with qty >= '+min+'</div>'; return; }
+    if (!items.length) { el.innerHTML = '<div style="color:var(--dim);padding:8px;">No items matching filters</div>'; return; }
     el.innerHTML = `<table><thead><tr>
       <th>Product</th><th>Qty</th><th>Price</th><th>COGS</th><th>Margin</th><th>Sold 90d</th><th>Days to Sell</th><th></th>
     </tr></thead><tbody>${items.map(i => {
