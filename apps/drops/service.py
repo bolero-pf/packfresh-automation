@@ -282,7 +282,7 @@ def setup_drop(product_gid: str, variant_gid: str, drop_date: str,
     set_drop_price(product_gid, variant_gid, drop_price)
 
     # 2. Tags
-    tags = [unavail_tag, "drop", "weekly-deals"]
+    tags = [unavail_tag, "drop", "weekly deals"]
     if drop_type == "vip":
         tags.append("vip-drop")
     if limit_qty:

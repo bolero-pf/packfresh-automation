@@ -8,13 +8,13 @@
 - DB via shared/db.py (no local db.py)
 
 ## Drop Types
-- **weekly**: set price, add `unavailable-{month}-{day}` + `drop` + `weekly-deals` + `limit-X` tags, remove from non-Online channels
+- **weekly**: set price, add `unavailable-{month}-{day}` + `drop` + `weekly deals` + `limit-X` tags, remove from non-Online channels
 - **vip**: everything above + add `vip-drop` tag (permanent) + set `custom.vip_price_cents` metafield
 
 ## Tag Lifecycle
-- **Setup adds**: unavailable-*, drop, weekly-deals, limit-X (+ vip-drop for VIP)
+- **Setup adds**: unavailable-*, drop, weekly deals, limit-X (+ vip-drop for VIP)
 - **Release removes**: unavailable-* and drop ONLY
-- **Persistent**: weekly-deals, limit-X, vip-drop (never auto-removed)
+- **Persistent**: weekly deals, limit-X, vip-drop (never auto-removed)
 
 ## Flow
 1. Search product → set date, price, type, limit

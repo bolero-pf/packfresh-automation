@@ -249,6 +249,45 @@ def backfill_drop():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# API: Remove Weekly Deals Tag
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/weekly-deals", methods=["GET"])
+def list_weekly_deals():
+    """Find all products currently tagged 'weekly deals'."""
+    from service import search_products
+    results = search_products("tag:'weekly deals'", limit=50)
+    return jsonify({"products": results})
+
+
+@app.route("/api/weekly-deals/remove", methods=["POST"])
+def remove_weekly_deals():
+    """Remove 'weekly deals' tag from all (or specified) products."""
+    data = request.get_json(silent=True) or {}
+    product_gids = data.get("product_gids")  # optional: remove from specific ones only
+
+    from service import search_products, remove_tags
+    if not product_gids:
+        # Find all products with the tag
+        results = search_products("tag:'weekly deals'", limit=50)
+        product_gids = [p["id"] for p in results]
+
+    if not product_gids:
+        return jsonify({"ok": True, "removed": 0, "message": "No products with 'weekly deals' tag"})
+
+    removed = []
+    errors = []
+    for gid in product_gids:
+        try:
+            remove_tags(gid, ["weekly deals"])
+            removed.append(gid)
+        except Exception as e:
+            errors.append({"gid": gid, "error": str(e)})
+
+    return jsonify({"ok": True, "removed": len(removed), "errors": errors})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # API: Delete Drop
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -430,7 +469,19 @@ DASHBOARD_HTML = """
   </div>
 
   <!-- SCHEDULED -->
-  <div class="pane" id="pane-scheduled"><div class="spinner"></div></div>
+  <div class="pane" id="pane-scheduled">
+    <div class="card" style="margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-weight:700;">Weekly Deals Tag</span>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-sm btn-secondary" onclick="previewWeeklyDeals()">Preview Current</button>
+          <button class="btn btn-sm btn-red" onclick="removeWeeklyDeals()">Remove All Weekly Deals</button>
+        </div>
+      </div>
+      <div id="weekly-deals-preview" style="margin-top:8px;"></div>
+    </div>
+    <div id="scheduled-drops"><div class="spinner"></div></div>
+  </div>
 
   <!-- HISTORY -->
   <div class="pane" id="pane-history"><div class="spinner"></div></div>
@@ -640,8 +691,42 @@ async function submitDrop() {
 }
 
 // Drops list
+async function previewWeeklyDeals() {
+  const el = document.getElementById('weekly-deals-preview');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/weekly-deals');
+    const d = await r.json();
+    const products = d.products||[];
+    if (!products.length) { el.innerHTML = '<div style="color:var(--dim);padding:4px;">No products with weekly deals tag</div>'; return; }
+    el.innerHTML = products.map(p => `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);">
+      <strong style="flex:1;">${p.title}</strong>
+      <span style="color:var(--dim);">qty ${p.total_inventory}</span>
+    </div>`).join('');
+  } catch(e) { el.innerHTML = `<div style="color:var(--red);">${e.message}</div>`; }
+}
+
+async function removeWeeklyDeals() {
+  const el = document.getElementById('weekly-deals-preview');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/weekly-deals');
+    const d = await r.json();
+    const products = d.products||[];
+    if (!products.length) { el.innerHTML = '<div style="color:var(--dim);padding:4px;">No products with weekly deals tag</div>'; return; }
+    if (!confirm('Remove weekly deals tag from ' + products.length + ' product(s)?\\n\\n' + products.map(p=>p.title).join('\\n'))) {
+      el.innerHTML = '';
+      return;
+    }
+    const r2 = await fetch('/api/weekly-deals/remove', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
+    const d2 = await r2.json();
+    toast('Removed weekly deals from ' + d2.removed + ' product(s)', 'green');
+    el.innerHTML = '';
+  } catch(e) { el.innerHTML = `<div style="color:var(--red);">${e.message}</div>`; }
+}
+
 async function loadDrops(tab) {
-  const el = document.getElementById('pane-' + tab);
+  const el = tab === 'scheduled' ? document.getElementById('scheduled-drops') : document.getElementById('pane-' + tab);
   el.innerHTML = '<div class="spinner"></div>';
   const status = tab === 'scheduled' ? 'scheduled' : 'all';
   try {
