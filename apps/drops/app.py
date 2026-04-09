@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 db.init_pool()
 
+# Ensure unit_cost column exists on inventory_product_cache (may not have been migrated yet)
+try:
+    db.execute("ALTER TABLE inventory_product_cache ADD COLUMN IF NOT EXISTS unit_cost NUMERIC(10,2)")
+except Exception:
+    pass
+
 
 from auth import register_auth_hooks
 register_auth_hooks(app, roles=["owner"], public_prefixes=('/static', '/api/'),
