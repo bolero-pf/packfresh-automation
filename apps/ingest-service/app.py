@@ -211,9 +211,9 @@ def upload_collectr():
     if result.errors and not result.items:
         return jsonify({"error": "Failed to parse CSV", "details": result.errors}), 400
 
-    # Check for duplicate import
+    # Check for duplicate import (allow override with force flag)
     dup_session = intake.check_duplicate_import(result.file_hash)
-    if dup_session:
+    if dup_session and request.form.get("force") != "1":
         return jsonify({
             "error": "This file has already been imported",
             "existing_session_id": dup_session,
@@ -329,10 +329,10 @@ def upload_collectr_html():
     if result.errors and not result.items:
         return jsonify({"error": "Failed to parse HTML", "details": result.errors}), 400
 
-    # Check for duplicate import (skip if appending to existing session)
+    # Check for duplicate import (skip if appending or force override)
     if not existing_session_id:
         dup_session = intake.check_duplicate_import(result.file_hash)
-        if dup_session:
+        if dup_session and not data.get("force"):
             return jsonify({
                 "error": "This exact HTML has already been imported",
                 "existing_session_id": dup_session,
@@ -491,9 +491,9 @@ def upload_generic_csv():
             "unmapped_headers": result.unmapped_headers,
         }), 400
 
-    # Check for duplicate import
+    # Check for duplicate import (allow override with force flag)
     dup_session = intake.check_duplicate_import(result.file_hash)
-    if dup_session:
+    if dup_session and request.form.get("force") != "1":
         return jsonify({
             "error": "This file has already been imported",
             "existing_session_id": dup_session,

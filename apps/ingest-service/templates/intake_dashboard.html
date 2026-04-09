@@ -878,10 +878,19 @@
         form.append('is_distribution', document.getElementById('csv-distribution').checked ? '1' : '0');
 
         try {
-            const r = await fetch('/api/intake/upload-collectr', { method: 'POST', body: form });
-            const d = await r.json();
+            let r = await fetch('/api/intake/upload-collectr', { method: 'POST', body: form });
+            let d = await r.json();
+            if (r.status === 409 && d.existing_session_id) {
+                if (!confirm(`This file was already imported (Session: ${d.existing_session_id.slice(0,8)}...). Re-import anyway?`)) {
+                    resultDiv.innerHTML = '';
+                    return;
+                }
+                form.append('force', '1');
+                r = await fetch('/api/intake/upload-collectr', { method: 'POST', body: form });
+                d = await r.json();
+            }
             if (!r.ok) {
-                resultDiv.innerHTML = `<div class="alert alert-error">${d.error}${d.existing_session_id ? ` (Session: ${d.existing_session_id.slice(0,8)}...)` : ''}</div>`;
+                resultDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`;
                 return;
             }
 
@@ -914,19 +923,33 @@
         resultDiv.innerHTML = '<div class="card"><div class="loading"><span class="spinner"></span> Parsing HTML...</div></div>';
 
         try {
-            const r = await fetch('/api/intake/upload-collectr-html', {
+            const payload = {
+                html: htmlContent,
+                customer_name: document.getElementById('html-customer').value,
+                offer_percentage: document.getElementById('html-offer-pct').value,
+                is_distribution: document.getElementById('html-distribution').checked,
+            };
+            let r = await fetch('/api/intake/upload-collectr-html', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    html: htmlContent,
-                    customer_name: document.getElementById('html-customer').value,
-                    offer_percentage: document.getElementById('html-offer-pct').value,
-                    is_distribution: document.getElementById('html-distribution').checked,
-                }),
+                body: JSON.stringify(payload),
             });
-            const d = await r.json();
+            let d = await r.json();
+            if (r.status === 409 && d.existing_session_id) {
+                if (!confirm(`This content was already imported (Session: ${d.existing_session_id.slice(0,8)}...). Re-import anyway?`)) {
+                    resultDiv.innerHTML = '';
+                    return;
+                }
+                payload.force = true;
+                r = await fetch('/api/intake/upload-collectr-html', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                });
+                d = await r.json();
+            }
             if (!r.ok) {
-                resultDiv.innerHTML = `<div class="alert alert-error">${d.error}${d.existing_session_id ? ` (Session: ${d.existing_session_id.slice(0,8)}...)` : ''}</div>`;
+                resultDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`;
                 return;
             }
 
@@ -1037,10 +1060,19 @@
             form.append('is_distribution', document.getElementById('generic-distribution').checked ? '1' : '0');
             form.append('column_mapping', JSON.stringify(_genericCsvMapping));
 
-            const r = await fetch('/api/intake/upload-generic-csv', { method: 'POST', body: form });
-            const d = await r.json();
+            let r = await fetch('/api/intake/upload-generic-csv', { method: 'POST', body: form });
+            let d = await r.json();
+            if (r.status === 409 && d.existing_session_id) {
+                if (!confirm(`This file was already imported (Session: ${d.existing_session_id.slice(0,8)}...). Re-import anyway?`)) {
+                    resultDiv.innerHTML = '';
+                    return;
+                }
+                form.append('force', '1');
+                r = await fetch('/api/intake/upload-generic-csv', { method: 'POST', body: form });
+                d = await r.json();
+            }
             if (!r.ok) {
-                resultDiv.innerHTML = `<div class="alert alert-error">${d.error}${d.details ? '<br><small>' + d.details.join('; ') + '</small>' : ''}${d.existing_session_id ? ` (Session: ${d.existing_session_id.slice(0,8)}...)` : ''}</div>`;
+                resultDiv.innerHTML = `<div class="alert alert-error">${d.error}${d.details ? '<br><small>' + d.details.join('; ') + '</small>' : ''}</div>`;
                 return;
             }
 
