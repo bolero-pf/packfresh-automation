@@ -756,14 +756,29 @@ def webhook_order_paid():
     if not hold_ids:
         return jsonify({"ok": True, "kiosk": False}), 200
 
+    # Extract order info for staff fulfillment
     shopify_order_id = order.get("id")
+    order_number = order.get("name") or f"#{order.get('order_number', '')}"
+    shipping = order.get("shipping_address") or {}
+    shipping_name = f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip()
+    if not shipping_name:
+        shipping_name = f"{order.get('customer', {}).get('first_name', '')} {order.get('customer', {}).get('last_name', '')}".strip()
+    shipping_addr = ", ".join(filter(None, [
+        shipping.get("address1"), shipping.get("address2"),
+        shipping.get("city"), shipping.get("province_code"),
+        shipping.get("zip"), shipping.get("country"),
+    ]))
+
     for hold_id in hold_ids:
         db.execute("""
             UPDATE holds
-            SET checkout_status = 'completed', status = 'PENDING'
+            SET checkout_status = 'completed', status = 'PENDING',
+                customer_name = %s, shopify_order_number = %s,
+                shipping_name = %s, shipping_address = %s
             WHERE id = %s AND cohort = 'champion' AND checkout_status = 'pending'
-        """, (hold_id,))
-        logger.info(f"Champion order paid: hold={hold_id} shopify_order={shopify_order_id}")
+        """, (shipping_name or order_number, order_number,
+              shipping_name, shipping_addr, hold_id))
+        logger.info(f"Champion order paid: hold={hold_id} order={order_number} ship_to={shipping_name}")
 
     return jsonify({"ok": True, "kiosk": True, "holds": list(hold_ids)}), 200
 

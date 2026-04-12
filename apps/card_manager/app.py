@@ -84,6 +84,7 @@ def list_holds():
             FROM holds h
             LEFT JOIN hold_items hi ON hi.hold_id = h.id
             WHERE h.status IN ('PENDING','PULLING','READY')
+              AND NOT (h.cohort = 'champion' AND h.checkout_status = 'pending')
             GROUP BY h.id
             ORDER BY h.created_at DESC
         """)

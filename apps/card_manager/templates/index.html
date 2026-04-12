@@ -250,7 +250,7 @@ async function loadHolds() {
         <div class="hold-row">
           <div>
             <div class="hold-name">${esc(h.customer_name)}${isChampion ? ' <span style="color:#4ade80;font-size:0.75rem;font-weight:700;">★ PAID — Ship</span>' : ''}</div>
-            <div class="hold-phone">${isChampion ? esc(h.customer_email||'') : esc(h.customer_phone||'—')}</div>
+            <div class="hold-phone">${isChampion ? esc(h.shopify_order_number||'') + ' · ' + esc(h.shipping_name||h.customer_email||'') : esc(h.customer_phone||'—')}</div>
           </div>
           <div>
             <span class="badge ${badgeCls}">${h.status}</span>
@@ -306,7 +306,8 @@ function renderHoldDetail(d) {
     <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
       <div>
         <div style="font-size:1.4rem;font-weight:700;">${esc(hold.customer_name)}${isChampionHold ? ' <span style="background:#4ade80;color:#000;padding:2px 10px;border-radius:12px;font-size:0.75rem;font-weight:700;">★ PAID — Ship</span>' : ''}</div>
-        <div style="font-size:0.82rem;color:var(--dim);">${isChampionHold ? esc(hold.customer_email||'') : esc(hold.customer_phone||'')} · ${_age(hold.created_at)} · <span class="badge ${badgeCls}">${hold.status}</span></div>
+        <div style="font-size:0.82rem;color:var(--dim);">${isChampionHold ? esc(hold.shopify_order_number||'') + ' · ' + esc(hold.shipping_name||hold.customer_email||'') : esc(hold.customer_phone||'')} · ${_age(hold.created_at)} · <span class="badge ${badgeCls}">${hold.status}</span></div>
+        ${isChampionHold && hold.shipping_address ? `<div style="font-size:0.78rem;color:var(--dim);margin-top:2px;">📦 ${esc(hold.shipping_address)}</div>` : ''}
       </div>
       <div class="btn-row" style="margin:0;">
         ${hold.status === 'PENDING' ? `<button class="btn btn-amber" onclick="transitionHold('PULLING')">▶ Start Pulling</button>` : ''}

@@ -38,6 +38,9 @@ cols = {
     "shopify_customer_gid": "VARCHAR(100)",
     "checkout_url":         "TEXT",
     "checkout_status":      "VARCHAR(20) DEFAULT 'pending'",
+    "shopify_order_number": "VARCHAR(50)",
+    "shipping_name":        "VARCHAR(255)",
+    "shipping_address":     "TEXT",
 }
 
 for col, typedef in cols.items():
