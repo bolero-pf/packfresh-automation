@@ -393,10 +393,16 @@ def reverse_decision(hold_id, hold_item_id):
 def finish_hold(hold_id):
     """
     Finish a hold:
-    - Create Shopify draft listings for all ACCEPTED items
-    - Mark REJECTED items as PENDING_RETURN
-    - Close the hold
+    - For guest holds: Create Shopify draft listings for ACCEPTED items, reject undecided
+    - For champion holds: Skip product creation (already exists), auto-accept all pulled items
     """
+    # Check if this is a Champion (kiosk checkout) hold
+    hold = db.query_one("SELECT cohort, checkout_status FROM holds WHERE id = %s", (hold_id,))
+    is_champion = hold and hold.get("cohort") == "champion"
+
+    if is_champion:
+        return _finish_champion_hold(hold_id)
+
     if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
         return jsonify({"error": "Shopify not configured"}), 503
 
@@ -501,6 +507,53 @@ def _create_raw_listing(item: dict) -> dict:
         "variant_id": product["variants"][0]["id"],
         "title":      title,
     }
+
+
+def _finish_champion_hold(hold_id):
+    """
+    Finish a Champion (kiosk checkout) hold.
+    Products already exist on Shopify (created by kiosk at checkout).
+    Auto-accept all PULLED items, mark MISSING items, close the hold.
+    """
+    # Auto-accept all PULLED/REQUESTED items (customer already paid)
+    items = db.query("""
+        SELECT hi.id AS hold_item_id, hi.status, hi.raw_card_id
+        FROM hold_items hi
+        WHERE hi.hold_id = %s AND hi.status IN ('PULLED', 'REQUESTED')
+    """, (hold_id,))
+
+    for item in items:
+        db.execute("""
+            UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (str(item["hold_item_id"]),))
+        db.execute("""
+            UPDATE raw_cards SET state = 'PENDING_SALE', current_hold_id = NULL
+            WHERE id = %s
+        """, (str(item["raw_card_id"]),))
+
+    # Handle MISSING items — release them
+    db.execute("""
+        UPDATE raw_cards SET current_hold_id = NULL
+        WHERE id IN (
+            SELECT raw_card_id FROM hold_items
+            WHERE hold_id = %s AND status = 'MISSING'
+        )
+    """, (hold_id,))
+
+    # Close the hold
+    db.execute("""
+        UPDATE holds SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP WHERE id = %s
+    """, (hold_id,))
+
+    accepted_count = len(items)
+    logger.info(f"Finished Champion hold {hold_id}: {accepted_count} items accepted (pre-paid)")
+
+    return jsonify({
+        "success": True,
+        "champion": True,
+        "accepted": accepted_count,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

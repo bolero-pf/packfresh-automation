@@ -245,11 +245,12 @@ async function loadHolds() {
       const total   = h.total_items  || 0;
       const pct     = total ? Math.round(pulled / total * 100) : 0;
       const badgeCls= h.status === 'PENDING' ? 'badge-pending' : h.status === 'PULLING' ? 'badge-pulling' : 'badge-ready';
+      const isChampion = h.cohort === 'champion' && h.checkout_status === 'completed';
       return `<div class="card" onclick="openHold('${h.id}')">
         <div class="hold-row">
           <div>
-            <div class="hold-name">${esc(h.customer_name)}</div>
-            <div class="hold-phone">${esc(h.customer_phone||'—')}</div>
+            <div class="hold-name">${esc(h.customer_name)}${isChampion ? ' <span style="color:#4ade80;font-size:0.75rem;font-weight:700;">★ PAID — Ship</span>' : ''}</div>
+            <div class="hold-phone">${isChampion ? esc(h.customer_email||'') : esc(h.customer_phone||'—')}</div>
           </div>
           <div>
             <span class="badge ${badgeCls}">${h.status}</span>
@@ -299,11 +300,13 @@ function renderHoldDetail(d) {
   const totalCount  = items.length;
   const badgeCls    = hold.status === 'PENDING' ? 'badge-pending' : hold.status === 'PULLING' ? 'badge-pulling' : 'badge-ready';
 
+  const isChampionHold = hold.cohort === 'champion' && hold.checkout_status === 'completed';
+
   let html = `
     <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
       <div>
-        <div style="font-size:1.4rem;font-weight:700;">${esc(hold.customer_name)}</div>
-        <div style="font-size:0.82rem;color:var(--dim);">${esc(hold.customer_phone||'')} · ${_age(hold.created_at)} · <span class="badge ${badgeCls}">${hold.status}</span></div>
+        <div style="font-size:1.4rem;font-weight:700;">${esc(hold.customer_name)}${isChampionHold ? ' <span style="background:#4ade80;color:#000;padding:2px 10px;border-radius:12px;font-size:0.75rem;font-weight:700;">★ PAID — Ship</span>' : ''}</div>
+        <div style="font-size:0.82rem;color:var(--dim);">${isChampionHold ? esc(hold.customer_email||'') : esc(hold.customer_phone||'')} · ${_age(hold.created_at)} · <span class="badge ${badgeCls}">${hold.status}</span></div>
       </div>
       <div class="btn-row" style="margin:0;">
         ${hold.status === 'PENDING' ? `<button class="btn btn-amber" onclick="transitionHold('PULLING')">▶ Start Pulling</button>` : ''}

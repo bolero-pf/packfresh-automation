@@ -346,6 +346,9 @@ header {
   </div>
 </header>
 
+<!-- Champion status bar -->
+<div id="champion-bar" style="display:none;align-items:center;justify-content:center;gap:8px;padding:6px 16px;background:rgba(232,197,71,0.1);border-bottom:1px solid rgba(232,197,71,0.2);font-size:0.85rem;"></div>
+
 <!-- Condition pills + filter toggle -->
 <div class="filter-bar">
   <span class="cond-toggle on" data-cond="NM" onclick="toggleCond(this)" style="border-color:#4ade80;background:rgba(74,222,128,0.15);color:#4ade80;">NM</span>
@@ -413,6 +416,35 @@ const MAX = 20;
 let _cart = [];  // [{card_name, set_name, condition, qty, price, image_url}]
 let _activeConditions = new Set(['NM','LP','MP','HP','DMG']);
 
+// Champion state — persisted in localStorage
+let _champion = null;  // { verified, first_name, customer_gid, email }
+
+function _saveChampion() {
+  try { localStorage.setItem('pf_champion', JSON.stringify(_champion)); } catch(e) {}
+}
+function _loadChampion() {
+  try {
+    const saved = localStorage.getItem('pf_champion');
+    if (saved) _champion = JSON.parse(saved);
+  } catch(e) { _champion = null; }
+}
+function _clearChampion() {
+  _champion = null;
+  try { localStorage.removeItem('pf_champion'); } catch(e) {}
+  updateChampionUI();
+}
+function updateChampionUI() {
+  const bar = document.getElementById('champion-bar');
+  if (!bar) return;
+  if (_champion && _champion.verified) {
+    bar.innerHTML = `<span style="color:var(--accent);font-weight:700;">★ Champion</span> ${esc(_champion.first_name || _champion.email)} <button class="btn btn-outline" style="padding:2px 10px;font-size:0.75rem;margin-left:8px;" onclick="_clearChampion()">Sign Out</button>`;
+    bar.style.display = 'flex';
+  } else {
+    bar.innerHTML = '';
+    bar.style.display = 'none';
+  }
+}
+
 // ── Themed Confirm ───────────────────────────────────────────────────────────
 function themedConfirm(title, msg) {
   return new Promise(resolve => {
@@ -465,7 +497,9 @@ let _detail = null;  // current card being viewed
 // ── Boot ─────────────────────────────────────────────────────────────────────
 async function boot() {
   _loadCart();
+  _loadChampion();
   updateCartBadge();
+  updateChampionUI();
   await Promise.all([loadSets(), loadEras()]);
   doSearch();
 }
@@ -618,7 +652,7 @@ function renderDetail(card, copies) {
       const addLabel = cartQty > 0
         ? `<span style="background:var(--accent);color:#000;padding:4px 14px;border-radius:20px;font-weight:700;font-size:0.85rem;">✓ Added ×${cartQty}</span>`
         : `<span style="border:1.5px solid var(--accent);color:var(--accent);padding:4px 14px;border-radius:20px;font-weight:700;font-size:0.85rem;">+ Add</span>`;
-      return `<div class="copy-row${cartQty>0?' selected':''}" data-cond="${cond}" data-avail="${copies.length}" data-price="${avgPrice.toFixed(2)}" onclick="toggleCondition(this,'${esc(card.card_name)}','${esc(card.set_name||'')}','${esc(card.image_url||'')}')">
+      return `<div class="copy-row${cartQty>0?' selected':''}" data-cond="${cond}" data-avail="${copies.length}" data-price="${avgPrice.toFixed(2)}" data-card-name="${esc(card.card_name)}" data-set-name="${esc(card.set_name||'')}" data-image-url="${esc(card.image_url||'')}">
         <div class="copy-cond"><span class="cond-pill cond-${cond}">${cond}</span></div>
         <div class="copy-num">${copies.length} available${copies[0]?.card_number ? ' · #'+copies[0].card_number : ''}</div>
         <div class="copy-price">$${avgPrice > 0 ? avgPrice.toFixed(2) : '—'}</div>
@@ -650,10 +684,28 @@ function renderDetail(card, copies) {
   `;
 }
 
-function toggleCondition(row, cardName, setName, imageUrl) {
-  const cond   = row.getAttribute('data-cond');
-  const avail  = parseInt(row.getAttribute('data-avail'));
-  const price  = parseFloat(row.getAttribute('data-price')) || 0;
+// Delegated click handler for condition rows (avoids inline onclick with user data)
+document.addEventListener('click', function(e) {
+  const row = e.target.closest('.copy-row');
+  if (!row || !row.dataset.cardName) return;
+  toggleCondition(row);
+});
+
+// Delegated click handler for cart remove buttons
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.cart-item-remove');
+  if (!btn || !btn.dataset.cardName) return;
+  removeFromCart(btn.dataset.cardName, btn.dataset.setName, btn.dataset.condition);
+  renderCart(document.getElementById('cart-panel'));
+});
+
+function toggleCondition(row) {
+  const cardName = row.dataset.cardName;
+  const setName  = row.dataset.setName;
+  const imageUrl = row.dataset.imageUrl;
+  const cond     = row.dataset.cond;
+  const avail    = parseInt(row.dataset.avail);
+  const price    = parseFloat(row.dataset.price) || 0;
   const inCart = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
 
   if (inCart) {
@@ -669,32 +721,40 @@ function toggleCondition(row, cardName, setName, imageUrl) {
 
 function showQtyAdjuster(row, cardName, setName, cond, avail, price, imageUrl, currentQty) {
   // Inline qty adjuster replaces the row temporarily
-  const orig = row.innerHTML;
   row.innerHTML = `
-    <div style="flex:1;font-weight:600;">${cond} — How many?</div>
+    <div style="flex:1;font-weight:600;">${esc(cond)} — How many?</div>
     <div class="qty-ctrl">
-      <button class="qty-btn" onclick="adjustQty('${cardName}','${setName}','${cond}',${avail},${price},'${imageUrl}',-1,event)">−</button>
+      <button class="qty-btn qty-adjust" data-delta="-1">−</button>
       <div class="qty-val" id="qa-val-${cond}">${currentQty}</div>
-      <button class="qty-btn" onclick="adjustQty('${cardName}','${setName}','${cond}',${avail},${price},'${imageUrl}',1,event)">+</button>
+      <button class="qty-btn qty-adjust" data-delta="1">+</button>
     </div>
-    <button class="qty-btn" style="background:var(--red);border-color:var(--red);" onclick="removeFromCart('${cardName}','${setName}','${cond}'); openDetail(_detail);">✕</button>
+    <button class="qty-btn qty-remove" style="background:var(--red);border-color:var(--red);">✕</button>
   `;
+  // Bind adjust buttons via closure (no user data in HTML attributes)
+  row.querySelectorAll('.qty-adjust').forEach(btn => {
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      const delta = parseInt(this.dataset.delta);
+      const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
+      if (!item) return;
+      const newQty = item.qty + delta;
+      if (newQty < 1) { removeFromCart(cardName, setName, cond); openDetail(_detail); return; }
+      if (newQty > avail) return;
+      if (delta > 0 && cartCount() >= MAX) return;
+      item.qty = newQty;
+      updateCartBadge();
+      const el = document.getElementById(`qa-val-${cond}`);
+      if (el) el.textContent = newQty;
+      _saveCart();
+    });
+  });
+  row.querySelector('.qty-remove').addEventListener('click', function(e) {
+    e.stopPropagation();
+    removeFromCart(cardName, setName, cond);
+    openDetail(_detail);
+  });
 }
 
-function adjustQty(cardName, setName, cond, avail, price, imageUrl, delta, evt) {
-  evt.stopPropagation();
-  const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
-  if (!item) return;
-  const newQty = item.qty + delta;
-  if (newQty < 1) { removeFromCart(cardName, setName, cond); openDetail(_detail); return; }
-  if (newQty > avail) return;
-  if (delta > 0 && cartCount() >= MAX) return;
-  item.qty = newQty;
-  updateCartBadge();
-  const el = document.getElementById(`qa-val-${cond}`);
-  if (el) el.textContent = newQty;
-  _saveCart();
-}
 
 function addToCart(cardName, setName, cond, qty, price, imageUrl) {
   const existing = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
@@ -772,7 +832,7 @@ function renderCart(panel) {
         <div class="cart-item-name">${esc(c.card_name)}</div>
         <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> × ${c.qty} · $${(parseFloat(c.price)||0).toFixed(2)} ea · <strong style="color:var(--accent);">$${((parseFloat(c.price)||0) * c.qty).toFixed(2)}</strong></div>
       </div>
-      <button class="cart-item-remove" onclick="removeFromCart('${esc(c.card_name)}','${esc(c.set_name)}','${c.condition}'); renderCart(document.getElementById('cart-panel'));">✕</button>
+      <button class="cart-item-remove" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}">✕</button>
     </div>
   `).join('');
 
@@ -790,21 +850,47 @@ function renderCart(panel) {
       <div class="cart-total-label">Estimated Total</div>
       <div class="cart-total-val">$${estimatedTotal.toFixed(2)}</div>
     </div>
-    <div class="form-row">
-      <label class="form-label">Your Name *</label>
-      <input class="form-input" id="cust-name" type="text" placeholder="e.g. Mark" autocomplete="name">
-    </div>
-    <div class="form-row">
-      <label class="form-label">Phone Number (optional)</label>
-      <input class="form-input" id="cust-phone" type="tel" placeholder="(555) 867-5309"
-             autocomplete="tel" inputmode="numeric" maxlength="14"
-             oninput="formatPhone(this)">
-    </div>
-    <div id="submit-error" style="display:none;" class="warning"></div>
-    <div class="btn-row" style="margin-top:8px;">
-      <button class="btn btn-outline" onclick="closeCartPanel()">Back</button>
-      <button class="btn btn-gold" id="submit-btn" onclick="submitHold()">Request These Cards →</button>
-    </div>
+    ${_champion && _champion.verified ? `
+      <!-- Champion checkout -->
+      <div style="background:rgba(232,197,71,0.08);border:1px solid rgba(232,197,71,0.25);border-radius:8px;padding:12px;margin-bottom:12px;">
+        <div style="font-weight:700;color:var(--accent);margin-bottom:4px;">★ Champion Checkout</div>
+        <div style="font-size:0.82rem;color:var(--dim);">Checking out as ${esc(_champion.email)}</div>
+        ${estimatedTotal >= 200 ? '<div style="font-size:0.82rem;color:#4ade80;margin-top:4px;">Free shipping!</div>' : '<div style="font-size:0.82rem;color:var(--dim);margin-top:4px;">Shipping will be calculated at checkout</div>'}
+      </div>
+      <div id="submit-error" style="display:none;" class="warning"></div>
+      <div class="btn-row" style="margin-top:8px;">
+        <button class="btn btn-outline" onclick="closeCartPanel()">Back</button>
+        <button class="btn btn-gold" id="submit-btn" onclick="submitChampionCheckout()">Checkout on Shopify →</button>
+      </div>
+    ` : `
+      <!-- Guest hold request / Champion sign-in -->
+      <div id="champion-section" style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px;">
+        <div style="font-size:0.82rem;color:var(--dim);margin-bottom:8px;">★ <a href="#" onclick="showChampionLogin(event)" style="color:var(--accent);">Champion? Sign in to checkout online</a></div>
+        <div id="champion-login-form" style="display:none;">
+          <div class="form-row">
+            <label class="form-label">Champion Email</label>
+            <input class="form-input" id="champ-email" type="email" placeholder="your@email.com" autocomplete="email">
+          </div>
+          <div id="champ-error" style="display:none;" class="warning"></div>
+          <button class="btn btn-outline" style="width:100%;" id="champ-verify-btn" onclick="verifyChampion()">Verify Champion Status</button>
+        </div>
+      </div>
+      <div class="form-row">
+        <label class="form-label">Your Name *</label>
+        <input class="form-input" id="cust-name" type="text" placeholder="e.g. Mark" autocomplete="name">
+      </div>
+      <div class="form-row">
+        <label class="form-label">Phone Number (optional)</label>
+        <input class="form-input" id="cust-phone" type="tel" placeholder="(555) 867-5309"
+               autocomplete="tel" inputmode="numeric" maxlength="14"
+               oninput="formatPhone(this)">
+      </div>
+      <div id="submit-error" style="display:none;" class="warning"></div>
+      <div class="btn-row" style="margin-top:8px;">
+        <button class="btn btn-outline" onclick="closeCartPanel()">Back</button>
+        <button class="btn btn-gold" id="submit-btn" onclick="submitHold()">Request These Cards →</button>
+      </div>
+    `}
   `;
 }
 
@@ -866,6 +952,90 @@ function showConfirmation(d, name) {
   `;
 }
 
+// ── Champion Login + Checkout ─────────────────────────────────────────────────
+function showChampionLogin(e) {
+  e.preventDefault();
+  const form = document.getElementById('champion-login-form');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+async function verifyChampion() {
+  const email = (document.getElementById('champ-email')?.value || '').trim().toLowerCase();
+  const errEl = document.getElementById('champ-error');
+  const btn = document.getElementById('champ-verify-btn');
+  if (!email) { errEl.textContent = 'Please enter your email.'; errEl.style.display = 'block'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Verifying…';
+  errEl.style.display = 'none';
+
+  try {
+    const d = await post('/api/champion/identify', { email });
+    if (d.verified) {
+      _champion = { verified: true, first_name: d.first_name, customer_gid: d.customer_gid, email: d.email };
+      _saveChampion();
+      updateChampionUI();
+      renderCart(document.getElementById('cart-panel'));  // re-render with Champion mode
+    } else {
+      errEl.textContent = d.reason || 'Not a Champion account.';
+      errEl.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Verify Champion Status';
+    }
+  } catch(e) {
+    errEl.textContent = e.message || 'Verification failed.';
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Verify Champion Status';
+  }
+}
+
+async function submitChampionCheckout() {
+  const errEl = document.getElementById('submit-error');
+  const btn = document.getElementById('submit-btn');
+
+  if (!_champion || !_champion.verified) {
+    errEl.textContent = 'Please sign in as a Champion first.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Creating checkout…';
+  errEl.style.display = 'none';
+
+  const items = _cart.map(c => ({
+    card_name: c.card_name,
+    set_name:  c.set_name,
+    condition: c.condition,
+    qty:       c.qty,
+  }));
+
+  try {
+    const d = await post('/api/checkout', {
+      email: _champion.email,
+      customer_gid: _champion.customer_gid,
+      items
+    });
+
+    if (d.checkout_url) {
+      // Clear cart before redirecting
+      _cart = [];
+      updateCartBadge();
+      _saveCart();
+      // Redirect to Shopify checkout
+      window.location.href = d.checkout_url;
+    } else {
+      throw new Error('No checkout URL returned');
+    }
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = 'Checkout on Shopify →';
+    errEl.textContent = e.message || 'Checkout failed. Please try again.';
+    errEl.style.display = 'block';
+  }
+}
+
 function closeCart(evt) {
   if (evt && evt.target !== document.getElementById('cart-overlay')) return;
   closeCartPanel();
@@ -887,7 +1057,7 @@ async function post(url, body) {
   return d;
 }
 function esc(s) {
-  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 document.addEventListener('keydown', e => {
