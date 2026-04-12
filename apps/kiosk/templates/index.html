@@ -499,6 +499,11 @@ function _loadChampion() {
 function _clearChampion() {
   _champion = null;
   try { localStorage.removeItem('pf_champion'); } catch(e) {}
+  // If no store key either, reload to show the access gate
+  if (!localStorage.getItem('pf_kiosk_key')) {
+    location.reload();
+    return;
+  }
   updateChampionUI();
 }
 function updateChampionUI() {
