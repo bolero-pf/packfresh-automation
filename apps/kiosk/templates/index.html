@@ -1132,6 +1132,7 @@ function _kioskHeaders() {
   const h = {};
   const key = localStorage.getItem('pf_kiosk_key');
   if (key) h['X-Kiosk-Key'] = key;
+  if (_champion && _champion.verified && _champion.email) h['X-Champion-Email'] = _champion.email;
   return h;
 }
 async function get(url) {

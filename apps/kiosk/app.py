@@ -93,11 +93,17 @@ def index():
 
 
 def _check_access():
-    """Verify the request has a valid access key (via header or query param)."""
+    """Verify the request has a valid access key or Champion identity."""
     if not KIOSK_ACCESS_KEY:
         return True
     key = request.headers.get("X-Kiosk-Key", "") or request.args.get("key", "")
-    return key == KIOSK_ACCESS_KEY
+    if key == KIOSK_ACCESS_KEY:
+        return True
+    # Champions get access via their verified email header
+    champ = request.headers.get("X-Champion-Email", "")
+    if champ:
+        return True
+    return False
 
 
 @app.before_request
