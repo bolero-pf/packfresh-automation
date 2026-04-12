@@ -39,21 +39,15 @@ SHOPIFY_STORE   = os.environ.get("SHOPIFY_STORE", "")
 SHOPIFY_TOKEN   = os.environ.get("SHOPIFY_TOKEN", "")
 SHOPIFY_VERSION = os.environ.get("SHOPIFY_VERSION", "2025-01")
 
-# Shopify Storefront API (for cart creation)
-SHOPIFY_STOREFRONT_TOKEN = os.environ.get("SHOPIFY_STOREFRONT_TOKEN", "")
-
 # Webhook verification
 SHOPIFY_WEBHOOK_SECRET = os.environ.get("SHOPIFY_WEBHOOK_SECRET", "")
 
-# Shipping threshold for Champions — below this, they pay shipping
-KIOSK_FREE_SHIP_THRESHOLD = float(os.environ.get("KIOSK_FREE_SHIP_THRESHOLD", "200"))
-KIOSK_FREE_SHIP_CODE = os.environ.get("KIOSK_FREE_SHIP_CODE", "CHAMPION_RAW_FREESHIP")
 
 # Cleanup endpoint auth
 CLEANUP_SECRET = os.environ.get("CLEANUP_SECRET", "")
 
-# Shopify publication ID for the Kiosk headless channel (set in Railway env)
-KIOSK_PUBLICATION_ID = os.environ.get("KIOSK_PUBLICATION_ID", "")
+# Storefront URL for cart-merge redirect
+SHOPIFY_STOREFRONT_URL = os.environ.get("SHOPIFY_STOREFRONT_URL", "https://pack-fresh.com")
 
 # Era mapping — groups set names by TCG era for browsing filters
 # Sets are matched by prefix/keyword. If a set doesn't match any era, it goes to "Classic".
@@ -494,9 +488,10 @@ def champion_identify():
 
 def _create_kiosk_product(card, hold_id):
     """
-    Create a real ACTIVE Shopify product for a raw card,
-    published only to the Kiosk headless channel.
-    Returns {"product_id": ..., "variant_id": ..., "variant_gid": ...}
+    Create a real ACTIVE Shopify product for a raw card.
+    Published to Online Store with 'hidde' template (blank page), no collections.
+    Cleaned up after 30 min if unpurchased.
+    Returns {"product_id": ..., "variant_id": ...}
     """
     condition_labels = {
         "NM": "Near Mint", "LP": "Lightly Played",
@@ -518,7 +513,7 @@ def _create_kiosk_product(card, hold_id):
             "product_type": "Raw Card",
             "vendor": "Pack Fresh",
             "tags": f"kiosk-raw,kiosk-hold-{hold_id}",
-            "published": False,  # Don't auto-publish; we'll publish to Kiosk channel only
+            "template_suffix": "hidde",
             "images": [{"src": card["image_url"]}] if card.get("image_url") else [],
             "variants": [{
                 "price": str(round(price, 2)),
@@ -536,25 +531,9 @@ def _create_kiosk_product(card, hold_id):
     product_id = product["id"]
     variant_id = product["variants"][0]["id"]
 
-    # Publish ONLY to Kiosk headless channel (product was created unpublished)
-    if KIOSK_PUBLICATION_ID:
-        product_gid = f"gid://shopify/Product/{product_id}"
-        _shopify_gql("""
-            mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
-              publishablePublish(id: $id, input: $input) {
-                userErrors { field message }
-              }
-            }
-        """, {
-            "id": product_gid,
-            "input": [{"publicationId": KIOSK_PUBLICATION_ID}],
-        })
-
     return {
         "product_id": product_id,
         "variant_id": variant_id,
-        "variant_gid": f"gid://shopify/ProductVariant/{variant_id}",
-        "title": title,
     }
 
 
@@ -578,12 +557,17 @@ def champion_checkout():
     if not items:
         return jsonify({"error": "No items in checkout"}), 400
 
-    if not SHOPIFY_STOREFRONT_TOKEN:
-        return jsonify({"error": "Storefront API not configured"}), 503
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return jsonify({"error": "Shopify not configured"}), 503
 
     total_qty = sum(int(i.get("qty", 1)) for i in items)
     if total_qty > MAX_HOLD_ITEMS:
         return jsonify({"error": f"Maximum {MAX_HOLD_ITEMS} cards per checkout"}), 400
+
+    # Estimate cart total for minimum check
+    est_total = sum(float(i.get("price", 0)) * int(i.get("qty", 1)) for i in items)
+    if est_total < KIOSK_MIN_CHECKOUT:
+        return jsonify({"error": f"Minimum ${KIOSK_MIN_CHECKOUT:.0f} to check out online"}), 400
 
     # ── Step 1: Re-verify Champion ──────────────────────────────────────────
     verify_result = _shopify_gql("""
@@ -660,16 +644,15 @@ def champion_checkout():
             conn.rollback()
             raise
 
-    # ── Step 4: Create Shopify products ─────────────────────────────────────
-    variant_gids = []
+    # ── Step 4: Create Shopify products (Online Store, hidde template) ─────
+    variant_ids = []
     cart_total = 0
     try:
         for card in lines_resolved:
             listing = _create_kiosk_product(card, hold_id)
-            variant_gids.append(listing["variant_gid"])
+            variant_ids.append(str(listing["variant_id"]))
             cart_total += float(card.get("current_price") or 0)
 
-            # Store product/variant IDs on hold_items for cleanup
             db.execute("""
                 UPDATE hold_items
                 SET shopify_product_id = %s, shopify_variant_id = %s
@@ -678,24 +661,14 @@ def champion_checkout():
                   hold_id, card["id"]))
     except Exception as e:
         logger.error(f"Failed to create Shopify products for hold {hold_id}: {e}")
-        # Clean up: release the hold
         _cleanup_hold(hold_id)
         return jsonify({"error": "Failed to create checkout products"}), 500
 
-    # ── Step 5: Create Storefront API cart ──────────────────────────────────
-    discount_codes = []
-    if cart_total >= KIOSK_FREE_SHIP_THRESHOLD and KIOSK_FREE_SHIP_CODE:
-        discount_codes.append(KIOSK_FREE_SHIP_CODE)
+    # ── Step 5: Build cart-merge URL ──────────────────────────────────────
+    # Redirects customer to theme page that adds items to their existing Shopify cart
+    items_param = ",".join(variant_ids)
+    checkout_url = f"{SHOPIFY_STOREFRONT_URL}/pages/kiosk-add?items={items_param}"
 
-    try:
-        from shopify_storefront import create_cart
-        checkout_url = create_cart(variant_gids, email, discount_codes or None)
-    except Exception as e:
-        logger.error(f"Failed to create Storefront cart for hold {hold_id}: {e}")
-        _cleanup_hold(hold_id)
-        return jsonify({"error": "Failed to create checkout"}), 500
-
-    # Store checkout URL on hold
     db.execute("UPDATE holds SET checkout_url = %s WHERE id = %s", (checkout_url, hold_id))
 
     logger.info(f"Champion checkout: hold={hold_id} email={email} items={len(lines_resolved)} total=${cart_total:.2f}")
@@ -706,7 +679,6 @@ def champion_checkout():
         "checkout_url": checkout_url,
         "item_count": len(lines_resolved),
         "cart_total": round(cart_total, 2),
-        "free_shipping": cart_total >= KIOSK_FREE_SHIP_THRESHOLD,
         "warnings": errors,
     })
 

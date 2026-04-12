@@ -1,0 +1,27 @@
+query RunInput {
+  cart {
+    lines {
+      merchandise {
+        ... on ProductVariant {
+          product {
+            hasAnyTag(tags: ["kiosk-raw"])
+          }
+        }
+      }
+    }
+    cost {
+      subtotalAmount {
+        amount
+      }
+    }
+  }
+  deliveryGroups {
+    deliveryOptions {
+      handle
+      title
+      cost {
+        amount
+      }
+    }
+  }
+}
