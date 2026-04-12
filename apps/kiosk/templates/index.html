@@ -853,15 +853,21 @@ function renderCart(panel) {
     ${_champion && _champion.verified ? `
       <!-- Champion checkout -->
       <div style="background:rgba(232,197,71,0.08);border:1px solid rgba(232,197,71,0.25);border-radius:8px;padding:12px;margin-bottom:12px;">
-        <div style="font-weight:700;color:var(--accent);margin-bottom:4px;">★ Champion Checkout</div>
-        <div style="font-size:0.82rem;color:var(--dim);">Checking out as ${esc(_champion.email)}</div>
-        ${estimatedTotal >= 200 ? '<div style="font-size:0.82rem;color:#4ade80;margin-top:4px;">Free shipping!</div>' : '<div style="font-size:0.82rem;color:var(--dim);margin-top:4px;">Shipping will be calculated at checkout</div>'}
+        <div style="font-weight:700;color:var(--accent);margin-bottom:4px;">★ Champion</div>
+        <div style="font-size:0.82rem;color:var(--dim);">Browsing as ${esc(_champion.email)}</div>
       </div>
-      <div id="submit-error" style="display:none;" class="warning"></div>
-      <div class="btn-row" style="margin-top:8px;">
-        <button class="btn btn-outline" onclick="closeCartPanel()">Back</button>
-        <button class="btn btn-gold" id="submit-btn" onclick="submitChampionCheckout()">Checkout on Shopify →</button>
-      </div>
+      ${_champion.checkout_enabled ? `
+        <div id="submit-error" style="display:none;" class="warning"></div>
+        <div class="btn-row" style="margin-top:8px;">
+          <button class="btn btn-outline" onclick="closeCartPanel()">Back</button>
+          <button class="btn btn-gold" id="submit-btn" onclick="submitChampionCheckout()">Checkout on Shopify →</button>
+        </div>
+      ` : `
+        <div style="font-size:0.85rem;color:var(--dim);text-align:center;padding:12px 0;">Online checkout coming soon. For now, browse and build your wishlist!</div>
+        <div class="btn-row" style="margin-top:8px;">
+          <button class="btn btn-outline" onclick="closeCartPanel()">Back</button>
+        </div>
+      `}
     ` : `
       <!-- Guest hold request / Champion sign-in -->
       <div id="champion-section" style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px;">
@@ -972,7 +978,7 @@ async function verifyChampion() {
   try {
     const d = await post('/api/champion/identify', { email });
     if (d.verified) {
-      _champion = { verified: true, first_name: d.first_name, customer_gid: d.customer_gid, email: d.email };
+      _champion = { verified: true, first_name: d.first_name, customer_gid: d.customer_gid, email: d.email, checkout_enabled: d.checkout_enabled };
       _saveChampion();
       updateChampionUI();
       renderCart(document.getElementById('cart-panel'));  // re-render with Champion mode

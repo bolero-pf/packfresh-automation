@@ -49,6 +49,9 @@ CLEANUP_SECRET = os.environ.get("CLEANUP_SECRET", "")
 # Storefront URL for cart-merge redirect
 SHOPIFY_STOREFRONT_URL = os.environ.get("SHOPIFY_STOREFRONT_URL", "https://pack-fresh.com")
 
+# Feature flag: disable Champion checkout (browse-only mode)
+KIOSK_CHECKOUT_ENABLED = os.environ.get("KIOSK_CHECKOUT_ENABLED", "false").lower() == "true"
+
 # Era mapping — groups set names by TCG era for browsing filters
 # Sets are matched by prefix/keyword. If a set doesn't match any era, it goes to "Classic".
 ERA_KEYWORDS = {
@@ -479,6 +482,7 @@ def champion_identify():
         "first_name": customer.get("firstName") or "",
         "customer_gid": customer["id"],
         "email": customer.get("email") or email,
+        "checkout_enabled": KIOSK_CHECKOUT_ENABLED,
     })
 
 
@@ -547,6 +551,9 @@ def champion_checkout():
     4. Create Storefront API cart → get checkout URL
     5. Return checkout URL to frontend
     """
+    if not KIOSK_CHECKOUT_ENABLED:
+        return jsonify({"error": "Online checkout is coming soon!"}), 403
+
     data = request.get_json() or {}
     email = (data.get("email") or "").strip().lower()
     customer_gid = (data.get("customer_gid") or "").strip()
