@@ -52,6 +52,9 @@ SHOPIFY_STOREFRONT_URL = os.environ.get("SHOPIFY_STOREFRONT_URL", "https://pack-
 # Feature flag: disable Champion checkout (browse-only mode)
 KIOSK_CHECKOUT_ENABLED = os.environ.get("KIOSK_CHECKOUT_ENABLED", "false").lower() == "true"
 
+# Access key — required to use kiosk (set once on in-store tablets via URL param ?key=...)
+KIOSK_ACCESS_KEY = os.environ.get("KIOSK_ACCESS_KEY", "")
+
 # Era mapping — groups set names by TCG era for browsing filters
 # Sets are matched by prefix/keyword. If a set doesn't match any era, it goes to "Classic".
 ERA_KEYWORDS = {
@@ -86,7 +89,28 @@ def _classify_era(set_name: str) -> str:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", access_key=KIOSK_ACCESS_KEY)
+
+
+def _check_access():
+    """Verify the request has a valid access key (via header or query param)."""
+    if not KIOSK_ACCESS_KEY:
+        return True
+    key = request.headers.get("X-Kiosk-Key", "") or request.args.get("key", "")
+    return key == KIOSK_ACCESS_KEY
+
+
+@app.before_request
+def gate_api():
+    """Block API access without a valid access key. Health/webhook endpoints are exempt."""
+    if not KIOSK_ACCESS_KEY:
+        return
+    path = request.path
+    if path in ("/", "/health", "/api/champion/identify") or path.startswith("/api/webhooks/") or path.startswith("/api/cleanup/"):
+        return
+    if path.startswith("/api/"):
+        if not _check_access():
+            return jsonify({"error": "Access key required"}), 403
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

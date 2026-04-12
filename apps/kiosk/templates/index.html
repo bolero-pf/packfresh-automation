@@ -413,8 +413,76 @@ header {
 
 <script>
 const MAX = 20;
+const KIOSK_ACCESS_KEY = '{{ access_key }}';
 let _cart = [];  // [{card_name, set_name, condition, qty, price, image_url}]
 let _activeConditions = new Set(['NM','LP','MP','HP','DMG']);
+let _hasAccess = false;
+
+// Access gate — check URL param or localStorage
+function checkAccess() {
+  const params = new URLSearchParams(window.location.search);
+  const urlKey = params.get('key');
+  if (urlKey && urlKey === KIOSK_ACCESS_KEY) {
+    localStorage.setItem('pf_kiosk_key', urlKey);
+    // Clean the URL
+    window.history.replaceState({}, '', '/');
+    _hasAccess = true;
+    return true;
+  }
+  const savedKey = localStorage.getItem('pf_kiosk_key');
+  if (savedKey && savedKey === KIOSK_ACCESS_KEY) {
+    _hasAccess = true;
+    return true;
+  }
+  if (!KIOSK_ACCESS_KEY) {
+    _hasAccess = true;
+    return true;
+  }
+  return false;
+}
+
+function showAccessGate() {
+  document.getElementById('main-grid').innerHTML = `
+    <div style="grid-column:1/-1;text-align:center;padding:60px 20px;">
+      <div style="font-size:2rem;margin-bottom:12px;">🃏</div>
+      <div style="font-size:1.2rem;font-weight:700;margin-bottom:8px;">Pack Fresh Card Browser</div>
+      <div style="color:var(--dim);margin-bottom:20px;">This kiosk is for in-store use. Ask a staff member for access.</div>
+      <div style="color:var(--dim);font-size:0.82rem;">Champion? <a href="#" onclick="showChampionAccessLogin(event)" style="color:var(--accent);">Sign in with your email</a></div>
+      <div id="gate-champion-form" style="display:none;max-width:300px;margin:16px auto 0;">
+        <input class="form-input" id="gate-champ-email" type="email" placeholder="your@email.com" style="margin-bottom:8px;">
+        <div id="gate-champ-error" style="display:none;color:var(--red);font-size:0.82rem;margin-bottom:8px;"></div>
+        <button class="btn btn-gold" style="width:100%;" onclick="gateChampionVerify()">Verify Champion Status</button>
+      </div>
+    </div>
+  `;
+}
+
+function showChampionAccessLogin(e) {
+  e.preventDefault();
+  document.getElementById('gate-champion-form').style.display = 'block';
+}
+
+async function gateChampionVerify() {
+  const email = (document.getElementById('gate-champ-email')?.value || '').trim().toLowerCase();
+  const errEl = document.getElementById('gate-champ-error');
+  if (!email) { errEl.textContent = 'Please enter your email.'; errEl.style.display = 'block'; return; }
+  try {
+    const d = await post('/api/champion/identify', { email });
+    if (d.verified) {
+      _champion = { verified: true, first_name: d.first_name, customer_gid: d.customer_gid, email: d.email, checkout_enabled: d.checkout_enabled };
+      _saveChampion();
+      _hasAccess = true;
+      updateChampionUI();
+      location.reload();
+    } else {
+      errEl.textContent = d.reason || 'Not a Champion account.';
+      errEl.style.display = 'block';
+    }
+  } catch(e) {
+    errEl.textContent = e.message || 'Verification failed.';
+    errEl.style.display = 'block';
+  }
+}
 
 // Champion state — persisted in localStorage
 let _champion = null;  // { verified, first_name, customer_gid, email }
@@ -498,6 +566,15 @@ let _detail = null;  // current card being viewed
 async function boot() {
   _loadCart();
   _loadChampion();
+
+  // Champions bypass the access gate
+  const championAccess = _champion && _champion.verified;
+  if (!championAccess && !checkAccess()) {
+    showAccessGate();
+    return;
+  }
+  _hasAccess = true;
+
   updateCartBadge();
   updateChampionUI();
   await Promise.all([loadSets(), loadEras()]);
@@ -1051,13 +1128,19 @@ function closeCartPanel() {
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+function _kioskHeaders() {
+  const h = {};
+  const key = localStorage.getItem('pf_kiosk_key');
+  if (key) h['X-Kiosk-Key'] = key;
+  return h;
+}
 async function get(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, { headers: _kioskHeaders() });
   if (!r.ok) { const d = await r.json(); throw new Error(d.error || `HTTP ${r.status}`); }
   return r.json();
 }
 async function post(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const r = await fetch(url, { method: 'POST', headers: {..._kioskHeaders(), 'Content-Type':'application/json'}, body: JSON.stringify(body) });
   const d = await r.json();
   if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
   return d;
