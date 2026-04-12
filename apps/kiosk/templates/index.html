@@ -353,6 +353,9 @@ header {
 </head>
 <body>
 
+<!-- Champion status bar -->
+<div id="champion-bar" style="display:none;align-items:center;gap:8px;padding:4px 16px;background:rgba(232,197,71,0.08);border-bottom:1px solid rgba(232,197,71,0.15);font-size:0.82rem;line-height:1;"></div>
+
 <header>
   <div class="header-inner">
     <div>
@@ -371,9 +374,6 @@ header {
     </button>
   </div>
 </header>
-
-<!-- Champion status bar -->
-<div id="champion-bar" style="display:none;align-items:center;justify-content:center;gap:8px;padding:6px 16px;background:rgba(232,197,71,0.1);border-bottom:1px solid rgba(232,197,71,0.2);font-size:0.85rem;"></div>
 
 <!-- Condition pills + filter toggle -->
 <div class="filter-bar">
@@ -536,7 +536,7 @@ function updateChampionUI() {
   const bar = document.getElementById('champion-bar');
   if (!bar) return;
   if (_champion && _champion.verified) {
-    bar.innerHTML = `<span style="color:var(--accent);font-weight:700;">★ Champion</span> ${esc(_champion.first_name || _champion.email)} <button class="btn btn-outline" style="padding:2px 10px;font-size:0.75rem;margin-left:8px;" onclick="_clearChampion()">Sign Out</button>`;
+    bar.innerHTML = `<span style="color:var(--accent);font-weight:700;">★ Champion</span><span style="color:var(--text);margin-left:4px;">${esc(_champion.first_name || _champion.email)}</span><button class="btn btn-outline" style="padding:2px 10px;font-size:0.72rem;margin-left:auto;line-height:1;" onclick="_clearChampion()">Sign Out</button>`;
     bar.style.display = 'flex';
   } else {
     bar.innerHTML = '';

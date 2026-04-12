@@ -258,8 +258,8 @@ def list_eras():
     for r in rows:
         era = _classify_era(r["set_name"])
         era_counts[era] = era_counts.get(era, 0) + 1
-    # Return eras sorted by name, with set counts
-    eras = [{"name": k, "set_count": v} for k, v in sorted(era_counts.items())]
+    # Return eras sorted by name, with set counts (exclude "Classic" catch-all)
+    eras = [{"name": k, "set_count": v} for k, v in sorted(era_counts.items()) if k != "Classic"]
     return jsonify({"eras": eras})
 
 
