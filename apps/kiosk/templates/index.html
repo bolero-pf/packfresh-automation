@@ -807,7 +807,13 @@ document.addEventListener('click', function(e) {
   if (cartCount() >= MAX) return;
   addToCart(row.dataset.cardName, row.dataset.setName, row.dataset.cond, 1,
             parseFloat(row.dataset.price) || 0, row.dataset.imageUrl);
-  openDetail(_detail);
+  // Swap add button to qty bar in place
+  row.classList.add('selected');
+  row.querySelector('.copy-action').innerHTML = `<div class="copy-qty-bar">
+    <button class="qty-btn" data-delta="-1">−</button>
+    <div class="qty-val">1</div>
+    <button class="qty-btn" data-delta="1">+</button>
+  </div>`;
 });
 
 // Delegated click: qty +/- buttons in condition rows
@@ -825,13 +831,21 @@ document.addEventListener('click', function(e) {
   const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
   if (!item) return;
   const newQty = item.qty + delta;
-  if (newQty < 1) { removeFromCart(cardName, setName, cond); openDetail(_detail); return; }
+  if (newQty < 1) {
+    // Remove from cart — swap qty bar back to add button
+    removeFromCart(cardName, setName, cond);
+    row.classList.remove('selected');
+    row.querySelector('.copy-action').innerHTML = '<button class="copy-add-btn">+ Add to Picks</button>';
+    return;
+  }
   if (newQty > avail) return;
   if (delta > 0 && cartCount() >= MAX) return;
   item.qty = newQty;
   updateCartBadge();
   _saveCart();
-  openDetail(_detail);  // re-render to update qty display
+  // Update qty display in place
+  const valEl = row.querySelector('.qty-val');
+  if (valEl) valEl.textContent = newQty;
 });
 
 // Delegated click handler for cart remove buttons
