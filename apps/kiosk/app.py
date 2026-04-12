@@ -565,9 +565,6 @@ def champion_checkout():
         return jsonify({"error": f"Maximum {MAX_HOLD_ITEMS} cards per checkout"}), 400
 
     # Estimate cart total for minimum check
-    est_total = sum(float(i.get("price", 0)) * int(i.get("qty", 1)) for i in items)
-    if est_total < KIOSK_MIN_CHECKOUT:
-        return jsonify({"error": f"Minimum ${KIOSK_MIN_CHECKOUT:.0f} to check out online"}), 400
 
     # ── Step 1: Re-verify Champion ──────────────────────────────────────────
     verify_result = _shopify_gql("""
