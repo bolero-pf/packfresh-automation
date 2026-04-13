@@ -805,7 +805,8 @@ document.addEventListener('click', function(e) {
   if (!row || !row.dataset.cardName) return;
   if (cartCount() >= MAX) return;
   addToCart(row.dataset.cardName, row.dataset.setName, row.dataset.cond, 1,
-            parseFloat(row.dataset.price) || 0, row.dataset.imageUrl);
+            parseFloat(row.dataset.price) || 0, row.dataset.imageUrl,
+            parseInt(row.dataset.avail) || 1);
   // Swap add button to qty bar in place
   row.classList.add('selected');
   row.querySelector('.copy-action').innerHTML = `<div class="copy-qty-bar">
@@ -861,6 +862,7 @@ document.addEventListener('click', function(e) {
   const setName = row.dataset.setName;
   const cond = row.dataset.condition;
   const delta = parseInt(btn.dataset.delta);
+  const avail = parseInt(row.dataset.avail) || 999;
   const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
   if (!item) return;
   const newQty = item.qty + delta;
@@ -869,6 +871,7 @@ document.addEventListener('click', function(e) {
     renderCart(document.getElementById('cart-panel'));
     return;
   }
+  if (newQty > avail) return;
   if (delta > 0 && cartCount() >= MAX) return;
   item.qty = newQty;
   updateCartBadge();
@@ -894,12 +897,13 @@ document.addEventListener('click', function(e) {
 });
 
 
-function addToCart(cardName, setName, cond, qty, price, imageUrl) {
+function addToCart(cardName, setName, cond, qty, price, imageUrl, avail) {
   const existing = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
   if (existing) {
     existing.qty = Math.min(existing.qty + qty, MAX);
+    if (avail) existing.avail = avail;
   } else {
-    _cart.push({ card_name: cardName, set_name: setName, condition: cond, qty, price, image_url: imageUrl });
+    _cart.push({ card_name: cardName, set_name: setName, condition: cond, qty, price, image_url: imageUrl, avail: avail || qty });
   }
   updateCartBadge();
   _saveCart();
@@ -964,7 +968,7 @@ function renderCart(panel) {
   }
 
   const items = _cart.map(c => `
-    <div class="cart-item" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}">
+    <div class="cart-item" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}" data-avail="${c.avail || c.qty}">
       ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:44px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
       <div class="cart-item-info">
         <div class="cart-item-name">${esc(c.card_name)}</div>
