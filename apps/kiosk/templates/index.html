@@ -229,7 +229,19 @@ header {
 .cart-item-info { flex: 1; }
 .cart-item-name { font-weight: 600; font-size: 0.9rem; }
 .cart-item-sub  { font-size: 0.75rem; color: var(--dim); }
-.cart-item .copy-qty-bar { min-width: 100px; }
+.cart-item .copy-qty-bar { min-width: 84px; gap: 8px; }
+.cart-item .qty-btn { width: 30px; height: 30px; font-size: 1rem; }
+.cart-item img { width: 36px; }
+
+/* Toast notice */
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 10px 20px; font-size: 0.85rem;
+  color: var(--text); z-index: 300; animation: toastIn 0.2s ease;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+@keyframes toastIn { from { opacity: 0; transform: translateX(-50%) translateY(10px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 
 /* Form */
 .form-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
@@ -807,6 +819,19 @@ function renderDetail(card, copies) {
   `;
 }
 
+let _toastTimer = null;
+function showToast(msg) {
+  let el = document.getElementById('pf-toast');
+  if (el) el.remove();
+  clearTimeout(_toastTimer);
+  el = document.createElement('div');
+  el.id = 'pf-toast';
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  _toastTimer = setTimeout(() => el.remove(), 2500);
+}
+
 function _updateDetailPicksBtn() {
   const btn = document.getElementById('detail-picks-btn');
   if (btn) btn.textContent = `View My Picks (${cartCount()})`;
@@ -855,7 +880,7 @@ document.addEventListener('click', function(e) {
     _updateDetailPicksBtn();
     return;
   }
-  if (newQty > avail) return;
+  if (newQty > avail) { showToast(`Only ${avail} available in ${cond}`); return; }
   if (delta > 0 && cartCount() >= MAX) return;
   item.qty = newQty;
   updateCartBadge();
@@ -886,7 +911,7 @@ document.addEventListener('click', function(e) {
     renderCart(document.getElementById('cart-panel'));
     return;
   }
-  if (newQty > avail) return;
+  if (newQty > avail) { showToast(`Only ${avail} available in ${cond}`); return; }
   if (delta > 0 && cartCount() >= MAX) return;
   item.qty = newQty;
   updateCartBadge();
@@ -984,7 +1009,7 @@ function renderCart(panel) {
 
   const items = _cart.map(c => `
     <div class="cart-item" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}" data-avail="${c.avail || c.qty}">
-      ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:44px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
+      ${c.image_url ? `<img src="${esc(c.image_url)}" style="aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
       <div class="cart-item-info">
         <div class="cart-item-name">${esc(c.card_name)}</div>
         <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> · $${(parseFloat(c.price)||0).toFixed(2)} ea · <strong style="color:var(--accent);">$${((parseFloat(c.price)||0) * c.qty).toFixed(2)}</strong></div>
