@@ -1576,8 +1576,12 @@ let _rsIndex = 0;        // current card position
 let _rsSessionId = null;
 let _rsCounts = { storage: 0, display: 0, grade: 0, bulk: 0 };
 
+let _rsEnrichJobId = null;
+let _rsEnrichDone = false;
+
 async function startRouteSession(sessionId) {
     _rsSessionId = sessionId;
+    _rsEnrichDone = false;
 
     // Create overlay if it doesn't exist
     let overlay = document.getElementById('route-session-overlay');
@@ -1590,10 +1594,7 @@ async function startRouteSession(sessionId) {
     overlay.style.display = 'block';
     overlay.innerHTML = `<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:60vh;">
         <div class="spinner" style="margin-bottom:12px;"></div>
-        <div id="enrich-progress-text" style="font-size:1rem; color:var(--text-dim);">Starting enrichment...</div>
-        <div style="width:300px; height:8px; background:var(--surface-2); border-radius:4px; margin-top:12px; overflow:hidden;">
-            <div id="enrich-progress-bar" style="width:0%; height:100%; background:var(--accent); border-radius:4px; transition:width 0.3s;"></div>
-        </div>
+        <div style="font-size:1rem; color:var(--text-dim);">Loading cards...</div>
         <button class="btn btn-secondary" onclick="exitRouteSession()" style="margin-top:24px;">Cancel</button>
     </div>`;
 
@@ -1601,26 +1602,20 @@ async function startRouteSession(sessionId) {
     document.addEventListener('keydown', _rsKeyHandler);
 
     try {
-        // Kick off enrichment
-        const er = await fetch(`/api/ingest/session/${sessionId}/enrich-route`, { method: 'POST' });
-        const ej = await er.json();
-
-        if (ej.status === 'complete' && !ej.job_id) {
-            // Cache already exists — skip polling
-        } else if (ej.job_id) {
-            // Poll for completion
-            await _pollEnrichJob(ej.job_id, ej.total);
-        }
-
-        // Fetch enriched data
-        const r = await fetch(`/api/ingest/session/${sessionId}/route-enriched`);
-        if (!r.ok) throw new Error('Failed to load enriched data');
+        // Load basic route data immediately (no PPT needed)
+        const r = await fetch(`/api/ingest/session/${sessionId}/route-summary`);
+        if (!r.ok) throw new Error('Failed to load route data');
         const data = await r.json();
 
-        _rsItems = data.items || [];
+        _rsItems = (data.items || []).map(item => ({
+            ...item,
+            image_url: null,
+            graded_prices: {},
+            grading_economics: {},
+            _enrichLoading: true,  // flag: PPT data not yet loaded
+        }));
         _rsIndex = 0;
 
-        // Calculate initial counts from items
         _rsCounts = { storage: 0, display: 0, grade: 0, bulk: 0 };
         for (const item of _rsItems) {
             const dest = item.routing_destination || 'storage';
@@ -1635,28 +1630,78 @@ async function startRouteSession(sessionId) {
             return;
         }
 
+        // Start showing cards immediately
         _renderSessionCard();
+
+        // Kick off enrichment in background
+        const er = await fetch(`/api/ingest/session/${sessionId}/enrich-route`, { method: 'POST' });
+        const ej = await er.json();
+
+        if (ej.status === 'complete' && !ej.job_id) {
+            // Cache already exists — merge immediately
+            _rsEnrichDone = true;
+            await _rsMergeEnrichment();
+        } else if (ej.job_id) {
+            _rsEnrichJobId = ej.job_id;
+            // Poll in background — don't block the session
+            _pollAndMergeEnrichment(ej.job_id, ej.total);
+        }
     } catch(e) {
         overlay.innerHTML = `<div class="card" style="max-width:500px; margin:20vh auto; text-align:center;">
-            <div class="alert alert-error">Enrichment failed: ${e.message}</div>
+            <div class="alert alert-error">Failed to start session: ${e.message}</div>
             <button class="btn btn-primary" onclick="exitRouteSession()" style="margin-top:12px;">Close</button>
         </div>`;
     }
 }
 
-async function _pollEnrichJob(jobId, total) {
-    const progText = document.getElementById('enrich-progress-text');
-    const progBar = document.getElementById('enrich-progress-bar');
-    while (true) {
-        await new Promise(r => setTimeout(r, 500));
+async function _pollAndMergeEnrichment(jobId, total) {
+    while (_rsActive) {
+        await new Promise(r => setTimeout(r, 1000));
         try {
             const r = await fetch(`/api/ingest/enrich-job/${jobId}`);
             const j = await r.json();
-            if (progText) progText.textContent = `Fetching card data ${j.progress || 0}/${j.total || total}...${j.errors ? ` (${j.errors} errors)` : ''}`;
-            if (progBar) progBar.style.width = `${Math.round(((j.progress || 0) / (j.total || total || 1)) * 100)}%`;
-            if (j.status === 'complete') break;
+            // Periodically merge whatever's been fetched so far
+            await _rsMergeEnrichment();
+            if (j.status === 'complete') {
+                _rsEnrichDone = true;
+                break;
+            }
         } catch(e) { break; }
     }
+}
+
+async function _rsMergeEnrichment() {
+    if (!_rsSessionId || !_rsActive) return;
+    try {
+        const r = await fetch(`/api/ingest/session/${_rsSessionId}/route-enriched`);
+        if (!r.ok) return;
+        const data = await r.json();
+        const enrichedMap = {};
+        for (const item of (data.items || [])) {
+            enrichedMap[item.id] = item;
+        }
+        // Merge enrichment data into existing items
+        let changed = false;
+        for (const item of _rsItems) {
+            const enriched = enrichedMap[item.id];
+            if (enriched && item._enrichLoading) {
+                if (enriched.image_url || enriched.grading_economics?.psa10_price != null || enriched.grading_economics?.reason) {
+                    item.image_url = enriched.image_url;
+                    item.graded_prices = enriched.graded_prices || {};
+                    item.grading_economics = enriched.grading_economics || {};
+                    item._enrichLoading = false;
+                    changed = true;
+                }
+            }
+        }
+        // Re-render current card if it got new data
+        if (changed) {
+            const current = _rsItems[_rsIndex];
+            if (current && !current._enrichLoading) {
+                _renderSessionCard();
+            }
+        }
+    } catch(e) { /* silent */ }
 }
 
 function _renderSessionCard() {
@@ -1689,7 +1734,10 @@ function _renderSessionCard() {
             <span style="color:var(--accent2);">G:${_rsCounts.grade||0}</span>
             <span style="color:var(--text-dim);">K:${_rsCounts.bulk||0}</span>
         </div>
-        <button class="btn btn-secondary btn-sm" onclick="exitRouteSession()">Exit (Esc)</button>
+        <div style="display:flex; align-items:center; gap:8px;">
+            ${!_rsEnrichDone ? '<span class="spinner" style="width:14px; height:14px;"></span><span style="font-size:0.75rem; color:var(--text-dim);">Loading data...</span>' : ''}
+            <button class="btn btn-secondary btn-sm" onclick="exitRouteSession()">Exit (Esc)</button>
+        </div>
     </div>
     <div style="width:100%; height:6px; background:var(--surface-2); border-radius:3px; margin-bottom:16px; overflow:hidden;">
         <div style="width:${progPct}%; height:100%; background:var(--accent); border-radius:3px; transition:width 0.2s;"></div>
@@ -1701,6 +1749,10 @@ function _renderSessionCard() {
     // Image
     if (imgUrl) {
         html += `<img src="${imgUrl}" style="width:260px; max-height:360px; object-fit:contain; border-radius:8px; flex-shrink:0;" alt="card image">`;
+    } else if (item._enrichLoading) {
+        html += `<div style="width:260px; height:360px; background:var(--surface-2); border-radius:8px; flex-shrink:0; display:flex; align-items:center; justify-content:center; color:var(--text-dim); font-size:0.85rem; flex-direction:column; gap:8px;">
+            <span class="spinner" style="width:20px; height:20px;"></span> Loading...
+        </div>`;
     } else {
         html += `<div style="width:260px; height:360px; background:var(--surface-2); border-radius:8px; flex-shrink:0; display:flex; align-items:center; justify-content:center; color:var(--text-dim); font-size:0.85rem;">No image</div>`;
     }
@@ -1720,14 +1772,33 @@ function _renderSessionCard() {
         </div>`;
 
     // ── Grading economics panel ──
-    if (econ.psa10_price || econ.psa9_price) {
+    const _enrichLoading = item._enrichLoading;
+    if (_enrichLoading) {
+        html += `<div style="background:var(--surface-2); border-radius:10px; padding:14px; margin-bottom:16px;">
+            <div style="display:flex; align-items:center; gap:8px; color:var(--text-dim); font-size:0.85rem;">
+                <span class="spinner" style="width:16px; height:16px;"></span> Loading grading data...
+            </div>
+        </div>`;
+    } else if (econ.psa10_price || econ.psa9_price) {
         const isEligible = econ.eligible;
-        const isWorthy = econ.grade_worthy;
         const dimmed = !isEligible;
 
+        // ROI tier: red <40%, amber 40-60%, green 60%+
+        const roi = econ.roi_pct || 0;
+        const roiColor = roi >= 60 ? 'var(--green)' : roi >= 40 ? '#e6a817' : 'var(--red)';
+        const roiTier = roi >= 60 ? 'definitely' : roi >= 40 ? 'potentially' : 'not';
+        const profitColor = econ.expected_profit >= 40 ? 'var(--green)' : econ.expected_profit >= 20 ? '#e6a817' : 'var(--red)';
+
+        // Header label based on tier
+        const headerLabel = !isEligible ? 'Grading Analysis'
+            : roiTier === 'definitely' ? 'Definitely Grade Worthy'
+            : roiTier === 'potentially' ? 'Potentially Grade Worthy'
+            : 'Not Grade Worthy';
+        const headerColor = !isEligible ? 'var(--text-dim)' : roiColor;
+
         html += `<div style="background:var(--surface-2); border-radius:10px; padding:14px; margin-bottom:16px; ${dimmed ? 'opacity:0.6;' : ''}">
-            <div style="font-size:0.82rem; font-weight:700; margin-bottom:10px; color:${isWorthy ? 'var(--green)' : 'var(--text-dim)'};">
-                ${isWorthy ? 'GRADE CANDIDATE' : 'Grading Analysis'}
+            <div style="font-size:0.82rem; font-weight:700; margin-bottom:10px; color:${headerColor};">
+                ${headerLabel}
             </div>
 
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; font-size:0.82rem;">
@@ -1754,21 +1825,26 @@ function _renderSessionCard() {
                     <div>$${price.toFixed(2)} + $${econ.grading_cost.toFixed(2)} = $${econ.total_cost.toFixed(2)}</div>
 
                     <div style="color:var(--text-dim);">Expected profit</div>
-                    <div style="font-weight:700; color:${econ.expected_profit >= 40 ? 'var(--green)' : 'var(--text-dim)'};">$${econ.expected_profit.toFixed(2)}</div>
+                    <div style="font-weight:700; color:${profitColor};">$${econ.expected_profit.toFixed(2)}</div>
 
                     <div style="color:var(--text-dim);">ROI</div>
-                    <div style="font-weight:700; color:${econ.roi_pct >= 50 ? 'var(--green)' : 'var(--text-dim)'};">${econ.roi_pct.toFixed(1)}%</div>
+                    <div style="font-weight:700; color:${roiColor};">${econ.roi_pct.toFixed(1)}%</div>
                 </div>
             </div>`;
 
-            if (isWorthy) {
+            // Verdict banner
+            if (roiTier === 'definitely') {
                 html += `<div style="margin-top:10px; padding:8px 12px; background:var(--green)15; border:1px solid var(--green)44; border-radius:6px; color:var(--green); font-weight:700; font-size:0.85rem; text-align:center;">
-                    GRADE CANDIDATE &mdash; $${econ.expected_profit.toFixed(2)} profit at ${econ.roi_pct.toFixed(0)}% ROI
+                    Definitely Grade Worthy &mdash; $${econ.expected_profit.toFixed(2)} profit at ${econ.roi_pct.toFixed(0)}% ROI
+                </div>`;
+            } else if (roiTier === 'potentially') {
+                html += `<div style="margin-top:10px; padding:8px 12px; background:#e6a81715; border:1px solid #e6a81744; border-radius:6px; color:#e6a817; font-weight:700; font-size:0.85rem; text-align:center;">
+                    Potentially Grade Worthy &mdash; $${econ.expected_profit.toFixed(2)} profit at ${econ.roi_pct.toFixed(0)}% ROI
                 </div>`;
             } else {
                 const reasons = [];
                 if (econ.expected_profit < 40) reasons.push(`profit $${econ.expected_profit.toFixed(2)} < $40 min`);
-                if (econ.roi_pct < 50) reasons.push(`ROI ${econ.roi_pct.toFixed(0)}% < 50% min`);
+                if (roi < 40) reasons.push(`ROI ${econ.roi_pct.toFixed(0)}% < 40%`);
                 html += `<div style="margin-top:8px; font-size:0.75rem; color:var(--text-dim);">Not grade-worthy: ${reasons.join(', ')}</div>`;
             }
         } else if (econ.reason) {
@@ -1779,7 +1855,7 @@ function _renderSessionCard() {
         }
 
         html += `</div>`; // close grading panel
-    } else if (cond === 'NM') {
+    } else if (cond === 'NM' && !_enrichLoading) {
         html += `<div style="background:var(--surface-2); border-radius:10px; padding:12px; margin-bottom:16px; font-size:0.82rem; color:var(--text-dim);">
             No graded price data available
         </div>`;
