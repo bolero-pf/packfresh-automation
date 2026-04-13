@@ -44,13 +44,13 @@ header {
   border-bottom: 1px solid var(--border);
   padding: 14px 20px;
 }
-.header-inner { max-width: 1200px; margin: 0 auto; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.header-top { max-width: 1200px; margin: 0 auto; display: flex; gap: 14px; align-items: center; justify-content: space-between; }
+.header-search { max-width: 1200px; margin: 10px auto 0; }
 .logo { font-family: var(--display); font-size: 2rem; letter-spacing: 0.06em; color: var(--accent); white-space: nowrap; line-height: 1; }
 .logo-sub { font-size: 0.65rem; color: var(--dim); letter-spacing: 0.15em; text-transform: uppercase; margin-top: -2px; }
 
-.search-wrap { flex: 1; min-width: 200px; display: flex; gap: 10px; }
 .search-input {
-  flex: 1; height: var(--touch);
+  width: 100%; height: var(--touch);
   background: var(--surface2); border: 1.5px solid var(--border);
   border-radius: var(--r); color: var(--text);
   padding: 0 18px; font-family: var(--sans); font-size: 1rem; outline: none;
@@ -58,14 +58,6 @@ header {
 }
 .search-input:focus { border-color: var(--accent); }
 .search-input::placeholder { color: var(--dim); }
-
-.set-select {
-  height: var(--touch); min-width: 160px;
-  background: var(--surface2); border: 1.5px solid var(--border);
-  border-radius: var(--r); color: var(--text);
-  padding: 0 14px; font-family: var(--sans); font-size: 0.9rem; outline: none;
-  cursor: pointer;
-}
 
 /* Cart button */
 .cart-btn {
@@ -237,8 +229,7 @@ header {
 .cart-item-info { flex: 1; }
 .cart-item-name { font-weight: 600; font-size: 0.9rem; }
 .cart-item-sub  { font-size: 0.75rem; color: var(--dim); }
-.cart-item-remove { width: 36px; height: 36px; border-radius: 8px; background: none;
-  border: 1.5px solid var(--border); color: var(--red); cursor: pointer; font-size: 1rem; }
+.cart-item .copy-qty-bar { min-width: 100px; }
 
 /* Form */
 .form-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
@@ -292,6 +283,12 @@ header {
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   padding: 10px 20px; background: var(--surface);
   border-bottom: 1px solid var(--border); max-width: 1200px; margin: 0 auto;
+}
+.filter-bar .filter-select { min-width: 0; flex-shrink: 1; }
+@media (max-width: 480px) {
+  .filter-bar { gap: 6px; padding: 8px 12px; }
+  .cond-toggle { padding: 4px 8px; font-size: 0.7rem; }
+  .filter-bar .filter-select { font-size: 0.78rem; height: 34px; }
 }
 .filter-toggle {
   background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--r);
@@ -357,21 +354,18 @@ header {
 <div id="champion-bar" style="display:none;align-items:center;gap:8px;padding:4px 16px;background:rgba(232,197,71,0.08);border-bottom:1px solid rgba(232,197,71,0.15);font-size:0.82rem;line-height:1;"></div>
 
 <header>
-  <div class="header-inner">
+  <div class="header-top">
     <div>
       <div class="logo">Pack Fresh</div>
       <div class="logo-sub">Card Browser</div>
-    </div>
-    <div class="search-wrap">
-      <input class="search-input" type="text" id="q" placeholder="Search cards…" oninput="debounce()" autocomplete="off" autocorrect="off">
-      <select class="set-select" id="set-filter" onchange="doSearch()">
-        <option value="">All Sets</option>
-      </select>
     </div>
     <button class="cart-btn" onclick="openCart()">
       🃏 My Picks
       <span class="cart-badge" id="cart-badge">0</span>
     </button>
+  </div>
+  <div class="header-search">
+    <input class="search-input" type="text" id="q" placeholder="Search cards or card #…" oninput="debounce()" autocomplete="off" autocorrect="off">
   </div>
 </header>
 
@@ -382,7 +376,13 @@ header {
   <span class="cond-toggle on" data-cond="MP" onclick="toggleCond(this)" style="border-color:#fb923c;background:rgba(251,146,60,0.15);color:#fb923c;">MP</span>
   <span class="cond-toggle on" data-cond="HP" onclick="toggleCond(this)" style="border-color:#f87171;background:rgba(248,113,113,0.15);color:#f87171;">HP</span>
   <span class="cond-toggle on" data-cond="DMG" onclick="toggleCond(this)" style="border-color:#b91c1c;background:rgba(185,28,28,0.15);color:#b91c1c;">DMG</span>
-  <button class="filter-toggle" id="filter-toggle-btn" onclick="toggleFilterDrawer()">⚙ Filters</button>
+  <select class="filter-select" id="era-filter" onchange="doSearch()">
+    <option value="">All Eras</option>
+  </select>
+  <select class="filter-select" id="set-filter" onchange="doSearch()">
+    <option value="">All Sets</option>
+  </select>
+  <button class="filter-toggle" id="filter-toggle-btn" onclick="toggleFilterDrawer()">$ Price</button>
   <select class="filter-select" id="sort-select" onchange="doSearch()" style="margin-left:auto;">
     <option value="name_asc">Name A–Z</option>
     <option value="price_asc">Price Low–High</option>
@@ -393,12 +393,6 @@ header {
 
 <!-- Expandable filter drawer -->
 <div class="filter-drawer" id="filter-drawer">
-  <div class="filter-group">
-    <span class="filter-label">Era</span>
-    <select class="filter-select" id="era-filter" onchange="doSearch()">
-      <option value="">All Eras</option>
-    </select>
-  </div>
   <div class="filter-group">
     <span class="filter-label">Price Min</span>
     <input class="price-input" id="price-min" type="number" min="0" step="1" placeholder="$0" onchange="doSearch()">
@@ -848,12 +842,47 @@ document.addEventListener('click', function(e) {
   if (valEl) valEl.textContent = newQty;
 });
 
-// Delegated click handler for cart remove buttons
+// Delegated click handler for cart qty +/- buttons
 document.addEventListener('click', function(e) {
-  const btn = e.target.closest('.cart-item-remove');
-  if (!btn || !btn.dataset.cardName) return;
-  removeFromCart(btn.dataset.cardName, btn.dataset.setName, btn.dataset.condition);
-  renderCart(document.getElementById('cart-panel'));
+  const btn = e.target.closest('.cart-qty-btn');
+  if (!btn) return;
+  e.stopPropagation();
+  const row = btn.closest('.cart-item');
+  if (!row) return;
+  const cardName = row.dataset.cardName;
+  const setName = row.dataset.setName;
+  const cond = row.dataset.condition;
+  const delta = parseInt(btn.dataset.delta);
+  const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
+  if (!item) return;
+  const newQty = item.qty + delta;
+  if (newQty < 1) {
+    removeFromCart(cardName, setName, cond);
+    renderCart(document.getElementById('cart-panel'));
+    return;
+  }
+  if (delta > 0 && cartCount() >= MAX) return;
+  item.qty = newQty;
+  updateCartBadge();
+  _saveCart();
+  // Update in place
+  const valEl = row.querySelector('.qty-val');
+  if (valEl) valEl.textContent = newQty;
+  // Update subtotal text
+  const subEl = row.querySelector('.cart-item-sub');
+  if (subEl) {
+    const price = parseFloat(item.price) || 0;
+    subEl.innerHTML = `<span class="cond-pill cond-${cond}">${cond}</span> · $${price.toFixed(2)} ea · <strong style="color:var(--accent);">$${(price * newQty).toFixed(2)}</strong>`;
+  }
+  // Update total bar
+  const totalVal = document.querySelector('.cart-total-val');
+  if (totalVal) {
+    const est = _cart.reduce((s,c) => s + (parseFloat(c.price)||0) * c.qty, 0);
+    totalVal.textContent = `$${est.toFixed(2)}`;
+  }
+  // Update count
+  const limitEl = document.querySelector('.cart-limit');
+  if (limitEl) limitEl.textContent = `${cartCount()} of ${MAX} cards selected`;
 });
 
 
@@ -927,13 +956,17 @@ function renderCart(panel) {
   }
 
   const items = _cart.map(c => `
-    <div class="cart-item">
+    <div class="cart-item" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}">
       ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:44px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
       <div class="cart-item-info">
         <div class="cart-item-name">${esc(c.card_name)}</div>
-        <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> × ${c.qty} · $${(parseFloat(c.price)||0).toFixed(2)} ea · <strong style="color:var(--accent);">$${((parseFloat(c.price)||0) * c.qty).toFixed(2)}</strong></div>
+        <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> · $${(parseFloat(c.price)||0).toFixed(2)} ea · <strong style="color:var(--accent);">$${((parseFloat(c.price)||0) * c.qty).toFixed(2)}</strong></div>
       </div>
-      <button class="cart-item-remove" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}">✕</button>
+      <div class="copy-qty-bar" style="flex-shrink:0;">
+        <button class="qty-btn cart-qty-btn" data-delta="-1">−</button>
+        <div class="qty-val">${c.qty}</div>
+        <button class="qty-btn cart-qty-btn" data-delta="1">+</button>
+      </div>
     </div>
   `).join('');
 

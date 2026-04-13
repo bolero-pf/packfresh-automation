@@ -56,34 +56,56 @@ KIOSK_CHECKOUT_ENABLED = os.environ.get("KIOSK_CHECKOUT_ENABLED", "false").lower
 KIOSK_ACCESS_KEY = os.environ.get("KIOSK_ACCESS_KEY", "")
 
 # Era mapping — groups set names by TCG era for browsing filters
-# Sets are matched by prefix/keyword. If a set doesn't match any era, it goes to "Classic".
+# Sets are matched by prefix/keyword. If a set doesn't match any era, it goes to "Vintage".
 ERA_KEYWORDS = {
-    "Scarlet & Violet": ["Scarlet & Violet", "Paldea", "Obsidian Flames", "151",
-                         "Paradox Rift", "Temporal Forces", "Twilight Masque",
-                         "Shrouded Fable", "Stellar Crown", "Surging Sparks",
-                         "Prismatic Evolutions", "Journey Together", "Destined Rivals"],
-    "Sword & Shield": ["Sword & Shield", "Rebel Clash", "Darkness Ablaze", "Vivid Voltage",
-                        "Battle Styles", "Chilling Reign", "Evolving Skies", "Fusion Strike",
-                        "Brilliant Stars", "Astral Radiance", "Lost Origin", "Silver Tempest",
-                        "Crown Zenith", "Shining Fates", "Champion's Path", "Hidden Fates"],
-    "Sun & Moon": ["Sun & Moon", "Guardians Rising", "Burning Shadows", "Crimson Invasion",
-                   "Ultra Prism", "Forbidden Light", "Celestial Storm", "Lost Thunder",
-                   "Team Up", "Unbroken Bonds", "Unified Minds", "Cosmic Eclipse",
-                   "Detective Pikachu"],
-    "XY": ["XY", "Flashfire", "Furious Fists", "Phantom Forces", "Primal Clash",
-            "Roaring Skies", "Ancient Origins", "BREAKthrough", "BREAKpoint",
-            "Fates Collide", "Steam Siege", "Evolutions", "Generations"],
+    "Mega Evolution": [
+        "Mega Evolution", "Chaos Rising", "Perfect Order",
+        "Ascended Heroes", "Phantasmal Flames",
+    ],
+    "Scarlet & Violet": [
+        "Scarlet & Violet", "Paldea Evolved", "Obsidian Flames", "151",
+        "Paradox Rift", "Paldean Fates", "Temporal Forces",
+        "Twilight Masquerade", "Twilight Masque",
+        "Shrouded Fable", "Stellar Crown", "Surging Sparks",
+        "Prismatic Evolutions", "Journey Together", "Destined Rivals",
+        "White Flare", "Black Bolt",
+    ],
+    "Sword & Shield": [
+        "Sword & Shield", "Rebel Clash", "Darkness Ablaze", "Vivid Voltage",
+        "Battle Styles", "Chilling Reign", "Evolving Skies", "Fusion Strike",
+        "Brilliant Stars", "Astral Radiance", "Lost Origin", "Silver Tempest",
+        "Crown Zenith", "Shining Fates", "Champion's Path",
+        "Celebrations", "Pokemon GO", "Pokemon Go",
+    ],
+    "Sun & Moon": [
+        "Sun & Moon", "Guardians Rising", "Burning Shadows", "Crimson Invasion",
+        "Ultra Prism", "Forbidden Light", "Celestial Storm", "Lost Thunder",
+        "Team Up", "Unbroken Bonds", "Unified Minds", "Cosmic Eclipse",
+        "Detective Pikachu", "Hidden Fates", "Shining Legends", "Dragon Majesty",
+    ],
+    "XY": [
+        "XY", "Flashfire", "Furious Fists", "Phantom Forces", "Primal Clash",
+        "Roaring Skies", "Ancient Origins", "BREAKthrough", "BREAKpoint",
+        "Fates Collide", "Steam Siege", "Evolutions", "Generations", "Double Crisis",
+        "Kalos Starter",
+    ],
+    "Black & White": [
+        "Black & White", "Emerging Powers", "Noble Victories", "Next Destinies",
+        "Dark Explorers", "Dragons Exalted", "Dragon Vault",
+        "Boundaries Crossed", "Plasma Storm", "Plasma Freeze",
+        "Plasma Blast", "Legendary Treasures", "Radiant Collection",
+    ],
 }
 
 def _classify_era(set_name: str) -> str:
     if not set_name:
-        return "Classic"
+        return "Vintage"
     sn = set_name.strip()
     for era, keywords in ERA_KEYWORDS.items():
         for kw in keywords:
             if sn.lower().startswith(kw.lower()) or kw.lower() in sn.lower():
                 return era
-    return "Classic"
+    return "Vintage"
 
 
 
@@ -146,8 +168,8 @@ def browse():
     params  = []
 
     if q:
-        filters.append("(card_name ILIKE %s OR set_name ILIKE %s)")
-        params += [f"%{q}%", f"%{q}%"]
+        filters.append("(card_name ILIKE %s OR set_name ILIKE %s OR card_number ILIKE %s)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
     if set_name:
         filters.append("set_name ILIKE %s")
         params.append(f"%{set_name}%")
@@ -164,11 +186,18 @@ def browse():
         filters.append("current_price <= %s")
         params.append(max_price)
     if era:
-        era_kws = ERA_KEYWORDS.get(era)
-        if era_kws:
-            era_clauses = " OR ".join(["set_name ILIKE %s"] * len(era_kws))
-            filters.append(f"({era_clauses})")
-            params += [f"%{kw}%" for kw in era_kws]
+        if era == "Vintage":
+            # Classic = doesn't match any known era keywords
+            all_kws = [kw for kws in ERA_KEYWORDS.values() for kw in kws]
+            exclude_clauses = " AND ".join(["set_name NOT ILIKE %s"] * len(all_kws))
+            filters.append(f"({exclude_clauses})")
+            params += [f"%{kw}%" for kw in all_kws]
+        else:
+            era_kws = ERA_KEYWORDS.get(era)
+            if era_kws:
+                era_clauses = " OR ".join(["set_name ILIKE %s"] * len(era_kws))
+                filters.append(f"({era_clauses})")
+                params += [f"%{kw}%" for kw in era_kws]
 
     where = " AND ".join(filters)
 
@@ -258,8 +287,8 @@ def list_eras():
     for r in rows:
         era = _classify_era(r["set_name"])
         era_counts[era] = era_counts.get(era, 0) + 1
-    # Return eras sorted by name, with set counts (exclude "Classic" catch-all)
-    eras = [{"name": k, "set_count": v} for k, v in sorted(era_counts.items()) if k != "Classic"]
+    # Return eras sorted by name, with set counts
+    eras = [{"name": k, "set_count": v} for k, v in sorted(era_counts.items())]
     return jsonify({"eras": eras})
 
 
