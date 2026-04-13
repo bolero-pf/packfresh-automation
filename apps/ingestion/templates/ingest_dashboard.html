@@ -1584,7 +1584,7 @@ async function startRouteSession(sessionId) {
     if (!overlay) {
         overlay = document.createElement('div');
         overlay.id = 'route-session-overlay';
-        overlay.style.cssText = 'display:none; position:fixed; inset:0; background:var(--bg); z-index:2000; overflow-y:auto; padding:16px;';
+        overlay.style.cssText = 'display:none; position:fixed; inset:0; background:var(--bg); z-index:10000; overflow-y:auto; padding:16px; padding-top:48px;';
         document.body.appendChild(overlay);
     }
     overlay.style.display = 'block';
