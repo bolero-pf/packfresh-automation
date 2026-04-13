@@ -95,6 +95,13 @@ ERA_KEYWORDS = {
         "Boundaries Crossed", "Plasma Storm", "Plasma Freeze",
         "Plasma Blast", "Legendary Treasures", "Radiant Collection",
     ],
+    "Promos & Misc": [
+        "Miscellaneous Cards & Products", "Miscellaneous",
+        "McDonald's", "Trick or Trade", "Holiday Calendar",
+        "Best of Game", "Wizards of the Coast Promos",
+        "Nintendo Promos", "POP Series",
+        "Futsal", "Rumble",
+    ],
 }
 
 def _classify_era(set_name: str) -> str:
@@ -268,12 +275,16 @@ def browse():
 
 @app.route("/api/sets")
 def list_sets():
+    era = (request.args.get("era") or "").strip()
     rows = db.query("""
         SELECT DISTINCT set_name FROM raw_cards
         WHERE state = 'STORED' AND set_name IS NOT NULL
         ORDER BY set_name ASC LIMIT 200
     """)
-    return jsonify({"sets": [r["set_name"] for r in rows]})
+    sets = [r["set_name"] for r in rows]
+    if era:
+        sets = [s for s in sets if _classify_era(s) == era]
+    return jsonify({"sets": sets})
 
 
 @app.route("/api/eras")

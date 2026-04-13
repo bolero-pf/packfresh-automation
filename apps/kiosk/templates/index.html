@@ -376,7 +376,7 @@ header {
   <span class="cond-toggle on" data-cond="MP" onclick="toggleCond(this)" style="border-color:#fb923c;background:rgba(251,146,60,0.15);color:#fb923c;">MP</span>
   <span class="cond-toggle on" data-cond="HP" onclick="toggleCond(this)" style="border-color:#f87171;background:rgba(248,113,113,0.15);color:#f87171;">HP</span>
   <span class="cond-toggle on" data-cond="DMG" onclick="toggleCond(this)" style="border-color:#b91c1c;background:rgba(185,28,28,0.15);color:#b91c1c;">DMG</span>
-  <select class="filter-select" id="era-filter" onchange="doSearch()">
+  <select class="filter-select" id="era-filter" onchange="onEraChange()">
     <option value="">All Eras</option>
   </select>
   <select class="filter-select" id="set-filter" onchange="doSearch()">
@@ -619,16 +619,31 @@ async function loadEras() {
   } catch(e) {}
 }
 
-async function loadSets() {
+async function loadSets(era) {
   try {
-    const d = await get('/api/sets');
+    const url = era ? `/api/sets?era=${encodeURIComponent(era)}` : '/api/sets';
+    const d = await get(url);
     const sel = document.getElementById('set-filter');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">All Sets</option>';
     (d.sets || []).forEach(s => {
       const o = document.createElement('option');
       o.value = o.textContent = s;
       sel.appendChild(o);
     });
+    // Restore previous selection if it still exists in the new list
+    if (prev && [...sel.options].some(o => o.value === prev)) {
+      sel.value = prev;
+    }
   } catch(e) {}
+}
+
+async function onEraChange() {
+  const era = document.getElementById('era-filter').value;
+  // Reset set filter when era changes, then reload sets scoped to era
+  document.getElementById('set-filter').value = '';
+  await loadSets(era);
+  doSearch();
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
