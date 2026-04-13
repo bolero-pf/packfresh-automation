@@ -766,6 +766,23 @@ def screen_every_order(order_gid: str) -> dict:
                 order_count = int(customer.get("numberOfOrders", 0) or 0)
                 _apply_verification(order_gid, order_name, customer, tier, cumulative_total, note_text,
                                     is_first_order=(order_count <= 1))
+
+                # Also hold sibling orders so they appear grouped in verification
+                tag = "high-value-tier2" if tier >= 2 else "high-value-tier1"
+                for s in unfulfilled_siblings:
+                    try:
+                        shopify_gql(ORDER_TAGS_ADD, {"id": s["order_gid"], "tags": [tag, "hold-for-review"]})
+                    except Exception as e:
+                        print(f"[screening] Failed to tag sibling {s['order_gid']} for cumulative: {e}", flush=True)
+                    try:
+                        _hold_fulfillment(s["order_gid"], f"Cumulative ${cumulative_total:.2f} — verification required")
+                    except Exception as e:
+                        print(f"[screening] Failed to hold sibling {s['order_gid']} for cumulative: {e}", flush=True)
+                    try:
+                        _add_order_note(s["order_gid"], note_text)
+                    except Exception as e:
+                        print(f"[screening] Failed to note sibling {s['order_gid']} for cumulative: {e}", flush=True)
+
                 if active_verification_tier:
                     _log_screening(order_gid, order_name, customer_email, "upgrade", f"tier{tier}", {
                         "from_tier": active_verification_tier, "cumulative_total": cumulative_total,
@@ -1150,6 +1167,107 @@ def on_order_cancelled(order_gid: str) -> dict:
         print(f"[easter_egg] Slot returned for cancelled order={order_name} tier={tier}", flush=True)
 
     return result
+
+# ═══════════════════════════════════════════════════════════════════════
+#  RELEASE CUMULATIVE VERIFICATION GROUP (keep combine state)
+# ═══════════════════════════════════════════════════════════════════════
+
+VERIFICATION_ONLY_TAGS = ["high-value-tier1", "high-value-tier2"]
+
+def release_verification_group(order_gids: list) -> dict:
+    """
+    Release verification holds from a group of orders.
+    Removes verification tags + notes. If an order also has combine state,
+    keeps hold-for-review + fulfillment hold so it flows to combine tab.
+    """
+    results = []
+    customer_email = None
+    customer_gid = None
+
+    for gid in order_gids:
+        r = {"order_gid": gid}
+        try:
+            data = shopify_gql(ORDER_DETAIL_Q, {"id": gid})
+            order = data["data"]["order"]
+        except Exception as e:
+            r["error"] = str(e)
+            results.append(r)
+            continue
+
+        order_tags = set(order.get("tags") or [])
+        order_name = order.get("name", "?")
+        note = order.get("note") or ""
+        has_combine = "combine" in note.lower()
+
+        # Capture customer info for Klaviyo clear (once)
+        if not customer_email:
+            cust = order.get("customer") or {}
+            customer_email = (cust.get("email") or "").strip()
+            customer_gid = cust.get("id")
+
+        # Remove verification tags
+        ver_tags = [t for t in VERIFICATION_ONLY_TAGS if t in order_tags]
+        tags_to_remove = list(ver_tags)
+        if not has_combine:
+            # No combine — fully release
+            tags_to_remove.append("hold-for-review")
+
+        if tags_to_remove:
+            try:
+                shopify_gql(ORDER_TAGS_REMOVE, {"id": gid, "tags": tags_to_remove})
+                r["tags_removed"] = tags_to_remove
+            except Exception as e:
+                print(f"[screening] Failed to remove tags from {gid}: {e}", flush=True)
+
+        # Release fulfillment holds only if no combine state
+        if not has_combine:
+            try:
+                r["holds_released"] = _release_fulfillment_holds(gid)
+            except Exception as e:
+                print(f"[screening] Failed to release holds for {gid}: {e}", flush=True)
+        else:
+            r["kept_for_combine"] = True
+
+        # Clear verification notes
+        try:
+            cleaned_lines = [
+                l for l in note.split("\n")
+                if "waiting on id verification" not in l.lower()
+            ]
+            cleaned_note = "\n".join(cleaned_lines).strip()
+            while "\n---\n\n---\n" in cleaned_note:
+                cleaned_note = cleaned_note.replace("\n---\n\n---\n", "\n---\n")
+            cleaned_note = cleaned_note.strip().strip("-").strip()
+            if cleaned_note != note.strip():
+                shopify_gql(ORDER_UPDATE_NOTE, {"input": {"id": gid, "note": cleaned_note}})
+                r["note_cleared"] = True
+        except Exception as e:
+            print(f"[screening] Failed to clear note from {gid}: {e}", flush=True)
+
+        # Log release
+        for tag in ver_tags:
+            check = "tier2" if "tier2" in tag else "tier1"
+            _log_screening(gid, order_name, customer_email or "", "release", check)
+
+        results.append(r)
+
+    # Clear Klaviyo verification flags once for the customer
+    if customer_email and customer_gid:
+        try:
+            external_id = customer_gid.split("/")[-1]
+            upsert_profile(email=customer_email, external_id=external_id, properties={
+                "id_verification_required": False,
+                "id_selfie_required": False,
+                "cumulative_verification_required": False,
+                "spend_spike_verification_required": False,
+                "fraud_verification_required": False,
+                "verification_cleared_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            print(f"[screening] Klaviyo clear failed for group: {e}", flush=True)
+
+    return {"orders": results}
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  EVENT: ORDER FULFILLED → cleanup

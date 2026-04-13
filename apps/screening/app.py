@@ -245,8 +245,10 @@ def api_held_orders():
             # Determine specific type
             if "high-value-tier2" in tags:
                 order_data["check_type"] = "ID + Selfie ($1000+)"
+                order_data["is_cumulative"] = True
             elif "high-value-tier1" in tags:
                 order_data["check_type"] = "ID Verification ($700+)"
+                order_data["is_cumulative"] = True
             elif "spend-spike-review" in tags:
                 order_data["check_type"] = "Spend Spike"
             elif "fraud-medium" in tags:
@@ -264,6 +266,38 @@ def api_held_orders():
         else:
             order_data["check_type"] = "Other Hold"
             verification.append(order_data)
+
+    # Group cumulative verification orders by customer
+    verification_groups = {}
+    standalone_verification = []
+    for o in verification:
+        if o.get("is_cumulative"):
+            key = o["customer_email"] or o["customer_name"]
+            if key not in verification_groups:
+                verification_groups[key] = {
+                    "customer_name": o["customer_name"],
+                    "customer_email": o["customer_email"],
+                    "customer_id": o["customer_id"],
+                    "check_type": o["check_type"],
+                    "orders": [],
+                    "total_value": 0,
+                }
+            verification_groups[key]["orders"].append(o)
+            verification_groups[key]["total_value"] += o["total"]
+            # Use highest tier check_type in the group
+            if "Selfie" in o["check_type"]:
+                verification_groups[key]["check_type"] = o["check_type"]
+        else:
+            standalone_verification.append(o)
+
+    # Groups with 1 order go back to standalone list
+    final_verification_groups = []
+    for group in verification_groups.values():
+        if len(group["orders"]) > 1:
+            group["check_type"] = "Cumulative " + group["check_type"]
+            final_verification_groups.append(group)
+        else:
+            standalone_verification.extend(group["orders"])
 
     # Group combine orders by customer
     combine_groups = {}
@@ -290,7 +324,8 @@ def api_held_orders():
                 combine_groups[key]["all_items"].append({**item})
 
     return jsonify({
-        "verification": verification,
+        "verification": standalone_verification,
+        "verification_groups": final_verification_groups,
         "combine_groups": list(combine_groups.values()),
     })
 
@@ -305,6 +340,19 @@ def api_release_hold():
 
     from service import on_order_fulfilled
     result = on_order_fulfilled(order_gid)
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/api/release-verification-group", methods=["POST"])
+def api_release_verification_group():
+    """Release verification holds from a cumulative group. Preserves combine state."""
+    data = request.get_json(silent=True) or {}
+    order_ids = data.get("order_ids")
+    if not order_ids or not isinstance(order_ids, list):
+        return jsonify({"error": "order_ids (list) required"}), 400
+
+    from service import release_verification_group
+    result = release_verification_group(order_ids)
     return jsonify({"ok": True, **result})
 
 
@@ -1228,8 +1276,9 @@ async function loadFreshdeskData() {
   }
   if (!_fdCanned.configured) return;
 
-  // Fetch tickets for each unique email in verification queue
-  const emails = [...new Set((_data.verification || []).map(o => o.customer_email).filter(Boolean))];
+  // Fetch tickets for each unique email in verification queue (including groups)
+  const groupEmails = (_data.verification_groups || []).map(g => g.customer_email).filter(Boolean);
+  const emails = [...new Set([...(_data.verification || []).map(o => o.customer_email).filter(Boolean), ...groupEmails])];
   const fetches = emails.filter(e => !_fdTickets[e]).map(async (email) => {
     try {
       const r = await fetch('/api/freshdesk-tickets?email=' + encodeURIComponent(email));
@@ -1239,14 +1288,15 @@ async function loadFreshdeskData() {
   if (fetches.length) {
     await Promise.all(fetches);
     // Re-render verification cards with Freshdesk data
-    renderVerification(_data.verification || []);
+    renderVerification(_data.verification || [], _data.verification_groups || []);
   }
 }
 
 function renderAll() {
-  renderVerification(_data.verification || []);
+  renderVerification(_data.verification || [], _data.verification_groups || []);
   renderCombine(_data.combine_groups || []);
-  document.getElementById('tab-verify').textContent = '🔍 Verification (' + (_data.verification||[]).length + ')';
+  const vCount = (_data.verification||[]).length + (_data.verification_groups||[]).reduce((s,g)=>s+g.orders.length, 0);
+  document.getElementById('tab-verify').textContent = '🔍 Verification (' + vCount + ')';
   document.getElementById('tab-combine').textContent = '📦 Combine (' + (_data.combine_groups||[]).length + ')';
 }
 
@@ -1304,10 +1354,45 @@ function _getTicketForOrder(email) {
   return fd.tickets.find(t => t.status <= 3) || fd.tickets[0];
 }
 
-function renderVerification(orders) {
+function renderVerification(orders, groups) {
   const el = document.getElementById('pane-verify');
-  if (!orders.length) { el.innerHTML = '<div class="empty">✅ No orders awaiting verification</div>'; return; }
-  el.innerHTML = orders.map(o => `
+  if (!orders.length && !(groups && groups.length)) { el.innerHTML = '<div class="empty">✅ No orders awaiting verification</div>'; return; }
+
+  // Render cumulative verification groups first
+  const groupHtml = (groups || []).map(g => {
+    const orderIds = JSON.stringify(g.orders.map(o => o.id)).replace(/"/g, '&quot;');
+    const orderNames = g.orders.map(o => o.name).join(', ');
+    return `
+    <div class="card" style="border-left:3px solid var(--amber);">
+      <div class="order-header">
+        <span class="badge badge-amber">${g.check_type}</span>
+        ${_fdBadgeHtml(g.customer_email)}
+        <strong>${g.customer_name}</strong> · ${g.orders.length} orders · <span style="font-weight:700;">$${g.total_value.toFixed(2)}</span>
+        <div style="margin-left:auto;display:flex;gap:6px;">
+          <button class="btn btn-green btn-sm" onclick="releaseVerificationGroup(${orderIds},'${orderNames}','${g.customer_email}')">✓ Verify & Release All</button>
+        </div>
+      </div>
+      <div class="order-meta" style="margin-bottom:4px;">
+        ${g.customer_email}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        ${g.orders.map(o => `
+          <div style="padding:8px 12px;background:rgba(255,255,255,0.03);border-radius:6px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <a href="https://admin.shopify.com/store/{{ shopify_store }}/orders/${o.numeric_id}" target="_blank" style="color:var(--accent);text-decoration:none;font-weight:600;">${o.name}</a>
+              <span style="font-weight:600;">$${o.total.toFixed(2)}</span>
+            </div>
+            <div class="items-list" style="margin-top:4px;">${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}</div>
+            ${o.note ? '<em style="color:var(--amber);font-size:0.78rem;">' + o.note + '</em>' : ''}
+          </div>
+        `).join('')}
+      </div>
+      ${_fdSectionHtml(g.customer_email, g.orders[0].id)}
+    </div>`;
+  }).join('');
+
+  // Render standalone verification orders
+  const orderHtml = orders.map(o => `
     <div class="card">
       <div class="order-header">
         <a href="https://admin.shopify.com/store/{{ shopify_store }}/orders/${o.numeric_id}" target="_blank" class="order-name" style="color:var(--accent);text-decoration:none;">${o.name}</a>
@@ -1328,6 +1413,8 @@ function renderVerification(orders) {
       ${_fdSectionHtml(o.customer_email, o.id)}
     </div>
   `).join('');
+
+  el.innerHTML = groupHtml + orderHtml;
 }
 
 function renderCombine(groups) {
@@ -1456,6 +1543,46 @@ async function _doReleaseHold(orderId, orderName) {
     const d = await r.json();
     if (!r.ok) { alert(d.error); return; }
     toast('Released: ' + orderName, 'green');
+    _fdTickets = {};
+    loadOrders();
+  } catch(e) { alert(e.message); }
+}
+
+async function releaseVerificationGroup(orderIds, orderNames, email) {
+  const ticket = _getTicketForOrder(email);
+  if (ticket && _fdCanned && _fdCanned.configured) {
+    showFdReplyModal(ticket, 'approve', async (ticketId, cannedId) => {
+      if (!confirm('Release verification hold on ' + orderNames + '?')) return;
+      if (ticketId && cannedId) {
+        try {
+          await fetch('/api/freshdesk-reply', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ ticket_id: ticketId, canned_response_id: cannedId }),
+          });
+        } catch(e) { console.warn('Freshdesk reply failed:', e); }
+      }
+      await _doReleaseVerificationGroup(orderIds, orderNames);
+    });
+  } else {
+    if (!confirm('Release verification hold on ' + orderNames + '?')) return;
+    await _doReleaseVerificationGroup(orderIds, orderNames);
+  }
+}
+
+async function _doReleaseVerificationGroup(orderIds, orderNames) {
+  try {
+    const r = await fetch('/api/release-verification-group', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ order_ids: orderIds }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error); return; }
+    const kept = (d.orders || []).filter(o => o.kept_for_combine).length;
+    if (kept) {
+      toast('Verified: ' + orderNames + ' — moved to Combine', 'green');
+    } else {
+      toast('Verified & released: ' + orderNames, 'green');
+    }
     _fdTickets = {};
     loadOrders();
   } catch(e) { alert(e.message); }
