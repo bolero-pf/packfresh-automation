@@ -382,13 +382,13 @@ header {
   <select class="filter-select" id="set-filter" onchange="doSearch()">
     <option value="">All Sets</option>
   </select>
-  <button class="filter-toggle" id="filter-toggle-btn" onclick="toggleFilterDrawer()">$ Price</button>
-  <select class="filter-select" id="sort-select" onchange="doSearch()" style="margin-left:auto;">
+  <select class="filter-select" id="sort-select" onchange="doSearch()">
     <option value="name_asc">Name A–Z</option>
     <option value="price_asc">Price Low–High</option>
     <option value="price_desc">Price High–Low</option>
     <option value="newest">Newest</option>
   </select>
+  <button class="filter-toggle" id="filter-toggle-btn" onclick="toggleFilterDrawer()">$ Price</button>
 </div>
 
 <!-- Expandable filter drawer -->
