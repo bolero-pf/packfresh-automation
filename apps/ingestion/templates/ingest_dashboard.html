@@ -1462,9 +1462,14 @@ function _renderRouteCards(sessionId, data) {
                 <div class="stat"><div class="stat-label">Grade</div><div class="stat-value" style="color:var(--accent2);">${byDest.grade||0}</div></div>
                 <div class="stat"><div class="stat-label">Bulk</div><div class="stat-value" style="color:var(--text-dim);">${byDest.bulk||0}</div></div>
             </div>
-            <button class="btn btn-success" onclick="switchStage('push')" style="font-size:1rem; padding:10px 24px; white-space:nowrap;">
-                Push All &rarr;
-            </button>
+            <div style="display:flex; gap:8px; flex-shrink:0;">
+                <button class="btn btn-primary" onclick="startRouteSession('${sessionId}')" style="font-size:1rem; padding:10px 24px; white-space:nowrap;">
+                    Start Session
+                </button>
+                <button class="btn btn-success" onclick="switchStage('push')" style="font-size:1rem; padding:10px 24px; white-space:nowrap;">
+                    Push All &rarr;
+                </button>
+            </div>
         </div>
         <div style="font-size:0.75rem; color:var(--text-dim); margin-top:6px;">
             Binder capacity: ${binderAvail} slots remaining
@@ -1560,6 +1565,393 @@ async function _setRoute(sessionId, itemId, destination) {
         }
     } catch(e) {
         console.error('Route failed:', e);
+    }
+}
+
+
+// ── ROUTING SESSION (card-by-card) ──────────────────────────────────────
+let _rsActive = false;
+let _rsItems = [];       // enriched items array
+let _rsIndex = 0;        // current card position
+let _rsSessionId = null;
+let _rsCounts = { storage: 0, display: 0, grade: 0, bulk: 0 };
+
+async function startRouteSession(sessionId) {
+    _rsSessionId = sessionId;
+
+    // Create overlay if it doesn't exist
+    let overlay = document.getElementById('route-session-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'route-session-overlay';
+        overlay.style.cssText = 'display:none; position:fixed; inset:0; background:var(--bg); z-index:2000; overflow-y:auto; padding:16px;';
+        document.body.appendChild(overlay);
+    }
+    overlay.style.display = 'block';
+    overlay.innerHTML = `<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:60vh;">
+        <div class="spinner" style="margin-bottom:12px;"></div>
+        <div id="enrich-progress-text" style="font-size:1rem; color:var(--text-dim);">Starting enrichment...</div>
+        <div style="width:300px; height:8px; background:var(--surface-2); border-radius:4px; margin-top:12px; overflow:hidden;">
+            <div id="enrich-progress-bar" style="width:0%; height:100%; background:var(--accent); border-radius:4px; transition:width 0.3s;"></div>
+        </div>
+        <button class="btn btn-secondary" onclick="exitRouteSession()" style="margin-top:24px;">Cancel</button>
+    </div>`;
+
+    _rsActive = true;
+    document.addEventListener('keydown', _rsKeyHandler);
+
+    try {
+        // Kick off enrichment
+        const er = await fetch(`/api/ingest/session/${sessionId}/enrich-route`, { method: 'POST' });
+        const ej = await er.json();
+
+        if (ej.status === 'complete' && !ej.job_id) {
+            // Cache already exists — skip polling
+        } else if (ej.job_id) {
+            // Poll for completion
+            await _pollEnrichJob(ej.job_id, ej.total);
+        }
+
+        // Fetch enriched data
+        const r = await fetch(`/api/ingest/session/${sessionId}/route-enriched`);
+        if (!r.ok) throw new Error('Failed to load enriched data');
+        const data = await r.json();
+
+        _rsItems = data.items || [];
+        _rsIndex = 0;
+
+        // Calculate initial counts from items
+        _rsCounts = { storage: 0, display: 0, grade: 0, bulk: 0 };
+        for (const item of _rsItems) {
+            const dest = item.routing_destination || 'storage';
+            _rsCounts[dest] = (_rsCounts[dest] || 0) + (item.quantity || 1);
+        }
+
+        if (!_rsItems.length) {
+            overlay.innerHTML = `<div class="card" style="max-width:500px; margin:20vh auto; text-align:center;">
+                <p>No cards to route.</p>
+                <button class="btn btn-primary" onclick="exitRouteSession()">Close</button>
+            </div>`;
+            return;
+        }
+
+        _renderSessionCard();
+    } catch(e) {
+        overlay.innerHTML = `<div class="card" style="max-width:500px; margin:20vh auto; text-align:center;">
+            <div class="alert alert-error">Enrichment failed: ${e.message}</div>
+            <button class="btn btn-primary" onclick="exitRouteSession()" style="margin-top:12px;">Close</button>
+        </div>`;
+    }
+}
+
+async function _pollEnrichJob(jobId, total) {
+    const progText = document.getElementById('enrich-progress-text');
+    const progBar = document.getElementById('enrich-progress-bar');
+    while (true) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+            const r = await fetch(`/api/ingest/enrich-job/${jobId}`);
+            const j = await r.json();
+            if (progText) progText.textContent = `Fetching card data ${j.progress || 0}/${j.total || total}...${j.errors ? ` (${j.errors} errors)` : ''}`;
+            if (progBar) progBar.style.width = `${Math.round(((j.progress || 0) / (j.total || total || 1)) * 100)}%`;
+            if (j.status === 'complete') break;
+        } catch(e) { break; }
+    }
+}
+
+function _renderSessionCard() {
+    const overlay = document.getElementById('route-session-overlay');
+    if (!overlay || !_rsItems.length) return;
+
+    const item = _rsItems[_rsIndex];
+    const total = _rsItems.length;
+    const price = parseFloat(item.market_price || 0);
+    const dest = item.routing_destination || 'storage';
+    const cond = item.condition || 'NM';
+    const econ = item.grading_economics || {};
+    const imgUrl = item.image_url;
+
+    // Condition colors
+    const condColors = { 'NM': 'var(--green)', 'LP': '#e6a817', 'MP': 'var(--orange)', 'HP': 'var(--red)', 'DMG': 'var(--red)' };
+    const condColor = condColors[cond] || 'var(--text-dim)';
+
+    // Progress percentage
+    const progPct = Math.round(((_rsIndex + 1) / total) * 100);
+
+    let html = '';
+
+    // ── Top bar ──
+    html += `<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; flex-wrap:wrap;">
+        <div style="font-size:1.1rem; font-weight:700;">Card ${_rsIndex + 1} of ${total}</div>
+        <div style="display:flex; gap:16px; font-size:0.85rem; font-weight:600;">
+            <span style="color:var(--green);">B:${_rsCounts.display||0}</span>
+            <span style="color:var(--accent);">S:${_rsCounts.storage||0}</span>
+            <span style="color:var(--accent2);">G:${_rsCounts.grade||0}</span>
+            <span style="color:var(--text-dim);">K:${_rsCounts.bulk||0}</span>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="exitRouteSession()">Exit (Esc)</button>
+    </div>
+    <div style="width:100%; height:6px; background:var(--surface-2); border-radius:3px; margin-bottom:16px; overflow:hidden;">
+        <div style="width:${progPct}%; height:100%; background:var(--accent); border-radius:3px; transition:width 0.2s;"></div>
+    </div>`;
+
+    // ── Card display ──
+    html += `<div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; justify-content:center;">`;
+
+    // Image
+    if (imgUrl) {
+        html += `<img src="${imgUrl}" style="width:260px; max-height:360px; object-fit:contain; border-radius:8px; flex-shrink:0;" alt="card image">`;
+    } else {
+        html += `<div style="width:260px; height:360px; background:var(--surface-2); border-radius:8px; flex-shrink:0; display:flex; align-items:center; justify-content:center; color:var(--text-dim); font-size:0.85rem;">No image</div>`;
+    }
+
+    // Info panel
+    html += `<div style="flex:1; min-width:280px; max-width:500px;">
+        <div style="font-size:1.3rem; font-weight:700; margin-bottom:4px; line-height:1.3;">${item.product_name || 'Unknown'}</div>
+        <div style="font-size:0.9rem; color:var(--text-dim); margin-bottom:12px;">
+            ${item.set_name||''} ${item.card_number ? '#'+item.card_number : ''} ${item.variant ? '· '+item.variant : ''}
+        </div>
+        <div style="display:flex; gap:16px; align-items:center; margin-bottom:16px; flex-wrap:wrap;">
+            <div style="font-size:0.85rem; padding:4px 10px; border-radius:6px; font-weight:700; background:${condColor}22; color:${condColor}; border:1px solid ${condColor}44;">
+                ${cond}
+            </div>
+            <div style="font-size:1.6rem; font-weight:800; color:var(--text);">$${price.toFixed(2)}</div>
+            <div style="font-size:0.78rem; color:var(--text-dim);">raw market</div>
+        </div>`;
+
+    // ── Grading economics panel ──
+    if (econ.psa10_price || econ.psa9_price) {
+        const isEligible = econ.eligible;
+        const isWorthy = econ.grade_worthy;
+        const dimmed = !isEligible;
+
+        html += `<div style="background:var(--surface-2); border-radius:10px; padding:14px; margin-bottom:16px; ${dimmed ? 'opacity:0.6;' : ''}">
+            <div style="font-size:0.82rem; font-weight:700; margin-bottom:10px; color:${isWorthy ? 'var(--green)' : 'var(--text-dim)'};">
+                ${isWorthy ? 'GRADE CANDIDATE' : 'Grading Analysis'}
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; font-size:0.82rem;">
+                <div style="color:var(--text-dim);">PSA 10</div>
+                <div style="font-weight:600;">
+                    ${econ.psa10_price ? '$'+econ.psa10_price.toFixed(2) : '—'}
+                    ${econ.psa10_confidence ? `<span style="font-size:0.68rem; padding:1px 5px; border-radius:3px; margin-left:4px; background:${econ.psa10_confidence==='high'?'var(--green)22':'var(--orange)22'}; color:${econ.psa10_confidence==='high'?'var(--green)':'var(--orange)'};">${econ.psa10_confidence}</span>` : ''}
+                </div>
+
+                <div style="color:var(--text-dim);">PSA 9</div>
+                <div style="font-weight:600;">
+                    ${econ.psa9_price ? '$'+econ.psa9_price.toFixed(2) : '—'}
+                    ${econ.psa9_confidence ? `<span style="font-size:0.68rem; padding:1px 5px; border-radius:3px; margin-left:4px; background:${econ.psa9_confidence==='high'?'var(--green)22':'var(--orange)22'}; color:${econ.psa9_confidence==='high'?'var(--green)':'var(--orange)'};">${econ.psa9_confidence}</span>` : ''}
+                </div>
+            </div>`;
+
+        if (isEligible && econ.ev != null) {
+            html += `<div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border); font-size:0.82rem;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px 16px;">
+                    <div style="color:var(--text-dim);">EV</div>
+                    <div style="font-weight:600;">0.60 &times; $${econ.psa10_price.toFixed(2)} + 0.40 &times; $${econ.psa9_price.toFixed(2)} = <strong>$${econ.ev.toFixed(2)}</strong></div>
+
+                    <div style="color:var(--text-dim);">Total cost</div>
+                    <div>$${price.toFixed(2)} + $${econ.grading_cost.toFixed(2)} = $${econ.total_cost.toFixed(2)}</div>
+
+                    <div style="color:var(--text-dim);">Expected profit</div>
+                    <div style="font-weight:700; color:${econ.expected_profit >= 40 ? 'var(--green)' : 'var(--text-dim)'};">$${econ.expected_profit.toFixed(2)}</div>
+
+                    <div style="color:var(--text-dim);">ROI</div>
+                    <div style="font-weight:700; color:${econ.roi_pct >= 50 ? 'var(--green)' : 'var(--text-dim)'};">${econ.roi_pct.toFixed(1)}%</div>
+                </div>
+            </div>`;
+
+            if (isWorthy) {
+                html += `<div style="margin-top:10px; padding:8px 12px; background:var(--green)15; border:1px solid var(--green)44; border-radius:6px; color:var(--green); font-weight:700; font-size:0.85rem; text-align:center;">
+                    GRADE CANDIDATE &mdash; $${econ.expected_profit.toFixed(2)} profit at ${econ.roi_pct.toFixed(0)}% ROI
+                </div>`;
+            } else {
+                const reasons = [];
+                if (econ.expected_profit < 40) reasons.push(`profit $${econ.expected_profit.toFixed(2)} < $40 min`);
+                if (econ.roi_pct < 50) reasons.push(`ROI ${econ.roi_pct.toFixed(0)}% < 50% min`);
+                html += `<div style="margin-top:8px; font-size:0.75rem; color:var(--text-dim);">Not grade-worthy: ${reasons.join(', ')}</div>`;
+            }
+        } else if (econ.reason) {
+            html += `<div style="margin-top:8px; font-size:0.78rem; color:var(--text-dim);">${econ.reason}</div>`;
+            if (cond === 'LP') {
+                html += `<div style="margin-top:4px; font-size:0.72rem; color:var(--accent2); font-style:italic;">LP cards may be worth grading if vintage — use [G] to override</div>`;
+            }
+        }
+
+        html += `</div>`; // close grading panel
+    } else if (cond === 'NM') {
+        html += `<div style="background:var(--surface-2); border-radius:10px; padding:12px; margin-bottom:16px; font-size:0.82rem; color:var(--text-dim);">
+            No graded price data available
+        </div>`;
+    }
+
+    html += `</div>`; // close info panel
+    html += `</div>`; // close flex row
+
+    // ── Destination buttons ──
+    const dests = [
+        { key: 'display', label: 'Binder', shortcut: 'B', color: 'var(--green)' },
+        { key: 'storage', label: 'Storage', shortcut: 'S', color: 'var(--accent)' },
+        { key: 'grade', label: 'Grade', shortcut: 'G', color: 'var(--accent2)' },
+        { key: 'bulk', label: 'Bulk', shortcut: 'K', color: 'var(--text-dim)' },
+    ];
+
+    html += `<div style="display:flex; gap:10px; justify-content:center; margin-top:24px; flex-wrap:wrap;">`;
+    for (const d of dests) {
+        const isCurrent = dest === d.key;
+        html += `<button id="rs-btn-${d.key}" onclick="_rsSetDest('${d.key}')"
+            style="font-size:1.1rem; font-weight:700; padding:16px 32px; min-width:120px;
+                   border-radius:10px; cursor:pointer; transition:all 0.15s;
+                   border:2px solid ${isCurrent ? d.color : 'var(--border)'};
+                   background:${isCurrent ? d.color+'22' : 'var(--surface-2)'};
+                   color:${isCurrent ? d.color : 'var(--text-dim)'};">
+            <span style="font-size:0.7rem; opacity:0.7; display:block; margin-bottom:2px;">[${d.shortcut}]</span>
+            ${d.label}
+        </button>`;
+    }
+    html += `</div>`;
+
+    // ── Accept + Nav ──
+    html += `<div style="display:flex; justify-content:center; gap:12px; margin-top:16px; align-items:center;">
+        <button class="btn btn-secondary" onclick="_rsNav(-1)" ${_rsIndex === 0 ? 'disabled' : ''} style="padding:8px 20px;">&larr; Prev</button>
+        <button class="btn btn-success" onclick="_rsAccept()" style="padding:10px 36px; font-size:1.05rem; font-weight:700;">
+            <span style="font-size:0.7rem; opacity:0.7; display:block; margin-bottom:1px;">[Space / Enter]</span>
+            Accept
+        </button>
+        <button class="btn btn-secondary" onclick="_rsNav(1)" ${_rsIndex >= total - 1 ? 'disabled' : ''} style="padding:8px 20px;">Next &rarr;</button>
+    </div>`;
+
+    overlay.innerHTML = html;
+}
+
+async function _rsSetDest(destination) {
+    const item = _rsItems[_rsIndex];
+    if (!item) return;
+
+    const oldDest = item.routing_destination || 'storage';
+    const qty = item.quantity || 1;
+
+    // Update local state immediately
+    item.routing_destination = destination;
+    _rsCounts[oldDest] = (_rsCounts[oldDest] || 0) - qty;
+    _rsCounts[destination] = (_rsCounts[destination] || 0) + qty;
+
+    // Also update _routeData for when we exit
+    if (_routeData) {
+        const ri = _routeData.items.find(i => i.id === item.id);
+        if (ri) ri.routing_destination = destination;
+        _routeData.by_destination = { ..._rsCounts };
+    }
+
+    // Flash the button
+    const btn = document.getElementById(`rs-btn-${destination}`);
+    if (btn) {
+        btn.style.transform = 'scale(1.08)';
+        setTimeout(() => { if (btn) btn.style.transform = ''; }, 150);
+    }
+
+    // Fire-and-forget server update
+    fetch(`/api/ingest/session/${_rsSessionId}/route-card`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_id: item.id, destination }),
+    }).catch(e => console.error('Route save failed:', e));
+
+    // Auto-advance after brief pause
+    setTimeout(() => {
+        if (_rsIndex < _rsItems.length - 1) {
+            _rsIndex++;
+            _renderSessionCard();
+        } else {
+            _showSessionComplete();
+        }
+    }, 200);
+}
+
+function _rsNav(delta) {
+    const newIdx = _rsIndex + delta;
+    if (newIdx < 0 || newIdx >= _rsItems.length) return;
+    _rsIndex = newIdx;
+    _renderSessionCard();
+}
+
+function _rsKeyHandler(e) {
+    if (!_rsActive) return;
+    // Don't capture if user is in an input
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
+    const key = e.key.toLowerCase();
+    if (key === ' ' || key === 'enter') { e.preventDefault(); _rsAccept(); }
+    else if (key === 'b') { e.preventDefault(); _rsSetDest('display'); }
+    else if (key === 's') { e.preventDefault(); _rsSetDest('storage'); }
+    else if (key === 'g') { e.preventDefault(); _rsSetDest('grade'); }
+    else if (key === 'k') { e.preventDefault(); _rsSetDest('bulk'); }
+    else if (key === 'arrowleft') { e.preventDefault(); _rsNav(-1); }
+    else if (key === 'arrowright') { e.preventDefault(); _rsNav(1); }
+    else if (key === 'escape') { e.preventDefault(); exitRouteSession(); }
+}
+
+function _rsAccept() {
+    // Accept the current destination as-is and advance (no server call needed — it's already set)
+    const item = _rsItems[_rsIndex];
+    if (!item) return;
+    const dest = item.routing_destination || 'storage';
+
+    // Flash the current button
+    const btn = document.getElementById(`rs-btn-${dest}`);
+    if (btn) {
+        btn.style.transform = 'scale(1.08)';
+        setTimeout(() => { if (btn) btn.style.transform = ''; }, 150);
+    }
+
+    setTimeout(() => {
+        if (_rsIndex < _rsItems.length - 1) {
+            _rsIndex++;
+            _renderSessionCard();
+        } else {
+            _showSessionComplete();
+        }
+    }, 200);
+}
+
+function _showSessionComplete() {
+    const overlay = document.getElementById('route-session-overlay');
+    if (!overlay) return;
+
+    overlay.innerHTML = `
+    <div style="max-width:500px; margin:15vh auto; text-align:center;">
+        <div style="font-size:1.4rem; font-weight:800; margin-bottom:16px;">Routing Complete</div>
+        <div style="display:flex; gap:20px; justify-content:center; margin-bottom:24px; flex-wrap:wrap;">
+            <div style="text-align:center;">
+                <div style="font-size:2rem; font-weight:800; color:var(--green);">${_rsCounts.display||0}</div>
+                <div style="font-size:0.82rem; color:var(--text-dim);">Binder</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:2rem; font-weight:800; color:var(--accent);">${_rsCounts.storage||0}</div>
+                <div style="font-size:0.82rem; color:var(--text-dim);">Storage</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:2rem; font-weight:800; color:var(--accent2);">${_rsCounts.grade||0}</div>
+                <div style="font-size:0.82rem; color:var(--text-dim);">Grade</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:2rem; font-weight:800; color:var(--text-dim);">${_rsCounts.bulk||0}</div>
+                <div style="font-size:0.82rem; color:var(--text-dim);">Bulk</div>
+            </div>
+        </div>
+        <button class="btn btn-primary" onclick="exitRouteSession()" style="font-size:1.1rem; padding:12px 36px;">Done</button>
+    </div>`;
+}
+
+function exitRouteSession() {
+    _rsActive = false;
+    document.removeEventListener('keydown', _rsKeyHandler);
+    const overlay = document.getElementById('route-session-overlay');
+    if (overlay) overlay.style.display = 'none';
+    // Re-render route list with updated data
+    if (_routeData && _rsSessionId) {
+        _routeData.by_destination = { ..._rsCounts };
+        _renderRouteCards(_rsSessionId, _routeData);
     }
 }
 
@@ -2573,35 +2965,70 @@ function _renderSealedRawResults(d, sessionId, panel) {
         html += '</tbody></table>';
     }
 
-    // ── Barcode labels for raw cards (sorted) ──────────────────────────────────
+    // ── Barcode labels for raw cards (grouped by destination) ──────────────
     const rawResults = (d.results||[]).filter(r => r.action === 'raw_card_ingested' && r.barcodes?.length);
     if (rawResults.length) {
-        const allBarcodes = _sortBarcodeCards(rawResults.flatMap(r => r.barcodes || []));
-        html += `<div style="margin-top:16px; border-top:1px solid var(--border); padding-top:14px;">
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-                <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${allBarcodes.length})</div>
-                <button class="btn btn-primary btn-sm" onclick="printAllBarcodes()" style="font-size:0.78rem;">🖨 Print All</button>
-            </div>
-            <div id="barcode-label-grid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-                ${allBarcodes.map(b => `
-                    <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px;">
-                        <img src="data:image/png;base64,${b.png_b64}" style="width:100%; border-radius:4px; background:#fff;" alt="barcode">
-                        <div style="font-size:0.78rem; color:var(--text-dim);">
-                            <strong style="color:var(--text);">${b.card_name||''}</strong><br>
-                            ${b.set_name||''} · ${b.condition||''} · <span style="color:var(--accent); font-family:monospace;">${b.bin_label||''}</span>
-                        </div>
-                        <div style="display:flex; gap:6px;">
-                            <a href="data:image/png;base64,${b.png_b64}" download="${b.barcode}.png" style="flex:1;">
-                                <button class="btn btn-secondary btn-sm" style="width:100%; font-size:0.72rem;">⬇ Download</button>
-                            </a>
-                            <button class="btn btn-secondary btn-sm" style="flex:1; font-size:0.72rem;" onclick="printOneBarcode('${b.barcode}')">🖨 Print</button>
-                        </div>
-                    </div>
-                `).join('')}
-            </div>
-        </div>`;
-        // Store barcodes for print-all
+        // Group barcodes by destination (storage vs display/binder)
+        const storageBarcodes = _sortBarcodeCards(rawResults.filter(r => r.destination === 'storage').flatMap(r => r.barcodes || []));
+        const binderBarcodes = _sortBarcodeCards(rawResults.filter(r => r.destination === 'display').flatMap(r => r.barcodes || []));
+        const allBarcodes = [...storageBarcodes, ...binderBarcodes];
+
+        // Store for print functions
         window._lastBarcodes = allBarcodes;
+        window._storageBarcodes = storageBarcodes;
+        window._binderBarcodes = binderBarcodes;
+
+        function _barcodeGrid(barcodes) {
+            return barcodes.map(b => `
+                <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px;">
+                    <img src="data:image/png;base64,${b.png_b64}" style="width:100%; border-radius:4px; background:#fff;" alt="barcode">
+                    <div style="font-size:0.78rem; color:var(--text-dim);">
+                        <strong style="color:var(--text);">${b.card_name||''}</strong><br>
+                        ${b.set_name||''} · ${b.condition||''} · <span style="color:var(--accent); font-family:monospace;">${b.bin_label||''}</span>
+                    </div>
+                    <div style="display:flex; gap:6px;">
+                        <a href="data:image/png;base64,${b.png_b64}" download="${b.barcode}.png" style="flex:1;">
+                            <button class="btn btn-secondary btn-sm" style="width:100%; font-size:0.72rem;">⬇ Download</button>
+                        </a>
+                        <button class="btn btn-secondary btn-sm" style="flex:1; font-size:0.72rem;" onclick="printOneBarcode('${b.barcode}')">🖨 Print</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        html += `<div style="margin-top:16px; border-top:1px solid var(--border); padding-top:14px;">`;
+
+        if (storageBarcodes.length) {
+            html += `<div style="margin-bottom:16px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+                    <div style="font-weight:700; font-size:0.95rem; color:var(--accent);">🏷 Storage Barcodes (${storageBarcodes.length})</div>
+                    <button class="btn btn-primary btn-sm" onclick="printBarcodeStack('storage')" style="font-size:0.78rem;">🖨 Print Storage</button>
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                    ${_barcodeGrid(storageBarcodes)}
+                </div>
+            </div>`;
+        }
+
+        if (binderBarcodes.length) {
+            html += `<div style="margin-bottom:16px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+                    <div style="font-weight:700; font-size:0.95rem; color:var(--green);">🏷 Binder Barcodes (${binderBarcodes.length})</div>
+                    <button class="btn btn-primary btn-sm" onclick="printBarcodeStack('binder')" style="font-size:0.78rem;">🖨 Print Binder</button>
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                    ${_barcodeGrid(binderBarcodes)}
+                </div>
+            </div>`;
+        }
+
+        if (allBarcodes.length > 1) {
+            html += `<div style="text-align:center; margin-top:8px;">
+                <button class="btn btn-secondary btn-sm" onclick="printAllBarcodes()" style="font-size:0.78rem;">🖨 Print All (${allBarcodes.length})</button>
+            </div>`;
+        }
+
+        html += `</div>`;
     }
 
     panel.innerHTML = html;
@@ -2639,20 +3066,30 @@ async function _loadSessionBarcodes(sessionId) {
 function _renderBarcodeSection(panel, sessionId) {
     const sorted = _sortBarcodeCards(_sessionBarcodeCards);
 
-    const grid = sorted.map(c => `
-        <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px;">
-            <img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:100%; border-radius:4px; background:#fff;" alt="barcode" loading="lazy">
-            <div style="font-size:0.78rem; color:var(--text-dim);">
-                <strong style="color:var(--text);">${c.card_name||''}</strong><br>
-                ${c.set_name||''} · ${c.condition||''} · <span style="color:var(--accent); font-family:monospace;">${c.bin_label||'?'}</span>
+    // Group by state: STORED = storage bins, DISPLAY = binder
+    const storageCards = sorted.filter(c => c.state === 'STORED');
+    const binderCards = sorted.filter(c => c.state === 'DISPLAY');
+
+    function _barcodeCardGrid(cards) {
+        return cards.map(c => `
+            <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px;">
+                <img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:100%; border-radius:4px; background:#fff;" alt="barcode" loading="lazy">
+                <div style="font-size:0.78rem; color:var(--text-dim);">
+                    <strong style="color:var(--text);">${c.card_name||''}</strong><br>
+                    ${c.set_name||''} · ${c.condition||''} · <span style="color:var(--accent); font-family:monospace;">${c.bin_label||'?'}</span>
+                </div>
+                <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" onclick="printOneBarcode('${c.barcode}')">🖨 Print</button>
             </div>
-            <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" onclick="printOneBarcode('${c.barcode}')">🖨 Print</button>
-        </div>
-    `).join('');
+        `).join('');
+    }
+
+    // Store for stack printing
+    window._sessionStorageCards = storageCards;
+    window._sessionBinderCards = binderCards;
 
     const barcodeSection = document.createElement('div');
     barcodeSection.className = 'card barcode-session-section';
-    barcodeSection.innerHTML = `
+    let sectionHtml = `
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
             <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${sorted.length})</div>
             <div style="display:flex; gap:8px; align-items:center;">
@@ -2662,13 +3099,40 @@ function _renderBarcodeSection(panel, sessionId) {
                     <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price ↓</option>
                     <option value="price-low" ${_currentSortBy==='price-low'?'selected':''}>Price ↑</option>
                 </select>
-                <button class="btn btn-primary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All</button>
             </div>
-        </div>
-        <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-            ${grid}
-        </div>
-    `;
+        </div>`;
+
+    if (storageCards.length) {
+        sectionHtml += `<div style="margin-bottom:14px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <div style="font-weight:600; font-size:0.88rem; color:var(--accent);">Storage (${storageCards.length})</div>
+                <button class="btn btn-primary btn-sm" onclick="printSessionStack('storage')" style="font-size:0.75rem;">🖨 Print Storage</button>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                ${_barcodeCardGrid(storageCards)}
+            </div>
+        </div>`;
+    }
+
+    if (binderCards.length) {
+        sectionHtml += `<div style="margin-bottom:14px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <div style="font-weight:600; font-size:0.88rem; color:var(--green);">Binder (${binderCards.length})</div>
+                <button class="btn btn-primary btn-sm" onclick="printSessionStack('binder')" style="font-size:0.75rem;">🖨 Print Binder</button>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                ${_barcodeCardGrid(binderCards)}
+            </div>
+        </div>`;
+    }
+
+    if (sorted.length > 1) {
+        sectionHtml += `<div style="text-align:center; margin-top:8px;">
+            <button class="btn btn-secondary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All (${sorted.length})</button>
+        </div>`;
+    }
+
+    barcodeSection.innerHTML = sectionHtml;
 
     const existing = panel.querySelector('.barcode-session-section');
     if (existing) existing.remove();
@@ -2725,6 +3189,32 @@ function printAllBarcodes() {
     const win = window.open('', '_blank');
     const imgs = barcodes.map(b =>
         `<img src="data:image/png;base64,${b.png_b64}" style="width:62mm; display:block; page-break-after:always;">`
+    ).join('');
+    win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
+    win.document.close();
+}
+
+function printSessionStack(stack) {
+    const cards = stack === 'storage' ? (window._sessionStorageCards || [])
+                : stack === 'binder' ? (window._sessionBinderCards || [])
+                : _sortBarcodeCards(_sessionBarcodeCards);
+    if (!cards.length) return;
+    const win = window.open('', '_blank');
+    const imgs = cards.map(c =>
+        `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
+    ).join('');
+    win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
+    win.document.close();
+}
+
+function printBarcodeStack(stack) {
+    const barcodes = stack === 'storage' ? (window._storageBarcodes || [])
+                   : stack === 'binder' ? (window._binderBarcodes || [])
+                   : (window._lastBarcodes || []);
+    if (!barcodes.length) return;
+    const win = window.open('', '_blank');
+    const imgs = barcodes.map(b =>
+        `<img src="data:image/png;base64,${b.png_b64}" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
     ).join('');
     win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
     win.document.close();

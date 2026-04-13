@@ -673,6 +673,131 @@ def push_dry_run(session_id):
 
 _push_jobs = {}  # {job_id: {status, progress, total, results, errors, ...}}
 
+# ── Route enrichment (PPT graded prices + images for routing session) ──
+_enrich_jobs = {}    # {job_id: {status, progress, total, session_id, errors}}
+_enrich_cache = {}   # {session_id: {tcg_id_str: {image_url, graded_prices, grading_economics}}}
+
+GRADING_COST = 30.0  # dollars per card to get graded
+
+
+def _calc_grading_economics(graded_prices: dict, raw_price: float, condition: str) -> dict:
+    """Calculate grade-worthiness metrics for a raw card."""
+    result = {
+        "eligible": False,
+        "grade_worthy": False,
+        "reason": None,
+        "psa10_price": None,
+        "psa9_price": None,
+        "psa10_confidence": None,
+        "psa9_confidence": None,
+        "ev": None,
+        "grading_cost": GRADING_COST,
+        "total_cost": None,
+        "expected_profit": None,
+        "roi_pct": None,
+    }
+
+    # Suppress if condition is LP or worse (but still return data so frontend
+    # can show the "LP vintage" hint)
+    if condition and condition not in ("NM",):
+        result["reason"] = f"Condition {condition} — skip for grading"
+        # Still populate prices if available so the UI can show them dimmed
+        psa = graded_prices.get("PSA", {})
+        p10 = psa.get("10", {}).get("price")
+        p9 = psa.get("9", {}).get("price")
+        if p10:
+            result["psa10_price"] = round(p10, 2)
+            result["psa10_confidence"] = psa.get("10", {}).get("confidence")
+        if p9:
+            result["psa9_price"] = round(p9, 2)
+            result["psa9_confidence"] = psa.get("9", {}).get("confidence")
+        return result
+
+    psa = graded_prices.get("PSA", {})
+    psa10_data = psa.get("10", {})
+    psa9_data = psa.get("9", {})
+    psa10 = psa10_data.get("price")
+    psa9 = psa9_data.get("price")
+
+    if not psa10 or not psa9:
+        result["reason"] = "Insufficient graded price data"
+        if psa10:
+            result["psa10_price"] = round(psa10, 2)
+            result["psa10_confidence"] = psa10_data.get("confidence")
+        if psa9:
+            result["psa9_price"] = round(psa9, 2)
+            result["psa9_confidence"] = psa9_data.get("confidence")
+        return result
+
+    result["eligible"] = True
+    result["psa10_price"] = round(psa10, 2)
+    result["psa9_price"] = round(psa9, 2)
+    result["psa10_confidence"] = psa10_data.get("confidence")
+    result["psa9_confidence"] = psa9_data.get("confidence")
+
+    ev = (0.60 * psa10) + (0.40 * psa9)
+    total_cost = raw_price + GRADING_COST
+    expected_profit = ev - total_cost
+    roi_pct = ((ev / total_cost) - 1) * 100 if total_cost > 0 else 0
+
+    result["ev"] = round(ev, 2)
+    result["total_cost"] = round(total_cost, 2)
+    result["expected_profit"] = round(expected_profit, 2)
+    result["roi_pct"] = round(roi_pct, 1)
+
+    # Grade-worthy when BOTH thresholds met
+    result["grade_worthy"] = expected_profit >= 40 and (ev / total_cost) >= 1.5
+
+    return result
+
+
+def _enrich_route_worker(job_id, session_id, items):
+    """Background worker: fetch PPT data for each unique tcgplayer_id."""
+    import time as _time
+    job = _enrich_jobs[job_id]
+    cache = {}
+
+    # Deduplicate by tcgplayer_id — keep first item per tcg_id for condition/price
+    unique = {}
+    for item in items:
+        tcg_id = item.get("tcgplayer_id")
+        if tcg_id and str(tcg_id) not in unique:
+            unique[str(tcg_id)] = item
+
+    job["total"] = len(unique)
+    errors = 0
+
+    for i, (tcg_id_str, item) in enumerate(unique.items()):
+        try:
+            card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id_str))
+            if card_data:
+                image_url = (card_data.get("imageCdnUrl800")
+                             or card_data.get("imageCdnUrl")
+                             or card_data.get("imageCdnUrl400"))
+                graded_prices = PPTClient.extract_graded_prices(card_data)
+                raw_price = float(item.get("market_price") or 0)
+                condition = item.get("condition") or "NM"
+                economics = _calc_grading_economics(graded_prices, raw_price, condition)
+
+                cache[tcg_id_str] = {
+                    "image_url": image_url,
+                    "graded_prices": graded_prices,
+                    "grading_economics": economics,
+                }
+            else:
+                cache[tcg_id_str] = {"error": "not_found"}
+                errors += 1
+        except Exception as e:
+            logger.warning(f"PPT enrich failed for TCG#{tcg_id_str}: {e}")
+            cache[tcg_id_str] = {"error": str(e)}
+            errors += 1
+
+        job["progress"] = i + 1
+        job["errors"] = errors
+
+    _enrich_cache[session_id] = cache
+    job["status"] = "complete"
+
 
 @app.route("/api/ingest/push-job/<job_id>", methods=["GET"])
 def get_push_job(job_id):
@@ -1653,6 +1778,115 @@ def binder_locations():
     if not get_binder_capacity:
         return jsonify({"error": "Storage module not available"}), 503
     return jsonify(_serialize({"binders": get_binder_capacity(db)}))
+
+
+# ── Route enrichment endpoints (PPT graded prices + images) ──────────
+
+@app.route("/api/ingest/session/<session_id>/enrich-route", methods=["POST"])
+def enrich_route(session_id):
+    """Kick off background PPT fetch for graded prices + images for all routable items."""
+    if not ppt:
+        return jsonify({"error": "PPT not configured"}), 503
+
+    # If cache already exists for this session, skip re-fetch
+    if session_id in _enrich_cache:
+        return jsonify({"job_id": None, "status": "complete", "total": len(_enrich_cache[session_id])})
+
+    items = db.query("""
+        SELECT id, product_name, set_name, condition, market_price, quantity,
+               routing_destination, tcgplayer_id, card_number, offer_price, variant
+        FROM intake_items
+        WHERE session_id = %s
+          AND product_type = 'raw'
+          AND is_graded IS NOT TRUE
+          AND item_status IN ('good', 'damaged')
+          AND is_mapped = TRUE
+          AND pushed_at IS NULL
+        ORDER BY COALESCE(market_price, 0) ASC
+    """, (session_id,))
+
+    if not items:
+        return jsonify({"error": "No raw items to enrich"}), 400
+
+    active_dicts = [dict(i) for i in items]
+
+    # Count unique tcgplayer_ids
+    unique_tcg = set(str(i["tcgplayer_id"]) for i in active_dicts if i.get("tcgplayer_id"))
+
+    job_id = str(_uuid.uuid4())
+    _enrich_jobs[job_id] = {
+        "status": "running",
+        "progress": 0,
+        "total": len(unique_tcg),
+        "session_id": session_id,
+        "errors": 0,
+    }
+
+    thread = threading.Thread(
+        target=_enrich_route_worker,
+        args=(job_id, session_id, active_dicts),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"job_id": job_id, "status": "running", "total": len(unique_tcg)})
+
+
+@app.route("/api/ingest/enrich-job/<job_id>", methods=["GET"])
+def get_enrich_job(job_id):
+    """Poll background enrichment job status."""
+    job = _enrich_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
+
+
+@app.route("/api/ingest/session/<session_id>/route-enriched")
+def route_enriched(session_id):
+    """Get routing data enriched with PPT graded prices, images, and grading economics."""
+    items = db.query("""
+        SELECT id, product_name, set_name, condition, market_price, quantity,
+               routing_destination, tcgplayer_id, card_number, offer_price,
+               variant, rarity, language
+        FROM intake_items
+        WHERE session_id = %s
+          AND product_type = 'raw'
+          AND is_graded IS NOT TRUE
+          AND item_status IN ('good', 'damaged')
+          AND is_mapped = TRUE
+          AND pushed_at IS NULL
+        ORDER BY COALESCE(market_price, 0) ASC
+    """, (session_id,))
+
+    cache = _enrich_cache.get(session_id, {})
+
+    enriched = []
+    for item in items:
+        d = dict(item)
+        tcg_id = str(d.get("tcgplayer_id") or "")
+        cached = cache.get(tcg_id, {})
+        if "error" not in cached:
+            d["image_url"] = cached.get("image_url")
+            d["graded_prices"] = cached.get("graded_prices", {})
+            d["grading_economics"] = cached.get("grading_economics", {})
+        else:
+            d["image_url"] = None
+            d["graded_prices"] = {}
+            d["grading_economics"] = {}
+        enriched.append(d)
+
+    by_dest = {"storage": 0, "display": 0, "grade": 0, "bulk": 0}
+    for item in enriched:
+        dest = item.get("routing_destination") or "storage"
+        qty = item.get("quantity", 1)
+        by_dest[dest] = by_dest.get(dest, 0) + qty
+
+    return jsonify(_serialize({
+        "items": enriched,
+        "total_items": len(enriched),
+        "total_qty": sum(i.get("quantity", 1) for i in enriched),
+        "by_destination": by_dest,
+    }))
 
 
 @app.route("/api/ingest/session/<session_id>/push-raw", methods=["POST"])
