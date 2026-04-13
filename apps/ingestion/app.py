@@ -1864,12 +1864,21 @@ def route_enriched(session_id):
     for item in items:
         d = dict(item)
         tcg_id = str(d.get("tcgplayer_id") or "")
-        cached = cache.get(tcg_id, {})
-        if "error" not in cached:
+        cached = cache.get(tcg_id)  # None if not yet fetched
+        if cached is not None and "error" not in cached:
+            d["_enriched"] = True
             d["image_url"] = cached.get("image_url")
             d["graded_prices"] = cached.get("graded_prices", {})
             d["grading_economics"] = cached.get("grading_economics", {})
+        elif cached is not None:
+            # PPT errored for this card — still mark as enriched (done, just no data)
+            d["_enriched"] = True
+            d["image_url"] = None
+            d["graded_prices"] = {}
+            d["grading_economics"] = {}
         else:
+            # Not yet fetched by background worker
+            d["_enriched"] = False
             d["image_url"] = None
             d["graded_prices"] = {}
             d["grading_economics"] = {}

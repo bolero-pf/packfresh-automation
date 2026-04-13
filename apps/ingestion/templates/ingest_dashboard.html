@@ -1607,13 +1607,13 @@ async function startRouteSession(sessionId) {
         if (!r.ok) throw new Error('Failed to load route data');
         const data = await r.json();
 
-        _rsItems = (data.items || []).map(item => ({
+        _rsItems = _sortItems((data.items || []).map(item => ({
             ...item,
             image_url: null,
             graded_prices: {},
             grading_economics: {},
             _enrichLoading: true,  // flag: PPT data not yet loaded
-        }));
+        })));
         _rsIndex = 0;
 
         _rsCounts = { storage: 0, display: 0, grade: 0, bulk: 0 };
@@ -1684,22 +1684,17 @@ async function _rsMergeEnrichment() {
         let changed = false;
         for (const item of _rsItems) {
             const enriched = enrichedMap[item.id];
-            if (enriched && item._enrichLoading) {
-                if (enriched.image_url || enriched.grading_economics?.psa10_price != null || enriched.grading_economics?.reason) {
-                    item.image_url = enriched.image_url;
-                    item.graded_prices = enriched.graded_prices || {};
-                    item.grading_economics = enriched.grading_economics || {};
-                    item._enrichLoading = false;
-                    changed = true;
-                }
+            if (enriched && item._enrichLoading && enriched._enriched) {
+                item.image_url = enriched.image_url;
+                item.graded_prices = enriched.graded_prices || {};
+                item.grading_economics = enriched.grading_economics || {};
+                item._enrichLoading = false;
+                changed = true;
             }
         }
-        // Re-render current card if it got new data
+        // Re-render current card if anything changed (current card may have gotten data)
         if (changed) {
-            const current = _rsItems[_rsIndex];
-            if (current && !current._enrichLoading) {
-                _renderSessionCard();
-            }
+            _renderSessionCard();
         }
     } catch(e) { /* silent */ }
 }
