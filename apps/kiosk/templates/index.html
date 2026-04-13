@@ -787,9 +787,14 @@ function renderDetail(card, copies) {
     ${cartTotal >= MAX ? `<div class="warning">You've reached the maximum of ${MAX} cards per request.</div>` : ''}
     <div class="btn-row" style="margin-top:8px;">
       <button class="btn btn-outline" onclick="closeDetailPanel()">Back to Browse</button>
-      <button class="btn btn-gold" onclick="closeDetailPanel(); openCart();">View My Picks (${cartTotal})</button>
+      <button class="btn btn-gold" id="detail-picks-btn" onclick="closeDetailPanel(); openCart();">View My Picks (${cartTotal})</button>
     </div>
   `;
+}
+
+function _updateDetailPicksBtn() {
+  const btn = document.getElementById('detail-picks-btn');
+  if (btn) btn.textContent = `View My Picks (${cartCount()})`;
 }
 
 // Delegated click: "+ Add to Picks" button
@@ -808,6 +813,7 @@ document.addEventListener('click', function(e) {
     <div class="qty-val">1</div>
     <button class="qty-btn" data-delta="1">+</button>
   </div>`;
+  _updateDetailPicksBtn();
 });
 
 // Delegated click: qty +/- buttons in condition rows
@@ -830,6 +836,7 @@ document.addEventListener('click', function(e) {
     removeFromCart(cardName, setName, cond);
     row.classList.remove('selected');
     row.querySelector('.copy-action').innerHTML = '<button class="copy-add-btn">+ Add to Picks</button>';
+    _updateDetailPicksBtn();
     return;
   }
   if (newQty > avail) return;
@@ -840,6 +847,7 @@ document.addEventListener('click', function(e) {
   // Update qty display in place
   const valEl = row.querySelector('.qty-val');
   if (valEl) valEl.textContent = newQty;
+  _updateDetailPicksBtn();
 });
 
 // Delegated click handler for cart qty +/- buttons
