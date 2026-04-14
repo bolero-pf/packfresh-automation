@@ -267,8 +267,8 @@ class ScrydexClient:
             "variants": {},
         }
 
-        best_market = None
-        primary_variant = None
+        # Track NM prices per variant to determine primary
+        variant_nm: dict[str, float] = {}
 
         for v in (variants or []):
             v_name = v.get("name", "normal")
@@ -286,22 +286,28 @@ class ScrydexClient:
                 low = p.get("low")
                 v_conditions[ppt_cond_name] = {"price": market, "low": low}
 
-                # Track best NM market for overall market price
                 if cond_short == "NM" and market is not None:
-                    if best_market is None or market > best_market:
-                        best_market = market
-                        primary_variant = display_name
+                    variant_nm[display_name] = market
 
             if v_conditions:
                 result["variants"][display_name] = v_conditions
 
-        # Set primary and overall market
+        # Primary variant: prefer "Normal" if it exists (most common printing),
+        # otherwise pick the variant with the LOWEST NM price (the common one,
+        # not the chase variant). This matches PPT's primaryPrinting behavior.
+        if "Normal" in variant_nm:
+            primary_variant = "Normal"
+        elif variant_nm:
+            primary_variant = min(variant_nm, key=variant_nm.get)
+        elif result["variants"]:
+            primary_variant = next(iter(result["variants"]))
+        else:
+            primary_variant = None
+
         if primary_variant:
             result["primaryPrinting"] = primary_variant
-        elif result["variants"]:
-            result["primaryPrinting"] = next(iter(result["variants"]))
 
-        result["market"] = best_market
+        result["market"] = variant_nm.get(primary_variant) if primary_variant else None
 
         # Build flat conditions from primary variant
         primary = result["primaryPrinting"]
