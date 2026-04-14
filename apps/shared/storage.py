@@ -54,7 +54,7 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
         FROM storage_locations
         WHERE card_type = %s
           AND current_count < capacity
-        ORDER BY bin_label ASC
+        ORDER BY partition_num ASC
     """, (ctype,))
 
     if not bins:
@@ -107,7 +107,7 @@ def assign_display(count: int, db) -> list[dict]:
         JOIN storage_rows sr ON sl.row_id = sr.id
         WHERE sr.location_type = 'binder'
           AND sl.current_count < sl.capacity
-        ORDER BY sl.bin_label ASC
+        ORDER BY sr.row_label ASC, sl.partition_num ASC
     """)
 
     if not binders:
@@ -176,7 +176,7 @@ def get_bin_summary(card_type: Optional[str], db) -> list[dict]:
             FROM storage_locations sl
             JOIN storage_rows sr ON sl.row_id = sr.id
             WHERE sl.card_type = %s
-            ORDER BY sl.bin_label ASC
+            ORDER BY sr.row_label ASC, sl.partition_num ASC
         """, (ctype,))
     else:
         rows = db.query("""
@@ -184,7 +184,7 @@ def get_bin_summary(card_type: Optional[str], db) -> list[dict]:
                    sr.row_label, sr.description
             FROM storage_locations sl
             JOIN storage_rows sr ON sl.row_id = sr.id
-            ORDER BY sl.bin_label ASC
+            ORDER BY sr.row_label ASC, sl.partition_num ASC
         """)
     return [dict(r) for r in rows]
 

@@ -240,14 +240,15 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
         # Determine if child is a raw card or sealed product.
         # Promos are always raw. For "sealed" components, detect single cards
         # by card number patterns (e.g. "- 073", "- 153/214", "SWSH136").
-        comp_type = comp.get("component_type", "sealed")
+        comp_type = comp.get("component_type")  # None if not set in recipe
         comp_name = comp.get("product_name", "")
         if comp_type in ("promo", "raw"):
             child_product_type = "raw"
-        elif _looks_like_single_card(comp_name):
-            child_product_type = "raw"
-        else:
+        elif comp_type == "sealed":
             child_product_type = "sealed"
+        else:
+            # component_type not set — detect from name
+            child_product_type = "raw" if _looks_like_single_card(comp_name) else "sealed"
         execute("""
             INSERT INTO intake_items (
                 id, session_id, product_name, set_name, tcgplayer_id,
