@@ -3067,9 +3067,12 @@ function _renderSealedRawResults(d, sessionId, panel) {
             `).join('');
         }
 
+        const hasStacks = storageBarcodes.length > 0 && binderBarcodes.length > 0;
+
         html += `<div style="margin-top:16px; border-top:1px solid var(--border); padding-top:14px;">`;
 
-        if (storageBarcodes.length) {
+        if (hasStacks) {
+            // Both stacks present — group with per-stack print buttons
             html += `<div style="margin-bottom:16px;">
                 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
                     <div style="font-weight:700; font-size:0.95rem; color:var(--accent);">🏷 Storage Barcodes (${storageBarcodes.length})</div>
@@ -3079,9 +3082,6 @@ function _renderSealedRawResults(d, sessionId, panel) {
                     ${_barcodeGrid(storageBarcodes)}
                 </div>
             </div>`;
-        }
-
-        if (binderBarcodes.length) {
             html += `<div style="margin-bottom:16px;">
                 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
                     <div style="font-weight:700; font-size:0.95rem; color:var(--green);">🏷 Binder Barcodes (${binderBarcodes.length})</div>
@@ -3091,11 +3091,17 @@ function _renderSealedRawResults(d, sessionId, panel) {
                     ${_barcodeGrid(binderBarcodes)}
                 </div>
             </div>`;
-        }
-
-        if (allBarcodes.length > 1) {
             html += `<div style="text-align:center; margin-top:8px;">
                 <button class="btn btn-secondary btn-sm" onclick="printAllBarcodes()" style="font-size:0.78rem;">🖨 Print All (${allBarcodes.length})</button>
+            </div>`;
+        } else {
+            // Single stack — show flat with one print button
+            html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+                <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${allBarcodes.length})</div>
+                <button class="btn btn-primary btn-sm" onclick="printAllBarcodes()" style="font-size:0.78rem;">🖨 Print All</button>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                ${_barcodeGrid(allBarcodes)}
             </div>`;
         }
 
@@ -3137,9 +3143,10 @@ async function _loadSessionBarcodes(sessionId) {
 function _renderBarcodeSection(panel, sessionId) {
     const sorted = _sortBarcodeCards(_sessionBarcodeCards);
 
-    // Group by state: STORED = storage bins, DISPLAY = binder
+    // Group by state: STORED = storage bins, DISPLAY = binder, REMOVED = grading (no barcode)
     const storageCards = sorted.filter(c => c.state === 'STORED');
     const binderCards = sorted.filter(c => c.state === 'DISPLAY');
+    const hasGroups = storageCards.length > 0 && binderCards.length > 0;
 
     function _barcodeCardGrid(cards) {
         return cards.map(c => `
@@ -3173,34 +3180,43 @@ function _renderBarcodeSection(panel, sessionId) {
             </div>
         </div>`;
 
-    if (storageCards.length) {
-        sectionHtml += `<div style="margin-bottom:14px;">
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                <div style="font-weight:600; font-size:0.88rem; color:var(--accent);">Storage (${storageCards.length})</div>
-                <button class="btn btn-primary btn-sm" onclick="printSessionStack('storage')" style="font-size:0.75rem;">🖨 Print Storage</button>
-            </div>
-            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-                ${_barcodeCardGrid(storageCards)}
-            </div>
-        </div>`;
-    }
-
-    if (binderCards.length) {
-        sectionHtml += `<div style="margin-bottom:14px;">
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                <div style="font-weight:600; font-size:0.88rem; color:var(--green);">Binder (${binderCards.length})</div>
-                <button class="btn btn-primary btn-sm" onclick="printSessionStack('binder')" style="font-size:0.75rem;">🖨 Print Binder</button>
-            </div>
-            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-                ${_barcodeCardGrid(binderCards)}
-            </div>
-        </div>`;
-    }
-
-    if (sorted.length > 1) {
+    if (hasGroups) {
+        // Show grouped with per-stack print buttons
+        if (storageCards.length) {
+            sectionHtml += `<div style="margin-bottom:14px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                    <div style="font-weight:600; font-size:0.88rem; color:var(--accent);">Storage (${storageCards.length})</div>
+                    <button class="btn btn-primary btn-sm" onclick="printSessionStack('storage')" style="font-size:0.75rem;">🖨 Print Storage</button>
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                    ${_barcodeCardGrid(storageCards)}
+                </div>
+            </div>`;
+        }
+        if (binderCards.length) {
+            sectionHtml += `<div style="margin-bottom:14px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                    <div style="font-weight:600; font-size:0.88rem; color:var(--green);">Binder (${binderCards.length})</div>
+                    <button class="btn btn-primary btn-sm" onclick="printSessionStack('binder')" style="font-size:0.75rem;">🖨 Print Binder</button>
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                    ${_barcodeCardGrid(binderCards)}
+                </div>
+            </div>`;
+        }
         sectionHtml += `<div style="text-align:center; margin-top:8px;">
             <button class="btn btn-secondary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All (${sorted.length})</button>
         </div>`;
+    } else {
+        // Single group — just show them all with a print button
+        sectionHtml += `<div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+            ${_barcodeCardGrid(sorted)}
+        </div>`;
+        if (sorted.length > 1) {
+            sectionHtml += `<div style="text-align:center; margin-top:8px;">
+                <button class="btn btn-primary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All (${sorted.length})</button>
+            </div>`;
+        }
     }
 
     barcodeSection.innerHTML = sectionHtml;
