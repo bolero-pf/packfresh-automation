@@ -420,26 +420,19 @@ class ScrydexClient:
     def _extract_tcgplayer_id(raw: dict) -> Optional[int]:
         """
         Extract TCGPlayer ID from Scrydex response.
-        Field exists but is undocumented — check multiple possible field names.
+        Lives inside variants[].marketplaces[] where name == "tcgplayer".
+        The product_id there is the TCGPlayer product ID.
+        Returns the first one found (cards typically share the same TCG product).
         """
-        for field in ("tcgplayer_id", "tcgplayerId", "tcgPlayerId",
-                       "tcg_player_id", "external_ids.tcgplayer"):
-            val = raw.get(field)
-            if val is not None:
-                try:
-                    return int(val)
-                except (ValueError, TypeError):
-                    pass
-        # Check nested external_ids
-        ext = raw.get("external_ids") or raw.get("externalIds") or {}
-        if isinstance(ext, dict):
-            for key in ("tcgplayer", "tcgplayer_id", "tcgplayerId"):
-                val = ext.get(key)
-                if val is not None:
-                    try:
-                        return int(val)
-                    except (ValueError, TypeError):
-                        pass
+        for variant in (raw.get("variants") or []):
+            for mp in (variant.get("marketplaces") or []):
+                if mp.get("name") == "tcgplayer":
+                    val = mp.get("product_id")
+                    if val is not None:
+                        try:
+                            return int(val)
+                        except (ValueError, TypeError):
+                            pass
         return None
 
     def _normalize_card(self, raw: dict, tcgplayer_id: int = None,
@@ -552,11 +545,17 @@ class ScrydexClient:
     def get_card_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False) -> Optional[dict]:
         """
         PPT-compatible: fetch card by TCGPlayer ID.
-        Strategy: mapping table -> Scrydex search by tcgplayer_id field -> None.
+
+        Scrydex has NO search-by-TCGPlayer-ID capability.
+        TCGPlayer IDs live inside variants[].marketplaces[].product_id and are
+        not queryable. The only path is the local mapping table (scrydex_tcg_map),
+        populated by nightly set-based pulls or the seed script.
+
+        Returns None if no mapping exists — caller should fall back gracefully.
         """
         tcg_id = int(tcgplayer_id)
 
-        # Strategy 1: mapping table (free — no API call)
+        # Only path: mapping table (free — no API call)
         scrydex_id = self._resolve_tcgplayer_id(tcg_id)
         if scrydex_id:
             card = self.get_card_by_id(scrydex_id, include_listings=include_history)
@@ -564,52 +563,8 @@ class ScrydexClient:
                 card["tcgPlayerId"] = tcg_id
                 return card
 
-        # Strategy 2: search by tcgplayer_id (undocumented but field exists)
-        try:
-            params = {
-                "q": f"tcgplayer_id:{tcg_id}",
-                "page_size": 1,
-                "include": "prices",
-            }
-            resp = self._get(f"{self.base_url}/pokemon/v1/cards", params)
-            items = resp.get("data", []) if isinstance(resp, dict) else []
-            if items:
-                card = self._normalize_card(items[0], tcgplayer_id=tcg_id,
-                                            listings=None)
-                if include_history and card.get("scrydexId"):
-                    try:
-                        listings = self._get_card_listings_raw(card["scrydexId"])
-                        card["ebay"] = self._build_graded_object(
-                            items[0].get("variants", []), listings
-                        )
-                    except Exception:
-                        pass
-                return card
-        except ScrydexError as e:
-            logger.warning(f"Scrydex search by tcgplayer_id={tcg_id} failed: {e}")
-
-        # Strategy 3: try sealed products
-        try:
-            sealed = self._search_sealed_by_tcg_id(tcg_id)
-            if sealed:
-                return sealed
-        except ScrydexError:
-            pass
-
-        logger.info(f"No Scrydex result for TCGPlayer ID {tcg_id}")
-        return None
-
-    def _search_sealed_by_tcg_id(self, tcg_id: int) -> Optional[dict]:
-        """Try finding a sealed product by TCGPlayer ID."""
-        params = {
-            "q": f"tcgplayer_id:{tcg_id}",
-            "page_size": 1,
-            "include": "prices",
-        }
-        resp = self._get(f"{self.base_url}/pokemon/v1/sealed", params)
-        items = resp.get("data", []) if isinstance(resp, dict) else []
-        if items:
-            return self._normalize_sealed(items[0], tcgplayer_id=tcg_id)
+        logger.debug(f"No Scrydex mapping for TCGPlayer ID {tcg_id} — "
+                     f"run seed script or wait for nightly set pull")
         return None
 
     def search_cards(self, query, *, set_name=None, limit=5) -> list[dict]:
@@ -641,10 +596,15 @@ class ScrydexClient:
 
     def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *,
                                            include_history=False) -> Optional[dict]:
-        """PPT-compatible: fetch sealed product by TCGPlayer ID."""
+        """
+        PPT-compatible: fetch sealed product by TCGPlayer ID.
+
+        Sealed products in Scrydex do NOT have TCGPlayer IDs at all
+        (no marketplaces array). Only the mapping table works, and it
+        must be manually seeded for sealed products.
+        """
         tcg_id = int(tcgplayer_id)
 
-        # Strategy 1: mapping table
         scrydex_id = self._resolve_tcgplayer_id(tcg_id)
         if scrydex_id:
             product = self.get_sealed_by_id(scrydex_id)
@@ -652,15 +612,7 @@ class ScrydexClient:
                 product["tcgPlayerId"] = tcg_id
                 return product
 
-        # Strategy 2: search by tcgplayer_id field
-        try:
-            result = self._search_sealed_by_tcg_id(tcg_id)
-            if result:
-                return result
-        except ScrydexError as e:
-            logger.warning(f"Scrydex sealed search by tcgplayer_id={tcg_id} failed: {e}")
-
-        logger.info(f"No Scrydex sealed result for TCGPlayer ID {tcg_id}")
+        logger.debug(f"No Scrydex mapping for sealed TCGPlayer ID {tcg_id}")
         return None
 
     def search_sealed_products(self, query, *, set_name=None, limit=5) -> list[dict]:
