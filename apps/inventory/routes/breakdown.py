@@ -17,9 +17,12 @@ import db
 from flask import Blueprint, request, jsonify, Response
 from routes.inventory import requires_auth, _get_shopify_client, _get_cache_manager, LOCATION_ID, DRY_RUN
 try:
-    from ppt_client import PPTError as _PPTError
+    from price_provider import PriceError as _PPTError
 except ImportError:
-    _PPTError = Exception
+    try:
+        from ppt_client import PPTError as _PPTError
+    except ImportError:
+        _PPTError = Exception
 
 logger = logging.getLogger(__name__)
 

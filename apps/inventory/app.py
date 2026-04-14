@@ -23,7 +23,7 @@ from flask import Flask, redirect
 import db
 from shopify_client import ShopifyClient
 from cache_manager import CacheManager
-from ppt_client import PPTClient
+from price_provider import create_price_provider
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,7 +38,7 @@ app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
 
 shopify_client: ShopifyClient = None
 cache_manager:  CacheManager  = None
-ppt_client:     PPTClient     = None
+ppt_client = None  # PriceProvider instance (PPT, Scrydex, or both)
 
 
 from auth import register_auth_hooks
@@ -64,11 +64,10 @@ def _lazy_init():
         )
 
     if ppt_client is None:
-        key = os.getenv("PPT_API_KEY")
-        if key:
-            ppt_client = PPTClient(api_key=key)
-        else:
-            logger.warning("PPT_API_KEY not set — PPT features disabled")
+        try:
+            ppt_client = create_price_provider(db=db)
+        except Exception as e:
+            logger.warning(f"Price provider init failed — pricing features disabled: {e}")
 
     # Ensure AI enrichment table exists (idempotent)
     if not getattr(_lazy_init, '_ai_table_ok', False):

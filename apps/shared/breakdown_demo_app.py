@@ -88,11 +88,9 @@ db = _DB()
 
 ppt = None
 try:
-    from ppt_client import PPTClient
-    ppt_key = os.getenv("PPT_API_KEY", "")
-    if ppt_key:
-        ppt = PPTClient(ppt_key)
-except ImportError:
+    from price_provider import create_price_provider
+    ppt = create_price_provider()
+except Exception:
     pass
 
 # ─── Register shared breakdown blueprint ─────────────────────────────

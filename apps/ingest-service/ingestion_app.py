@@ -18,7 +18,7 @@ from flask import Flask, render_template, request, jsonify, redirect, make_respo
 import db
 import ingest
 from shopify_client import ShopifyClient, ShopifyError
-from ppt_client import PPTClient
+from price_provider import PriceProvider, create_price_provider
 import product_enrichment as enrichment
 from cache_manager import CacheManager
 
@@ -97,7 +97,7 @@ else:
     logger.warning("SHOPIFY_TOKEN / SHOPIFY_STORE not set — push-live disabled")
 cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_products=True)
 
-ppt = PPTClient(os.getenv("PPT_API_KEY", ""))
+ppt = create_price_provider(db=db)
 
 
 def _serialize(obj):

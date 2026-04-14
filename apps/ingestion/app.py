@@ -20,7 +20,7 @@ from flask import Flask, Blueprint, render_template, request, jsonify, redirect,
 import db
 import ingest
 from shopify_client import ShopifyClient, ShopifyError
-from ppt_client import PPTClient
+from price_provider import PriceProvider, create_price_provider, PriceError
 import product_enrichment as enrichment
 from cache_manager import CacheManager
 try:
@@ -145,7 +145,7 @@ else:
     logger.warning("SHOPIFY_TOKEN / SHOPIFY_STORE not set — push-live disabled")
 cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_products=True)
 
-ppt = PPTClient(os.getenv("PPT_API_KEY", ""))
+ppt = create_price_provider(db=db)
 
 # Register shared breakdown blueprint (replaces breakdown-cache, PPT search, store-prices routes)
 from breakdown_routes import create_breakdown_blueprint
@@ -774,7 +774,7 @@ def _enrich_route_worker(job_id, session_id, items):
                 image_url = (card_data.get("imageCdnUrl800")
                              or card_data.get("imageCdnUrl")
                              or card_data.get("imageCdnUrl400"))
-                graded_prices = PPTClient.extract_graded_prices(card_data)
+                graded_prices = PriceProvider.extract_graded_prices(card_data)
                 raw_price = float(item.get("market_price") or 0)
                 condition = item.get("condition") or "NM"
                 economics = _calc_grading_economics(graded_prices, raw_price, condition)
@@ -2147,8 +2147,8 @@ def ppt_lookup_by_id(tcgplayer_id):
         # Try card first
         card = ppt.get_card_by_tcgplayer_id(tcgplayer_id)
         if card:
-            market_price = PPTClient.extract_market_price(card)
-            variants = PPTClient.extract_variants(card)
+            market_price = PriceProvider.extract_market_price(card)
+            variants = PriceProvider.extract_variants(card)
             return jsonify({
                 "found": True,
                 "type": "card",

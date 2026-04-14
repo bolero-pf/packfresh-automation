@@ -309,7 +309,7 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
     Only adjusts price if condition actually changed or price_override is set.
     Uses price_override > PPT condition pricing > fallback multipliers.
     """
-    from ppt_client import PPTClient, FALLBACK_MULTIPLIERS
+    from price_provider import PriceProvider, FALLBACK_MULTIPLIERS
 
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
@@ -342,7 +342,7 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
             try:
                 card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
                 if card_data:
-                    condition_market = PPTClient.extract_condition_price(
+                    condition_market = PriceProvider.extract_condition_price(
                         card_data, condition, variant=item.get("variant"))
             except Exception as e:
                 logger.warning(f"PPT condition lookup failed for TCG#{tcg_id}: {e}")
@@ -380,7 +380,7 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
     Update a graded slab's company/grade and recalculate its offer price.
     Uses price_override if provided, then PPT graded pricing, then keeps existing price.
     """
-    from ppt_client import PPTClient
+    from price_provider import PriceProvider
 
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
@@ -412,7 +412,7 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
         try:
             card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
             if card_data:
-                graded_price = PPTClient.get_graded_price(card_data, company, grade)
+                graded_price = PriceProvider.get_graded_price(card_data, company, grade)
                 if graded_price is not None:
                     new_market = graded_price
         except Exception as e:

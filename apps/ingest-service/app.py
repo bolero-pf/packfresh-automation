@@ -48,7 +48,8 @@ from flask_cors import CORS
 from functools import wraps
 
 import db
-from ppt_client import PPTClient, PPTError
+from price_provider import PriceProvider, PriceError, create_price_provider
+from ppt_client import PPTError  # keep for backward compat in except clauses
 from collectr_parser import parse_collectr_csv
 from collectr_html_parser import parse_collectr_html
 from generic_csv_parser import parse_generic_csv, detect_csv_columns
@@ -69,14 +70,13 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
-# Initialize PPT client (optional — gracefully degrades if no key)
-PPT_API_KEY = os.getenv("PPT_API_KEY")
-ppt: PPTClient | None = None
-if PPT_API_KEY:
-    ppt = PPTClient(PPT_API_KEY)
-    app.logger.info("PPT client initialized")
-else:
-    app.logger.warning("PPT_API_KEY not set — price lookups will be unavailable")
+# Initialize price provider (PPT, Scrydex, or both — controlled by PRICE_PROVIDER env var)
+try:
+    ppt = create_price_provider(db=db)
+    app.logger.info(f"Price provider initialized (mode={ppt.mode})")
+except Exception as e:
+    ppt = None
+    app.logger.warning(f"Price provider init failed — price lookups unavailable: {e}")
 
 # Initialize Shopify client (optional — for store inventory lookups)
 SHOPIFY_TOKEN = os.getenv("SHOPIFY_TOKEN")
@@ -865,7 +865,7 @@ def refresh_session_prices(session_id):
                     ppt_name = ppt_data.get("name")
                 elif is_graded and grade_co and grade_val:
                     # Use eBay smartMarketPrice for graded cards
-                    ppt_price = PPTClient.get_graded_price(ppt_data, grade_co, grade_val)
+                    ppt_price = PriceProvider.get_graded_price(ppt_data, grade_co, grade_val)
                     ppt_low = None  # no "low" concept for graded eBay data
                     ppt_name = ppt_data.get("name")
                 else:
@@ -1030,7 +1030,7 @@ def map_item():
                     ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
                 else:
                     ppt_data = ppt.get_card_by_tcgplayer_id(tcgplayer_id)
-                new_price = PPTClient.extract_market_price(ppt_data)
+                new_price = PriceProvider.extract_market_price(ppt_data)
             except PPTError as e:
                 app.logger.warning(f"PPT verification failed for {tcgplayer_id}: {e}")
 
@@ -1215,15 +1215,15 @@ def add_raw_card():
 
                 if is_graded and grade_company and grade_value:
                     # Use graded (PSA/BGS/CGC) eBay market price
-                    market_price = PPTClient.get_graded_price(card_data, grade_company, grade_value)
+                    market_price = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
                     if market_price is None:
                         app.logger.warning(
                             f"No graded price for {tcgplayer_id} {grade_company} {grade_value}, "
                             "falling back to NM raw price"
                         )
-                        market_price = PPTClient.extract_condition_price(card_data, "NM")
+                        market_price = PriceProvider.extract_condition_price(card_data, "NM")
                 else:
-                    market_price = PPTClient.extract_condition_price(
+                    market_price = PriceProvider.extract_condition_price(
                         card_data, data["condition"]
                     )
                 # Enrich with data from PPT if not provided
@@ -1508,7 +1508,7 @@ def update_condition(item_id):
             try:
                 card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
                 if card_data:
-                    variants = PPTClient.extract_variants(card_data)
+                    variants = PriceProvider.extract_variants(card_data)
                     # Use the item's variance to find the right printing, fall back to primary
                     item_variance = item.get("variance") or ""
                     primary = None
@@ -1518,7 +1518,7 @@ def update_condition(item_id):
                                 primary = vname
                                 break
                     if not primary:
-                        primary = PPTClient.get_primary_printing(card_data) or "Default"
+                        primary = PriceProvider.get_primary_printing(card_data) or "Default"
                     if primary not in variants and variants:
                         primary = list(variants.keys())[0]
                     variant_data = variants.get(primary, {})
@@ -1576,7 +1576,7 @@ def mark_item_graded(item_id):
         try:
             card_data = ppt.get_card_by_tcgplayer_id(int(item["tcgplayer_id"]))
             if card_data:
-                new_price = PPTClient.get_graded_price(card_data, grade_company, grade_value)
+                new_price = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
                 if new_price is None:
                     app.logger.warning(
                         f"No graded price for {item['tcgplayer_id']} {grade_company} {grade_value}"
@@ -1834,8 +1834,8 @@ def ppt_lookup_card():
             return jsonify({"error": "Card not found in PPT"}), 404
 
         # Extract structured variant → condition → price data
-        variants = PPTClient.extract_variants(card_data)
-        primary_printing = PPTClient.get_primary_printing(card_data)
+        variants = PriceProvider.extract_variants(card_data)
+        primary_printing = PriceProvider.get_primary_printing(card_data)
 
         # Debug logging
         prices_raw = card_data.get("prices", {})
@@ -1859,7 +1859,7 @@ def ppt_lookup_card():
         app.logger.info(f"  primary_printing={primary_printing}")
 
         # Extract graded (PSA/BGS/CGC) prices
-        graded_prices = PPTClient.extract_graded_prices(card_data)
+        graded_prices = PriceProvider.extract_graded_prices(card_data)
 
         return jsonify({
             "card": card_data,
