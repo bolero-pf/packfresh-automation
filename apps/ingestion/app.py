@@ -2118,6 +2118,26 @@ def ppt_search_sealed():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/store/search", methods=["POST"])
+def store_search():
+    """Search the Shopify product cache by title. Finds Japanese products, accessories, etc."""
+    data = request.get_json(silent=True) or {}
+    q = data.get("query", "").strip()
+    if not q:
+        return jsonify({"error": "No query"}), 400
+    try:
+        results = db.query("""
+            SELECT title, shopify_price, tcgplayer_id, shopify_variant_id, handle
+            FROM inventory_product_cache
+            WHERE title ILIKE %s AND is_damaged = FALSE
+            ORDER BY title ASC
+            LIMIT 15
+        """, (f"%{q}%",))
+        return jsonify({"results": [dict(r) for r in results]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ppt/lookup-by-id/<int:tcgplayer_id>")
 def ppt_lookup_by_id(tcgplayer_id):
     """Look up any product (card or sealed) by TCGPlayer ID. Tries card first, then sealed."""

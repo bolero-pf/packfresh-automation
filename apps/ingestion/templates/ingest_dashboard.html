@@ -2537,12 +2537,13 @@ async function addItemSearch() {
         const results = sd.results || [];
 
         if (!results.length) {
-            // No results — show fallback options
+            // No PPT results — offer store search next
             resultsDiv.innerHTML = `
-                <div class="alert alert-warning" style="margin-bottom:12px;">No results found for "${query}"</div>
+                <div class="alert alert-warning" style="margin-bottom:12px;">No PPT results for "${query}"</div>
                 <div style="display:flex; flex-direction:column; gap:8px;">
-                    <button class="btn btn-primary" onclick="_showTcgIdEntry()" style="width:100%;">Enter TCGPlayer ID directly</button>
-                    <button class="btn btn-secondary" onclick="_showManualEntryForm(null, 1)" style="width:100%;">Manual entry (no PPT)</button>
+                    <button class="btn btn-primary" onclick="_searchStore('${query.replace(/'/g,"\\'")}')" style="width:100%;">Search Store</button>
+                    <button class="btn btn-secondary" onclick="_showTcgIdEntry()" style="width:100%;">Enter TCGPlayer ID</button>
+                    <button class="btn btn-secondary" onclick="_showManualEntryForm(null, 1)" style="width:100%;">Manual entry</button>
                 </div>`;
             return;
         }
@@ -2558,6 +2559,53 @@ async function addItemSearch() {
                          onclick="addItemSelect(${tcgId}, '${name.replace(/'/g,"\\'")}', ${price}, '${setName.replace(/'/g,"\\'")}')">
                 <div style="font-weight:600;">${name}</div>
                 <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
+            </div>`;
+        }).join('');
+        html += '</div>';
+        html += `<div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border); display:flex; gap:8px;">
+            <button class="btn btn-secondary btn-sm" onclick="_showTcgIdEntry()" style="flex:1;">Enter TCG ID</button>
+            <button class="btn btn-secondary btn-sm" onclick="_showManualEntryForm(null, 1)" style="flex:1;">Manual entry</button>
+        </div>`;
+        resultsDiv.innerHTML = html;
+    } catch(err) {
+        resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+async function _searchStore(query) {
+    const resultsDiv = document.getElementById('add-item-search-results');
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching store...</div>';
+    try {
+        const r = await fetch('/api/store/search', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query }),
+        });
+        const d = await r.json();
+        if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
+        const results = d.results || [];
+
+        if (!results.length) {
+            resultsDiv.innerHTML = `
+                <div class="alert alert-warning" style="margin-bottom:12px;">Not found on store either.</div>
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    <button class="btn btn-primary" onclick="_showTcgIdEntry()" style="width:100%;">Enter TCGPlayer ID</button>
+                    <button class="btn btn-secondary" onclick="_showManualEntryForm(null, 1)" style="width:100%;">Manual entry</button>
+                </div>`;
+            return;
+        }
+
+        let html = '<div style="font-size:0.82rem; color:var(--text-dim); margin-bottom:8px;">Store results:</div>';
+        html += '<div style="max-height:350px; overflow-y:auto;">';
+        html += results.map(p => {
+            const name = p.title || '';
+            const price = p.shopify_price || 0;
+            const tcgId = p.tcgplayer_id || 0;
+            return `<div style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
+                         onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
+                         onclick="addItemSelect(${tcgId}, '${name.replace(/'/g,"\\'")}', ${price}, '')">
+                <div style="font-weight:600;">${name}</div>
+                <div style="font-size:0.8rem; color:var(--text-dim);">Store: $${Number(price).toFixed(2)}${tcgId ? ' · TCG#'+tcgId : ''}</div>
             </div>`;
         }).join('');
         html += '</div>';
