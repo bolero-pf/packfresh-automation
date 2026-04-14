@@ -172,8 +172,8 @@ def main():
                             # Likely duplicate tcgplayer_id (different variants)
                             logger.debug(f"Mapping conflict {scrydex_id}->{tcg_id}: {e}")
 
-                total_count = resp.get("totalCount", 0)
-                if page * 100 >= total_count:
+                # Paginate until short page (totalCount is unreliable/0)
+                if len(items) < 100:
                     break
                 page += 1
 

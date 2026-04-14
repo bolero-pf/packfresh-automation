@@ -682,8 +682,7 @@ class ScrydexClient:
             for item in items:
                 all_cards.append(self._normalize_card(item))
 
-            total = resp.get("totalCount", 0)
-            if page * page_size >= total:
+            if len(items) < page_size:
                 break
             page += 1
 
