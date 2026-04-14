@@ -2198,6 +2198,76 @@ def ppt_sealed_raw(tcgplayer_id):
     return jsonify({"keys": list(item.keys()), "data": item})
 
 
+@app.route("/api/price-compare/<int:tcgplayer_id>")
+def price_compare(tcgplayer_id):
+    """
+    Side-by-side comparison of PPT vs Scrydex for a card.
+    Hit this while routing to see both providers in action.
+    """
+    from ppt_client import PPTClient
+    from scrydex_client import ScrydexClient
+    import os, time
+
+    result = {"tcgplayer_id": tcgplayer_id, "ppt": None, "scrydex": None}
+
+    # PPT lookup
+    ppt_key = os.getenv("PPT_API_KEY", "")
+    if ppt_key:
+        try:
+            ppt_direct = PPTClient(ppt_key)
+            t0 = time.time()
+            card = ppt_direct.get_card_by_tcgplayer_id(tcgplayer_id)
+            ppt_ms = int((time.time() - t0) * 1000)
+            if card:
+                result["ppt"] = {
+                    "name": card.get("name"),
+                    "set": card.get("setName"),
+                    "market": float(PPTClient.extract_market_price(card) or 0),
+                    "variants": PPTClient.extract_variants(card),
+                    "graded": PPTClient.extract_graded_prices(card),
+                    "image": card.get("imageCdnUrl800") or card.get("imageCdnUrl"),
+                    "ms": ppt_ms,
+                }
+        except Exception as e:
+            result["ppt"] = {"error": str(e)}
+
+    # Scrydex lookup
+    sx_key = os.getenv("SCRYDEX_API_KEY", "")
+    sx_team = os.getenv("SCRYDEX_TEAM_ID", "")
+    if sx_key and sx_team:
+        try:
+            sx = ScrydexClient(sx_key, sx_team, db=db)
+            t0 = time.time()
+            card = sx.get_card_by_tcgplayer_id(tcgplayer_id, include_history=True)
+            sx_ms = int((time.time() - t0) * 1000)
+            if card:
+                result["scrydex"] = {
+                    "name": card.get("name"),
+                    "set": card.get("setName"),
+                    "scrydex_id": card.get("scrydexId"),
+                    "market": float(ScrydexClient.extract_market_price(card) or 0),
+                    "variants": ScrydexClient.extract_variants(card),
+                    "graded": ScrydexClient.extract_graded_prices(card),
+                    "image": card.get("imageCdnUrl800") or card.get("imageCdnUrl"),
+                    "ms": sx_ms,
+                }
+            else:
+                result["scrydex"] = {"error": "No mapping found", "ms": sx_ms}
+        except Exception as e:
+            result["scrydex"] = {"error": str(e)}
+
+    # Summary
+    if result["ppt"] and result["scrydex"] and "error" not in result["ppt"] and "error" not in result["scrydex"]:
+        ppt_m = result["ppt"]["market"]
+        sx_m = result["scrydex"]["market"]
+        if ppt_m > 0:
+            result["market_delta_pct"] = round(abs(ppt_m - sx_m) / ppt_m * 100, 1)
+        result["ppt_ms"] = result["ppt"]["ms"]
+        result["scrydex_ms"] = result["scrydex"]["ms"]
+
+    return jsonify(result)
+
+
 @app.route("/api/enrich/preview", methods=["POST"])
 def enrich_preview():
     """
