@@ -287,6 +287,12 @@
             transition: all 0.15s; min-height: 32px;
         }
         .verify-btn:hover { background: var(--surface-2); }
+        .verify-btn.action-trigger {
+            min-width: 40px; min-height: 40px; padding: 8px 12px;
+            font-size: 1.1rem; font-weight: 700; letter-spacing: 2px;
+            border: 1.5px solid var(--border); color: var(--text);
+        }
+        .verify-btn.action-trigger:hover { background: var(--surface-2); border-color: var(--text-dim); }
         .verify-btn.here { color: var(--green); border-color: var(--green); }
         .verify-btn.here:hover { background: rgba(45,212,160,0.1); }
         .verify-btn.missing { color: var(--red); border-color: var(--red); }
@@ -952,7 +958,7 @@ function _renderVerifyRow(item, sessionId) {
         verifyCell = `<div style="display:flex;gap:4px;align-items:center;">
             <span class="verify-btn verified-damaged" style="cursor:default;">⚠ Damaged</span>
             <div class="action-dropdown-container" style="position:relative;display:inline-block;">
-                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <button class="verify-btn action-trigger" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
                 <div class="action-dropdown">
                     <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
                 </div>
@@ -964,7 +970,7 @@ function _renderVerifyRow(item, sessionId) {
         verifyCell = `<div style="display:flex;gap:4px;align-items:center;">
             <span class="verify-btn verified" style="cursor:default;">✓ ${co} ${gr}</span>
             <div class="action-dropdown-container" style="position:relative;display:inline-block;">
-                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <button class="verify-btn action-trigger" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
                 <div class="action-dropdown">
                     <button onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${co}', '${gr}')">✏️ Change Grade</button>
                     <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
@@ -976,7 +982,7 @@ function _renderVerifyRow(item, sessionId) {
         verifyCell = `<div style="display:flex;gap:4px;align-items:center;">
             <span class="verify-btn verified" style="cursor:default;">✓ ${cond}</span>
             <div class="action-dropdown-container" style="position:relative;display:inline-block;">
-                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <button class="verify-btn action-trigger" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
                 <div class="action-dropdown">
                     <button onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Change Condition</button>
                     <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
@@ -987,7 +993,7 @@ function _renderVerifyRow(item, sessionId) {
         verifyCell = `<div style="display:flex;gap:4px;align-items:center;">
             <span class="verify-btn verified" style="cursor:default;">✓ Here</span>
             <div class="action-dropdown-container" style="position:relative;display:inline-block;">
-                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <button class="verify-btn action-trigger" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
                 <div class="action-dropdown">
                     <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
                 </div>
@@ -1017,7 +1023,7 @@ function _renderVerifyRow(item, sessionId) {
         verifyCell = `<div class="verify-btn-group" style="flex-direction:row;">
             ${confirmBtn}
             <div class="action-dropdown-container" style="position:relative;display:inline-block;">
-                <button class="verify-btn" style="padding:4px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                <button class="verify-btn action-trigger" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
                 <div class="action-dropdown">
                     ${extraActions}
                 </div>
@@ -2493,30 +2499,17 @@ let _addItemSessionId = null;
 function openAddItem(sessionId) {
     _addItemSessionId = sessionId;
     document.getElementById('add-item-body').innerHTML = `
-        <h3 style="margin-bottom:12px;">➕ Add Item</h3>
+        <h3 style="margin-bottom:12px;">Add Item</h3>
         <div style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px;">
             <div style="flex:1;">
                 <label style="font-size:0.85rem; color:var(--text-dim);">Search Products</label>
-                <input type="text" id="add-item-search" placeholder="e.g. Celebrations ETB"
+                <input type="text" id="add-item-search" placeholder="e.g. Celebrations ETB, Charizard ex"
                        style="width:100%; margin-top:4px;"
                        onkeydown="if(event.key==='Enter') addItemSearch()">
             </div>
             <button class="btn btn-primary btn-sm" onclick="addItemSearch()" style="height:40px;">Search</button>
         </div>
         <div id="add-item-search-results"></div>
-        <div style="margin-top:16px; padding-top:12px; border-top:1px solid var(--border);">
-            <h4 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Or enter TCGPlayer ID directly:</h4>
-            <div style="display:flex; gap:8px; align-items:flex-end;">
-                <div style="flex:1;">
-                    <input type="number" id="add-item-manual-tcgid" placeholder="TCGPlayer Product ID" style="width:100%;">
-                </div>
-                <div style="width:80px;">
-                    <label style="font-size:0.75rem; color:var(--text-dim);">Qty</label>
-                    <input type="number" id="add-item-manual-qty" value="1" min="1" style="width:100%; margin-top:2px;">
-                </div>
-                <button class="btn btn-success btn-sm" onclick="addItemManual()" style="height:40px;">Add</button>
-            </div>
-        </div>
     `;
     document.getElementById('add-item-modal').classList.add('active');
     setTimeout(() => document.getElementById('add-item-search').focus(), 100);
@@ -2542,23 +2535,59 @@ async function addItemSearch() {
         const sd = await sr.json();
         if (!sr.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${sd.error}</div>`; return; }
         const results = sd.results || [];
-        if (!results.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No results found</div>'; return; }
 
-        resultsDiv.innerHTML = '<div style="max-height:350px; overflow-y:auto;">' + results.slice(0, 10).map(p => {
+        if (!results.length) {
+            // No results — show fallback options
+            resultsDiv.innerHTML = `
+                <div class="alert alert-warning" style="margin-bottom:12px;">No results found for "${query}"</div>
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    <button class="btn btn-primary" onclick="_showTcgIdEntry()" style="width:100%;">Enter TCGPlayer ID directly</button>
+                    <button class="btn btn-secondary" onclick="_showManualEntryForm(null, 1)" style="width:100%;">Manual entry (no PPT)</button>
+                </div>`;
+            return;
+        }
+
+        let html = '<div style="max-height:350px; overflow-y:auto;">';
+        html += results.slice(0, 10).map(p => {
             const name = p.name || p.productName || '';
             const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || 0;
             const price = p.unopenedPrice || p.marketPrice || 0;
             const setName = p.setName || p.set_name || '';
-            return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
+            return `<div style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
                          onclick="addItemSelect(${tcgId}, '${name.replace(/'/g,"\\'")}', ${price}, '${setName.replace(/'/g,"\\'")}')">
                 <div style="font-weight:600;">${name}</div>
                 <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
             </div>`;
-        }).join('') + '</div>';
+        }).join('');
+        html += '</div>';
+        html += `<div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border); display:flex; gap:8px;">
+            <button class="btn btn-secondary btn-sm" onclick="_showTcgIdEntry()" style="flex:1;">Enter TCG ID</button>
+            <button class="btn btn-secondary btn-sm" onclick="_showManualEntryForm(null, 1)" style="flex:1;">Manual entry</button>
+        </div>`;
+        resultsDiv.innerHTML = html;
     } catch(err) {
         resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
+}
+
+function _showTcgIdEntry() {
+    const resultsDiv = document.getElementById('add-item-search-results');
+    resultsDiv.innerHTML = `
+        <div style="display:flex; gap:8px; align-items:flex-end;">
+            <div style="flex:1;">
+                <label style="font-size:0.78rem; color:var(--text-dim);">TCGPlayer Product ID</label>
+                <input type="number" id="add-item-manual-tcgid" placeholder="e.g. 12345" style="width:100%; margin-top:4px;"
+                       onkeydown="if(event.key==='Enter') addItemManual()">
+            </div>
+            <div style="width:80px;">
+                <label style="font-size:0.78rem; color:var(--text-dim);">Qty</label>
+                <input type="number" id="add-item-manual-qty" value="1" min="1" style="width:100%; margin-top:4px;">
+            </div>
+            <button class="btn btn-success btn-sm" onclick="addItemManual()" style="height:40px;">Look Up</button>
+        </div>
+    `;
+    setTimeout(() => document.getElementById('add-item-manual-tcgid').focus(), 50);
 }
 
 async function addItemSelect(tcgId, name, price, setName) {
