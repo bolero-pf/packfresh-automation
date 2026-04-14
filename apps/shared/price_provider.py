@@ -250,8 +250,10 @@ def create_price_provider(db=None) -> PriceProvider:
             logger.error("PRICE_PROVIDER=both but Scrydex credentials missing — falling back to PPT")
             primary = PPTClient(ppt_key)
             return PriceProvider(primary, mode="ppt")
-        primary = ScrydexClient(scrydex_key, scrydex_team, db=db)
-        shadow = PPTClient(ppt_key) if ppt_key else None
+        # PPT is primary (safe — known working), Scrydex is shadow (comparison logging)
+        # Flip to scrydex primary once field mapping is verified
+        primary = PPTClient(ppt_key)
+        shadow = ScrydexClient(scrydex_key, scrydex_team, db=db)
         return PriceProvider(primary, shadow=shadow, mode="both")
 
     else:  # "ppt" (default)
