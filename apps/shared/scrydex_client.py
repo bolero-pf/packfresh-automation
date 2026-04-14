@@ -755,8 +755,8 @@ class ScrydexClient:
             if not items:
                 break
             all_expansions.extend(items)
-            total = resp.get("totalCount", 0)
-            if page * 100 >= total:
+            # Expansions endpoint doesn't return totalCount — paginate until short page
+            if len(items) < 100:
                 break
             page += 1
         return all_expansions
