@@ -46,16 +46,18 @@ class PriceProvider:
     depending on PRICE_PROVIDER env var.
     """
 
-    def __init__(self, primary, shadow=None, mode="ppt"):
+    def __init__(self, primary, shadow=None, mode="ppt", cache=None):
         """
         Args:
             primary: PPTClient or ScrydexClient instance
             shadow: Optional secondary client for comparison logging
             mode: "ppt", "scrydex", or "both"
+            cache: Optional PriceCache instance — checked first for ID lookups
         """
         self.primary = primary
         self.shadow = shadow
         self.mode = mode
+        self.cache = cache
         self._client_class = type(primary)
 
     # ── shadow comparison ─────────────────────────────────────────
@@ -106,6 +108,16 @@ class PriceProvider:
     # ── PPT-compatible methods ────────────────────────────────────
 
     def get_card_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
+        # Cache-first: local DB read, zero API calls
+        if self.cache:
+            try:
+                cached = self.cache.get_card_by_tcgplayer_id(tcgplayer_id)
+                if cached:
+                    logger.debug(f"Cache hit: card tcg={tcgplayer_id}")
+                    return cached
+            except Exception as e:
+                logger.warning(f"Cache read failed for card {tcgplayer_id}: {e}")
+
         try:
             result = self.primary.get_card_by_tcgplayer_id(
                 tcgplayer_id, include_history=include_history
@@ -124,12 +136,29 @@ class PriceProvider:
         return result
 
     def search_cards(self, query, *, set_name=None, limit=5):
+        if self.cache:
+            try:
+                results = self.cache.search_cards(query, set_name=set_name, limit=limit)
+                if results:
+                    return results
+            except Exception as e:
+                logger.warning(f"Cache search failed: {e}")
         try:
             return self.primary.search_cards(query, set_name=set_name, limit=limit)
         except (PPTError, ScrydexError) as e:
             raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
 
     def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
+        # Cache-first
+        if self.cache:
+            try:
+                cached = self.cache.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+                if cached:
+                    logger.debug(f"Cache hit: sealed tcg={tcgplayer_id}")
+                    return cached
+            except Exception as e:
+                logger.warning(f"Cache read failed for sealed {tcgplayer_id}: {e}")
+
         try:
             result = self.primary.get_sealed_product_by_tcgplayer_id(
                 tcgplayer_id, include_history=include_history
@@ -148,6 +177,13 @@ class PriceProvider:
         return result
 
     def search_sealed_products(self, query, *, set_name=None, limit=5):
+        if self.cache:
+            try:
+                results = self.cache.search_sealed_products(query, set_name=set_name, limit=limit)
+                if results:
+                    return results
+            except Exception as e:
+                logger.warning(f"Cache sealed search failed: {e}")
         try:
             return self.primary.search_sealed_products(
                 query, set_name=set_name, limit=limit
@@ -238,24 +274,34 @@ def create_price_provider(db=None) -> PriceProvider:
     scrydex_key = os.getenv("SCRYDEX_API_KEY", "")
     scrydex_team = os.getenv("SCRYDEX_TEAM_ID", "")
 
+    # Initialize local price cache if PRICE_CACHE=true (or any mode with db)
+    cache = None
+    use_cache = os.getenv("PRICE_CACHE", "").lower().strip() in ("true", "1", "yes")
+    if use_cache and db:
+        try:
+            from price_cache import PriceCache
+            cache = PriceCache(db)
+            logger.info("Price cache enabled — ID lookups will read from local DB first")
+        except Exception as e:
+            logger.warning(f"Failed to init price cache: {e}")
+
     if mode == "scrydex":
         if not scrydex_key or not scrydex_team:
             logger.error("PRICE_PROVIDER=scrydex but SCRYDEX_API_KEY/SCRYDEX_TEAM_ID not set")
             raise RuntimeError("Scrydex credentials not configured")
         primary = ScrydexClient(scrydex_key, scrydex_team, db=db)
-        return PriceProvider(primary, mode="scrydex")
+        return PriceProvider(primary, mode="scrydex", cache=cache)
 
     elif mode == "both":
         if not scrydex_key or not scrydex_team:
             logger.error("PRICE_PROVIDER=both but Scrydex credentials missing — falling back to PPT")
             primary = PPTClient(ppt_key)
-            return PriceProvider(primary, mode="ppt")
+            return PriceProvider(primary, mode="ppt", cache=cache)
         # PPT is primary (safe — known working), Scrydex is shadow (comparison logging)
-        # Flip to scrydex primary once field mapping is verified
         primary = PPTClient(ppt_key)
         shadow = ScrydexClient(scrydex_key, scrydex_team, db=db)
-        return PriceProvider(primary, shadow=shadow, mode="both")
+        return PriceProvider(primary, shadow=shadow, mode="both", cache=cache)
 
     else:  # "ppt" (default)
         primary = PPTClient(ppt_key)
-        return PriceProvider(primary, mode="ppt")
+        return PriceProvider(primary, mode="ppt", cache=cache)
