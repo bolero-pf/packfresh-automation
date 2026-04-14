@@ -1195,6 +1195,10 @@ def add_item_to_session(session_id: str, data: dict) -> dict:
     quantity = int(data.get("quantity", 1))
     set_name = data.get("set_name")
     product_type = data.get("product_type", "sealed")
+    condition = data.get("condition")
+    card_number = data.get("card_number")
+    rarity = data.get("rarity")
+    variant = data.get("variant")
 
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     offer_price = (market_price * offer_pct * quantity).quantize(Decimal("0.01"))
@@ -1204,13 +1208,14 @@ def add_item_to_session(session_id: str, data: dict) -> dict:
         INSERT INTO intake_items (
             id, session_id, product_name, set_name, tcgplayer_id,
             quantity, market_price, offer_price, product_type,
-            is_mapped, item_status
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            is_mapped, item_status, condition, card_number, rarity, variant
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         item_id, session_id, product_name, set_name,
         int(tcgplayer_id) if tcgplayer_id else None,
         quantity, market_price, offer_price, product_type,
         tcgplayer_id is not None, "good",
+        condition, card_number, rarity, variant,
     ))
 
     if tcgplayer_id and product_name:

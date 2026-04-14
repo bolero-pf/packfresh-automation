@@ -2118,6 +2118,48 @@ def ppt_search_sealed():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/ppt/lookup-by-id/<int:tcgplayer_id>")
+def ppt_lookup_by_id(tcgplayer_id):
+    """Look up any product (card or sealed) by TCGPlayer ID. Tries card first, then sealed."""
+    if not ppt:
+        return jsonify({"error": "PPT API not configured"}), 503
+    try:
+        # Try card first
+        card = ppt.get_card_by_tcgplayer_id(tcgplayer_id)
+        if card:
+            market_price = PPTClient.extract_market_price(card)
+            variants = PPTClient.extract_variants(card)
+            return jsonify({
+                "found": True,
+                "type": "card",
+                "name": card.get("name", ""),
+                "set_name": card.get("setName", ""),
+                "card_number": card.get("cardNumber", ""),
+                "rarity": card.get("rarity", ""),
+                "tcgplayer_id": tcgplayer_id,
+                "market_price": float(market_price) if market_price else 0,
+                "variants": variants,
+                "image_url": card.get("imageCdnUrl800") or card.get("imageCdnUrl") or card.get("imageCdnUrl400"),
+            })
+
+        # Try sealed
+        sealed = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+        if sealed:
+            price = sealed.get("unopenedPrice") or sealed.get("marketPrice") or 0
+            return jsonify({
+                "found": True,
+                "type": "sealed",
+                "name": sealed.get("name") or sealed.get("productName", ""),
+                "set_name": sealed.get("setName") or sealed.get("set_name", ""),
+                "tcgplayer_id": tcgplayer_id,
+                "market_price": float(price),
+            })
+
+        return jsonify({"found": False, "tcgplayer_id": tcgplayer_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ppt/sealed/<int:tcgplayer_id>")
 def ppt_sealed_lookup(tcgplayer_id):
     """Fetch a sealed product from PPT by TCGPlayer ID — used by the preview page."""

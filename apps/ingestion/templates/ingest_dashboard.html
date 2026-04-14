@@ -1001,13 +1001,16 @@ function _renderVerifyRow(item, sessionId) {
         if (item.is_graded) {
             extraActions = `
                 <button onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${item.grade_company||'PSA'}', '${item.grade_value||''}')">✏️ Change Grade</button>
+                <button onclick="editVerifyQty('${item.id}', '${sessionId}', ${item.quantity||1})">📦 Edit Qty</button>
                 <button onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>`;
         } else if (ptype === 'raw') {
             extraActions = `
                 <button onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Change Condition</button>
+                <button onclick="editVerifyQty('${item.id}', '${sessionId}', ${item.quantity||1})">📦 Edit Qty</button>
                 <button onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>`;
         } else {
             extraActions = `
+                <button onclick="editVerifyQty('${item.id}', '${sessionId}', ${item.quantity||1})">📦 Edit Qty</button>
                 <button onclick="verifyItem('${item.id}', '${sessionId}', 'damaged', ${item.quantity||1})">⚠️ Damaged</button>
                 <button onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>`;
         }
@@ -1047,6 +1050,25 @@ function _updateLocalItem(itemId, updates) {
     if (!_currentSessionData) return;
     const item = _currentSessionData.items.find(i => i.id === itemId);
     if (item) Object.assign(item, updates);
+}
+
+async function editVerifyQty(itemId, sessionId, currentQty) {
+    const input = await themedPrompt('Edit Quantity', `Current quantity: ${currentQty}. Enter new quantity:`, String(currentQty));
+    if (input === null) return;
+    const newQty = parseInt(input);
+    if (isNaN(newQty) || newQty < 1) { alert('Quantity must be at least 1'); return; }
+    if (newQty === currentQty) return;
+
+    try {
+        const r = await fetch(`/api/ingest/item/${itemId}/update-qty`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ quantity: newQty }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Failed to update quantity'); return; }
+        viewSession(sessionId, true);
+    } catch(e) { alert(e.message); }
 }
 
 async function verifyItem(itemId, sessionId, status, totalQty) {
@@ -2570,33 +2592,118 @@ async function addItemManual() {
     const qty = parseInt(document.getElementById('add-item-manual-qty').value) || 1;
     if (!tcgId) { alert('Enter a TCGPlayer ID'); return; }
 
+    const resultsDiv = document.getElementById('add-item-search-results');
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up TCG#' + tcgId + '...</div>';
+
     try {
-        // Look up the product first via PPT
-        const sr = await fetch('/api/ppt/search-sealed', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ query: tcgId }),
-        });
-        const sd = await sr.json();
-        const match = (sd.results || []).find(p => {
-            const pid = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || p.id;
-            return String(pid) === String(tcgId);
-        });
+        const lr = await fetch(`/api/ppt/lookup-by-id/${tcgId}`);
+        const ld = await lr.json();
 
-        const name = match ? (match.name || match.productName || 'Unknown') : 'Unknown';
-        const price = match ? (match.unopenedPrice || match.marketPrice || 0) : 0;
-        const setName = match ? (match.setName || match.set_name || '') : '';
+        if (ld.found) {
+            // Found — submit directly
+            const body = {
+                product_name: ld.name,
+                tcgplayer_id: parseInt(tcgId),
+                market_price: ld.market_price || 0,
+                set_name: ld.set_name || null,
+                quantity: qty,
+                product_type: ld.type === 'card' ? 'raw' : 'sealed',
+            };
+            if (ld.type === 'card') {
+                body.condition = 'NM';
+                body.card_number = ld.card_number || null;
+                body.rarity = ld.rarity || null;
+            }
+            const r = await fetch(`/api/ingest/session/${_addItemSessionId}/add-item`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error); return; }
+            const sid = _addItemSessionId;
+            closeAddItem();
+            viewSession(sid, true);
+        } else {
+            // Not found — show manual entry form
+            _showManualEntryForm(tcgId, qty);
+        }
+    } catch(err) {
+        // PPT error — show manual entry form
+        _showManualEntryForm(tcgId, qty);
+    }
+}
 
+function _showManualEntryForm(tcgId, qty) {
+    const resultsDiv = document.getElementById('add-item-search-results');
+    resultsDiv.innerHTML = `
+        <div class="alert alert-warning" style="margin-bottom:12px;">
+            TCG#${tcgId} not found in PPT. Enter details manually:
+        </div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+            <div>
+                <label style="font-size:0.78rem; color:var(--text-dim);">Product Name *</label>
+                <input type="text" id="manual-name" placeholder="e.g. Charizard ex" style="width:100%;">
+            </div>
+            <div style="display:flex; gap:8px;">
+                <div style="flex:1;">
+                    <label style="font-size:0.78rem; color:var(--text-dim);">Set Name</label>
+                    <input type="text" id="manual-set" placeholder="e.g. Obsidian Flames" style="width:100%;">
+                </div>
+                <div style="width:100px;">
+                    <label style="font-size:0.78rem; color:var(--text-dim);">Market Price *</label>
+                    <input type="number" id="manual-price" step="0.01" min="0" placeholder="0.00" style="width:100%;">
+                </div>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <div style="flex:1;">
+                    <label style="font-size:0.78rem; color:var(--text-dim);">Type</label>
+                    <select id="manual-type" style="width:100%;" onchange="document.getElementById('manual-condition-row').style.display = this.value==='raw' ? 'flex' : 'none';">
+                        <option value="sealed">Sealed</option>
+                        <option value="raw">Raw Card</option>
+                    </select>
+                </div>
+                <div id="manual-condition-row" style="flex:1; display:none;">
+                    <label style="font-size:0.78rem; color:var(--text-dim);">Condition</label>
+                    <select id="manual-condition" style="width:100%;">
+                        <option value="NM">NM</option>
+                        <option value="LP">LP</option>
+                        <option value="MP">MP</option>
+                        <option value="HP">HP</option>
+                        <option value="DMG">DMG</option>
+                    </select>
+                </div>
+            </div>
+            <button class="btn btn-success" onclick="_submitManualEntry('${tcgId}', ${qty})" style="margin-top:4px;">Add Item</button>
+        </div>
+    `;
+    setTimeout(() => document.getElementById('manual-name').focus(), 50);
+}
+
+async function _submitManualEntry(tcgId, qty) {
+    const name = document.getElementById('manual-name').value.trim();
+    const price = parseFloat(document.getElementById('manual-price').value);
+    if (!name) { alert('Product name is required'); return; }
+    if (isNaN(price) || price < 0) { alert('Enter a valid price'); return; }
+
+    const productType = document.getElementById('manual-type').value;
+    const body = {
+        product_name: name,
+        tcgplayer_id: parseInt(tcgId) || null,
+        market_price: price,
+        set_name: document.getElementById('manual-set').value.trim() || null,
+        quantity: qty,
+        product_type: productType,
+    };
+    if (productType === 'raw') {
+        body.condition = document.getElementById('manual-condition').value;
+    }
+
+    try {
         const r = await fetch(`/api/ingest/session/${_addItemSessionId}/add-item`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                product_name: name,
-                tcgplayer_id: parseInt(tcgId),
-                market_price: price,
-                set_name: setName || null,
-                quantity: qty,
-            }),
+            body: JSON.stringify(body),
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
