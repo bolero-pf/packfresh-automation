@@ -213,7 +213,7 @@ def _upsert_price(db, *, scrydex_id, tcgplayer_id, expansion_id, expansion_name,
             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
         )
         ON CONFLICT (scrydex_id, variant, condition, price_type,
-                     COALESCE(grade_company, ''), COALESCE(grade_value, ''))
+                     grade_company_key, grade_value_key)
         DO UPDATE SET
             tcgplayer_id   = COALESCE(EXCLUDED.tcgplayer_id, scrydex_price_cache.tcgplayer_id),
             expansion_name = EXCLUDED.expansion_name,

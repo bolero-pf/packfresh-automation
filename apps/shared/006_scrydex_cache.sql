@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS scrydex_price_cache (
     image_medium        TEXT,
     image_large         TEXT,
     fetched_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(scrydex_id, variant, condition, price_type, COALESCE(grade_company, ''), COALESCE(grade_value, ''))
+    grade_company_key  TEXT GENERATED ALWAYS AS (COALESCE(grade_company, '')) STORED,
+    grade_value_key    TEXT GENERATED ALWAYS AS (COALESCE(grade_value, '')) STORED,
+    UNIQUE(scrydex_id, variant, condition, price_type, grade_company_key, grade_value_key)
 );
 
 -- Fast lookups by TCGPlayer ID (the primary access pattern during migration)
