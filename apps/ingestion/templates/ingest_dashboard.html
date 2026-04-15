@@ -1845,9 +1845,32 @@ function _renderSessionCard() {
         html += `<div style="width:260px; height:360px; background:var(--surface-2); border-radius:8px; flex-shrink:0; display:flex; align-items:center; justify-content:center; color:var(--text-dim); font-size:0.85rem;">No image</div>`;
     }
 
+    // Figure out copy indicator — "Copy 3 of 19" for singles, "(1-5)" for splits
+    let copyLabel = '';
+    if ((item.quantity || 1) === 1) {
+        // Count how many items share this name (siblings from a split)
+        const siblings = _rsItems.filter(i => i.product_name === item.product_name && i.set_name === item.set_name && (i.quantity || 1) === 1);
+        if (siblings.length > 1) {
+            const copyNum = siblings.indexOf(item) + 1;
+            copyLabel = `<span style="font-size:0.78rem; color:var(--accent2,#c084fc); font-weight:600; margin-left:6px;">Copy ${copyNum} of ${siblings.length}</span>`;
+        }
+    } else {
+        // Multi-qty item — show range of which copies this represents
+        const allSame = _rsItems.filter(i => i.product_name === item.product_name && i.set_name === item.set_name);
+        const totalCopies = allSame.reduce((s, i) => s + (i.quantity || 1), 0);
+        if (totalCopies > (item.quantity || 1)) {
+            let before = 0;
+            for (const i of allSame) {
+                if (i === item) break;
+                before += (i.quantity || 1);
+            }
+            copyLabel = `<span style="font-size:0.78rem; color:var(--accent2,#c084fc); font-weight:600; margin-left:6px;">(${before + 1}–${before + item.quantity} of ${totalCopies})</span>`;
+        }
+    }
+
     // Info panel
     html += `<div style="flex:1; min-width:280px; max-width:500px;">
-        <div style="font-size:1.3rem; font-weight:700; margin-bottom:4px; line-height:1.3;">${item.product_name || 'Unknown'}</div>
+        <div style="font-size:1.3rem; font-weight:700; margin-bottom:4px; line-height:1.3;">${item.product_name || 'Unknown'}${copyLabel}</div>
         <div style="font-size:0.9rem; color:var(--text-dim); margin-bottom:12px;">
             ${item.set_name||''} ${item.card_number ? '#'+item.card_number : ''} ${item.variant ? '· '+item.variant : ''}
         </div>
