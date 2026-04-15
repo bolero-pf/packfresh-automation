@@ -162,23 +162,33 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
             break
         page += 1
 
-    # ── Sealed ─────────────────────────────────────────────
+    # ── Sealed (paginated) ───────────────────────────────────
     try:
-        resp = client._get(
-            f"{client.base_url}/{game}/v1/expansions/{expansion_id}/sealed",
-            {"page_size": 100, "include": "prices"}
-        )
-        stats["credits"] += 1
-        for item in (resp.get("data") or []):
-            stats["sealed"] += 1
-            if not expansion_name:
-                expansion_name = (item.get("expansion") or {}).get("name", "")
+        sealed_page = 1
+        while True:
+            resp = client._get(
+                f"{client.base_url}/{game}/v1/expansions/{expansion_id}/sealed",
+                {"page": sealed_page, "page_size": 100, "include": "prices"}
+            )
+            stats["credits"] += 1
+            sealed_items = resp.get("data") or []
+            if not sealed_items:
+                break
 
-            rows = _collect_price_rows(item, game=game, expansion_id=expansion_id,
-                                       expansion_name=expansion_name or "",
-                                       product_type="sealed", tcg_id=None)
-            price_batch.extend(rows)
-            stats["prices"] += len(rows)
+            for item in sealed_items:
+                stats["sealed"] += 1
+                if not expansion_name:
+                    expansion_name = (item.get("expansion") or {}).get("name", "")
+
+                rows = _collect_price_rows(item, game=game, expansion_id=expansion_id,
+                                           expansion_name=expansion_name or "",
+                                           product_type="sealed", tcg_id=None)
+                price_batch.extend(rows)
+                stats["prices"] += len(rows)
+
+            if len(sealed_items) < 100:
+                break
+            sealed_page += 1
     except Exception as e:
         # Some games don't have sealed endpoints — skip gracefully
         logger.debug(f"Sealed endpoint not available for {game}/{expansion_id}: {e}")
@@ -211,6 +221,8 @@ def main():
     parser.add_argument("--all", action="store_true", help="Sync ALL expansions for the game")
     parser.add_argument("--game", default="pokemon",
                         help="Game to sync: pokemon, magicthegathering, lorcana, onepiece, riftbound")
+    parser.add_argument("--language", default=None,
+                        help="Language code filter for expansions (e.g., EN, JA). Omit for all languages.")
     parser.add_argument("--dry-run", action="store_true", help="Show plan only")
     args = parser.parse_args()
 
@@ -231,8 +243,9 @@ def main():
     if args.sets:
         expansion_ids = [s.strip() for s in args.sets.split(",")]
     elif args.all:
-        expansions = client.get_expansions()
+        expansions = client.get_expansions(language_code=args.language)
         expansion_ids = [e["id"] for e in expansions]
+        logger.info(f"Found {len(expansion_ids)} expansions" + (f" (language={args.language})" if args.language else " (all languages)"))
     else:
         # Sync previously-pulled expansions (from scrydex_sync_log)
         rows = db.query("SELECT expansion_id FROM scrydex_sync_log WHERE game = %s AND active = TRUE", (game,))

@@ -750,22 +750,19 @@ class ScrydexClient:
         )
         return resp.get("data", []) if isinstance(resp, dict) else []
 
-    def get_expansions(self, *, language_code: str = "EN") -> list[dict]:
-        """List all available expansions."""
+    def get_expansions(self, *, language_code: str = None) -> list[dict]:
+        """List all available expansions. Pass language_code to filter (e.g., 'EN', 'JA')."""
         all_expansions = []
         page = 1
         while True:
-            params = {
-                "page": page,
-                "page_size": 100,
-                "q": f"language_code:{language_code}",
-            }
+            params = {"page": page, "page_size": 100}
+            if language_code:
+                params["q"] = f"language_code:{language_code}"
             resp = self._get(f"{self.base_url}/{self.game}/v1/expansions", params)
             items = resp.get("data", []) if isinstance(resp, dict) else []
             if not items:
                 break
             all_expansions.extend(items)
-            # Expansions endpoint doesn't return totalCount — paginate until short page
             if len(items) < 100:
                 break
             page += 1
