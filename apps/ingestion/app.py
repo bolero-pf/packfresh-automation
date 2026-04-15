@@ -2406,6 +2406,158 @@ def price_compare_enrich():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/price-compare/unmatched", methods=["POST"])
+def price_compare_unmatched():
+    """
+    Get store items that have no Scrydex cache match.
+    Body: { "filter": "sealed"|"card"|"all", "limit": 50, "offset": 0, "search": "" }
+    """
+    data = request.get_json(silent=True) or {}
+    product_filter = data.get("filter", "sealed")
+    limit = min(int(data.get("limit", 50)), 200)
+    offset = int(data.get("offset", 0))
+    search = data.get("search", "").strip()
+
+    where = ["ipc.tcgplayer_id IS NOT NULL", "ipc.is_damaged = FALSE",
+             "spc.tcgplayer_id IS NULL", "ipc.tags NOT ILIKE '%slab%'"]
+    params = []
+
+    if product_filter == "sealed":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%sealed%", "%booster%", "%etb%"])
+
+    if search:
+        where.append("ipc.title ILIKE %s")
+        params.append(f"%{search}%")
+
+    sql = f"""
+        SELECT ipc.title, ipc.tcgplayer_id, ipc.shopify_price, ipc.shopify_qty, ipc.tags
+        FROM inventory_product_cache ipc
+        LEFT JOIN scrydex_price_cache spc ON spc.tcgplayer_id = ipc.tcgplayer_id
+        WHERE {' AND '.join(where)}
+        ORDER BY ipc.title
+        LIMIT %s OFFSET %s
+    """
+    params.extend([limit, offset])
+    items = db.query(sql, tuple(params))
+
+    count_sql = f"""
+        SELECT COUNT(*) as cnt FROM inventory_product_cache ipc
+        LEFT JOIN scrydex_price_cache spc ON spc.tcgplayer_id = ipc.tcgplayer_id
+        WHERE {' AND '.join(where)}
+    """
+    total = db.query_one(count_sql, tuple(params[:-2]))["cnt"]
+
+    return jsonify({
+        "items": [{"title": i["title"], "tcgplayer_id": i["tcgplayer_id"],
+                    "store_price": float(i["shopify_price"]) if i["shopify_price"] else None,
+                    "qty": i["shopify_qty"]} for i in items],
+        "total": total, "limit": limit, "offset": offset,
+    })
+
+
+@app.route("/api/price-compare/scrydex-search", methods=["POST"])
+def scrydex_search_for_link():
+    """
+    Search Scrydex cache for a product to link to.
+    Body: { "query": "surging sparks booster box", "type": "sealed"|"card"|"all" }
+    """
+    data = request.get_json(silent=True) or {}
+    query = data.get("query", "").strip()
+    product_type = data.get("type", "all")
+    if not query:
+        return jsonify({"results": []})
+
+    where = ["product_name ILIKE %s"]
+    params = [f"%{query}%"]
+
+    if product_type != "all":
+        where.append("product_type = %s")
+        params.append(product_type)
+
+    # Get distinct products with their best price
+    results = db.query(f"""
+        SELECT DISTINCT ON (scrydex_id)
+            scrydex_id, product_name, expansion_name, product_type,
+            market_price, low_price, image_medium, tcgplayer_id
+        FROM scrydex_price_cache
+        WHERE {' AND '.join(where)}
+        AND condition IN ('NM', 'U') AND price_type = 'raw'
+        ORDER BY scrydex_id, variant
+        LIMIT 20
+    """, tuple(params))
+
+    return jsonify({
+        "results": [{
+            "scrydex_id": r["scrydex_id"],
+            "name": r["product_name"],
+            "set": r["expansion_name"],
+            "type": r["product_type"],
+            "market": float(r["market_price"]) if r["market_price"] else None,
+            "low": float(r["low_price"]) if r["low_price"] else None,
+            "image": r["image_medium"],
+            "already_linked": r["tcgplayer_id"] is not None,
+        } for r in results]
+    })
+
+
+@app.route("/api/price-compare/link", methods=["POST"])
+def scrydex_link():
+    """
+    Manually link a store item (tcgplayer_id) to a Scrydex product.
+    Body: { "tcgplayer_id": 12345, "scrydex_id": "sv8-s2" }
+    """
+    data = request.get_json(silent=True) or {}
+    tcg_id = data.get("tcgplayer_id")
+    scrydex_id = data.get("scrydex_id")
+    if not tcg_id or not scrydex_id:
+        return jsonify({"error": "Need tcgplayer_id and scrydex_id"}), 400
+
+    tcg_id = int(tcg_id)
+
+    # Update cache rows
+    updated = db.execute(
+        "UPDATE scrydex_price_cache SET tcgplayer_id = %s WHERE scrydex_id = %s AND tcgplayer_id IS NULL",
+        (tcg_id, scrydex_id)
+    )
+
+    # Add to mapping table
+    try:
+        db.execute("""
+            INSERT INTO scrydex_tcg_map (scrydex_id, tcgplayer_id, product_type, updated_at)
+            VALUES (%s, %s, 'sealed', NOW())
+            ON CONFLICT (scrydex_id) DO UPDATE SET tcgplayer_id = EXCLUDED.tcgplayer_id, updated_at = NOW()
+        """, (scrydex_id, tcg_id))
+    except Exception:
+        pass
+
+    # Also try the reverse unique index on tcgplayer_id
+    try:
+        db.execute("""
+            INSERT INTO scrydex_tcg_map (scrydex_id, tcgplayer_id, product_type, updated_at)
+            VALUES (%s, %s, 'sealed', NOW())
+            ON CONFLICT ON CONSTRAINT idx_scrydex_tcg_map_tcg
+            DO UPDATE SET scrydex_id = EXCLUDED.scrydex_id, updated_at = NOW()
+        """, (scrydex_id, tcg_id))
+    except Exception:
+        pass
+
+    # Get the linked price to confirm
+    row = db.query_one("""
+        SELECT product_name, market_price FROM scrydex_price_cache
+        WHERE scrydex_id = %s AND condition IN ('NM', 'U') AND price_type = 'raw'
+        LIMIT 1
+    """, (scrydex_id,))
+
+    return jsonify({
+        "ok": True,
+        "scrydex_id": scrydex_id,
+        "tcgplayer_id": tcg_id,
+        "name": row["product_name"] if row else None,
+        "market": float(row["market_price"]) if row and row["market_price"] else None,
+    })
+
+
 @app.route("/api/enrich/preview", methods=["POST"])
 def enrich_preview():
     """

@@ -36,11 +36,31 @@
   .source-tag { font-size: 0.65rem; color: var(--dim); display: block; }
   .qty { color: var(--dim); }
   .qty.zero { color: var(--red); }
+  .tab-btn { background: var(--card); color: var(--dim); border: 1px solid var(--border); border-radius: 6px 6px 0 0; padding: 8px 16px; cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+  .tab-btn.active { background: var(--bg); color: var(--text); border-bottom-color: var(--bg); }
+  .link-row { display: flex; align-items: center; gap: 10px; padding: 8px; border-bottom: 1px solid var(--border); cursor: pointer; border-radius: 6px; }
+  .link-row:hover { background: rgba(59,130,246,0.1); }
+  .link-row img { width: 48px; height: 48px; object-fit: contain; border-radius: 4px; background: var(--bg); }
+  .link-row .info { flex: 1; }
+  .link-row .info .name { font-weight: 600; font-size: 0.85rem; }
+  .link-row .info .meta { color: var(--dim); font-size: 0.75rem; }
+  .link-row .price { font-family: 'SF Mono', monospace; font-weight: 600; }
+  .linked-tag { background: rgba(34,197,94,0.15); color: var(--green); padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+  .link-btn { background: none; border: 1px solid var(--blue); color: var(--blue); padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 0.78rem; }
+  .link-btn:hover { background: var(--blue); color: white; }
+  .already-linked { color: var(--dim); font-size: 0.75rem; font-style: italic; }
 </style>
 </head>
 <body>
 
 <h1>Price Comparison Dashboard</h1>
+
+<div style="display:flex;gap:4px;margin-bottom:16px;">
+  <button class="tab-btn active" onclick="switchTab('compare')">Compare Prices</button>
+  <button class="tab-btn" onclick="switchTab('unmatched')">Unmatched Items</button>
+</div>
+
+<div id="tab-compare">
 <p class="subtitle">Store Price vs PPT (live) vs Cache (Scrydex nightly) — click "Fetch PPT" to load live prices per row</p>
 
 <div class="controls">
@@ -76,6 +96,55 @@
   <span id="pageInfo" style="color:var(--dim);font-size:0.85rem;"></span>
   <button class="secondary" id="nextBtn" onclick="nextPage()">Next &rarr;</button>
 </div>
+</div><!-- end tab-compare -->
+
+<div id="tab-unmatched" style="display:none;">
+<p class="subtitle">Store items with no Scrydex cache match — search Scrydex and click to link</p>
+
+<div class="controls">
+  <select id="um-filter">
+    <option value="sealed" selected>Sealed Only</option>
+    <option value="all">All Products</option>
+  </select>
+  <input type="text" id="um-search" placeholder="Filter store items..." style="width:250px;">
+  <button onclick="loadUnmatched()">Filter</button>
+  <span class="stats" id="um-stats"></span>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:35%">Store Item</th>
+      <th>Store $</th>
+      <th>Qty</th>
+      <th style="width:45%">Scrydex Link</th>
+      <th>TCG ID</th>
+    </tr>
+  </thead>
+  <tbody id="um-tbody"></tbody>
+</table>
+
+<div class="pager">
+  <button class="secondary" id="um-prevBtn" onclick="umPrevPage()" disabled>&larr; Prev</button>
+  <span id="um-pageInfo" style="color:var(--dim);font-size:0.85rem;"></span>
+  <button class="secondary" id="um-nextBtn" onclick="umNextPage()">Next &rarr;</button>
+</div>
+
+<!-- Link modal -->
+<div id="link-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;display:none;align-items:center;justify-content:center;">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;width:600px;max-height:80vh;overflow-y:auto;">
+    <div style="display:flex;justify-content:space-between;margin-bottom:12px;">
+      <h3 id="link-modal-title" style="font-size:1rem;"></h3>
+      <button onclick="closeLinkModal()" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:1.2rem;">&times;</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <input type="text" id="link-search-input" placeholder="Search Scrydex..." style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
+      <button onclick="doLinkSearch()" style="background:var(--blue);color:white;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;">Search</button>
+    </div>
+    <div id="link-results"></div>
+  </div>
+</div>
+</div><!-- end tab-unmatched -->
 
 <script>
 const PAGE_SIZE = 50;
@@ -194,6 +263,143 @@ document.getElementById('filter').addEventListener('change', () => { currentOffs
 
 // Initial load
 loadData();
+
+// ── Tab switching ──────────────────────────────────
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-compare').style.display = tab === 'compare' ? '' : 'none';
+  document.getElementById('tab-unmatched').style.display = tab === 'unmatched' ? '' : 'none';
+  if (tab === 'unmatched' && !umRows.length) loadUnmatched();
+}
+
+// ── Unmatched tab ──────────────────────────────────
+let umRows = [];
+let umOffset = 0;
+let umTotal = 0;
+const UM_PAGE = 50;
+
+async function loadUnmatched() {
+  const filter = document.getElementById('um-filter').value;
+  const search = document.getElementById('um-search').value;
+  const tbody = document.getElementById('um-tbody');
+  tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading...</td></tr>';
+
+  const resp = await fetch('/api/price-compare/unmatched', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ filter, search, limit: UM_PAGE, offset: umOffset })
+  });
+  const data = await resp.json();
+  umRows = data.items;
+  umTotal = data.total;
+  renderUnmatched();
+  document.getElementById('um-stats').textContent = `${umTotal} unmatched`;
+  document.getElementById('um-pageInfo').textContent = `${umOffset + 1}–${Math.min(umOffset + UM_PAGE, umTotal)} of ${umTotal}`;
+  document.getElementById('um-prevBtn').disabled = umOffset === 0;
+  document.getElementById('um-nextBtn').disabled = umOffset + UM_PAGE >= umTotal;
+}
+
+function renderUnmatched() {
+  const tbody = document.getElementById('um-tbody');
+  if (!umRows.length) { tbody.innerHTML = '<tr><td colspan="5" class="loading">No unmatched items</td></tr>'; return; }
+  tbody.innerHTML = umRows.map((r, i) => {
+    const linked = r._linked;
+    const linkCell = linked
+      ? `<span class="linked-tag">Linked: ${linked.name} ($${linked.market?.toFixed(2) || '?'})</span>`
+      : `<button class="link-btn" onclick="openLinkModal(${i})">Search & Link</button>`;
+    return `<tr>
+      <td>${r.title}</td>
+      <td class="price">${r.store_price != null ? '$' + r.store_price.toFixed(2) : '—'}</td>
+      <td class="qty ${(r.qty||0) === 0 ? 'zero' : ''}">${r.qty || 0}</td>
+      <td>${linkCell}</td>
+      <td style="color:var(--dim);font-size:0.78rem;">${r.tcgplayer_id}</td>
+    </tr>`;
+  }).join('');
+}
+
+function umPrevPage() { umOffset = Math.max(0, umOffset - UM_PAGE); loadUnmatched(); }
+function umNextPage() { umOffset += UM_PAGE; loadUnmatched(); }
+document.getElementById('um-search').addEventListener('keydown', e => { if (e.key === 'Enter') { umOffset = 0; loadUnmatched(); }});
+document.getElementById('um-filter').addEventListener('change', () => { umOffset = 0; loadUnmatched(); });
+
+// ── Link modal ─────────────────────────────────────
+let linkingIdx = null;
+
+function openLinkModal(idx) {
+  linkingIdx = idx;
+  const item = umRows[idx];
+  document.getElementById('link-modal-title').textContent = item.title;
+  document.getElementById('link-search-input').value = item.title.replace(/\[.*?\]/g, '').replace(/\(.*?\)/g, '').trim();
+  document.getElementById('link-results').innerHTML = '';
+  document.getElementById('link-modal').style.display = 'flex';
+  // Auto-search
+  doLinkSearch();
+}
+
+function closeLinkModal() {
+  document.getElementById('link-modal').style.display = 'none';
+  linkingIdx = null;
+}
+
+async function doLinkSearch() {
+  const query = document.getElementById('link-search-input').value.trim();
+  if (!query) return;
+  const results = document.getElementById('link-results');
+  results.innerHTML = '<div class="loading">Searching...</div>';
+
+  const resp = await fetch('/api/price-compare/scrydex-search', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ query, type: 'all' })
+  });
+  const data = await resp.json();
+
+  if (!data.results.length) {
+    results.innerHTML = '<div class="loading">No results. Try different keywords.</div>';
+    return;
+  }
+
+  results.innerHTML = data.results.map(r => `
+    <div class="link-row" onclick="doLink('${r.scrydex_id}')">
+      ${r.image ? `<img src="${r.image}" alt="">` : '<div style="width:48px;height:48px;background:var(--bg);border-radius:4px;"></div>'}
+      <div class="info">
+        <div class="name">${r.name}</div>
+        <div class="meta">${r.set || ''} &middot; ${r.type} &middot; ${r.scrydex_id}</div>
+      </div>
+      <div>
+        ${r.market != null ? `<span class="price">$${r.market.toFixed(2)}</span>` : ''}
+        ${r.low != null ? `<br><span style="color:var(--dim);font-size:0.75rem;">low $${r.low.toFixed(2)}</span>` : ''}
+      </div>
+      ${r.already_linked ? '<span class="already-linked">already linked</span>' : ''}
+    </div>
+  `).join('');
+}
+
+document.getElementById('link-search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doLinkSearch(); });
+
+async function doLink(scrydexId) {
+  if (linkingIdx === null) return;
+  const item = umRows[linkingIdx];
+  const resp = await fetch('/api/price-compare/link', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ tcgplayer_id: item.tcgplayer_id, scrydex_id: scrydexId })
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    umRows[linkingIdx]._linked = { name: data.name, market: data.market };
+    renderUnmatched();
+    closeLinkModal();
+  } else {
+    alert('Link failed: ' + (data.error || 'unknown'));
+  }
+}
+
+// Close modal on backdrop click
+document.getElementById('link-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('link-modal')) closeLinkModal();
+});
 </script>
 </body>
 </html>
