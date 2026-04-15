@@ -150,24 +150,20 @@ class PriceProvider:
         return self._stamp(result, self._primary_source)
 
     def search_cards(self, query, *, set_name=None, limit=5):
-        # Merge cache + live results so the user sees everything
-        merged = []
         if self.cache:
             try:
-                cached = self.cache.search_cards(query, set_name=set_name, limit=limit)
-                if cached:
-                    merged.extend(self._stamp(cached, "cache"))
+                results = self.cache.search_cards(query, set_name=set_name, limit=limit)
+                if results:
+                    return self._stamp(results, "cache")
             except Exception as e:
                 logger.warning(f"Cache search failed: {e}")
         try:
-            live = self.primary.search_cards(query, set_name=set_name, limit=limit)
-            if live:
-                merged.extend(self._stamp(live, self._primary_source))
+            return self._stamp(
+                self.primary.search_cards(query, set_name=set_name, limit=limit),
+                self._primary_source,
+            )
         except (PPTError, ScrydexError) as e:
-            if not merged:
-                raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
-            logger.warning(f"Live card search failed (returning cache only): {e}")
-        return self._dedup_search(merged, limit)
+            raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
 
     def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
         # Cache-first
@@ -198,24 +194,20 @@ class PriceProvider:
         return self._stamp(result, self._primary_source)
 
     def search_sealed_products(self, query, *, set_name=None, limit=5):
-        # Merge cache + live results so the user sees everything
-        merged = []
         if self.cache:
             try:
-                cached = self.cache.search_sealed_products(query, set_name=set_name, limit=limit)
-                if cached:
-                    merged.extend(self._stamp(cached, "cache"))
+                results = self.cache.search_sealed_products(query, set_name=set_name, limit=limit)
+                if results:
+                    return self._stamp(results, "cache")
             except Exception as e:
                 logger.warning(f"Cache sealed search failed: {e}")
         try:
-            live = self.primary.search_sealed_products(query, set_name=set_name, limit=limit)
-            if live:
-                merged.extend(self._stamp(live, self._primary_source))
+            return self._stamp(
+                self.primary.search_sealed_products(query, set_name=set_name, limit=limit),
+                self._primary_source,
+            )
         except (PPTError, ScrydexError) as e:
-            if not merged:
-                raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
-            logger.warning(f"Live sealed search failed (returning cache only): {e}")
-        return self._dedup_search(merged, limit)
+            raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
 
     @staticmethod
     def _dedup_search(results: list, limit: int) -> list:

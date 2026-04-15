@@ -2099,15 +2099,22 @@ def enrich_page():
 
 @app.route("/api/ppt/search-sealed", methods=["POST"])
 def ppt_search_sealed():
-    """Search PPT for sealed products by name."""
+    """Search for sealed products by name. Uses cache first; pass live=true to skip cache."""
     if not ppt:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
     q = data.get("query", "").strip()
     if not q:
         return jsonify({"error": "No query"}), 400
+    live_only = data.get("live", False)
     try:
-        results = ppt.search_sealed_products(q, limit=5)
+        if live_only:
+            # Bypass cache — go straight to PPT/Scrydex live API
+            from price_provider import PriceProvider as _PP
+            results = ppt.primary.search_sealed_products(q, limit=5)
+            results = ppt._stamp(results, ppt._primary_source)
+        else:
+            results = ppt.search_sealed_products(q, limit=5)
         for r in results:
             if not r.get("tcgplayer_id"):
                 tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")

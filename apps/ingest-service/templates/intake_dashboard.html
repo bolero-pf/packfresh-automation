@@ -1152,17 +1152,19 @@
         el.style.display = el.style.display === 'none' ? 'block' : 'none';
     }
 
-    async function intakeSealedSearch() {
+    async function intakeSealedSearch(live) {
         const searchTerm = document.getElementById('intake-sealed-search').value.trim();
         const resultsDiv = document.getElementById('intake-search-results');
         if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a search term</div>'; return; }
 
-        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+        resultsDiv.innerHTML = `<div class="loading"><span class="spinner"></span> Searching${live ? ' PPT live' : ''}...</div>`;
         try {
+            const body = { query: searchTerm };
+            if (live) body.live = true;
             const r = await fetch('/api/ppt/search-sealed', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ query: searchTerm }),
+                body: JSON.stringify(body),
             });
             const contentType = r.headers.get('content-type') || '';
             if (!contentType.includes('application/json')) {
@@ -1200,6 +1202,16 @@
                     </div>
                 </div>`;
             }).join('');
+
+            // If results came from cache, offer PPT live fallback
+            const anyCache = products.some(p => p._price_source === 'cache');
+            if (anyCache) {
+                resultsDiv.innerHTML += `<div style="margin-top:8px; text-align:center;">
+                    <button class="btn btn-secondary btn-sm" onclick="intakeSealedSearch(true)" style="font-size:0.78rem; opacity:0.8;">
+                        Don't see it? Search PPT live →
+                    </button>
+                </div>`;
+            }
         } catch(err) {
             resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
         }
@@ -4056,17 +4068,19 @@
         } catch(err) { alert(err.message); }
     }
 
-    async function searchSealedForSession(sessionId, offerPct) {
+    async function searchSealedForSession(sessionId, offerPct, live) {
         const searchTerm = document.getElementById('session-sealed-search').value.trim();
         const resultsDiv = document.getElementById('session-sealed-results');
         if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a search term</div>'; return; }
 
-        resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+        resultsDiv.innerHTML = `<div class="loading"><span class="spinner"></span> Searching${live ? ' PPT live' : ''}...</div>`;
         try {
+            const body = { query: searchTerm };
+            if (live) body.live = true;
             const r = await fetch('/api/ppt/search-sealed', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ query: searchTerm }),
+                body: JSON.stringify(body),
             });
             
             // Handle non-JSON responses
@@ -4105,6 +4119,16 @@
                     </div>
                 </div>`;
             }).join('');
+
+            // If results came from cache, offer a PPT live search fallback
+            const anyCache = products.some(p => p._price_source === 'cache');
+            if (anyCache) {
+                resultsDiv.innerHTML += `<div style="margin-top:8px; text-align:center;">
+                    <button class="btn btn-secondary btn-sm" onclick="searchSealedForSession('${sessionId}', ${offerPct}, true)" style="font-size:0.78rem; opacity:0.8;">
+                        Don't see it? Search PPT live →
+                    </button>
+                </div>`;
+            }
         } catch(err) {
             resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }

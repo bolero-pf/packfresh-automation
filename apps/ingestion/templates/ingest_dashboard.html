@@ -2520,17 +2520,19 @@ function closeAddItem() {
     _addItemSessionId = null;
 }
 
-async function addItemSearch() {
+async function addItemSearch(live) {
     const query = document.getElementById('add-item-search').value.trim();
     const resultsDiv = document.getElementById('add-item-search-results');
     if (!query) { resultsDiv.innerHTML = '<p style="color:var(--text-dim);">Enter a search term</p>'; return; }
 
-    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+    resultsDiv.innerHTML = `<div class="loading"><span class="spinner"></span> Searching${live ? ' PPT live' : ''}...</div>`;
     try {
+        const body = { query };
+        if (live) body.live = true;
         const sr = await fetch('/api/ppt/search-sealed', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ query }),
+            body: JSON.stringify(body),
         });
         const sd = await sr.json();
         if (!sr.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${sd.error}</div>`; return; }
@@ -2575,6 +2577,14 @@ async function addItemSearch() {
                 + '</div></div>';
         }).join('');
         html += '</div>';
+        // If results came from cache, offer PPT live fallback
+        const anyCache = results.some(p => p._price_source === 'cache');
+        if (anyCache) {
+            html += '<div style="margin-top:8px; text-align:center;">'
+                + '<button class="btn btn-secondary btn-sm" onclick="addItemSearch(true)" style="font-size:0.78rem; opacity:0.8;">'
+                + 'Don\'t see it? Search PPT live →'
+                + '</button></div>';
+        }
         html += `<div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border); display:flex; gap:8px;">
             <button class="btn btn-secondary btn-sm" onclick="_showTcgIdEntry()" style="flex:1;">Enter TCG ID</button>
             <button class="btn btn-secondary btn-sm" onclick="_showManualEntryForm(null, 1)" style="flex:1;">Manual entry</button>
