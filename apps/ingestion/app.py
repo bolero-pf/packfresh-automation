@@ -2419,8 +2419,9 @@ def price_compare_unmatched():
     search = data.get("search", "").strip()
 
     where = ["ipc.tcgplayer_id IS NOT NULL", "ipc.is_damaged = FALSE",
-             "spc.tcgplayer_id IS NULL", "ipc.tags NOT ILIKE '%slab%'"]
-    params = []
+             "ipc.tags NOT ILIKE %s",
+             "NOT EXISTS (SELECT 1 FROM scrydex_price_cache spc WHERE spc.tcgplayer_id = ipc.tcgplayer_id)"]
+    params = ["%slab%"]
 
     if product_filter == "sealed":
         where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
@@ -2433,7 +2434,6 @@ def price_compare_unmatched():
     sql = f"""
         SELECT ipc.title, ipc.tcgplayer_id, ipc.shopify_price, ipc.shopify_qty, ipc.tags
         FROM inventory_product_cache ipc
-        LEFT JOIN scrydex_price_cache spc ON spc.tcgplayer_id = ipc.tcgplayer_id
         WHERE {' AND '.join(where)}
         ORDER BY ipc.title
         LIMIT %s OFFSET %s
@@ -2443,7 +2443,6 @@ def price_compare_unmatched():
 
     count_sql = f"""
         SELECT COUNT(*) as cnt FROM inventory_product_cache ipc
-        LEFT JOIN scrydex_price_cache spc ON spc.tcgplayer_id = ipc.tcgplayer_id
         WHERE {' AND '.join(where)}
     """
     total = db.query_one(count_sql, tuple(params[:-2]))["cnt"]
