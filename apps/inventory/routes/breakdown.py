@@ -522,11 +522,11 @@ def execute_breakdown():
 
     # Pre-compute each child's share of parent COGS based on market values
     child_cogs = {}  # child_variant_id -> unit cost to set
+    total_comp_market = sum(
+        float(c.get("comp_market_price") or 0) * int(c["quantity_per_parent"])
+        for c in components
+    )
     if parent_unit_cost and parent_unit_cost > 0:
-        total_comp_market = sum(
-            float(c.get("comp_market_price") or 0) * int(c["quantity_per_parent"])
-            for c in components
-        )
         if total_comp_market > 0:
             for comp in components:
                 comp_market = float(comp.get("comp_market_price") or 0)
@@ -613,7 +613,7 @@ def execute_breakdown():
                 promo_components=promo_components,
                 qty_to_break=qty_to_break,
                 parent_unit_cost=parent_unit_cost,
-                child_cogs=child_cogs,
+                total_comp_market_all=total_comp_market,
             )
             if ingest_session_id:
                 results["ingest_session"] = ingest_session_id
@@ -627,23 +627,21 @@ def execute_breakdown():
 # ─── Promo routing session creation ──────────────────────────────────────────
 
 def _create_promo_routing_session(parent_title, promo_components, qty_to_break,
-                                   parent_unit_cost, child_cogs):
+                                   parent_unit_cost, total_comp_market_all):
     """
     Create an ingest session for promo/card components from a breakdown.
     Session lands at 'breakdown_complete' status so it shows up in ingest
     at the Route stage, ready for bin assignment + barcode printing.
+
+    total_comp_market_all: market total across ALL components (sealed + promo),
+    so each promo gets its correct proportional share of parent COGS.
     """
     now = datetime.now()
     date_label = now.strftime("%-m/%-d") if os.name != "nt" else now.strftime("%#m/%#d")
     session_name = f"Breakdown - {parent_title} - {date_label}"
     session_id = str(uuid4())
 
-    # Compute total market for COGS proportioning
-    total_comp_market = Decimal("0")
-    for c in promo_components:
-        m = Decimal(str(c.get("comp_market_price") or 0))
-        q = int(c["quantity_per_parent"])
-        total_comp_market += m * q
+    total_comp_market = Decimal(str(total_comp_market_all)) if total_comp_market_all else Decimal("0")
 
     db.execute("""
         INSERT INTO intake_sessions
