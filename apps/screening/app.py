@@ -1370,6 +1370,7 @@ function renderVerification(orders, groups) {
         <strong>${g.customer_name}</strong> · ${g.orders.length} orders · <span style="font-weight:700;">$${g.total_value.toFixed(2)}</span>
         <div style="margin-left:auto;display:flex;gap:6px;">
           <button class="btn btn-green btn-sm" onclick="releaseVerificationGroup(${orderIds},'${orderNames}','${g.customer_email}')">✓ Verify & Release All</button>
+          <button class="btn btn-sm" style="background:var(--red);color:#fff;" onclick="cancelVerificationGroup(${orderIds},'${orderNames}','${g.customer_email}')">✕ Cancel & Refund All</button>
         </div>
       </div>
       <div class="order-meta" style="margin-bottom:4px;">
@@ -1582,6 +1583,50 @@ async function _doReleaseVerificationGroup(orderIds, orderNames) {
       toast('Verified: ' + orderNames + ' — moved to Combine', 'green');
     } else {
       toast('Verified & released: ' + orderNames, 'green');
+    }
+    _fdTickets = {};
+    loadOrders();
+  } catch(e) { alert(e.message); }
+}
+
+async function cancelVerificationGroup(orderIds, orderNames, email) {
+  const ticket = _getTicketForOrder(email);
+  if (ticket && _fdCanned && _fdCanned.configured) {
+    showFdReplyModal(ticket, 'deny', async (ticketId, cannedId) => {
+      if (!confirm('Cancel ALL orders (' + orderNames + ') and issue full refunds?')) return;
+      if (ticketId && cannedId) {
+        try {
+          await fetch('/api/freshdesk-reply', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ ticket_id: ticketId, canned_response_id: cannedId }),
+          });
+        } catch(e) { console.warn('Freshdesk reply failed:', e); }
+      }
+      await _doCancelVerificationGroup(orderIds, orderNames);
+    });
+  } else {
+    if (!confirm('Cancel ALL orders (' + orderNames + ') and issue full refunds?')) return;
+    await _doCancelVerificationGroup(orderIds, orderNames);
+  }
+}
+
+async function _doCancelVerificationGroup(orderIds, orderNames) {
+  try {
+    let failed = [];
+    for (const oid of orderIds) {
+      const r = await fetch('/api/cancel-order', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ order_id: oid }),
+      });
+      if (!r.ok) {
+        const d = await r.json();
+        failed.push(d.error || oid);
+      }
+    }
+    if (failed.length) {
+      alert('Some cancels failed: ' + failed.join(', '));
+    } else {
+      toast('Cancelled & refunded all: ' + orderNames, 'green');
     }
     _fdTickets = {};
     loadOrders();
