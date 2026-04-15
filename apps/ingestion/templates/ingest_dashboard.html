@@ -1859,6 +1859,7 @@ function _renderSessionCard() {
             <div style="font-size:0.78rem; color:var(--text-dim);">raw market</div>
             ${(item.quantity || 1) > 1 ? `<div style="margin-left:auto; display:flex; align-items:center; gap:6px;">
                 <span style="font-size:1rem; font-weight:700; color:var(--accent);">x${item.quantity}</span>
+                <button class="btn btn-sm" onclick="_rsShowSplit()" style="font-size:0.72rem; padding:3px 8px; color:var(--accent); border:1px solid var(--accent)44;">Split</button>
                 <button class="btn btn-sm" onclick="_rsSplitSingles()" style="font-size:0.72rem; padding:3px 8px; color:var(--accent2,#c084fc); border:1px solid var(--accent2,#c084fc)44;">→ Singles</button>
             </div>` : ''}
         </div>`;
@@ -2034,6 +2035,76 @@ async function _rsSetDest(destination) {
             _showSessionComplete();
         }
     }, 200);
+}
+
+function _rsShowSplit() {
+    const item = _rsItems[_rsIndex];
+    if (!item || (item.quantity || 1) <= 1) return;
+    const qty = item.quantity;
+    // Insert a split form below the price/qty area
+    const existing = document.getElementById('rs-split-form');
+    if (existing) { existing.remove(); return; } // toggle off
+    const priceRow = document.querySelector('#route-session-overlay .route-radios')?.parentElement
+        || document.getElementById('route-session-overlay');
+    const form = document.createElement('div');
+    form.id = 'rs-split-form';
+    form.style.cssText = 'margin:12px 0; padding:10px 14px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border); display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:center;';
+    form.innerHTML = `<span style="font-size:0.82rem; color:var(--text-dim);">Split</span>
+        <input type="number" id="rs-split-qty" min="1" max="${qty - 1}" value="1" style="width:55px; padding:4px 6px; font-size:0.85rem;">
+        <span style="font-size:0.82rem; color:var(--text-dim);">of ${qty} →</span>
+        <select id="rs-split-dest" style="padding:4px 6px; font-size:0.85rem; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">
+            <option value="grade">Grade</option>
+            <option value="storage">Storage</option>
+            <option value="display">Binder</option>
+            <option value="bulk">Bulk</option>
+        </select>
+        <button class="btn btn-sm btn-primary" style="font-size:0.78rem; padding:4px 12px;" onclick="_rsDoSplit()">Split</button>
+        <button class="btn btn-sm btn-secondary" style="font-size:0.78rem; padding:4px 8px;" onclick="document.getElementById('rs-split-form').remove()">Cancel</button>`;
+    // Insert before the destination buttons
+    const destRow = document.getElementById('route-session-overlay');
+    const buttons = destRow.querySelector('[style*="justify-content:center"][style*="margin-top:24px"]');
+    if (buttons) buttons.before(form);
+    else destRow.appendChild(form);
+}
+
+async function _rsDoSplit() {
+    const item = _rsItems[_rsIndex];
+    if (!item) return;
+    const splitQty = parseInt(document.getElementById('rs-split-qty')?.value || 0);
+    const dest = document.getElementById('rs-split-dest')?.value;
+    if (!splitQty || splitQty < 1 || !dest) return;
+
+    try {
+        const r = await fetch(`/api/ingest/session/${_rsSessionId}/split-route`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: item.id, split_qty: splitQty, destination: dest }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Split failed'); return; }
+
+        // Update current item qty
+        item.quantity = d.original.quantity;
+
+        // Insert split item after current position
+        const splitItem = {
+            ...item,
+            id: d.split.id,
+            quantity: d.split.quantity,
+            routing_destination: d.split.destination,
+        };
+        _rsItems.splice(_rsIndex + 1, 0, splitItem);
+
+        // Update counts
+        const splitDest = d.split.destination;
+        _rsCounts[splitDest] = (_rsCounts[splitDest] || 0) + d.split.quantity;
+        const origDest = item.routing_destination || 'storage';
+        _rsCounts[origDest] = (_rsCounts[origDest] || 0) - d.split.quantity;
+
+        _renderSessionCard();
+    } catch(e) {
+        alert('Split failed: ' + e.message);
+    }
 }
 
 async function _rsSplitSingles() {
