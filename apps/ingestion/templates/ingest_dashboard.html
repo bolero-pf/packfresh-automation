@@ -1857,6 +1857,10 @@ function _renderSessionCard() {
             </div>
             <div style="font-size:1.6rem; font-weight:800; color:var(--text);">$${price.toFixed(2)}</div>
             <div style="font-size:0.78rem; color:var(--text-dim);">raw market</div>
+            ${(item.quantity || 1) > 1 ? `<div style="margin-left:auto; display:flex; align-items:center; gap:6px;">
+                <span style="font-size:1rem; font-weight:700; color:var(--accent);">x${item.quantity}</span>
+                <button class="btn btn-sm" onclick="_rsSplitSingles()" style="font-size:0.72rem; padding:3px 8px; color:var(--accent2,#c084fc); border:1px solid var(--accent2,#c084fc)44;">→ Singles</button>
+            </div>` : ''}
         </div>`;
 
     // ── Grading economics panel ──
@@ -2030,6 +2034,44 @@ async function _rsSetDest(destination) {
             _showSessionComplete();
         }
     }, 200);
+}
+
+async function _rsSplitSingles() {
+    const item = _rsItems[_rsIndex];
+    if (!item || (item.quantity || 1) <= 1) return;
+
+    try {
+        const r = await fetch(`/api/ingest/session/${_rsSessionId}/split-singles`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: item.id }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Split failed'); return; }
+
+        const oldQty = item.quantity;
+        // Update current item to qty=1
+        item.quantity = 1;
+
+        // Update counts (was counted as oldQty, now it's 1 for this item + (oldQty-1) new items = same total)
+        // No count change needed since total qty stays the same
+
+        // Insert (oldQty - 1) clones after current position
+        const newItems = [];
+        for (let i = 0; i < oldQty - 1; i++) {
+            newItems.push({
+                ...item,
+                id: d.original_id + '_split_' + i,  // temp ID until reload
+                quantity: 1,
+                _enrichLoading: item._enrichLoading,
+            });
+        }
+        _rsItems.splice(_rsIndex + 1, 0, ...newItems);
+
+        _renderSessionCard();
+    } catch(e) {
+        alert('Split failed: ' + e.message);
+    }
 }
 
 function _rsNav(delta) {
