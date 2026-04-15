@@ -2524,16 +2524,10 @@ def scrydex_link():
 
     tcg_id = int(tcg_id)
 
-    # Update cache rows for this specific variant
+    # Update cache rows for this specific variant — unconditional so re-linking works
+    # (variant-specific: normal and pokemonCenter get different tcgplayer_ids)
     db.execute(
-        "UPDATE scrydex_price_cache SET tcgplayer_id = %s WHERE scrydex_id = %s AND variant = %s AND tcgplayer_id IS NULL",
-        (tcg_id, scrydex_id, variant)
-    )
-
-    # Also update any generic rows (without variant specificity) for this scrydex_id
-    # so card lookups by tcgplayer_id can find image/name data
-    db.execute(
-        "UPDATE scrydex_price_cache SET tcgplayer_id = %s WHERE scrydex_id = %s AND variant = %s AND tcgplayer_id IS NULL",
+        "UPDATE scrydex_price_cache SET tcgplayer_id = %s WHERE scrydex_id = %s AND variant = %s",
         (tcg_id, scrydex_id, variant)
     )
 

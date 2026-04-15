@@ -83,6 +83,10 @@ class PriceCache:
         tcg_id = rows[0].get("tcgplayer_id")
         return self._build_card_dict(rows, tcg_id)
 
+    # Bundle/set/case keywords that indicate a multi-pack product, not the base item
+    _BUNDLE_KEYWORDS = ('art bundle', 'set of', 'bundle (', 'pack of', '(set of',
+                        'case', 'plus -', 'plus case', 'international version')
+
     def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, **kwargs) -> Optional[dict]:
         """Read sealed product from cache. Returns PPT-shaped dict."""
         tcg_id = int(tcgplayer_id)
@@ -95,7 +99,38 @@ class PriceCache:
         if not rows:
             return None
 
+        # If multiple scrydex products share this tcgplayer_id, prefer the base
+        # product over bundles/art sets/cases
+        scrydex_ids = set(r["scrydex_id"] for r in rows)
+        if len(scrydex_ids) > 1:
+            rows = self._prefer_base_product(rows)
+
         return self._build_sealed_dict(rows, tcg_id)
+
+    def _prefer_base_product(self, rows: list[dict]) -> list[dict]:
+        """When multiple scrydex products share a tcgplayer_id, keep only the base product."""
+        by_sid: dict[str, list[dict]] = {}
+        for r in rows:
+            by_sid.setdefault(r["scrydex_id"], []).append(r)
+
+        if len(by_sid) <= 1:
+            return rows
+
+        # Score each group: base products score 0, bundles score 1
+        def is_bundle(group_rows):
+            name = (group_rows[0].get("product_name") or "").lower()
+            return any(kw in name for kw in self._BUNDLE_KEYWORDS)
+
+        base_groups = [(sid, grp) for sid, grp in by_sid.items() if not is_bundle(grp)]
+
+        if base_groups:
+            # Among base products, pick the one with the shortest name (most specific)
+            base_groups.sort(key=lambda x: len(x[1][0].get("product_name", "")))
+            return base_groups[0][1]
+
+        # All are bundles — pick shortest name as least wrong
+        all_groups = sorted(by_sid.items(), key=lambda x: len(x[1][0].get("product_name", "")))
+        return all_groups[0][1]
 
     def search_cards(self, query: str, *, set_name: str = None, limit: int = 5) -> list[dict]:
         """Search cards by name in the local cache."""
@@ -124,7 +159,8 @@ class PriceCache:
         return results
 
     def search_sealed_products(self, query: str, *, set_name: str = None, limit: int = 5) -> list[dict]:
-        """Search sealed products by name in the local cache."""
+        """Search sealed products by name in the local cache.
+        Results are sorted so base products appear before bundles/art sets."""
         params = [f"%{query}%"]
         sql = """
             SELECT DISTINCT ON (scrydex_id) *
@@ -134,8 +170,9 @@ class PriceCache:
         if set_name:
             sql += " AND expansion_name ILIKE %s"
             params.append(f"%{set_name}%")
+        # Fetch extra to allow re-sorting after bundle deprioritization
         sql += " ORDER BY scrydex_id, condition LIMIT %s"
-        params.append(limit)
+        params.append(limit * 3)
 
         hits = self.db.query(sql, tuple(params))
         results = []
@@ -146,7 +183,14 @@ class PriceCache:
             """, (row["scrydex_id"],))
             if card_rows:
                 results.append(self._build_sealed_dict(card_rows, row.get("tcgplayer_id")))
-        return results
+
+        # Sort: base products first (shorter names, no bundle keywords), then bundles
+        def _bundle_sort_key(item):
+            name = (item.get("name") or "").lower()
+            is_bundle = any(kw in name for kw in self._BUNDLE_KEYWORDS)
+            return (1 if is_bundle else 0, len(name))
+        results.sort(key=_bundle_sort_key)
+        return results[:limit]
 
     # ── Build PPT-shaped dicts from cache rows ────────────
 

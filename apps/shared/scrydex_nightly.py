@@ -39,7 +39,7 @@ UPSERT_SQL = """
     ON CONFLICT (scrydex_id, variant, condition, price_type,
                  grade_company_key, grade_value_key)
     DO UPDATE SET
-        tcgplayer_id   = COALESCE(EXCLUDED.tcgplayer_id, scrydex_price_cache.tcgplayer_id),
+        tcgplayer_id   = COALESCE(scrydex_price_cache.tcgplayer_id, EXCLUDED.tcgplayer_id),
         expansion_name = EXCLUDED.expansion_name,
         product_name   = EXCLUDED.product_name,
         market_price   = EXCLUDED.market_price,
