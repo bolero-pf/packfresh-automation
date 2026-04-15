@@ -304,13 +304,17 @@ class PriceProvider:
         return PPTClient.extract_condition_price(card_data, condition, variant)
 
 
-def create_price_provider(db=None) -> PriceProvider:
+def create_price_provider(db=None, game: str = "pokemon") -> PriceProvider:
     """
     Factory: reads env vars and returns a configured PriceProvider.
 
+    Args:
+        db: Database module for cache reads
+        game: Game identifier — pokemon, magicthegathering, lorcana, onepiece, riftbound
+
     Env vars:
         PRICE_PROVIDER:   "ppt" | "scrydex" | "both" (default: "ppt")
-        PPT_API_KEY:      PPT API key
+        PPT_API_KEY:      PPT API key (Pokemon only)
         SCRYDEX_API_KEY:  Scrydex API key
         SCRYDEX_TEAM_ID:  Scrydex team ID
     """
@@ -322,14 +326,20 @@ def create_price_provider(db=None) -> PriceProvider:
     scrydex_key = os.getenv("SCRYDEX_API_KEY", "")
     scrydex_team = os.getenv("SCRYDEX_TEAM_ID", "")
 
+    # Non-Pokemon games: PPT doesn't exist, force scrydex/cache-only
+    if game != "pokemon" and mode == "ppt":
+        mode = "scrydex"
+    if game != "pokemon" and mode == "both":
+        mode = "scrydex"
+
     # Initialize local price cache if PRICE_CACHE=true (or any mode with db)
     cache = None
     use_cache = os.getenv("PRICE_CACHE", "").lower().strip() in ("true", "1", "yes")
     if use_cache and db:
         try:
             from price_cache import PriceCache
-            cache = PriceCache(db)
-            logger.info("Price cache enabled — ID lookups will read from local DB first")
+            cache = PriceCache(db, game=game)
+            logger.info(f"Price cache enabled for {game} — ID lookups will read from local DB first")
         except Exception as e:
             logger.warning(f"Failed to init price cache: {e}")
 
@@ -337,7 +347,7 @@ def create_price_provider(db=None) -> PriceProvider:
         if not scrydex_key or not scrydex_team:
             logger.error("PRICE_PROVIDER=scrydex but SCRYDEX_API_KEY/SCRYDEX_TEAM_ID not set")
             raise RuntimeError("Scrydex credentials not configured")
-        primary = ScrydexClient(scrydex_key, scrydex_team, db=db)
+        primary = ScrydexClient(scrydex_key, scrydex_team, db=db, game=game)
         return PriceProvider(primary, mode="scrydex", cache=cache)
 
     elif mode == "both":
@@ -345,9 +355,8 @@ def create_price_provider(db=None) -> PriceProvider:
             logger.error("PRICE_PROVIDER=both but Scrydex credentials missing — falling back to PPT")
             primary = PPTClient(ppt_key)
             return PriceProvider(primary, mode="ppt", cache=cache)
-        # PPT is primary (safe — known working), Scrydex is shadow (comparison logging)
         primary = PPTClient(ppt_key)
-        shadow = ScrydexClient(scrydex_key, scrydex_team, db=db)
+        shadow = ScrydexClient(scrydex_key, scrydex_team, db=db, game=game)
         return PriceProvider(primary, shadow=shadow, mode="both", cache=cache)
 
     else:  # "ppt" (default)

@@ -142,7 +142,7 @@ def call_dailyrunner():
 
 
 def run_scrydex_sync():
-    """Run the Scrydex nightly cache sync (active expansions only)."""
+    """Run the Scrydex nightly cache sync for all configured games."""
     try:
         scrydex_key = os.environ.get("SCRYDEX_API_KEY", "")
         scrydex_team = os.environ.get("SCRYDEX_TEAM_ID", "")
@@ -156,33 +156,46 @@ def run_scrydex_sync():
         import db as shared_db
 
         shared_db.init_pool()
-        client = ScrydexClient(scrydex_key, scrydex_team, db=shared_db)
 
-        rows = shared_db.query("SELECT expansion_id FROM scrydex_sync_log WHERE active = TRUE")
-        expansion_ids = [r["expansion_id"] for r in rows]
-        if not expansion_ids:
-            print("⏭ Scrydex sync: no active expansions in sync_log")
-            return
-
-        print(f"🔄 Scrydex sync: {len(expansion_ids)} active expansions")
-        totals = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0}
+        # Sync all configured games
+        games = [g.strip() for g in os.environ.get("SCRYDEX_GAMES", "pokemon").split(",") if g.strip()]
         import time as _time
-        t_start = _time.time()
+        grand_start = _time.time()
+        grand_totals = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0}
 
-        for i, eid in enumerate(expansion_ids):
-            try:
-                stats = sync_expansion(client, eid, shared_db)
-                for k in totals:
-                    totals[k] += stats.get(k, 0)
-                if (i + 1) % 20 == 0:
-                    print(f"  ... {i+1}/{len(expansion_ids)} done ({totals['credits']} credits)")
-            except Exception as e:
-                print(f"  ❌ {eid}: {e}")
-            _time.sleep(0.05)
+        for game in games:
+            client = ScrydexClient(scrydex_key, scrydex_team, db=shared_db, game=game)
 
-        elapsed = int(_time.time() - t_start)
-        print(f"✅ Scrydex sync done in {elapsed}s — {totals['cards']} cards, "
-              f"{totals['sealed']} sealed, {totals['prices']} prices, {totals['credits']} credits")
+            rows = shared_db.query(
+                "SELECT expansion_id FROM scrydex_sync_log WHERE game = %s AND active = TRUE", (game,))
+            expansion_ids = [r["expansion_id"] for r in rows]
+            if not expansion_ids:
+                print(f"⏭ {game}: no active expansions in sync_log")
+                continue
+
+            print(f"🔄 {game}: {len(expansion_ids)} active expansions")
+            totals = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0}
+            t_start = _time.time()
+
+            for i, eid in enumerate(expansion_ids):
+                try:
+                    stats = sync_expansion(client, eid, shared_db)
+                    for k in totals:
+                        totals[k] += stats.get(k, 0)
+                    if (i + 1) % 20 == 0:
+                        print(f"  ... {i+1}/{len(expansion_ids)} done ({totals['credits']} credits)")
+                except Exception as e:
+                    print(f"  ❌ {game}/{eid}: {e}")
+                _time.sleep(0.05)
+
+            elapsed = int(_time.time() - t_start)
+            print(f"✅ {game} done in {elapsed}s — {totals['cards']} cards, "
+                  f"{totals['sealed']} sealed, {totals['credits']} credits")
+            for k in grand_totals:
+                grand_totals[k] += totals[k]
+
+        grand_elapsed = int(_time.time() - grand_start)
+        print(f"✅ All games done in {grand_elapsed}s — {grand_totals['credits']} total credits")
     except Exception as e:
         print(f"❌ Scrydex sync failed: {e}")
         import traceback

@@ -119,17 +119,22 @@ class ScrydexError(Exception):
 
 class ScrydexClient:
 
+    # Supported game path prefixes for Scrydex API
+    GAMES = ("pokemon", "magicthegathering", "lorcana", "onepiece", "riftbound")
+
     def __init__(self, api_key: str, team_id: str,
                  base_url: str = "https://api.scrydex.com",
-                 db=None):
+                 db=None, game: str = "pokemon"):
         """
         Args:
             api_key: Scrydex API key
             team_id: Scrydex team ID
             base_url: API base URL
             db: Optional database connection for TCGPlayer ID mapping table
+            game: Game identifier — pokemon, magicthegathering, lorcana, onepiece, riftbound
         """
         self.base_url = base_url.rstrip("/")
+        self.game = game
         self.headers = {
             **DEFAULT_HEADERS,
             "X-Api-Key": api_key,
@@ -532,7 +537,7 @@ class ScrydexClient:
         params = {}
         if include_prices:
             params["include"] = "prices"
-        raw = self._get(f"{self.base_url}/pokemon/v1/cards/{scrydex_id}", params)
+        raw = self._get(f"{self.base_url}/{self.game}/v1/cards/{scrydex_id}", params)
         if not raw or raw.get("status") == "error":
             return None
         card_data = raw.get("data", raw)
@@ -583,7 +588,7 @@ class ScrydexClient:
             "page_size": min(limit, 100),
             "include": "prices",
         }
-        resp = self._get(f"{self.base_url}/pokemon/v1/cards", params)
+        resp = self._get(f"{self.base_url}/{self.game}/v1/cards", params)
         items = resp.get("data", []) if isinstance(resp, dict) else []
         return [self._normalize_card(item) for item in items[:limit]]
 
@@ -592,7 +597,7 @@ class ScrydexClient:
     def get_sealed_by_id(self, scrydex_id: str) -> Optional[dict]:
         """Fetch sealed product by Scrydex ID."""
         params = {"include": "prices"}
-        raw = self._get(f"{self.base_url}/pokemon/v1/sealed/{scrydex_id}", params)
+        raw = self._get(f"{self.base_url}/{self.game}/v1/sealed/{scrydex_id}", params)
         if not raw or raw.get("status") == "error":
             return None
         data = raw.get("data", raw)
@@ -631,7 +636,7 @@ class ScrydexClient:
             "page_size": min(limit, 100),
             "include": "prices",
         }
-        resp = self._get(f"{self.base_url}/pokemon/v1/sealed", params)
+        resp = self._get(f"{self.base_url}/{self.game}/v1/sealed", params)
         items = resp.get("data", []) if isinstance(resp, dict) else []
         return [self._normalize_sealed(item) for item in items[:limit]]
 
@@ -672,7 +677,7 @@ class ScrydexClient:
         while True:
             params["page"] = page
             resp = self._get(
-                f"{self.base_url}/pokemon/v1/expansions/{expansion_id}/cards",
+                f"{self.base_url}/{self.game}/v1/expansions/{expansion_id}/cards",
                 params
             )
             items = resp.get("data", []) if isinstance(resp, dict) else []
@@ -693,7 +698,7 @@ class ScrydexClient:
         """Pull all sealed products for a set."""
         params = {"page_size": 100, "include": "prices"}
         resp = self._get(
-            f"{self.base_url}/pokemon/v1/expansions/{expansion_id}/sealed",
+            f"{self.base_url}/{self.game}/v1/expansions/{expansion_id}/sealed",
             params
         )
         items = resp.get("data", []) if isinstance(resp, dict) else []
@@ -712,7 +717,7 @@ class ScrydexClient:
                 "page_size": 100,
             }
             resp = self._get(
-                f"{self.base_url}/pokemon/v1/cards/{scrydex_card_id}/listings",
+                f"{self.base_url}/{self.game}/v1/cards/{scrydex_card_id}/listings",
                 params
             )
             items = resp.get("data", []) if isinstance(resp, dict) else []
@@ -740,7 +745,7 @@ class ScrydexClient:
         if condition:
             params["condition"] = condition
         resp = self._get(
-            f"{self.base_url}/pokemon/v1/cards/{scrydex_card_id}/price_history",
+            f"{self.base_url}/{self.game}/v1/cards/{scrydex_card_id}/price_history",
             params
         )
         return resp.get("data", []) if isinstance(resp, dict) else []
@@ -755,7 +760,7 @@ class ScrydexClient:
                 "page_size": 100,
                 "q": f"language_code:{language_code}",
             }
-            resp = self._get(f"{self.base_url}/pokemon/v1/expansions", params)
+            resp = self._get(f"{self.base_url}/{self.game}/v1/expansions", params)
             items = resp.get("data", []) if isinstance(resp, dict) else []
             if not items:
                 break

@@ -26,17 +26,17 @@ logger = logging.getLogger(__name__)
 
 UPSERT_SQL = """
     INSERT INTO scrydex_price_cache (
-        scrydex_id, tcgplayer_id, expansion_id, expansion_name,
+        game, scrydex_id, tcgplayer_id, expansion_id, expansion_name,
         product_type, product_name, card_number, rarity,
         variant, condition, price_type, grade_company, grade_value,
         market_price, low_price, mid_price, high_price,
         trend_1d_pct, trend_7d_pct, trend_30d_pct,
         image_small, image_medium, image_large, fetched_at
     ) VALUES (
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
     )
-    ON CONFLICT (scrydex_id, variant, condition, price_type,
+    ON CONFLICT (game, scrydex_id, variant, condition, price_type,
                  grade_company_key, grade_value_key)
     DO UPDATE SET
         tcgplayer_id   = COALESCE(scrydex_price_cache.tcgplayer_id, EXCLUDED.tcgplayer_id),
@@ -56,8 +56,8 @@ UPSERT_SQL = """
 """
 
 MAP_SQL = """
-    INSERT INTO scrydex_tcg_map (scrydex_id, tcgplayer_id, product_type, updated_at)
-    VALUES (%s, %s, %s, NOW())
+    INSERT INTO scrydex_tcg_map (scrydex_id, tcgplayer_id, product_type, game, updated_at)
+    VALUES (%s, %s, %s, %s, NOW())
     ON CONFLICT (scrydex_id) DO UPDATE SET
         tcgplayer_id = EXCLUDED.tcgplayer_id, updated_at = NOW()
 """
@@ -81,7 +81,7 @@ def _extract_tcg_id(card: dict) -> int | None:
     return None
 
 
-def _collect_price_rows(item: dict, *, expansion_id: str, expansion_name: str,
+def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_name: str,
                         product_type: str, tcg_id: int | None) -> list[tuple]:
     """Extract all price rows from a card or sealed item. Returns list of param tuples."""
     scrydex_id = item.get("id")
@@ -107,7 +107,7 @@ def _collect_price_rows(item: dict, *, expansion_id: str, expansion_name: str,
             grade_val = str(p.get("grade", "")) if price_type == "graded" else None
 
             rows.append((
-                scrydex_id, tcg_id, expansion_id, expansion_name,
+                game, scrydex_id, tcg_id, expansion_id, expansion_name,
                 product_type, name, card_number, rarity,
                 variant_name, condition, price_type, grade_co, grade_val,
                 p.get("market"), p.get("low"), p.get("mid"), p.get("high"),
@@ -119,10 +119,12 @@ def _collect_price_rows(item: dict, *, expansion_id: str, expansion_name: str,
 def sync_expansion(client, expansion_id: str, db) -> dict:
     """
     Pull all cards + sealed for one expansion and batch-upsert into scrydex_price_cache.
+    Uses client.game to determine the API path and game column value.
     Returns stats dict.
     """
     from psycopg2.extras import execute_batch
 
+    game = client.game
     stats = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0, "mapped": 0}
     expansion_name = None
     price_batch = []
@@ -132,7 +134,7 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
     page = 1
     while True:
         resp = client._get(
-            f"{client.base_url}/pokemon/v1/expansions/{expansion_id}/cards",
+            f"{client.base_url}/{game}/v1/expansions/{expansion_id}/cards",
             {"page": page, "page_size": 100, "include": "prices"}
         )
         stats["credits"] += 1
@@ -147,10 +149,10 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
 
             tcg_id = _extract_tcg_id(card)
             if tcg_id and card.get("id"):
-                map_batch.append((card["id"], tcg_id, "card"))
+                map_batch.append((card["id"], tcg_id, "card", game))
                 stats["mapped"] += 1
 
-            rows = _collect_price_rows(card, expansion_id=expansion_id,
+            rows = _collect_price_rows(card, game=game, expansion_id=expansion_id,
                                        expansion_name=expansion_name or "",
                                        product_type="card", tcg_id=tcg_id)
             price_batch.extend(rows)
@@ -161,21 +163,25 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
         page += 1
 
     # ── Sealed ─────────────────────────────────────────────
-    resp = client._get(
-        f"{client.base_url}/pokemon/v1/expansions/{expansion_id}/sealed",
-        {"page_size": 100, "include": "prices"}
-    )
-    stats["credits"] += 1
-    for item in (resp.get("data") or []):
-        stats["sealed"] += 1
-        if not expansion_name:
-            expansion_name = (item.get("expansion") or {}).get("name", "")
+    try:
+        resp = client._get(
+            f"{client.base_url}/{game}/v1/expansions/{expansion_id}/sealed",
+            {"page_size": 100, "include": "prices"}
+        )
+        stats["credits"] += 1
+        for item in (resp.get("data") or []):
+            stats["sealed"] += 1
+            if not expansion_name:
+                expansion_name = (item.get("expansion") or {}).get("name", "")
 
-        rows = _collect_price_rows(item, expansion_id=expansion_id,
-                                   expansion_name=expansion_name or "",
-                                   product_type="sealed", tcg_id=None)
-        price_batch.extend(rows)
-        stats["prices"] += len(rows)
+            rows = _collect_price_rows(item, game=game, expansion_id=expansion_id,
+                                       expansion_name=expansion_name or "",
+                                       product_type="sealed", tcg_id=None)
+            price_batch.extend(rows)
+            stats["prices"] += len(rows)
+    except Exception as e:
+        # Some games don't have sealed endpoints — skip gracefully
+        logger.debug(f"Sealed endpoint not available for {game}/{expansion_id}: {e}")
 
     # ── Batch write ────────────────────────────────────────
     with db.get_conn() as conn:
@@ -186,14 +192,14 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
                 execute_batch(cur, UPSERT_SQL, price_batch, page_size=500)
             # Sync log
             cur.execute("""
-                INSERT INTO scrydex_sync_log (expansion_id, expansion_name, card_count, last_synced, credits_used)
-                VALUES (%s, %s, %s, NOW(), %s)
-                ON CONFLICT (expansion_id) DO UPDATE SET
+                INSERT INTO scrydex_sync_log (game, expansion_id, expansion_name, card_count, last_synced, credits_used)
+                VALUES (%s, %s, %s, %s, NOW(), %s)
+                ON CONFLICT (game, expansion_id) DO UPDATE SET
                     expansion_name = EXCLUDED.expansion_name,
                     card_count = EXCLUDED.card_count,
                     last_synced = NOW(),
                     credits_used = EXCLUDED.credits_used
-            """, (expansion_id, expansion_name, stats["cards"], stats["credits"]))
+            """, (game, expansion_id, expansion_name, stats["cards"], stats["credits"]))
         conn.commit()
 
     return stats
@@ -202,7 +208,9 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Scrydex nightly price cache sync")
     parser.add_argument("--sets", help="Comma-separated expansion IDs")
-    parser.add_argument("--all", action="store_true", help="Sync ALL English expansions")
+    parser.add_argument("--all", action="store_true", help="Sync ALL expansions for the game")
+    parser.add_argument("--game", default="pokemon",
+                        help="Game to sync: pokemon, magicthegathering, lorcana, onepiece, riftbound")
     parser.add_argument("--dry-run", action="store_true", help="Show plan only")
     args = parser.parse_args()
 
@@ -215,24 +223,25 @@ def main():
         print("Set SCRYDEX_API_KEY and SCRYDEX_TEAM_ID")
         sys.exit(1)
 
+    game = args.game.lower().strip()
     db.init_pool()
-    client = ScrydexClient(api_key, team_id, db=db)
+    client = ScrydexClient(api_key, team_id, db=db, game=game)
 
     # Determine which expansions to sync
     if args.sets:
         expansion_ids = [s.strip() for s in args.sets.split(",")]
     elif args.all:
-        expansions = client.get_expansions(language_code="EN")
+        expansions = client.get_expansions()
         expansion_ids = [e["id"] for e in expansions]
     else:
         # Sync previously-pulled expansions (from scrydex_sync_log)
-        rows = db.query("SELECT expansion_id FROM scrydex_sync_log WHERE active = TRUE")
+        rows = db.query("SELECT expansion_id FROM scrydex_sync_log WHERE game = %s AND active = TRUE", (game,))
         expansion_ids = [r["expansion_id"] for r in rows]
         if not expansion_ids:
-            logger.info("No expansions in sync_log — use --all for first run")
+            logger.info(f"No {game} expansions in sync_log — use --all for first run")
             return
 
-    logger.info(f"Will sync {len(expansion_ids)} expansions")
+    logger.info(f"[{game}] Will sync {len(expansion_ids)} expansions")
 
     if args.dry_run:
         for eid in expansion_ids[:20]:
@@ -245,11 +254,11 @@ def main():
     t_start = time.time()
 
     for i, eid in enumerate(expansion_ids):
-        logger.info(f"[{i+1}/{len(expansion_ids)}] {eid}")
+        logger.info(f"[{i+1}/{len(expansion_ids)}] {game}/{eid}")
         try:
             stats = sync_expansion(client, eid, db)
             for k in totals:
-                totals[k] += stats[k]
+                totals[k] += stats.get(k, 0)
             logger.info(f"  {stats['cards']} cards, {stats['sealed']} sealed, "
                         f"{stats['prices']} prices, {stats['credits']} credits")
         except Exception as e:
@@ -257,7 +266,7 @@ def main():
         time.sleep(0.05)
 
     elapsed = int(time.time() - t_start)
-    print(f"\nDone in {elapsed}s!")
+    print(f"\nDone [{game}] in {elapsed}s!")
     print(f"  Expansions:  {len(expansion_ids)}")
     print(f"  Cards:       {totals['cards']}")
     print(f"  Sealed:      {totals['sealed']}")

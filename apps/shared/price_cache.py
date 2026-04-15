@@ -49,8 +49,9 @@ GRADE_TO_KEY = {
 
 class PriceCache:
 
-    def __init__(self, db):
+    def __init__(self, db, game: str = "pokemon"):
         self.db = db
+        self.game = game
 
     def get_card_by_tcgplayer_id(self, tcgplayer_id, **kwargs) -> Optional[dict]:
         """
@@ -60,9 +61,9 @@ class PriceCache:
         tcg_id = int(tcgplayer_id)
         rows = self.db.query("""
             SELECT * FROM scrydex_price_cache
-            WHERE tcgplayer_id = %s AND product_type = 'card'
+            WHERE tcgplayer_id = %s AND product_type = 'card' AND game = %s
             ORDER BY variant, condition, price_type
-        """, (tcg_id,))
+        """, (tcg_id, self.game))
 
         if not rows:
             return None
@@ -73,9 +74,9 @@ class PriceCache:
         """Read card data by Scrydex ID."""
         rows = self.db.query("""
             SELECT * FROM scrydex_price_cache
-            WHERE scrydex_id = %s AND product_type = 'card'
+            WHERE scrydex_id = %s AND product_type = 'card' AND game = %s
             ORDER BY variant, condition, price_type
-        """, (scrydex_id,))
+        """, (scrydex_id, self.game))
 
         if not rows:
             return None
@@ -92,9 +93,9 @@ class PriceCache:
         tcg_id = int(tcgplayer_id)
         rows = self.db.query("""
             SELECT * FROM scrydex_price_cache
-            WHERE tcgplayer_id = %s AND product_type = 'sealed'
+            WHERE tcgplayer_id = %s AND product_type = 'sealed' AND game = %s
             ORDER BY variant, condition
-        """, (tcg_id,))
+        """, (tcg_id, self.game))
 
         if not rows:
             return None
@@ -134,11 +135,11 @@ class PriceCache:
 
     def search_cards(self, query: str, *, set_name: str = None, limit: int = 5) -> list[dict]:
         """Search cards by name in the local cache."""
-        params = [f"%{query}%"]
+        params = [f"%{query}%", self.game]
         sql = """
             SELECT DISTINCT ON (scrydex_id) *
             FROM scrydex_price_cache
-            WHERE product_type = 'card' AND product_name ILIKE %s
+            WHERE product_type = 'card' AND product_name ILIKE %s AND game = %s
         """
         if set_name:
             sql += " AND expansion_name ILIKE %s"
@@ -161,11 +162,11 @@ class PriceCache:
     def search_sealed_products(self, query: str, *, set_name: str = None, limit: int = 5) -> list[dict]:
         """Search sealed products by name in the local cache.
         Results are sorted so base products appear before bundles/art sets."""
-        params = [f"%{query}%"]
+        params = [f"%{query}%", self.game]
         sql = """
             SELECT DISTINCT ON (scrydex_id) *
             FROM scrydex_price_cache
-            WHERE product_type = 'sealed' AND product_name ILIKE %s
+            WHERE product_type = 'sealed' AND product_name ILIKE %s AND game = %s
         """
         if set_name:
             sql += " AND expansion_name ILIKE %s"
