@@ -685,6 +685,20 @@ def _create_promo_routing_session(parent_title, promo_components, qty_to_break,
             comp.get("tcgplayer_id") is not None,
         ))
 
+    # Roll up item totals to session header
+    totals = db.query_one("""
+        SELECT COALESCE(SUM(market_price * quantity), 0) AS market_total,
+               COALESCE(SUM(offer_price), 0) AS offer_total
+        FROM intake_items
+        WHERE session_id = %s AND item_status IN ('good', 'damaged')
+    """, (session_id,))
+    if totals:
+        db.execute("""
+            UPDATE intake_sessions
+            SET total_market_value = %s, total_offer_amount = %s
+            WHERE id = %s
+        """, (totals["market_total"], totals["offer_total"], session_id))
+
     logger.info(f"Created promo routing session '{session_name}' ({session_id}) "
                 f"with {len(promo_components)} components")
     return session_id
