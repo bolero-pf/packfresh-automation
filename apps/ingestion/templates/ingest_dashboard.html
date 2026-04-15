@@ -1531,7 +1531,7 @@ function _renderRouteCards(sessionId, data) {
         if (price < 1) autoTag = '<span style="font-size:0.65rem; color:var(--text-dim); margin-left:4px;">auto: &lt;$1</span>';
         else if (price < 5) autoTag = '<span style="font-size:0.65rem; color:var(--text-dim); margin-left:4px;">auto: $1-$5</span>';
 
-        const splitBtn = qty > 1 ? `<button class="btn btn-sm" style="font-size:0.65rem; padding:2px 6px; color:var(--accent); border:1px solid var(--accent)33; background:transparent; margin-left:4px;" onclick="event.stopPropagation(); _showSplitRoute('${sessionId}','${item.id}',${qty})">Split</button>` : '';
+        const splitBtn = qty > 1 ? `<button class="btn btn-sm" style="font-size:0.65rem; padding:2px 6px; color:var(--accent); border:1px solid var(--accent)33; background:transparent; margin-left:4px;" onclick="event.stopPropagation(); _showSplitRoute('${sessionId}','${item.id}',${qty})">Split</button><button class="btn btn-sm" style="font-size:0.65rem; padding:2px 6px; color:var(--accent2,#c084fc); border:1px solid var(--accent2,#c084fc)33; background:transparent; margin-left:2px;" onclick="event.stopPropagation(); _splitAllSingles('${sessionId}','${item.id}',${qty})">→ Singles</button>` : '';
 
         html += `<div class="card" style="padding:8px 10px;" data-item-id="${item.id}">
             <div style="display:flex; gap:8px; align-items:center;">
@@ -1614,6 +1614,22 @@ async function _doSplitRoute(sessionId, itemId) {
         if (!r.ok) { alert(d.error || 'Split failed'); return; }
 
         // Reload routing data to pick up the new split item
+        _loadRouteData(sessionId);
+    } catch(e) {
+        alert('Split failed: ' + e.message);
+    }
+}
+
+async function _splitAllSingles(sessionId, itemId, qty) {
+    if (!confirm(`Split into ${qty} individual cards? Each will get its own routing decision.`)) return;
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/split-singles`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: itemId }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Split failed'); return; }
         _loadRouteData(sessionId);
     } catch(e) {
         alert('Split failed: ' + e.message);

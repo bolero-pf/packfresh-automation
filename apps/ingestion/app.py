@@ -1807,6 +1807,76 @@ def split_route(session_id):
     })
 
 
+@app.route("/api/ingest/session/<session_id>/split-singles", methods=["POST"])
+def split_singles(session_id):
+    """Explode an item with qty > 1 into individual qty=1 rows.
+    Body: { item_id }
+    """
+    data = request.get_json(silent=True) or {}
+    item_id = data.get("item_id")
+    if not item_id:
+        return jsonify({"error": "item_id required"}), 400
+
+    item = db.query_one("SELECT * FROM intake_items WHERE id = %s AND session_id = %s", (item_id, session_id))
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+
+    total_qty = item.get("quantity", 1)
+    if total_qty <= 1:
+        return jsonify({"error": "Item already qty=1"}), 400
+
+    session = db.query_one("SELECT offer_percentage FROM intake_sessions WHERE id = %s", (session_id,))
+    offer_pct = float(session.get("offer_percentage", 65)) / 100 if session else 0.65
+    market_price = float(item.get("market_price") or 0)
+    unit_offer = round(market_price * offer_pct, 2)
+    unit_cost = float(item.get("unit_cost_basis") or 0)
+    dest = item.get("routing_destination") or "storage"
+
+    import uuid as _uuid
+
+    # Keep original as qty=1
+    db.execute("UPDATE intake_items SET quantity = 1, offer_price = %s WHERE id = %s",
+               (unit_offer, item_id))
+
+    # Create (total_qty - 1) new rows
+    new_ids = []
+    for _ in range(total_qty - 1):
+        new_id = str(_uuid.uuid4())
+        new_ids.append(new_id)
+        db.execute("""
+            INSERT INTO intake_items (
+                id, session_id, product_name, set_name, tcgplayer_id, card_number,
+                condition, rarity, variant, language, variance,
+                quantity, market_price, offer_price, unit_cost_basis,
+                product_type, is_mapped, item_status, is_graded, grade_company, grade_value,
+                routing_destination, verified_at, listing_condition
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s,
+                1, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s,
+                %s, %s, %s
+            )
+        """, (
+            new_id, session_id, item.get("product_name"), item.get("set_name"),
+            item.get("tcgplayer_id"), item.get("card_number"),
+            item.get("condition"), item.get("rarity"), item.get("variant"),
+            item.get("language"), item.get("variance"),
+            market_price, unit_offer, unit_cost,
+            item.get("product_type", "raw"), item.get("is_mapped", False),
+            item.get("item_status", "good"), item.get("is_graded", False),
+            item.get("grade_company"), item.get("grade_value"),
+            dest, item.get("verified_at"), item.get("listing_condition"),
+        ))
+
+    return jsonify({
+        "success": True,
+        "original_id": item_id,
+        "created": len(new_ids),
+        "total": total_qty,
+    })
+
+
 @app.route("/api/ingest/session/<session_id>/route-summary")
 def route_summary(session_id):
     """Get routing status for a session's raw items."""
