@@ -360,11 +360,14 @@ async function doLinkSearch() {
     return;
   }
 
-  results.innerHTML = data.results.map(r => `
-    <div class="link-row" onclick="doLink('${r.scrydex_id}')">
+  results.innerHTML = data.results.map(r => {
+    const variantTag = r.variant && r.variant !== 'normal'
+      ? `<span style="background:rgba(139,92,246,0.15);color:#a78bfa;padding:1px 6px;border-radius:3px;font-size:0.7rem;font-weight:600;">${r.variant_label || r.variant}</span>`
+      : '';
+    return `<div class="link-row" onclick="doLink('${r.scrydex_id}', '${r.variant || 'normal'}')">
       ${r.image ? `<img src="${r.image}" alt="">` : '<div style="width:48px;height:48px;background:var(--bg);border-radius:4px;"></div>'}
       <div class="info">
-        <div class="name">${r.name}</div>
+        <div class="name">${r.name} ${variantTag}</div>
         <div class="meta">${r.set || ''} &middot; ${r.type} &middot; ${r.scrydex_id}</div>
       </div>
       <div>
@@ -372,19 +375,19 @@ async function doLinkSearch() {
         ${r.low != null ? `<br><span style="color:var(--dim);font-size:0.75rem;">low $${r.low.toFixed(2)}</span>` : ''}
       </div>
       ${r.already_linked ? '<span class="already-linked">already linked</span>' : ''}
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 document.getElementById('link-search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doLinkSearch(); });
 
-async function doLink(scrydexId) {
+async function doLink(scrydexId, variant) {
   if (linkingIdx === null) return;
   const item = umRows[linkingIdx];
   const resp = await fetch('/api/price-compare/link', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ tcgplayer_id: item.tcgplayer_id, scrydex_id: scrydexId })
+    body: JSON.stringify({ tcgplayer_id: item.tcgplayer_id, scrydex_id: scrydexId, variant: variant || 'normal' })
   });
   const data = await resp.json();
   if (data.ok) {

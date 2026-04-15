@@ -2474,21 +2474,28 @@ def scrydex_search_for_link():
         where.append("product_type = %s")
         params.append(product_type)
 
-    # Get distinct products with their best price
+    # Get each variant as a separate row so PC ETBs show both normal + pokemonCenter
     results = db.query(f"""
-        SELECT DISTINCT ON (scrydex_id)
-            scrydex_id, product_name, expansion_name, product_type,
+        SELECT DISTINCT ON (scrydex_id, variant)
+            scrydex_id, product_name, expansion_name, product_type, variant,
             market_price, low_price, image_medium, tcgplayer_id
         FROM scrydex_price_cache
         WHERE {' AND '.join(where)}
         AND condition IN ('NM', 'U') AND price_type = 'raw'
         ORDER BY scrydex_id, variant
-        LIMIT 20
+        LIMIT 30
     """, tuple(params))
+
+    variant_labels = {
+        "normal": "Normal", "pokemonCenter": "Pokemon Center",
+        "holofoil": "Holofoil", "reverseHolofoil": "Reverse Holofoil",
+    }
 
     return jsonify({
         "results": [{
             "scrydex_id": r["scrydex_id"],
+            "variant": r["variant"],
+            "variant_label": variant_labels.get(r["variant"], r["variant"]),
             "name": r["product_name"],
             "set": r["expansion_name"],
             "type": r["product_type"],
@@ -2503,54 +2510,55 @@ def scrydex_search_for_link():
 @app.route("/api/price-compare/link", methods=["POST"])
 def scrydex_link():
     """
-    Manually link a store item (tcgplayer_id) to a Scrydex product.
-    Body: { "tcgplayer_id": 12345, "scrydex_id": "sv8-s2" }
+    Manually link a store item (tcgplayer_id) to a Scrydex product + variant.
+    Body: { "tcgplayer_id": 12345, "scrydex_id": "sv8-s2", "variant": "pokemonCenter" }
     """
     data = request.get_json(silent=True) or {}
     tcg_id = data.get("tcgplayer_id")
     scrydex_id = data.get("scrydex_id")
+    variant = data.get("variant", "normal")
     if not tcg_id or not scrydex_id:
         return jsonify({"error": "Need tcgplayer_id and scrydex_id"}), 400
 
     tcg_id = int(tcg_id)
 
-    # Update cache rows
-    updated = db.execute(
-        "UPDATE scrydex_price_cache SET tcgplayer_id = %s WHERE scrydex_id = %s AND tcgplayer_id IS NULL",
-        (tcg_id, scrydex_id)
+    # Update cache rows for this specific variant
+    db.execute(
+        "UPDATE scrydex_price_cache SET tcgplayer_id = %s WHERE scrydex_id = %s AND variant = %s AND tcgplayer_id IS NULL",
+        (tcg_id, scrydex_id, variant)
     )
 
-    # Add to mapping table
+    # Also update any generic rows (without variant specificity) for this scrydex_id
+    # so card lookups by tcgplayer_id can find image/name data
+    db.execute(
+        "UPDATE scrydex_price_cache SET tcgplayer_id = %s WHERE scrydex_id = %s AND variant = %s AND tcgplayer_id IS NULL",
+        (tcg_id, scrydex_id, variant)
+    )
+
+    # Add to mapping table (scrydex_id -> tcgplayer_id)
+    # Note: for variant-specific links (PC ETB vs normal ETB), both map to the
+    # same scrydex_id but different tcgplayer_ids. The mapping table stores
+    # the primary link; variant-specific pricing comes from the cache rows.
     try:
         db.execute("""
             INSERT INTO scrydex_tcg_map (scrydex_id, tcgplayer_id, product_type, updated_at)
             VALUES (%s, %s, 'sealed', NOW())
-            ON CONFLICT (scrydex_id) DO UPDATE SET tcgplayer_id = EXCLUDED.tcgplayer_id, updated_at = NOW()
+            ON CONFLICT (scrydex_id) DO NOTHING
         """, (scrydex_id, tcg_id))
     except Exception:
         pass
 
-    # Also try the reverse unique index on tcgplayer_id
-    try:
-        db.execute("""
-            INSERT INTO scrydex_tcg_map (scrydex_id, tcgplayer_id, product_type, updated_at)
-            VALUES (%s, %s, 'sealed', NOW())
-            ON CONFLICT ON CONSTRAINT idx_scrydex_tcg_map_tcg
-            DO UPDATE SET scrydex_id = EXCLUDED.scrydex_id, updated_at = NOW()
-        """, (scrydex_id, tcg_id))
-    except Exception:
-        pass
-
-    # Get the linked price to confirm
+    # Get the linked price from the specific variant to confirm
     row = db.query_one("""
         SELECT product_name, market_price FROM scrydex_price_cache
-        WHERE scrydex_id = %s AND condition IN ('NM', 'U') AND price_type = 'raw'
+        WHERE scrydex_id = %s AND variant = %s AND condition IN ('NM', 'U') AND price_type = 'raw'
         LIMIT 1
-    """, (scrydex_id,))
+    """, (scrydex_id, variant))
 
     return jsonify({
         "ok": True,
         "scrydex_id": scrydex_id,
+        "variant": variant,
         "tcgplayer_id": tcg_id,
         "name": row["product_name"] if row else None,
         "market": float(row["market_price"]) if row and row["market_price"] else None,
