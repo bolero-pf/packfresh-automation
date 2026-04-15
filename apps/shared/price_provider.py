@@ -127,10 +127,12 @@ class PriceProvider:
             try:
                 cached = self.cache.get_card_by_tcgplayer_id(tcgplayer_id)
                 if cached:
-                    logger.debug(f"Cache hit: card tcg={tcgplayer_id}")
+                    logger.info(f"Cache HIT: card tcg={tcgplayer_id}")
                     return self._stamp(cached, "cache")
+                else:
+                    logger.info(f"Cache MISS: card tcg={tcgplayer_id}")
             except Exception as e:
-                logger.warning(f"Cache read failed for card {tcgplayer_id}: {e}")
+                logger.warning(f"Cache read FAILED for card {tcgplayer_id}: {e}")
 
         try:
             result = self.primary.get_card_by_tcgplayer_id(
@@ -171,10 +173,12 @@ class PriceProvider:
             try:
                 cached = self.cache.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
                 if cached:
-                    logger.debug(f"Cache hit: sealed tcg={tcgplayer_id}")
+                    logger.info(f"Cache HIT: sealed tcg={tcgplayer_id}")
                     return self._stamp(cached, "cache")
+                else:
+                    logger.info(f"Cache MISS: sealed tcg={tcgplayer_id}")
             except Exception as e:
-                logger.warning(f"Cache read failed for sealed {tcgplayer_id}: {e}")
+                logger.warning(f"Cache read FAILED for sealed {tcgplayer_id}: {e}")
 
         try:
             result = self.primary.get_sealed_product_by_tcgplayer_id(
