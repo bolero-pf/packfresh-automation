@@ -2268,6 +2268,144 @@ def price_compare(tcgplayer_id):
     return jsonify(result)
 
 
+@app.route("/price-dashboard")
+def price_dashboard():
+    """Side-by-side comparison of Store vs PPT vs Cache across inventory."""
+    return render_template("price_dashboard.html")
+
+
+@app.route("/api/price-compare/batch", methods=["POST"])
+def price_compare_batch():
+    """
+    Batch price comparison for inventory items.
+    Body: { "filter": "sealed"|"card"|"all", "limit": 100, "offset": 0, "search": "" }
+    Returns array of items with store/ppt/cache prices.
+    """
+    from ppt_client import PPTClient
+    from price_cache import PriceCache
+
+    data = request.get_json(silent=True) or {}
+    product_filter = data.get("filter", "all")
+    limit = min(int(data.get("limit", 50)), 200)
+    offset = int(data.get("offset", 0))
+    search = data.get("search", "").strip()
+
+    # Get inventory items that have tcgplayer IDs
+    where = ["ipc.tcgplayer_id IS NOT NULL", "ipc.is_damaged = FALSE"]
+    params = []
+
+    if product_filter == "sealed":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%sealed%", "%booster%", "%etb%"])
+    elif product_filter == "card":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%slab%")
+
+    if search:
+        where.append("ipc.title ILIKE %s")
+        params.append(f"%{search}%")
+
+    sql = f"""
+        SELECT ipc.title, ipc.tcgplayer_id, ipc.shopify_variant_id,
+               ipc.shopify_price, ipc.shopify_qty, ipc.tags
+        FROM inventory_product_cache ipc
+        WHERE {' AND '.join(where)}
+        ORDER BY ipc.title ASC
+        LIMIT %s OFFSET %s
+    """
+    params.extend([limit, offset])
+    items = db.query(sql, tuple(params))
+
+    # Count total
+    count_sql = f"""
+        SELECT COUNT(*) as cnt FROM inventory_product_cache ipc
+        WHERE {' AND '.join(where)}
+    """
+    total = db.query_one(count_sql, tuple(params[:-2]))["cnt"]
+
+    # Initialize cache reader
+    cache = PriceCache(db)
+
+    results = []
+    for item in items:
+        tcg_id = item["tcgplayer_id"]
+        row = {
+            "title": item["title"],
+            "tcgplayer_id": tcg_id,
+            "variant_id": item["shopify_variant_id"],
+            "store_price": float(item["shopify_price"]) if item["shopify_price"] else None,
+            "qty": item["shopify_qty"],
+            "cache": None,
+            "ppt": None,
+        }
+
+        # Cache read (instant)
+        try:
+            # Try card first, then sealed
+            cached = cache.get_card_by_tcgplayer_id(tcg_id)
+            if not cached:
+                cached = cache.get_sealed_product_by_tcgplayer_id(tcg_id)
+            if cached:
+                market = PriceProvider.extract_market_price(cached)
+                row["cache"] = {
+                    "market": float(market) if market else None,
+                    "name": cached.get("name"),
+                    "source": "scrydex_cache",
+                }
+        except Exception:
+            pass
+
+        results.append(row)
+
+    return jsonify({
+        "items": results,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    })
+
+
+@app.route("/api/price-compare/batch/enrich", methods=["POST"])
+def price_compare_enrich():
+    """
+    Enrich a single item with live PPT data. Called lazily from the UI
+    to avoid hammering PPT for the whole list.
+    Body: { "tcgplayer_id": 12345 }
+    """
+    from ppt_client import PPTClient
+
+    data = request.get_json(silent=True) or {}
+    tcg_id = data.get("tcgplayer_id")
+    if not tcg_id:
+        return jsonify({"error": "No tcgplayer_id"}), 400
+
+    ppt_key = os.getenv("PPT_API_KEY", "")
+    if not ppt_key:
+        return jsonify({"error": "PPT not configured"}), 503
+
+    try:
+        ppt_direct = PPTClient(ppt_key)
+        card = ppt_direct.get_card_by_tcgplayer_id(int(tcg_id))
+        if card:
+            market = PPTClient.extract_market_price(card)
+            return jsonify({
+                "market": float(market) if market else None,
+                "name": card.get("name"),
+                "source": "ppt_live",
+            })
+        sealed = ppt_direct.get_sealed_product_by_tcgplayer_id(int(tcg_id))
+        if sealed:
+            market = PPTClient.extract_market_price(sealed)
+            return jsonify({
+                "market": float(market) if market else None,
+                "name": sealed.get("name"),
+                "source": "ppt_live",
+            })
+        return jsonify({"market": None, "source": "ppt_live", "error": "not found"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/enrich/preview", methods=["POST"])
 def enrich_preview():
     """

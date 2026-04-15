@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Price Comparison — PPT vs Cache (Scrydex)</title>
+<style>
+  :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --text: #e4e4e7; --dim: #8b8d97; --green: #22c55e; --red: #ef4444; --amber: #f59e0b; --blue: #3b82f6; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; padding: 20px; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .subtitle { color: var(--dim); margin-bottom: 16px; font-size: 0.85rem; }
+  .controls { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+  .controls select, .controls input, .controls button { background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 0.85rem; }
+  .controls button { cursor: pointer; background: var(--blue); border-color: var(--blue); font-weight: 600; }
+  .controls button:hover { opacity: 0.9; }
+  .controls button.secondary { background: var(--card); border-color: var(--border); }
+  .stats { color: var(--dim); font-size: 0.8rem; margin-left: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 10px 8px; border-bottom: 2px solid var(--border); color: var(--dim); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; position: sticky; top: 0; background: var(--bg); }
+  td { padding: 8px; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+  tr:hover { background: rgba(255,255,255,0.03); }
+  .price { font-family: 'SF Mono', 'Consolas', monospace; font-weight: 600; }
+  .delta { font-size: 0.78rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+  .delta.good { background: rgba(34,197,94,0.15); color: var(--green); }
+  .delta.warn { background: rgba(245,158,11,0.15); color: var(--amber); }
+  .delta.bad { background: rgba(239,68,68,0.15); color: var(--red); }
+  .delta.neutral { color: var(--dim); }
+  .loading { color: var(--dim); font-style: italic; }
+  .ppt-cell { min-width: 80px; }
+  .fetch-btn { background: none; border: 1px solid var(--border); color: var(--blue); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; }
+  .fetch-btn:hover { background: var(--blue); color: white; }
+  .miss { color: var(--dim); font-style: italic; }
+  .pager { display: flex; gap: 8px; margin-top: 12px; justify-content: center; align-items: center; }
+  .pager button { padding: 6px 14px; }
+  .source-tag { font-size: 0.65rem; color: var(--dim); display: block; }
+  .qty { color: var(--dim); }
+  .qty.zero { color: var(--red); }
+</style>
+</head>
+<body>
+
+<h1>Price Comparison Dashboard</h1>
+<p class="subtitle">Store Price vs PPT (live) vs Cache (Scrydex nightly) — click "Fetch PPT" to load live prices per row</p>
+
+<div class="controls">
+  <select id="filter">
+    <option value="all">All Products</option>
+    <option value="sealed" selected>Sealed Only</option>
+    <option value="card">Slabs Only</option>
+  </select>
+  <input type="text" id="search" placeholder="Search by name..." style="width:250px;">
+  <button onclick="loadData()">Search</button>
+  <button class="secondary" onclick="fetchAllPPT()">Fetch All PPT (slow)</button>
+  <span class="stats" id="stats"></span>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Product</th>
+      <th>Qty</th>
+      <th>Store $</th>
+      <th>Cache $ <span style="font-weight:normal;text-transform:none">(Scrydex)</span></th>
+      <th>Store↔Cache</th>
+      <th class="ppt-cell">PPT $ <span style="font-weight:normal;text-transform:none">(live)</span></th>
+      <th>PPT↔Cache</th>
+      <th>TCG ID</th>
+    </tr>
+  </thead>
+  <tbody id="tbody"></tbody>
+</table>
+
+<div class="pager">
+  <button class="secondary" id="prevBtn" onclick="prevPage()" disabled>&larr; Prev</button>
+  <span id="pageInfo" style="color:var(--dim);font-size:0.85rem;"></span>
+  <button class="secondary" id="nextBtn" onclick="nextPage()">Next &rarr;</button>
+</div>
+
+<script>
+const PAGE_SIZE = 50;
+let currentOffset = 0;
+let currentTotal = 0;
+let rows = [];
+
+async function loadData() {
+  const filter = document.getElementById('filter').value;
+  const search = document.getElementById('search').value;
+  const tbody = document.getElementById('tbody');
+  tbody.innerHTML = '<tr><td colspan="8" class="loading">Loading...</td></tr>';
+
+  const resp = await fetch('/api/price-compare/batch', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ filter, search, limit: PAGE_SIZE, offset: currentOffset })
+  });
+  const data = await resp.json();
+  rows = data.items;
+  currentTotal = data.total;
+  renderTable();
+  document.getElementById('stats').textContent = `${currentTotal} items`;
+  document.getElementById('pageInfo').textContent = `${currentOffset + 1}–${Math.min(currentOffset + PAGE_SIZE, currentTotal)} of ${currentTotal}`;
+  document.getElementById('prevBtn').disabled = currentOffset === 0;
+  document.getElementById('nextBtn').disabled = currentOffset + PAGE_SIZE >= currentTotal;
+}
+
+function renderTable() {
+  const tbody = document.getElementById('tbody');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="loading">No results</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((r, i) => {
+    const store = r.store_price;
+    const cacheP = r.cache ? r.cache.market : null;
+    const pptP = r.ppt ? r.ppt.market : null;
+    const qty = r.qty || 0;
+
+    // Store vs Cache delta
+    let storeCacheDelta = '';
+    if (store && cacheP) {
+      const pct = ((store - cacheP) / cacheP * 100).toFixed(1);
+      const cls = Math.abs(pct) < 3 ? 'good' : Math.abs(pct) < 10 ? 'warn' : 'bad';
+      storeCacheDelta = `<span class="delta ${cls}">${pct > 0 ? '+' : ''}${pct}%</span>`;
+    }
+
+    // PPT vs Cache delta
+    let pptCacheDelta = '';
+    if (pptP != null && cacheP != null) {
+      const pct = ((pptP - cacheP) / cacheP * 100).toFixed(1);
+      const cls = Math.abs(pct) < 3 ? 'good' : Math.abs(pct) < 10 ? 'warn' : 'bad';
+      pptCacheDelta = `<span class="delta ${cls}">${pct > 0 ? '+' : ''}${pct}%</span>`;
+    }
+
+    const pptCell = r.ppt
+      ? `<span class="price">$${pptP != null ? pptP.toFixed(2) : '—'}</span>`
+      : `<button class="fetch-btn" onclick="fetchPPT(${i}, ${r.tcgplayer_id})">Fetch PPT</button>`;
+
+    return `<tr>
+      <td title="${r.cache ? r.cache.name || '' : ''}">${r.title}</td>
+      <td class="qty ${qty === 0 ? 'zero' : ''}">${qty}</td>
+      <td class="price">${store != null ? '$' + store.toFixed(2) : '—'}</td>
+      <td>${cacheP != null ? '<span class="price">$' + cacheP.toFixed(2) + '</span>' : '<span class="miss">no cache</span>'}</td>
+      <td>${storeCacheDelta}</td>
+      <td class="ppt-cell">${pptCell}</td>
+      <td>${pptCacheDelta}</td>
+      <td style="color:var(--dim);font-size:0.78rem;">${r.tcgplayer_id}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function fetchPPT(idx, tcgId) {
+  const btn = event.target;
+  btn.textContent = '...';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/price-compare/batch/enrich', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ tcgplayer_id: tcgId })
+    });
+    const data = await resp.json();
+    rows[idx].ppt = data;
+    renderTable();
+  } catch(e) {
+    btn.textContent = 'err';
+  }
+}
+
+async function fetchAllPPT() {
+  for (let i = 0; i < rows.length; i++) {
+    if (!rows[i].ppt) {
+      try {
+        const resp = await fetch('/api/price-compare/batch/enrich', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ tcgplayer_id: rows[i].tcgplayer_id })
+        });
+        rows[i].ppt = await resp.json();
+        renderTable();
+      } catch(e) {}
+      // Small delay to not hammer PPT
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+}
+
+function prevPage() { currentOffset = Math.max(0, currentOffset - PAGE_SIZE); loadData(); }
+function nextPage() { currentOffset += PAGE_SIZE; loadData(); }
+
+// Search on enter
+document.getElementById('search').addEventListener('keydown', e => { if (e.key === 'Enter') { currentOffset = 0; loadData(); }});
+document.getElementById('filter').addEventListener('change', () => { currentOffset = 0; loadData(); });
+
+// Initial load
+loadData();
+</script>
+</body>
+</html>
