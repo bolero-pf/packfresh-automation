@@ -150,20 +150,24 @@ class PriceProvider:
         return self._stamp(result, self._primary_source)
 
     def search_cards(self, query, *, set_name=None, limit=5):
+        # Merge cache + live results so the user sees everything
+        merged = []
         if self.cache:
             try:
-                results = self.cache.search_cards(query, set_name=set_name, limit=limit)
-                if results:
-                    return self._stamp(results, "cache")
+                cached = self.cache.search_cards(query, set_name=set_name, limit=limit)
+                if cached:
+                    merged.extend(self._stamp(cached, "cache"))
             except Exception as e:
                 logger.warning(f"Cache search failed: {e}")
         try:
-            return self._stamp(
-                self.primary.search_cards(query, set_name=set_name, limit=limit),
-                self._primary_source,
-            )
+            live = self.primary.search_cards(query, set_name=set_name, limit=limit)
+            if live:
+                merged.extend(self._stamp(live, self._primary_source))
         except (PPTError, ScrydexError) as e:
-            raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
+            if not merged:
+                raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
+            logger.warning(f"Live card search failed (returning cache only): {e}")
+        return self._dedup_search(merged, limit)
 
     def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
         # Cache-first
@@ -194,20 +198,49 @@ class PriceProvider:
         return self._stamp(result, self._primary_source)
 
     def search_sealed_products(self, query, *, set_name=None, limit=5):
+        # Merge cache + live results so the user sees everything
+        merged = []
         if self.cache:
             try:
-                results = self.cache.search_sealed_products(query, set_name=set_name, limit=limit)
-                if results:
-                    return self._stamp(results, "cache")
+                cached = self.cache.search_sealed_products(query, set_name=set_name, limit=limit)
+                if cached:
+                    merged.extend(self._stamp(cached, "cache"))
             except Exception as e:
                 logger.warning(f"Cache sealed search failed: {e}")
         try:
-            return self._stamp(
-                self.primary.search_sealed_products(query, set_name=set_name, limit=limit),
-                self._primary_source,
-            )
+            live = self.primary.search_sealed_products(query, set_name=set_name, limit=limit)
+            if live:
+                merged.extend(self._stamp(live, self._primary_source))
         except (PPTError, ScrydexError) as e:
-            raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
+            if not merged:
+                raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
+            logger.warning(f"Live sealed search failed (returning cache only): {e}")
+        return self._dedup_search(merged, limit)
+
+    @staticmethod
+    def _dedup_search(results: list, limit: int) -> list:
+        """Deduplicate merged search results. Cache wins over live for same product."""
+        if not results:
+            return results
+        seen_names = {}
+        seen_tcg = set()
+        deduped = []
+        # Cache items come first in the merged list, so they win ties
+        for item in results:
+            name = (item.get("name") or "").lower().strip()
+            tcg_id = item.get("tcgPlayerId") or item.get("tcgplayer_id")
+            # Skip if we already have this tcgplayer_id
+            if tcg_id and tcg_id in seen_tcg:
+                continue
+            # Skip if exact same name from a different source
+            if name and name in seen_names:
+                continue
+            if tcg_id:
+                seen_tcg.add(tcg_id)
+            if name:
+                seen_names[name] = True
+            deduped.append(item)
+        return deduped[:limit]
 
     def parse_title(self, title, *, fuzzy=True, max_suggestions=5):
         try:

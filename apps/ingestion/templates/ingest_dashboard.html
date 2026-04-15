@@ -2554,12 +2554,25 @@ async function addItemSearch() {
             const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || 0;
             const price = p.unopenedPrice || p.marketPrice || 0;
             const setName = p.setName || p.set_name || '';
-            return `<div style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
-                         onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
-                         onclick="addItemSelect(${tcgId}, '${name.replace(/'/g,"\\'")}', ${price}, '${setName.replace(/'/g,"\\'")}')">
-                <div style="font-weight:600;">${name}</div>
-                <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}${p._price_source ? ' <small style="opacity:0.7;">' + ({cache:'⚡cache',ppt:'PPT',scrydex:'SDX'}[p._price_source]||p._price_source) + '</small>' : ''}</div>
-            </div>`;
+            const img = p.imageCdnUrl400 || p.imageCdnUrl || p.imageCdnUrl800 || '';
+            const src = p._price_source ? ({cache:'cache',ppt:'PPT',scrydex:'SDX'}[p._price_source]||p._price_source) : '';
+            const nameLower = name.toLowerCase();
+            const isBundle = ['art bundle','set of','bundle (','pack of','case','display'].some(kw => nameLower.includes(kw));
+            const bundleStyle = isBundle ? ' opacity:0.6; border-left:3px solid var(--amber);' : '';
+            const bundleTag = isBundle ? ' <span style="color:var(--amber);font-size:0.7rem;font-weight:700;">⚠ BUNDLE</span>' : '';
+            const imgHtml = img ? '<img src="' + img + '" style="width:48px; height:48px; object-fit:contain; border-radius:4px; flex-shrink:0;">' : '<div style="width:48px;height:48px;background:var(--surface-2);border-radius:4px;flex-shrink:0;"></div>';
+            return '<div style="display:flex; gap:10px; align-items:center; padding:8px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:4px; cursor:pointer;' + bundleStyle + '"'
+                + ' onmouseover="this.style.background=\'var(--surface-2)\'" onmouseout="this.style.background=\'transparent\'"'
+                + ' onclick="addItemSelect(' + tcgId + ', \'' + name.replace(/'/g,"\\'") + '\', ' + price + ', \'' + setName.replace(/'/g,"\\'") + '\')">'
+                + imgHtml
+                + '<div style="flex:1; min-width:0;">'
+                + '<div style="font-weight:600; font-size:0.9rem;">' + name + bundleTag + '</div>'
+                + '<div style="font-size:0.8rem; color:var(--text-dim);">' + setName + ' · TCG#' + tcgId + '</div>'
+                + '</div>'
+                + '<div style="text-align:right; flex-shrink:0;">'
+                + '<div style="font-weight:700;">$' + Number(price).toFixed(2) + '</div>'
+                + '<div style="font-size:0.7rem; color:var(--text-dim);">' + src + '</div>'
+                + '</div></div>';
         }).join('');
         html += '</div>';
         html += `<div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border); display:flex; gap:8px;">
