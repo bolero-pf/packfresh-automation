@@ -2444,7 +2444,7 @@ async function relinkSearch() {
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
                          onclick="relinkSelect(${tcgId}, '${name.replace(/'/g,"\\'")}', ${price}, '${setName.replace(/'/g,"\\'")}')">
                 <div style="font-weight:600;">${name}</div>
-                <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
+                <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}${p._price_source ? ' <small style="opacity:0.7;">' + ({cache:'⚡cache',ppt:'PPT',scrydex:'SDX'}[p._price_source]||p._price_source) + '</small>' : ''}</div>
             </div>`;
         }).join('') + '</div>';
     } catch(err) {
@@ -2558,7 +2558,7 @@ async function addItemSearch() {
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
                          onclick="addItemSelect(${tcgId}, '${name.replace(/'/g,"\\'")}', ${price}, '${setName.replace(/'/g,"\\'")}')">
                 <div style="font-weight:600;">${name}</div>
-                <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
+                <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}${p._price_source ? ' <small style="opacity:0.7;">' + ({cache:'⚡cache',ppt:'PPT',scrydex:'SDX'}[p._price_source]||p._price_source) + '</small>' : ''}</div>
             </div>`;
         }).join('');
         html += '</div>';

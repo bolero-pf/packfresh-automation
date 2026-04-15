@@ -2160,6 +2160,7 @@ def ppt_lookup_by_id(tcgplayer_id):
                 "market_price": float(market_price) if market_price else 0,
                 "variants": variants,
                 "image_url": card.get("imageCdnUrl800") or card.get("imageCdnUrl") or card.get("imageCdnUrl400"),
+                "price_source": card.get("_price_source"),
             })
 
         # Try sealed
@@ -2173,6 +2174,7 @@ def ppt_lookup_by_id(tcgplayer_id):
                 "set_name": sealed.get("setName") or sealed.get("set_name", ""),
                 "tcgplayer_id": tcgplayer_id,
                 "market_price": float(price),
+                "price_source": sealed.get("_price_source"),
             })
 
         return jsonify({"found": False, "tcgplayer_id": tcgplayer_id})

@@ -1143,9 +1143,10 @@ async function runSearch(q){{
       if (!id) return '';
       const safeId = String(id).replace(/[^0-9]/g, '');
       if (!safeId) return '';
+      const src = it._price_source ? ` <small style="color:var(--text-dim);font-size:0.65rem;opacity:0.7;">${{{{cache:'⚡cache',ppt:'PPT',scrydex:'SDX'}}[it._price_source]||it._price_source}}</small>` : '';
       return `<div class="dd-item" onpointerdown="event.preventDefault();selectItem('${{safeId}}')">
         ${{esc(it.name)}}
-        <span class="price">$${{(+p).toFixed(2)}}</span>
+        <span class="price">$${{(+p).toFixed(2)}}${{src}}</span>
         <span class="set">${{esc(it.setName||'')}}</span>
       </div>`;
     }}).join('');
@@ -1204,7 +1205,7 @@ function renderResult(ppt, prev){{
       <div><h2>${{esc(ppt.name)}}</h2><div style="color:var(--dim);font-size:.82rem;margin-top:2px;">${{esc(ppt.setName||'—')}}</div></div>
       <div style="text-align:right;flex-shrink:0;">
         <div style="font-size:.68rem;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px;">Market Price</div>
-        <div style="font-size:1.3rem;font-weight:700;color:var(--green);">$${{(+price).toFixed(2)}}</div>
+        <div style="font-size:1.3rem;font-weight:700;color:var(--green);">$${{(+price).toFixed(2)}} ${{ppt._price_source ? `<small style="font-size:0.55rem;font-weight:400;color:var(--dim);opacity:0.7;">${{{{cache:'⚡cache',ppt:'PPT',scrydex:'SDX'}}[ppt._price_source]||ppt._price_source}}</small>` : ''}}</div>
       </div>
     </div>
     ${{!era?`<div style="padding:8px 18px;background:var(--amber-bg);border-bottom:1px solid var(--amber);color:var(--amber);font-size:.82rem;">⚠ <strong>Era unknown.</strong> Listing will include a NEEDS REVIEW note.</div>`:''}}

@@ -141,11 +141,60 @@ def call_dailyrunner():
         print(f"❌ Cron call failed: {e}")
 
 
+def run_scrydex_sync():
+    """Run the Scrydex nightly cache sync (active expansions only)."""
+    try:
+        scrydex_key = os.environ.get("SCRYDEX_API_KEY", "")
+        scrydex_team = os.environ.get("SCRYDEX_TEAM_ID", "")
+        if not scrydex_key or not scrydex_team:
+            print("⏭ Scrydex sync skipped — SCRYDEX_API_KEY/SCRYDEX_TEAM_ID not set")
+            return
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+        from scrydex_client import ScrydexClient
+        from scrydex_nightly import sync_expansion
+        import db as shared_db
+
+        shared_db.init_pool()
+        client = ScrydexClient(scrydex_key, scrydex_team, db=shared_db)
+
+        rows = shared_db.query("SELECT expansion_id FROM scrydex_sync_log WHERE active = TRUE")
+        expansion_ids = [r["expansion_id"] for r in rows]
+        if not expansion_ids:
+            print("⏭ Scrydex sync: no active expansions in sync_log")
+            return
+
+        print(f"🔄 Scrydex sync: {len(expansion_ids)} active expansions")
+        totals = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0}
+        import time as _time
+        t_start = _time.time()
+
+        for i, eid in enumerate(expansion_ids):
+            try:
+                stats = sync_expansion(client, eid, shared_db)
+                for k in totals:
+                    totals[k] += stats.get(k, 0)
+                if (i + 1) % 20 == 0:
+                    print(f"  ... {i+1}/{len(expansion_ids)} done ({totals['credits']} credits)")
+            except Exception as e:
+                print(f"  ❌ {eid}: {e}")
+            _time.sleep(0.05)
+
+        elapsed = int(_time.time() - t_start)
+        print(f"✅ Scrydex sync done in {elapsed}s — {totals['cards']} cards, "
+              f"{totals['sealed']} sealed, {totals['prices']} prices, {totals['credits']} credits")
+    except Exception as e:
+        print(f"❌ Scrydex sync failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 if os.environ.get("ENABLE_CRON", "").lower() == "true":
     scheduler = BackgroundScheduler()
     scheduler.add_job(call_dailyrunner, "cron", hour=3)  # UTC
+    scheduler.add_job(run_scrydex_sync, "cron", hour=4)  # UTC — after dailyrunner + analytics snapshot
     scheduler.start()
-    print("✅ Scheduler started — /run-dailyrunner will fire daily at 3 AM UTC")
+    print("✅ Scheduler started — dailyrunner at 3 AM UTC, Scrydex sync at 4 AM UTC")
 
 def load_csv(path):
     if not os.path.exists(path):
@@ -177,6 +226,16 @@ def home():
 @app.route("/dashboard/runlog")
 def runlog():
     return render_template("runlog.html")
+
+
+@app.route('/run-scrydex-sync', methods=["GET", "POST"])
+def trigger_scrydex_sync():
+    """Manually trigger Scrydex cache sync."""
+    from flask import jsonify
+    threading.Thread(target=run_scrydex_sync, daemon=True).start()
+    if request.method == "GET":
+        return redirect("/dashboard/runlog")
+    return jsonify({"ok": True, "started": True}), 200
 
 
 @app.route('/run-dailyrunner', methods=["GET", "POST"])

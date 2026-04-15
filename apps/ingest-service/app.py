@@ -845,6 +845,7 @@ def refresh_session_prices(session_id):
         ppt_low = None
         ppt_name = None
         error = None
+        source = None
 
         try:
             if ptype == "sealed":
@@ -853,6 +854,7 @@ def refresh_session_prices(session_id):
                 ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
 
             if ppt_data:
+                source = ppt_data.get("_price_source", "ppt")
                 if ptype == "sealed":
                     unopened = ppt_data.get("unopenedPrice")
                     prices = ppt_data.get("prices") or {}
@@ -877,7 +879,7 @@ def refresh_session_prices(session_id):
                     # Store full prices dict for per-condition lookup in comparisons step
                     price_cache[(tcg_id, ptype, is_graded, grade_co, grade_val)] = {
                         "ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name,
-                        "error": None, "raw_prices": prices,
+                        "error": None, "raw_prices": prices, "price_source": source,
                     }
                     fetched_count += 1
                     continue
@@ -907,7 +909,7 @@ def refresh_session_prices(session_id):
             error = str(e)
             app.logger.warning(f"Unexpected error for {tcg_id}: {e}")
 
-        price_cache[(tcg_id, ptype, is_graded, grade_co, grade_val)] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name, "error": error}
+        price_cache[(tcg_id, ptype, is_graded, grade_co, grade_val)] = {"ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name, "error": error, "price_source": source if ppt_data else None}
 
     # Build comparisons for ALL linked items (using whatever we've fetched so far)
     comparisons = []
@@ -958,6 +960,7 @@ def refresh_session_prices(session_id):
             "is_graded": is_graded,
             "grade_label": f"{grade_co} {grade_val}".strip() if is_graded else None,
             "condition": item.get("condition") or item.get("listing_condition"),
+            "price_source": cached.get("price_source") if cached else None,
         })
 
     succeeded = sum(1 for c in comparisons if c.get("ppt_market") is not None)

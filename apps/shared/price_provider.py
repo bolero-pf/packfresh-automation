@@ -59,6 +59,20 @@ class PriceProvider:
         self.mode = mode
         self.cache = cache
         self._client_class = type(primary)
+        # Determine the live source label from the primary client type
+        self._primary_source = "scrydex" if "Scrydex" in type(primary).__name__ else "ppt"
+
+    # ── source attribution ─────────────────────────────────────
+
+    def _stamp(self, result, source: str):
+        """Tag a result dict (or list of dicts) with _price_source."""
+        if isinstance(result, dict):
+            result["_price_source"] = source
+        elif isinstance(result, list):
+            for item in result:
+                if isinstance(item, dict):
+                    item["_price_source"] = source
+        return result
 
     # ── shadow comparison ─────────────────────────────────────────
 
@@ -114,7 +128,7 @@ class PriceProvider:
                 cached = self.cache.get_card_by_tcgplayer_id(tcgplayer_id)
                 if cached:
                     logger.debug(f"Cache hit: card tcg={tcgplayer_id}")
-                    return cached
+                    return self._stamp(cached, "cache")
             except Exception as e:
                 logger.warning(f"Cache read failed for card {tcgplayer_id}: {e}")
 
@@ -133,18 +147,21 @@ class PriceProvider:
                     tcgplayer_id, include_history=include_history
                 ),
             )
-        return result
+        return self._stamp(result, self._primary_source)
 
     def search_cards(self, query, *, set_name=None, limit=5):
         if self.cache:
             try:
                 results = self.cache.search_cards(query, set_name=set_name, limit=limit)
                 if results:
-                    return results
+                    return self._stamp(results, "cache")
             except Exception as e:
                 logger.warning(f"Cache search failed: {e}")
         try:
-            return self.primary.search_cards(query, set_name=set_name, limit=limit)
+            return self._stamp(
+                self.primary.search_cards(query, set_name=set_name, limit=limit),
+                self._primary_source,
+            )
         except (PPTError, ScrydexError) as e:
             raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
 
@@ -155,7 +172,7 @@ class PriceProvider:
                 cached = self.cache.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
                 if cached:
                     logger.debug(f"Cache hit: sealed tcg={tcgplayer_id}")
-                    return cached
+                    return self._stamp(cached, "cache")
             except Exception as e:
                 logger.warning(f"Cache read failed for sealed {tcgplayer_id}: {e}")
 
@@ -174,28 +191,30 @@ class PriceProvider:
                     tcgplayer_id, include_history=include_history
                 ),
             )
-        return result
+        return self._stamp(result, self._primary_source)
 
     def search_sealed_products(self, query, *, set_name=None, limit=5):
         if self.cache:
             try:
                 results = self.cache.search_sealed_products(query, set_name=set_name, limit=limit)
                 if results:
-                    return results
+                    return self._stamp(results, "cache")
             except Exception as e:
                 logger.warning(f"Cache sealed search failed: {e}")
         try:
-            return self.primary.search_sealed_products(
-                query, set_name=set_name, limit=limit
+            return self._stamp(
+                self.primary.search_sealed_products(query, set_name=set_name, limit=limit),
+                self._primary_source,
             )
         except (PPTError, ScrydexError) as e:
             raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
 
     def parse_title(self, title, *, fuzzy=True, max_suggestions=5):
         try:
-            return self.primary.parse_title(
+            result = self.primary.parse_title(
                 title, fuzzy=fuzzy, max_suggestions=max_suggestions
             )
+            return self._stamp(result, self._primary_source)
         except (PPTError, ScrydexError) as e:
             raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
 

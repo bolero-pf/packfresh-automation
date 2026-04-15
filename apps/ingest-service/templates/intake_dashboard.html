@@ -1868,6 +1868,7 @@
         // Step 1: Look up PPT price
         let pptPrice = null;
         let pptProductName = '';
+        let pptSourceLabel = 'PPT';
         try {
             const endpoint = currentMapProductType === 'raw' ? '/api/ppt/lookup-card' : '/api/ppt/lookup-sealed';
             const r = await fetch(endpoint, {
@@ -1886,6 +1887,7 @@
                         || item.market_price               // flat field
                         || null;
                 pptProductName = item.name || item.productName || '';
+                pptSourceLabel = {cache:'Cache',ppt:'PPT',scrydex:'Scrydex'}[item._price_source] || 'PPT';
             } else {
                 // PPT lookup failed — still allow linking, just no price comparison
                 panel.innerHTML = `
@@ -1940,9 +1942,9 @@
                 <!-- PPT price -->
                 <div style="background:var(--surface-2); border:2px solid var(--border); border-radius:8px; padding:14px; text-align:center; cursor:pointer; transition:all 0.15s;"
                      onclick="selectPrice('ppt')" id="price-option-ppt">
-                    <div style="font-size:0.75rem; color:var(--text-dim); font-weight:600; text-transform:uppercase;">PPT (Live)</div>
+                    <div style="font-size:0.75rem; color:var(--text-dim); font-weight:600; text-transform:uppercase;">${pptSourceLabel}</div>
                     <div style="font-size:1.4rem; font-weight:700; margin:4px 0;">${ppt > 0 ? '$' + ppt.toFixed(2) : 'N/A'}</div>
-                    <div style="font-size:0.75rem; color:var(--text-dim);">TCGPlayer market</div>
+                    <div style="font-size:0.75rem; color:var(--text-dim);">${pptSourceLabel === 'Cache' ? 'Scrydex nightly cache' : 'TCGPlayer market'}</div>
                 </div>
             </div>
 
@@ -2444,7 +2446,7 @@
                         <td>${c.quantity || 1}</td>
                         <td>$${c.collectr_price.toFixed(2)}</td>
                         <td style="${sig ? 'font-weight:700; color:var(--accent);' : ''}">
-                            ${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) : hasError ? '<span style="color:var(--red);">Error</span>' : '—'}
+                            ${c.ppt_market != null ? '$' + c.ppt_market.toFixed(2) + (c.price_source ? ' <small style="color:var(--text-dim);font-size:0.65rem;opacity:0.7;" title="Price source: ' + c.price_source + '">' + ({cache:'⚡cache',ppt:'PPT',scrydex:'SDX'}[c.price_source]||c.price_source) + '</small>' : '') : hasError ? '<span style="color:var(--red);">Error</span>' : '—'}
                         </td>
                         <td>${c.ppt_low != null ? '$' + c.ppt_low.toFixed(2) : c.is_graded ? '<span style="color:var(--text-dim);font-size:0.75rem;">n/a</span>' : '—'}</td>
                         <td style="color:${deltaColor}; font-weight:${sig ? '700' : '400'};">
