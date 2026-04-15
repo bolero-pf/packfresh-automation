@@ -222,12 +222,17 @@ class PriceCache:
                 grade = r.get("grade_value") or ""
                 key = GRADE_TO_KEY.get((company, grade))
                 if key and market is not None:
+                    mid_p = float(r.get("mid_price")) if r.get("mid_price") else float(market)
+                    low_p = float(low) if low else None
+                    high_p = float(r.get("high_price")) if r.get("high_price") else None
+                    confidence = self._graded_confidence(float(market), low_p, mid_p, high_p)
                     graded_data[key] = {
-                        "smartMarketPrice": {"price": float(market), "method": "scrydex_cache"},
+                        "smartMarketPrice": {"price": float(market), "method": "scrydex_cache",
+                                             "confidence": confidence},
                         "marketPrice7Day": float(market),
-                        "medianPrice": float(r.get("mid_price")) if r.get("mid_price") else float(market),
-                        "minPrice": float(low) if low else None,
-                        "maxPrice": float(r.get("high_price")) if r.get("high_price") else None,
+                        "medianPrice": mid_p,
+                        "minPrice": low_p,
+                        "maxPrice": high_p,
                         "count": None,
                         "dailyVolume7Day": None,
                         "marketTrend": self._trend_from_pct(r.get("trend_7d_pct")),
@@ -295,6 +300,28 @@ class PriceCache:
     @staticmethod
     def _display_variant(name: str) -> str:
         return VARIANT_DISPLAY.get(name, name.replace("_", " ").title())
+
+    @staticmethod
+    def _graded_confidence(market: float, low: float | None, mid: float | None,
+                           high: float | None) -> str:
+        """Derive confidence from price spread. When low/mid/high are all the same,
+        it means very few sales (low confidence). Real spread = more data."""
+        if market <= 0:
+            return "low"
+        # If we have low + high, check spread relative to market
+        if low is not None and high is not None and low > 0:
+            spread_pct = (high - low) / market * 100 if market > 0 else 999
+            # Tight spread (<30%) with distinct low/mid/high = good data
+            if low != high and spread_pct < 50:
+                return "high"
+            # Some spread but not wild
+            if low != high:
+                return "medium"
+        # Mid differs from market = at least some price diversity
+        if mid is not None and mid != market:
+            return "medium"
+        # All values identical or missing = single data point
+        return "low"
 
     @staticmethod
     def _trend_from_pct(pct) -> Optional[str]:

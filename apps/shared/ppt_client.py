@@ -504,12 +504,19 @@ class PPTClient:
             min_p        = entry.get("minPrice")
             max_p        = entry.get("maxPrice")
 
+            # If smartMarketPrice already has a confidence field, the data came from
+            # cache with pre-computed confidence — use it directly (Scrydex graded data)
+            if smp.get("confidence") and smp_price is not None:
+                price      = float(smp_price)
+                confidence = smp["confidence"]
+                method     = smp.get("method") or "scrydex_cache"
+                days_used  = smp.get("daysUsed")
             # Better pricing hierarchy:
             # 1. 7-day market ONLY when daily volume >= 1.0 (genuinely active recent market)
             # 2. Median price — primary default (outlier-resistant, most defensible)
             # 3. 7-day with lower volume (fresher than smp but sparse)
             # 4. smartMarketPrice fallback (PPT's window-adaptive weighted avg — often stale/noisy)
-            if price7day is not None and vol7 is not None and vol7 >= 1.0:
+            elif price7day is not None and vol7 is not None and vol7 >= 1.0:
                 price      = float(price7day)
                 confidence = "high"
                 method     = "7day_market"
@@ -526,7 +533,7 @@ class PPTClient:
                 days_used  = 7
             elif smp_price is not None:
                 price      = float(smp_price)
-                confidence = "low"
+                confidence = smp.get("confidence") or "low"
                 method     = smp.get("method") or "smart_market"
                 days_used  = smp.get("daysUsed")
             else:
