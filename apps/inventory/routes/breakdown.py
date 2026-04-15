@@ -11,6 +11,9 @@ Inventory Breakdown page:
 
 import os
 import logging
+from uuid import uuid4
+from datetime import datetime
+from decimal import Decimal
 from functools import wraps
 
 import db
@@ -494,6 +497,8 @@ def execute_breakdown():
     components = db.query("""
         SELECT sbc.tcgplayer_id, sbc.product_name, sbc.quantity_per_parent,
                sbc.market_price AS comp_market_price,
+               COALESCE(sbc.component_type, 'sealed') AS component_type,
+               sbc.set_name AS comp_set_name,
                ipc.shopify_variant_id AS child_variant_id,
                ipc.inventory_item_id  AS child_inv_item_id,
                ipc.shopify_qty        AS child_current_qty,
@@ -598,7 +603,91 @@ def execute_breakdown():
     if not DRY_RUN:
         _get_cache_manager().record_tool_push()
 
+    # Create ingest session for promo/card components that need routing + barcodes
+    promo_components = [c for c in components if c["component_type"] == "promo"]
+    ingest_session_id = None
+    if promo_components and not DRY_RUN:
+        try:
+            ingest_session_id = _create_promo_routing_session(
+                parent_title=parent_row["title"],
+                promo_components=promo_components,
+                qty_to_break=qty_to_break,
+                parent_unit_cost=parent_unit_cost,
+                child_cogs=child_cogs,
+            )
+            if ingest_session_id:
+                results["ingest_session"] = ingest_session_id
+        except Exception as e:
+            logger.error(f"Failed to create promo routing session: {e}")
+            results["routing_warning"] = f"Breakdown succeeded but routing session failed: {e}"
+
     return jsonify({"success": True, "results": results})
+
+
+# ─── Promo routing session creation ──────────────────────────────────────────
+
+def _create_promo_routing_session(parent_title, promo_components, qty_to_break,
+                                   parent_unit_cost, child_cogs):
+    """
+    Create an ingest session for promo/card components from a breakdown.
+    Session lands at 'breakdown_complete' status so it shows up in ingest
+    at the Route stage, ready for bin assignment + barcode printing.
+    """
+    now = datetime.now()
+    date_label = now.strftime("%-m/%-d") if os.name != "nt" else now.strftime("%#m/%#d")
+    session_name = f"Breakdown - {parent_title} - {date_label}"
+    session_id = str(uuid4())
+
+    # Compute total market for COGS proportioning
+    total_comp_market = Decimal("0")
+    for c in promo_components:
+        m = Decimal(str(c.get("comp_market_price") or 0))
+        q = int(c["quantity_per_parent"])
+        total_comp_market += m * q
+
+    db.execute("""
+        INSERT INTO intake_sessions
+            (id, customer_name, session_type, status, offer_percentage, notes)
+        VALUES (%s, %s, 'raw', 'breakdown_complete', 100, %s)
+    """, (session_id, session_name, f"Auto-created from inventory breakdown"))
+
+    for comp in promo_components:
+        item_qty = int(comp["quantity_per_parent"]) * qty_to_break
+        market_price = Decimal(str(comp.get("comp_market_price") or 0))
+
+        # COGS per unit from breakdown redistribution
+        unit_cost = Decimal("0")
+        if parent_unit_cost and parent_unit_cost > 0 and total_comp_market > 0:
+            comp_qty = int(comp["quantity_per_parent"])
+            share = (market_price * comp_qty) / total_comp_market
+            unit_cost = Decimal(str(round(float(parent_unit_cost) * float(share) / max(comp_qty, 1), 2)))
+
+        offer_price = unit_cost * item_qty
+        item_id = str(uuid4())
+
+        db.execute("""
+            INSERT INTO intake_items
+                (id, session_id, product_name, tcgplayer_id, product_type,
+                 set_name, condition, quantity, market_price,
+                 offer_price, unit_cost_basis, is_mapped, item_status, verified_at)
+            VALUES (%s, %s, %s, %s, 'raw',
+                    %s, 'NM', %s, %s,
+                    %s, %s, %s, 'good', NOW())
+        """, (
+            item_id, session_id,
+            comp["product_name"],
+            comp["tcgplayer_id"],
+            comp.get("comp_set_name"),
+            item_qty,
+            market_price,
+            offer_price,
+            unit_cost,
+            comp.get("tcgplayer_id") is not None,
+        ))
+
+    logger.info(f"Created promo routing session '{session_name}' ({session_id}) "
+                f"with {len(promo_components)} components")
+    return session_id
 
 
 # ─── Breakdown cache routes — direct DB (same shared Postgres, no proxy needed) ─

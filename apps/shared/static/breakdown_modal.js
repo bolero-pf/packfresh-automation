@@ -979,7 +979,14 @@
 
         Promise.resolve(_opts.onExecute(variantId, qty, _components))
             .then(function(result) {
-                _toast('Breakdown executed');
+                var r = result && result.results;
+                if (r && r.ingest_session) {
+                    _toast('Breakdown executed — promos queued for routing in Ingest');
+                } else if (r && r.routing_warning) {
+                    _toast('Breakdown executed — ' + r.routing_warning);
+                } else {
+                    _toast('Breakdown executed');
+                }
                 _closeModal();
             })
             .catch(function(e) {
