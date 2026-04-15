@@ -1734,6 +1734,79 @@ def route_batch(session_id):
     return jsonify({"success": True, "count": len(item_ids)})
 
 
+@app.route("/api/ingest/session/<session_id>/split-route", methods=["POST"])
+def split_route(session_id):
+    """Split an item's quantity so a portion can be routed to a different destination.
+    Body: { item_id, split_qty, destination }
+    Reduces original item qty, creates new item with split_qty and the given destination.
+    """
+    data = request.get_json(silent=True) or {}
+    item_id = data.get("item_id")
+    split_qty = int(data.get("split_qty", 0))
+    destination = data.get("destination")
+
+    if not item_id or split_qty < 1 or destination not in ROUTING_DESTINATIONS:
+        return jsonify({"error": "item_id, split_qty >= 1, and valid destination required"}), 400
+
+    item = db.query_one("SELECT * FROM intake_items WHERE id = %s AND session_id = %s", (item_id, session_id))
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+
+    total_qty = item.get("quantity", 1)
+    if split_qty >= total_qty:
+        return jsonify({"error": f"split_qty must be less than current quantity ({total_qty})"}), 400
+
+    remaining_qty = total_qty - split_qty
+    market_price = float(item.get("market_price") or 0)
+    unit_cost = float(item.get("unit_cost_basis") or 0)
+
+    # Reduce original item qty and recalculate offer
+    session = db.query_one("SELECT offer_percentage FROM intake_sessions WHERE id = %s", (session_id,))
+    offer_pct = float(session.get("offer_percentage", 65)) / 100 if session else 0.65
+    remaining_offer = round(market_price * offer_pct * remaining_qty, 2)
+
+    db.execute("""
+        UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s
+    """, (remaining_qty, remaining_offer, item_id))
+
+    # Create split item — copies all card fields, new qty + destination
+    import uuid as _uuid
+    split_id = str(_uuid.uuid4())
+    split_offer = round(market_price * offer_pct * split_qty, 2)
+
+    db.execute("""
+        INSERT INTO intake_items (
+            id, session_id, product_name, set_name, tcgplayer_id, card_number,
+            condition, rarity, variant, language, variance,
+            quantity, market_price, offer_price, unit_cost_basis,
+            product_type, is_mapped, item_status, is_graded, grade_company, grade_value,
+            routing_destination, verified_at, listing_condition
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s
+        )
+    """, (
+        split_id, session_id, item.get("product_name"), item.get("set_name"),
+        item.get("tcgplayer_id"), item.get("card_number"),
+        item.get("condition"), item.get("rarity"), item.get("variant"),
+        item.get("language"), item.get("variance"),
+        split_qty, market_price, split_offer, unit_cost,
+        item.get("product_type", "raw"), item.get("is_mapped", False),
+        item.get("item_status", "good"), item.get("is_graded", False),
+        item.get("grade_company"), item.get("grade_value"),
+        destination, item.get("verified_at"), item.get("listing_condition"),
+    ))
+
+    return jsonify({
+        "success": True,
+        "original": {"id": item_id, "quantity": remaining_qty},
+        "split": {"id": split_id, "quantity": split_qty, "destination": destination},
+    })
+
+
 @app.route("/api/ingest/session/<session_id>/route-summary")
 def route_summary(session_id):
     """Get routing status for a session's raw items."""

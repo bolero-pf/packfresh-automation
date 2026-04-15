@@ -1531,23 +1531,28 @@ function _renderRouteCards(sessionId, data) {
         if (price < 1) autoTag = '<span style="font-size:0.65rem; color:var(--text-dim); margin-left:4px;">auto: &lt;$1</span>';
         else if (price < 5) autoTag = '<span style="font-size:0.65rem; color:var(--text-dim); margin-left:4px;">auto: $1-$5</span>';
 
-        html += `<div class="card" style="padding:8px 10px; display:flex; gap:8px; align-items:center;" data-item-id="${item.id}">
-            ${imgSrc ? `<img src="${imgSrc}" style="width:40px; height:56px; object-fit:cover; border-radius:4px; flex-shrink:0;" loading="lazy">` : '<div style="width:40px; height:56px; background:var(--surface-2); border-radius:4px; flex-shrink:0;"></div>'}
-            <div style="flex:1; min-width:0;">
-                <div style="font-size:0.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                    ${item.product_name || 'Unknown'}
+        const splitBtn = qty > 1 ? `<button class="btn btn-sm" style="font-size:0.65rem; padding:2px 6px; color:var(--accent); border:1px solid var(--accent)33; background:transparent; margin-left:4px;" onclick="event.stopPropagation(); _showSplitRoute('${sessionId}','${item.id}',${qty})">Split</button>` : '';
+
+        html += `<div class="card" style="padding:8px 10px;" data-item-id="${item.id}">
+            <div style="display:flex; gap:8px; align-items:center;">
+                ${imgSrc ? `<img src="${imgSrc}" style="width:40px; height:56px; object-fit:cover; border-radius:4px; flex-shrink:0;" loading="lazy">` : '<div style="width:40px; height:56px; background:var(--surface-2); border-radius:4px; flex-shrink:0;"></div>'}
+                <div style="flex:1; min-width:0;">
+                    <div style="font-size:0.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                        ${item.product_name || 'Unknown'}
+                    </div>
+                    <div style="font-size:0.72rem; color:var(--text-dim);">
+                        ${item.set_name||''} ${item.card_number ? '#'+item.card_number : ''} · ${item.condition||'NM'} · <strong>${priceStr}</strong>${qty > 1 ? ' <strong style="color:var(--accent);">x'+qty+'</strong>' : ''}${splitBtn}
+                    </div>
                 </div>
-                <div style="font-size:0.72rem; color:var(--text-dim);">
-                    ${item.set_name||''} ${item.card_number ? '#'+item.card_number : ''} · ${item.condition||'NM'} · <strong>${priceStr}</strong>${qty > 1 ? ' x'+qty : ''}
+                <div class="route-radios" style="display:flex; gap:2px; flex-shrink:0; flex-wrap:wrap;">
+                    ${_routeRadio(sessionId, item.id, 'bulk', 'Bulk', dest)}
+                    ${_routeRadio(sessionId, item.id, 'display', 'Binder', dest)}
+                    ${_routeRadio(sessionId, item.id, 'storage', 'Storage', dest)}
+                    ${_routeRadio(sessionId, item.id, 'grade', 'Grade', dest)}
                 </div>
+                ${autoTag}
             </div>
-            <div class="route-radios" style="display:flex; gap:2px; flex-shrink:0; flex-wrap:wrap;">
-                ${_routeRadio(sessionId, item.id, 'bulk', 'Bulk', dest)}
-                ${_routeRadio(sessionId, item.id, 'display', 'Binder', dest)}
-                ${_routeRadio(sessionId, item.id, 'storage', 'Storage', dest)}
-                ${_routeRadio(sessionId, item.id, 'grade', 'Grade', dest)}
-            </div>
-            ${autoTag}
+            <div id="split-form-${item.id}" style="display:none;"></div>
         </div>`;
     }
     html += '</div>';
@@ -1569,6 +1574,50 @@ function _routeRadio(sessionId, itemId, value, label, current) {
             style="display:none;">
         <span style="font-weight:${checked?'700':'400'};">${label}</span>
     </label>`;
+}
+
+function _showSplitRoute(sessionId, itemId, totalQty) {
+    const form = document.getElementById('split-form-' + itemId);
+    if (!form) return;
+    if (form.style.display !== 'none') { form.style.display = 'none'; return; }
+    form.style.display = 'block';
+    form.innerHTML = `<div style="margin-top:6px; padding:8px 10px; background:var(--surface-2); border-radius:6px; border:1px solid var(--border); display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <span style="font-size:0.78rem; color:var(--text-dim);">Split</span>
+        <input type="number" id="split-qty-${itemId}" min="1" max="${totalQty - 1}" value="1" style="width:55px; padding:4px 6px; font-size:0.82rem;">
+        <span style="font-size:0.78rem; color:var(--text-dim);">of ${totalQty} →</span>
+        <select id="split-dest-${itemId}" style="padding:4px 6px; font-size:0.82rem; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">
+            <option value="grade">Grade</option>
+            <option value="storage">Storage</option>
+            <option value="display">Binder</option>
+            <option value="bulk">Bulk</option>
+        </select>
+        <button class="btn btn-sm btn-primary" style="font-size:0.75rem; padding:3px 10px;" onclick="_doSplitRoute('${sessionId}','${itemId}')">Split</button>
+        <button class="btn btn-sm btn-secondary" style="font-size:0.75rem; padding:3px 8px;" onclick="document.getElementById('split-form-${itemId}').style.display='none'">Cancel</button>
+    </div>`;
+}
+
+async function _doSplitRoute(sessionId, itemId) {
+    const qtyEl = document.getElementById('split-qty-' + itemId);
+    const destEl = document.getElementById('split-dest-' + itemId);
+    if (!qtyEl || !destEl) return;
+    const splitQty = parseInt(qtyEl.value);
+    const dest = destEl.value;
+    if (!splitQty || splitQty < 1) return;
+
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/split-route`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: itemId, split_qty: splitQty, destination: dest }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Split failed'); return; }
+
+        // Reload routing data to pick up the new split item
+        _loadRouteData(sessionId);
+    } catch(e) {
+        alert('Split failed: ' + e.message);
+    }
 }
 
 async function _setRoute(sessionId, itemId, destination) {
