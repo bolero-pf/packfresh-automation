@@ -693,9 +693,10 @@ def _create_promo_routing_session(parent_title, promo_components, qty_to_break,
     if totals:
         db.execute("""
             UPDATE intake_sessions
-            SET total_market_value = %s, total_offer_amount = %s
+            SET total_market_value = %s, total_offer_amount = %s,
+                original_offer_amount = %s
             WHERE id = %s
-        """, (totals["market_total"], totals["offer_total"], session_id))
+        """, (totals["market_total"], totals["offer_total"], totals["offer_total"], session_id))
 
     logger.info(f"Created promo routing session '{session_name}' ({session_id}) "
                 f"with {len(promo_components)} components")
