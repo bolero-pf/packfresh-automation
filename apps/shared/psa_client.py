@@ -497,6 +497,7 @@ def create_graded_listing(
             "tags": ", ".join(tags),
             "status": "draft",
             "product_type": "Pokemon",
+            "vendor": "Pack Fresh",
             "published_scope": "web",
             "template_suffix": "cro-alt",
             "images": [{"src": img} for img in image_urls[:5]],

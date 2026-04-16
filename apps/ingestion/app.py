@@ -1846,6 +1846,33 @@ def push_graded_item(item_id):
         logger.exception(f"push_graded_item failed for item {item_id}: {e}")
         return jsonify({"error": str(e)}), 500
 
+    # ── Post-creation enrichment (category, era, tcgplayer_id, COGS) ────────
+    # Graded listings bypass product_enrichment so these need to be added
+    # after the Shopify product exists. Non-fatal — log and continue.
+    product_gid = result.get("shopify_product_id")
+    if product_gid and result.get("action") == "created_listing":
+        product_gid_str = f"gid://shopify/Product/{product_gid}"
+        try:
+            # Category: Gaming Cards
+            enrichment.set_product_category(product_gid_str)
+        except Exception as e:
+            logger.warning(f"Slab enrichment: category failed: {e}")
+        try:
+            # Era inference + tcgplayer_id metafield (tcg namespace, list type)
+            card_name = item.get("product_name") or ""
+            set_name  = item.get("set_name") or ""
+            era = enrichment.infer_era(card_name, set_name)
+            enrichment.set_product_metafields(product_gid_str, str(tcg_id) if tcg_id else "", era)
+        except Exception as e:
+            logger.warning(f"Slab enrichment: metafields failed: {e}")
+        try:
+            # COGS — unit cost from intake offer
+            unit_cost = float(item.get("offer_price") or 0)
+            if unit_cost > 0:
+                enrichment.set_variant_cost(product_gid_str, unit_cost)
+        except Exception as e:
+            logger.warning(f"Slab enrichment: variant cost failed: {e}")
+
     # Mark item pushed + store cert number
     db.execute("""
         UPDATE intake_items
