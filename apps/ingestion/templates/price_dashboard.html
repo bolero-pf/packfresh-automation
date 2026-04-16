@@ -377,7 +377,14 @@ async function exportUnmatched() {
 }
 
 function umPrevPage() { umOffset = Math.max(0, umOffset - UM_PAGE); loadUnmatched(); }
-function umNextPage() { umOffset += UM_PAGE; loadUnmatched(); }
+function umNextPage() {
+  // Count how many items on the current page were linked this session —
+  // those items dropped out of the server's unmatched list, so advancing
+  // offset by a full page would skip items that shifted up.
+  const linkedOnCurrentPage = umRows.filter(r => r._linked).length;
+  umOffset += Math.max(1, UM_PAGE - linkedOnCurrentPage);
+  loadUnmatched();
+}
 document.getElementById('um-search').addEventListener('keydown', e => { if (e.key === 'Enter') { umOffset = 0; loadUnmatched(); }});
 document.getElementById('um-filter').addEventListener('change', () => { umOffset = 0; loadUnmatched(); });
 document.getElementById('um-game').addEventListener('change', () => { umOffset = 0; loadUnmatched(); });
