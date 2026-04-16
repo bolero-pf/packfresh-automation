@@ -21,3 +21,8 @@ ALTER TABLE scrydex_sync_log ADD PRIMARY KEY (game, expansion_id);
 
 -- 3. scrydex_tcg_map
 ALTER TABLE scrydex_tcg_map ADD COLUMN IF NOT EXISTS game TEXT NOT NULL DEFAULT 'pokemon';
+
+-- 4. Drop unique constraint on tcgplayer_id — multiple scrydex products legitimately
+-- share TCGPlayer IDs (reprints, cross-set promos). Keep as non-unique index for lookup speed.
+DROP INDEX IF EXISTS idx_scrydex_tcg_map_tcg;
+CREATE INDEX IF NOT EXISTS idx_scrydex_tcg_map_tcg ON scrydex_tcg_map(tcgplayer_id);
