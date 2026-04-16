@@ -2572,9 +2572,9 @@ function _renderPushContent(data) {
         html += `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
                 <div>
-                    <h2 style="margin:0; color:var(--green);">🚀 Push Live</h2>
+                    <h2 style="margin:0; color:var(--green);">🚀 Push</h2>
                     <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
-                        Increment inventory for matched items, create damaged listings, and mark session as ingested.
+                        Update Shopify inventory for sealed items, route raw cards to storage/binder/bulk, and queue graded slabs for cert entry.
                     </p>
                 </div>
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
@@ -2582,7 +2582,7 @@ function _renderPushContent(data) {
                         🔍 Debug Dry Run
                     </button>
                     <button class="btn btn-success" id="push-live-btn" onclick="pushLive('${sessionId}')" style="font-size:1.05rem; padding:12px 28px;">
-                        🚀 Push Live to Shopify
+                        🚀 Push Session
                     </button>
                     <button class="btn btn-sm" style="font-size:0.75rem; padding:6px 12px; background:var(--surface-2); color:var(--text-dim); border:1px solid var(--border);" onclick="forceIngested('${sessionId}')">
                         ⚡ Force Mark Ingested
@@ -3558,7 +3558,7 @@ async function pushLive(sessionId) {
 
     const confirmMsg = `Push ${totalPending} items (${gradedItems.length} graded slabs, ${sealedRawItems.length} sealed/raw). Cannot be easily undone.`;
 
-    const ok = await themedConfirm('🚀 Push Live', confirmMsg,
+    const ok = await themedConfirm('🚀 Push Session', confirmMsg,
         { confirmText: `Push ${totalPending} Items`, dangerous: true });
     if (!ok) return;
 
@@ -3918,33 +3918,49 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
             company: item.grade_company || 'PSA',
             grade:   item.grade_value || '?',
             price:   item.market_price || '0',
+            qty:     Math.max(1, parseInt(item.quantity || 1, 10)),
         };
     }).filter(Boolean);
 
+    // Expand each item into qty rows — one cert per slab
     const certPanel = document.createElement('div');
     certPanel.style.cssText = 'margin-top:16px; border-top:2px solid var(--border); padding-top:16px;';
-    certPanel.innerHTML = `
-        <div style="font-size:1rem;font-weight:700;margin-bottom:12px;">🏅 Graded Slabs — Enter Cert Numbers</div>
-        <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:14px;">
-            Enter the cert number for each slab, then push individually. You can skip any and push them later.
-        </p>
-        ${gradedRows.map(item => `
-            <div id="graded-row-${item.id}" style="display:flex;gap:10px;align-items:center;padding:10px;background:var(--surface-2);border-radius:8px;margin-bottom:8px;flex-wrap:wrap;">
+
+    const slabCount = gradedRows.reduce((s, r) => s + r.qty, 0);
+    const slabRowsHtml = gradedRows.map(item => {
+        const header = item.qty > 1
+            ? `<div style="font-size:0.78rem;color:var(--accent);font-weight:600;margin:10px 0 4px;">${item.qty}× ${item.name} — ${item.company} ${item.grade}</div>`
+            : '';
+        const rows = Array.from({length: item.qty}, (_, idx) => {
+            const rowId = `${item.id}-${idx}`;
+            const slabLabel = item.qty > 1 ? `Slab ${idx + 1} of ${item.qty}` : `${item.company} ${item.grade}`;
+            return `
+            <div id="graded-row-${rowId}" data-item-id="${item.id}" data-slab-idx="${idx}"
+                 style="display:flex;gap:10px;align-items:center;padding:10px;background:var(--surface-2);border-radius:8px;margin-bottom:8px;flex-wrap:wrap;">
                 <div style="flex:1;min-width:200px;">
                     <div style="font-weight:600;font-size:0.9rem;">${item.name}</div>
-                    <div style="font-size:0.78rem;color:var(--text-dim);">${item.company} ${item.grade} · $${parseFloat(item.price).toFixed(2)}</div>
+                    <div style="font-size:0.78rem;color:var(--text-dim);">${slabLabel} · $${parseFloat(item.price).toFixed(2)}</div>
                 </div>
-                <input type="text" id="cert-input-${item.id}" placeholder="Cert # (e.g. 12345678)"
+                <input type="text" id="cert-input-${rowId}" placeholder="Cert # (e.g. 12345678)"
                     style="width:170px;font-size:0.85rem;"
-                    onkeydown="if(event.key==='Enter') pushGradedSlab('${item.id}','${sessionId}')">
-                <button class="btn btn-primary btn-sm" id="cert-btn-${item.id}"
-                    onclick="pushGradedSlab('${item.id}','${sessionId}')"
+                    onkeydown="if(event.key==='Enter') pushGradedSlab('${item.id}','${sessionId}',${idx})">
+                <button class="btn btn-primary btn-sm" id="cert-btn-${rowId}"
+                    onclick="pushGradedSlab('${item.id}','${sessionId}',${idx})"
                     style="font-size:0.78rem;white-space:nowrap;">
                     Push Slab
                 </button>
-                <div id="cert-result-${item.id}" style="font-size:0.8rem;min-width:100px;"></div>
-            </div>
-        `).join('')}
+                <div id="cert-result-${rowId}" style="font-size:0.8rem;min-width:100px;"></div>
+            </div>`;
+        }).join('');
+        return header + rows;
+    }).join('');
+
+    certPanel.innerHTML = `
+        <div style="font-size:1rem;font-weight:700;margin-bottom:12px;">🏅 Graded Slabs — Enter Cert Numbers</div>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:14px;">
+            ${slabCount} slab${slabCount === 1 ? '' : 's'} to push. Each cert becomes its own Shopify product — enter and push one at a time. You can skip any and push them later.
+        </p>
+        ${slabRowsHtml}
     `;
 
     if (append) {
@@ -3955,10 +3971,14 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
     }
 }
 
-async function pushGradedSlab(itemId, sessionId) {
-    const certInput = document.getElementById(`cert-input-${itemId}`);
-    const btn       = document.getElementById(`cert-btn-${itemId}`);
-    const resultEl  = document.getElementById(`cert-result-${itemId}`);
+async function pushGradedSlab(itemId, sessionId, slabIdx) {
+    // slabIdx is the row index within this item's qty (0-based). Required when rendered
+    // as qty-many rows; backend splits-off-1 if qty > 1 so each cert gets its own product.
+    if (slabIdx === undefined) slabIdx = 0;
+    const rowId     = `${itemId}-${slabIdx}`;
+    const certInput = document.getElementById(`cert-input-${rowId}`);
+    const btn       = document.getElementById(`cert-btn-${rowId}`);
+    const resultEl  = document.getElementById(`cert-result-${rowId}`);
     const cert      = (certInput?.value || '').trim();
 
     if (!cert) { resultEl.innerHTML = '<span style="color:var(--red);">Enter cert #</span>'; return; }
@@ -3980,8 +4000,8 @@ async function pushGradedSlab(itemId, sessionId) {
             return;
         }
 
-        // Success — lock row
-        const row = document.getElementById(`graded-row-${itemId}`);
+        // Success — lock just this slab's row
+        const row = document.getElementById(`graded-row-${rowId}`);
         if (row) {
             const actionLabel = d.action === 'added_variant' ? '✅ Added variant' : '🆕 New listing';
             row.style.opacity = '0.6';

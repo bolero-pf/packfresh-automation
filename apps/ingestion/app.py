@@ -1616,6 +1616,15 @@ def push_graded_item(item_id):
     if item.get("pushed_at"):
         return jsonify({"error": "Item already pushed"}), 400
 
+    # If qty > 1, peel off one slab so each cert gets its own Shopify product
+    if (item.get("quantity") or 1) > 1:
+        try:
+            item = ingest.split_one_slab(item_id)
+            item_id = item["id"]
+        except Exception as e:
+            logger.exception(f"split_one_slab failed for {item_id}: {e}")
+            return jsonify({"error": f"Could not split slab: {e}"}), 500
+
     grade_company = (item.get("grade_company") or "PSA").upper()
     grade_value   = item.get("grade_value") or "9"
     tcg_id        = item.get("tcgplayer_id")

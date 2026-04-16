@@ -622,6 +622,65 @@ def split_damaged(item_id: str, damaged_qty: int) -> dict:
     }
 
 
+def split_one_slab(item_id: str) -> dict:
+    """
+    Split a single slab off a graded item (qty > 1) so each slab can carry
+    its own cert number and become its own Shopify product.
+
+    If qty == 1, returns the original item (no split needed).
+    Otherwise, decrements the parent qty by 1, creates a child row with qty=1
+    inheriting all graded fields, and returns the child for pushing.
+    """
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    qty = item.get("quantity", 1)
+    if qty <= 1:
+        return item
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    market_price = Decimal(str(item.get("market_price", 0)))
+
+    # Decrement parent qty + its offer
+    new_parent_qty = qty - 1
+    new_parent_offer = (market_price * offer_pct * new_parent_qty).quantize(Decimal("0.01"))
+    execute(
+        "UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s",
+        (new_parent_qty, new_parent_offer, item_id),
+    )
+
+    # Create a 1-qty child carrying all the graded fields + verified state
+    child_id = str(uuid4())
+    child_offer = (market_price * offer_pct * 1).quantize(Decimal("0.01"))
+    execute("""
+        INSERT INTO intake_items (
+            id, session_id, product_name, set_name, tcgplayer_id,
+            quantity, market_price, offer_price, product_type,
+            is_mapped, item_status, verified_at,
+            is_graded, grade_company, grade_value,
+            variant, language, parent_item_id, condition
+        ) VALUES (
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, CURRENT_TIMESTAMP,
+            %s, %s, %s,
+            %s, %s, %s, %s
+        )
+    """, (
+        child_id, item["session_id"], item.get("product_name"), item.get("set_name"),
+        item.get("tcgplayer_id"),
+        1, market_price, child_offer, item.get("product_type", "raw"),
+        item.get("is_mapped", False), item.get("item_status", "good"),
+        item.get("is_graded", True), item.get("grade_company"), item.get("grade_value"),
+        item.get("variant"), item.get("language", "EN"), item_id, item.get("condition"),
+    ))
+
+    _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (child_id,))
+
+
 def mark_item_good(item_id: str) -> dict:
     """Restore an item to good status and restore full offer price."""
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
