@@ -105,6 +105,7 @@ def main():
             continue
 
         totals = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0}
+        failures = []
         t_start = time.time()
 
         for i, eid in enumerate(expansion_ids):
@@ -118,7 +119,26 @@ def main():
                           f"{totals['sealed']} sealed, {totals['credits']} credits ({elapsed}s)")
             except Exception as e:
                 logger.error(f"  {eid}: {e}")
+                failures.append((eid, str(e)))
             time.sleep(0.05)
+
+        # Retry failures
+        if failures:
+            print(f"  --- Retrying {len(failures)} failed expansions ---")
+            still_failed = []
+            for eid, original_error in failures:
+                try:
+                    stats = sync_expansion(client, eid, db)
+                    for k in totals:
+                        totals[k] += stats.get(k, 0)
+                    print(f"    Retry OK: {eid} ({stats['cards']} cards, {stats['sealed']} sealed)")
+                except Exception as e:
+                    still_failed.append((eid, original_error, str(e)))
+                time.sleep(0.1)
+            if still_failed:
+                print(f"  *** {len(still_failed)} expansions still failed after retry:")
+                for eid, err1, err2 in still_failed:
+                    print(f"    {eid}: {err1[:80]}")
 
         elapsed = int(time.time() - t_start)
         print(f"  Done: {len(expansion_ids)} expansions, {totals['cards']} cards, "

@@ -264,6 +264,7 @@ def main():
         return
 
     totals = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0, "mapped": 0}
+    failures = []  # [(expansion_id, error_message)]
     t_start = time.time()
 
     for i, eid in enumerate(expansion_ids):
@@ -276,7 +277,33 @@ def main():
                         f"{stats['prices']} prices, {stats['credits']} credits")
         except Exception as e:
             logger.error(f"  FAILED: {e}")
+            failures.append((eid, str(e)))
         time.sleep(0.05)
+
+    # ── Retry failures ─────────────────────────────────────
+    if failures:
+        logger.info(f"\n--- Retrying {len(failures)} failed expansions ---")
+        still_failed = []
+        for eid, original_error in failures:
+            logger.info(f"  Retry: {game}/{eid} (was: {original_error[:80]})")
+            try:
+                stats = sync_expansion(client, eid, db)
+                for k in totals:
+                    totals[k] += stats.get(k, 0)
+                logger.info(f"    OK: {stats['cards']} cards, {stats['sealed']} sealed")
+            except Exception as e:
+                logger.error(f"    FAILED AGAIN: {e}")
+                still_failed.append((eid, original_error, str(e)))
+            time.sleep(0.1)
+
+        if still_failed:
+            logger.warning(f"\n{'='*60}")
+            logger.warning(f"  {len(still_failed)} expansions failed after retry:")
+            for eid, err1, err2 in still_failed:
+                logger.warning(f"    {game}/{eid}")
+                logger.warning(f"      1st: {err1[:100]}")
+                logger.warning(f"      2nd: {err2[:100]}")
+            logger.warning(f"{'='*60}")
 
     elapsed = int(time.time() - t_start)
     print(f"\nDone [{game}] in {elapsed}s!")

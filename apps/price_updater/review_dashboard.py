@@ -175,6 +175,7 @@ def run_scrydex_sync():
 
             print(f"🔄 {game}: {len(expansion_ids)} active expansions")
             totals = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0}
+            failures = []
             t_start = _time.time()
 
             for i, eid in enumerate(expansion_ids):
@@ -186,7 +187,21 @@ def run_scrydex_sync():
                         print(f"  ... {i+1}/{len(expansion_ids)} done ({totals['credits']} credits)")
                 except Exception as e:
                     print(f"  ❌ {game}/{eid}: {e}")
+                    failures.append((eid, str(e)))
                 _time.sleep(0.05)
+
+            # Retry failures
+            if failures:
+                print(f"  🔁 Retrying {len(failures)} failed expansions...")
+                for eid, original_error in failures:
+                    try:
+                        stats = sync_expansion(client, eid, shared_db)
+                        for k in totals:
+                            totals[k] += stats.get(k, 0)
+                        print(f"    ✅ Retry OK: {game}/{eid}")
+                    except Exception as e:
+                        print(f"    ❌ Still failed: {game}/{eid}: {e}")
+                    _time.sleep(0.1)
 
             elapsed = int(_time.time() - t_start)
             print(f"✅ {game} done in {elapsed}s — {totals['cards']} cards, "
