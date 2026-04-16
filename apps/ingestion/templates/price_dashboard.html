@@ -431,6 +431,15 @@ async function doLinkSearch() {
         return;
       }
     }
+    // Helpful message for games Scrydex doesn't have sealed data for
+    const noSealedGames = ['lorcana', 'mtg', 'riftbound'];
+    if (noSealedGames.includes(itemGame)) {
+      results.innerHTML = `<div style="padding:16px; text-align:center;">
+        <div style="color:var(--amber,#e6a817); font-weight:600; margin-bottom:6px;">⚠ Scrydex has no sealed data for ${GAME_LABELS[itemGame]} yet</div>
+        <div style="color:var(--dim); font-size:0.82rem;">Only cards are available. Sealed products for ${GAME_LABELS[itemGame]} can't be linked until Scrydex adds them to their API.</div>
+      </div>`;
+      return;
+    }
     results.innerHTML = '<div class="loading">No results. Try different keywords.</div>';
     return;
   }
@@ -480,9 +489,17 @@ async function doLink(scrydexId, variant) {
   }
 }
 
-// Close modal on backdrop click
-document.getElementById('link-modal').addEventListener('click', e => {
-  if (e.target === document.getElementById('link-modal')) closeLinkModal();
+// Close modal on backdrop click — but only if mousedown AND mouseup happen on the backdrop
+// (prevents accidental dismissal when dragging selection out of the modal)
+let _linkModalMouseDownOnBackdrop = false;
+document.getElementById('link-modal').addEventListener('mousedown', e => {
+  _linkModalMouseDownOnBackdrop = (e.target === document.getElementById('link-modal'));
+});
+document.getElementById('link-modal').addEventListener('mouseup', e => {
+  if (_linkModalMouseDownOnBackdrop && e.target === document.getElementById('link-modal')) {
+    closeLinkModal();
+  }
+  _linkModalMouseDownOnBackdrop = false;
 });
 </script>
 </body>
