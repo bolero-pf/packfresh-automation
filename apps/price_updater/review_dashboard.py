@@ -217,12 +217,27 @@ def run_scrydex_sync():
         traceback.print_exc()
 
 
+def run_slab_updater():
+    """Nightly slab price sync — runs after Scrydex sync so cache is fresh."""
+    try:
+        from slab_updater import run as slab_run
+        results = slab_run(apply=True, csv_path="slab_updates.csv")
+        adjusted = sum(1 for r in results if r.get("action") == "adjusted")
+        flagged  = sum(1 for r in results if "flag" in (r.get("action") or ""))
+        print(f"✅ Slab updater done: {len(results)} slabs, {adjusted} adjusted, {flagged} flagged")
+    except Exception as e:
+        print(f"❌ Slab updater failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 if os.environ.get("ENABLE_CRON", "").lower() == "true":
     scheduler = BackgroundScheduler()
     scheduler.add_job(call_dailyrunner, "cron", hour=3)  # UTC
     scheduler.add_job(run_scrydex_sync, "cron", hour=4)  # UTC — after dailyrunner + analytics snapshot
+    scheduler.add_job(run_slab_updater, "cron", hour=5)  # UTC — after Scrydex sync
     scheduler.start()
-    print("✅ Scheduler started — dailyrunner at 3 AM UTC, Scrydex sync at 4 AM UTC")
+    print("✅ Scheduler started — dailyrunner 3AM, Scrydex 4AM, slab updater 5AM UTC")
 
 def load_csv(path):
     if not os.path.exists(path):

@@ -4221,6 +4221,7 @@
             const card = d.card || {};
             const variants = d.variants || {};
             const gradedPrices = d.graded_prices || {};
+            const liveGraded = d.live_graded || {};
             let primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
             if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
             const variantData = variants[primary] || {};
@@ -4247,30 +4248,51 @@
                 const safeName = (card.name||'').replace(/'/g, "\'");
                 const safeSet = setName.replace(/'/g, "\'");
 
+                // Merge live comps over cache aggregates — live is truth
+                const liveCompany = liveGraded[gradeCompany] || {};
+
                 let gradedHtml = '<div style="background:var(--surface-2); border-radius:8px; padding:14px; margin-top:8px;">';
                 gradedHtml += '<div style="margin-bottom:10px;"><strong style="color:var(--accent);">' + (card.name||'') + '</strong>';
                 gradedHtml += '<span style="color:var(--text-dim);"> — ' + setName + (cardNum ? ' #'+cardNum : '') + '</span></div>';
-                if (Object.keys(companyGrades).length) {
-                    gradedHtml += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:6px;">' + gradeCompany + ' Smart Market Prices</div>';
+
+                // Collect all grades we know about (union of cache + live keys)
+                const allGrades = new Set([...Object.keys(companyGrades), ...Object.keys(liveCompany)]);
+                if (allGrades.size) {
+                    gradedHtml += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:6px;">' + gradeCompany + ' eBay Comps</div>';
                     gradedHtml += '<div style="display:flex; gap:8px; flex-wrap:wrap;">';
-                    Object.entries(companyGrades).sort((a,b) => parseFloat(b[0])-parseFloat(a[0])).forEach(([g, gd]) => {
+                    [...allGrades].sort((a,b) => parseFloat(b)-parseFloat(a)).forEach(g => {
+                        const live = liveCompany[g];
+                        const cached = companyGrades[g] || {};
                         const isSel = g === gradeVal;
-                        gradedHtml += '<div style="background:' + (isSel ? 'var(--accent)' : 'var(--surface)') + ';color:' + (isSel ? '#fff' : 'var(--text)') + ';border:1px solid var(--border);border-radius:6px;padding:8px 12px;text-align:center;min-width:70px;">';
+                        const price = live ? live.mid : cached.price;
+                        const comps = live ? live.comps_count : cached.count;
+                        const src = live ? (live.source === 'live_listings' ? 'live' : 'cache') : 'cache';
+                        const srcColor = src === 'live' ? '#22c55e' : '#f59e0b';
+
+                        gradedHtml += '<div style="background:' + (isSel ? 'var(--accent)' : 'var(--surface)') + ';color:' + (isSel ? '#fff' : 'var(--text)') + ';border:1px solid var(--border);border-radius:6px;padding:8px 12px;text-align:center;min-width:80px;">';
                         gradedHtml += '<div style="font-size:0.75rem;font-weight:600;">' + gradeCompany + ' ' + g + '</div>';
-                        gradedHtml += '<div style="font-size:1rem;font-weight:700;">' + (gd.price != null ? '$' + Number(gd.price).toFixed(2) : '—') + '</div>';
-                        const confColor = gd.confidence === 'high' ? '#22c55e' : gd.confidence === 'medium' ? '#f59e0b' : '#ef4444';
-                        if (gd.confidence) gradedHtml += '<div style="font-size:0.65rem;color:' + confColor + ';">' + gd.confidence + '</div>';
-                        if (gd.count) gradedHtml += '<div style="font-size:0.65rem;opacity:0.7;">' + gd.count + ' sales</div>';
+                        gradedHtml += '<div style="font-size:1rem;font-weight:700;">' + (price != null ? '$' + Number(price).toFixed(2) : '—') + '</div>';
+                        if (live && live.low != null && live.high != null) {
+                            gradedHtml += '<div style="font-size:0.6rem;opacity:0.7;">$' + live.low.toFixed(0) + '–$' + live.high.toFixed(0) + '</div>';
+                        }
+                        if (comps) gradedHtml += '<div style="font-size:0.6rem;color:' + srcColor + ';">' + comps + ' comps (' + src + ')</div>';
                         gradedHtml += '</div>';
                     });
                     gradedHtml += '</div></div>';
                 }
                 if (nmRaw) gradedHtml += '<div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:10px;">Raw NM: $' + Number(nmRaw).toFixed(2) + '</div>';
-                if (gradedPrice) {
-                    const offerAmt = (gradedPrice * qty * offerPct / 100).toFixed(2);
-                    gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + gradedPrice + ', \'' + context + '\')">' +
+
+                // Use live median for the selected grade if available, else cache price
+                const liveSelected = liveCompany[gradeVal];
+                const effectivePrice = liveSelected ? liveSelected.mid : gradedPrice;
+                if (effectivePrice) {
+                    const offerAmt = (effectivePrice * qty * offerPct / 100).toFixed(2);
+                    const priceLabel = liveSelected
+                        ? 'Median: $' + effectivePrice.toFixed(2) + ' (' + (liveSelected.comps_count||'?') + ' comps)'
+                        : 'Market: $' + effectivePrice.toFixed(2) + ' (cache)';
+                    gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + effectivePrice + ', \'' + context + '\')">' +
                         '<h4>Add ' + gradeCompany + ' ' + gradeVal + ' — ' + (card.name||'') + '</h4>' +
-                        '<p>Smart market: $' + gradedPrice.toFixed(2) + ' · Qty ' + qty + ' · Offer: $' + offerAmt + '</p></div>';
+                        '<p>' + priceLabel + ' · Qty ' + qty + ' · Offer: $' + offerAmt + '</p></div>';
                 } else {
                     gradedHtml += '<div class="alert alert-warning">No ' + gradeCompany + ' ' + gradeVal + ' data.</div>';
                     if (nmRaw) gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + nmRaw + ', \'' + context + '\')">' +

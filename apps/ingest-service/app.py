@@ -1217,8 +1217,21 @@ def add_raw_card():
                 grade_value = (data.get("grade_value") or "").strip()
 
                 if is_graded and grade_company and grade_value:
-                    # Use graded (PSA/BGS/CGC) eBay market price
-                    market_price = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
+                    # Live eBay comps via Scrydex listings — cache aggregates are unreliable
+                    try:
+                        from graded_pricing import get_live_graded_comps
+                        live = get_live_graded_comps(tcgplayer_id, grade_company, grade_value, db)
+                        if live and live.get("mid"):
+                            market_price = Decimal(str(live["mid"])).quantize(Decimal("0.01"))
+                            app.logger.info(
+                                f"Live graded comps for TCG#{tcgplayer_id} {grade_company} {grade_value}: "
+                                f"median ${live['mid']} ({live.get('comps_count', '?')} comps, {live.get('source')})"
+                            )
+                    except Exception as e:
+                        app.logger.warning(f"Live graded pricing failed for TCG#{tcgplayer_id}: {e}")
+                    # Fallback to PPT/cache aggregate if live didn't return anything
+                    if market_price is None:
+                        market_price = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
                     if market_price is None:
                         app.logger.warning(
                             f"No graded price for {tcgplayer_id} {grade_company} {grade_value}, "
@@ -1575,17 +1588,29 @@ def mark_item_graded(item_id):
         except Exception:
             pass
 
-    if new_price is None and ppt and item.get("tcgplayer_id"):
+    if new_price is None and item.get("tcgplayer_id"):
+        # Live eBay comps first
         try:
-            card_data = ppt.get_card_by_tcgplayer_id(int(item["tcgplayer_id"]))
-            if card_data:
-                new_price = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
-                if new_price is None:
-                    app.logger.warning(
-                        f"No graded price for {item['tcgplayer_id']} {grade_company} {grade_value}"
-                    )
+            from graded_pricing import get_live_graded_comps
+            live = get_live_graded_comps(int(item["tcgplayer_id"]), grade_company, grade_value, db)
+            if live and live.get("mid"):
+                new_price = Decimal(str(live["mid"])).quantize(Decimal("0.01"))
+                app.logger.info(f"Live graded comps for mark-graded: median ${live['mid']} "
+                                f"({live.get('comps_count', '?')} comps)")
         except Exception as e:
-            app.logger.warning(f"PPT graded price fetch failed: {e}")
+            app.logger.warning(f"Live graded pricing failed: {e}")
+        # Fallback to cache/PPT aggregate
+        if new_price is None and ppt:
+            try:
+                card_data = ppt.get_card_by_tcgplayer_id(int(item["tcgplayer_id"]))
+                if card_data:
+                    new_price = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
+                    if new_price is None:
+                        app.logger.warning(
+                            f"No graded price for {item['tcgplayer_id']} {grade_company} {grade_value}"
+                        )
+            except Exception as e:
+                app.logger.warning(f"PPT graded price fetch failed: {e}")
 
     if new_price is not None:
         item = intake.update_item_price(item_id, new_price, session_id)
@@ -1861,14 +1886,28 @@ def ppt_lookup_card():
         app.logger.info(f"  extract_variants result={variants}")
         app.logger.info(f"  primary_printing={primary_printing}")
 
-        # Extract graded (PSA/BGS/CGC) prices
+        # Extract graded (PSA/BGS/CGC) prices — cache aggregates as fallback
         graded_prices = PriceProvider.extract_graded_prices(card_data)
+
+        # Enrich with live comps for each grade that has cached data
+        # This replaces unreliable aggregates with real eBay sold data
+        live_graded = {}
+        try:
+            from graded_pricing import get_live_graded_comps
+            for company_name, grades in graded_prices.items():
+                for grade_val in grades:
+                    live = get_live_graded_comps(int(tcgplayer_id), company_name, grade_val, db)
+                    if live:
+                        live_graded.setdefault(company_name, {})[grade_val] = live
+        except Exception as e:
+            app.logger.warning(f"Live graded enrichment failed for TCG#{tcgplayer_id}: {e}")
 
         return jsonify({
             "card": card_data,
             "variants": variants,            # {"Holofoil": {"NM": 103.85, "LP": 87.80, ...}, ...}
             "primary_printing": primary_printing,  # "Holofoil"
             "graded_prices": graded_prices,  # {"PSA": {"10": {"avg": 450, ...}, "9": {...}}, ...}
+            "live_graded": live_graded,      # {"PSA": {"10": {market, mid, low, high, comps_count, sales, ...}}}
         })
     except PPTError as e:
         return jsonify({"error": str(e)}), 502

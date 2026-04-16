@@ -1,0 +1,296 @@
+"""
+slab_updater.py — Nightly graded slab price sync.
+
+Pulls live eBay comps from Scrydex for every slab in our Shopify store,
+compares to current listing price, and flags or auto-adjusts.
+
+Usage:
+    python slab_updater.py                  # dry run (print only)
+    python slab_updater.py --apply          # apply safe auto-updates
+    python slab_updater.py --csv output.csv # write results to CSV
+
+Can also be triggered via HTTP POST from review_dashboard.py or APScheduler.
+"""
+
+import os
+import re
+import sys
+import csv
+import logging
+import argparse
+from datetime import datetime
+from decimal import Decimal
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+import requests
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+SHOPIFY_STORE    = os.environ.get("SHOPIFY_STORE", "")
+SHOPIFY_TOKEN    = os.environ.get("SHOPIFY_TOKEN", "")
+SHOPIFY_VERSION  = "2025-10"
+GRAPHQL_ENDPOINT = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_VERSION}/graphql.json"
+HEADERS = {
+    "Content-Type": "application/json",
+    "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+}
+
+# ── Grade extraction from Shopify product titles ─────────────────────────────
+# Patterns like "PSA 10", "BGS 9.5", "CGC 9" anywhere in the title
+_GRADE_PATTERN = re.compile(
+    r"\b(PSA|BGS|CGC|SGC|ACE|TAG)\s+(\d+(?:\.\d)?)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_grade_from_title(title: str) -> tuple[str, str] | None:
+    """Extract (company, grade_value) from a Shopify product title."""
+    m = _GRADE_PATTERN.search(title or "")
+    if m:
+        return m.group(1).upper(), m.group(2)
+    return None
+
+
+def fetch_slab_products() -> list[dict]:
+    """Fetch all Shopify products tagged 'slab' via GraphQL."""
+    query = """
+    query getSlabs($first: Int!, $cursor: String, $query: String!) {
+      products(first: $first, after: $cursor, query: $query) {
+        pageInfo { hasNextPage }
+        edges {
+          cursor
+          node {
+            id
+            title
+            handle
+            tags
+            variants(first: 10) {
+              edges {
+                node {
+                  id
+                  price
+                  sku
+                  inventoryQuantity
+                  inventoryItem { id unitCost { amount } }
+                }
+              }
+            }
+            metafields(first: 10) {
+              edges {
+                node { namespace key value }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    products = []
+    cursor = None
+    has_next = True
+
+    while has_next:
+        variables = {"first": 50, "cursor": cursor, "query": "tag:slab"}
+        r = requests.post(GRAPHQL_ENDPOINT, headers=HEADERS,
+                          json={"query": query, "variables": variables}, timeout=30)
+        r.raise_for_status()
+        data = r.json()["data"]["products"]
+        for edge in data["edges"]:
+            node = edge["node"]
+            cursor = edge["cursor"]
+
+            # Extract metafields
+            mf = {}
+            for mfe in node.get("metafields", {}).get("edges", []):
+                n = mfe["node"]
+                mf[f"{n['namespace']}.{n['key']}"] = n["value"]
+
+            tcg_id = mf.get("tcg.tcgplayer_id") or mf.get("pf_slab.tcgplayer_id")
+            if tcg_id:
+                try:
+                    tcg_id = int(str(tcg_id).strip().strip("[]\"'"))
+                except (ValueError, TypeError):
+                    tcg_id = None
+
+            for ve in node["variants"]["edges"]:
+                v = ve["node"]
+                cost_amount = None
+                if v.get("inventoryItem", {}).get("unitCost"):
+                    try:
+                        cost_amount = float(v["inventoryItem"]["unitCost"]["amount"])
+                    except (TypeError, ValueError):
+                        pass
+
+                products.append({
+                    "product_gid": node["id"],
+                    "variant_gid": v["id"],
+                    "title":       node["title"],
+                    "tags":        node.get("tags", []),
+                    "price":       float(v["price"]),
+                    "sku":         v.get("sku", ""),
+                    "qty":         v.get("inventoryQuantity", 0),
+                    "cost_basis":  cost_amount,
+                    "tcg_id":      tcg_id,
+                })
+
+        has_next = data["pageInfo"]["hasNextPage"]
+
+    return products
+
+
+def update_variant_price(product_gid: str, variant_gid: str, new_price: float):
+    """Update a single variant's price via GraphQL."""
+    mutation = """
+    mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants { id price }
+        userErrors { field message }
+      }
+    }
+    """
+    variables = {
+        "productId": product_gid,
+        "variants": [{"id": variant_gid, "price": str(new_price)}],
+    }
+    r = requests.post(GRAPHQL_ENDPOINT, headers=HEADERS,
+                      json={"query": mutation, "variables": variables}, timeout=30)
+    r.raise_for_status()
+    result = r.json()
+    errs = result.get("data", {}).get("productVariantsBulkUpdate", {}).get("userErrors", [])
+    if errs:
+        raise RuntimeError(f"Shopify price update failed: {errs}")
+    return result
+
+
+def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
+    """
+    Main slab update loop.
+
+    1. Fetch all slab products from Shopify
+    2. For each, extract grade from title + resolve TCG ID
+    3. Fetch live eBay comps via shared/graded_pricing.py
+    4. Compare current price to live median
+    5. Flag or auto-adjust
+
+    Returns list of result dicts.
+    """
+    import db as db_module
+    db_module.init_pool()
+
+    from graded_pricing import get_live_graded_comps
+
+    logger.info("Fetching slab products from Shopify...")
+    slabs = fetch_slab_products()
+    logger.info(f"Found {len(slabs)} slab variants")
+
+    results = []
+    updated = 0
+    flagged = 0
+
+    for slab in slabs:
+        title = slab["title"]
+        grade_info = extract_grade_from_title(title)
+        if not grade_info:
+            results.append({**slab, "action": "skip", "reason": "no grade in title"})
+            continue
+
+        company, grade_val = grade_info
+        tcg_id = slab.get("tcg_id")
+        if not tcg_id:
+            results.append({**slab, "action": "skip", "reason": "no tcg_id"})
+            continue
+
+        # Fetch live comps
+        comps = get_live_graded_comps(tcg_id, company, grade_val, db_module)
+        if not comps or not comps.get("mid"):
+            results.append({**slab, "action": "skip", "reason": "no comp data",
+                            "company": company, "grade": grade_val})
+            continue
+
+        current = slab["price"]
+        median  = comps["mid"]
+        cost    = slab.get("cost_basis") or 0
+        comps_n = comps.get("comps_count", 0)
+        delta_pct = ((current - median) / median * 100) if median > 0 else 0
+
+        entry = {
+            **slab,
+            "company":     company,
+            "grade":       grade_val,
+            "median":      median,
+            "low":         comps.get("low"),
+            "high":        comps.get("high"),
+            "comps_count": comps_n,
+            "trend_7d":    comps.get("trend_7d_pct"),
+            "delta_pct":   round(delta_pct, 1),
+        }
+
+        # Decision logic
+        # Floor: never go below cost basis
+        safe_price = max(median, cost) if cost else median
+
+        if abs(delta_pct) <= 10:
+            entry["action"] = "ok"
+            entry["reason"] = f"within 10% (delta {delta_pct:+.1f}%)"
+        elif delta_pct > 10:
+            # Overpriced — auto-adjust for in-stock items
+            if apply and slab["qty"] > 0:
+                new_price = round(safe_price, 2)
+                try:
+                    update_variant_price(slab["product_gid"], slab["variant_gid"], new_price)
+                    entry["action"] = "adjusted"
+                    entry["new_price"] = new_price
+                    entry["reason"] = f"overpriced {delta_pct:+.1f}%, adjusted to median ${new_price}"
+                    updated += 1
+                except Exception as e:
+                    entry["action"] = "error"
+                    entry["reason"] = f"price update failed: {e}"
+            else:
+                entry["action"] = "flag_overpriced"
+                entry["reason"] = f"overpriced {delta_pct:+.1f}% — review"
+                entry["suggested_price"] = round(safe_price, 2)
+                flagged += 1
+        else:
+            # Underpriced — always flag for review (don't auto-raise)
+            entry["action"] = "flag_underpriced"
+            entry["reason"] = f"underpriced {delta_pct:+.1f}% vs median — review"
+            entry["suggested_price"] = round(safe_price, 2)
+            flagged += 1
+
+        results.append(entry)
+        logger.info(f"  {title}: ${current:.2f} vs median ${median:.2f} ({comps_n} comps) → {entry['action']}")
+
+    logger.info(f"\nDone. {len(slabs)} slabs, {updated} adjusted, {flagged} flagged")
+
+    # Write CSV if requested
+    if csv_path and results:
+        _write_csv(csv_path, results)
+        logger.info(f"Results written to {csv_path}")
+
+    return results
+
+
+def _write_csv(path: str, results: list[dict]):
+    fields = ["title", "sku", "company", "grade", "price", "median", "low", "high",
+              "comps_count", "delta_pct", "trend_7d", "action", "reason",
+              "suggested_price", "new_price", "cost_basis", "qty"]
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        w.writeheader()
+        for r in results:
+            w.writerow(r)
+
+
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+    parser = argparse.ArgumentParser(description="Nightly slab price updater")
+    parser.add_argument("--apply", action="store_true", help="Apply safe auto-updates (default: dry run)")
+    parser.add_argument("--csv", default=None, help="Write results to CSV file")
+    args = parser.parse_args()
+
+    run(apply=args.apply, csv_path=args.csv)
