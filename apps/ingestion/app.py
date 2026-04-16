@@ -356,6 +356,60 @@ def mark_good(item_id):
     return jsonify({"success": True, "item": _serialize(item)})
 
 
+@app.route("/api/ingest/search-cards", methods=["POST"])
+def search_cards_for_relink():
+    """
+    Cache-first card search for the re-link flow (preview panel uses this when
+    PSA and Scrydex set names disagree). Reads scrydex_price_cache directly so
+    zero API credits are consumed.
+
+    POST body: { "query": "alakazam", "set_name": "base set 2", "limit": 20 }
+    """
+    data    = request.get_json(silent=True) or {}
+    query   = (data.get("query") or "").strip()
+    set_nm  = (data.get("set_name") or "").strip()
+    limit   = min(int(data.get("limit") or 20), 50)
+
+    if not query and not set_nm:
+        return jsonify({"error": "query or set_name required"}), 400
+
+    where = ["product_type = 'card'"]
+    params = []
+    if query:
+        where.append("product_name ILIKE %s")
+        params.append(f"%{query}%")
+    if set_nm:
+        where.append("expansion_name ILIKE %s")
+        params.append(f"%{set_nm}%")
+
+    # One row per scrydex_id — NM raw variant first (most representative)
+    sql = f"""
+        SELECT DISTINCT ON (scrydex_id)
+               scrydex_id, tcgplayer_id, product_name, expansion_name,
+               card_number, rarity, variant, image_small, image_medium, market_price
+        FROM scrydex_price_cache
+        WHERE {' AND '.join(where)}
+        ORDER BY scrydex_id, price_type ASC, condition ASC
+        LIMIT %s
+    """
+    params.append(limit)
+    rows = db.query(sql, tuple(params))
+
+    results = [{
+        "scrydex_id":    r.get("scrydex_id"),
+        "tcgplayer_id":  r.get("tcgplayer_id"),
+        "product_name":  r.get("product_name"),
+        "set_name":      r.get("expansion_name"),
+        "card_number":   r.get("card_number"),
+        "rarity":        r.get("rarity"),
+        "variant":       r.get("variant"),
+        "image":         r.get("image_small") or r.get("image_medium"),
+        "market_price":  float(r["market_price"]) if r.get("market_price") else None,
+    } for r in rows if r.get("tcgplayer_id")]  # must have a TCG ID to be usable
+
+    return jsonify({"results": results, "total": len(results)})
+
+
 @app.route("/api/ingest/item/<item_id>/relink", methods=["POST"])
 def relink_item(item_id):
     """Relink an item to a different PPT product (change name, tcgplayer_id, market price)."""

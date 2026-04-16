@@ -2879,6 +2879,185 @@ async function relinkManual() {
     } catch(err) { alert(err.message); }
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// Graded-slab card re-link (from preview panel) — uses Scrydex cache search
+// Unlike the sealed relink above, on success this re-runs the slab preview
+// in place rather than reloading the whole session view, so cert inputs
+// Sean already entered for other slabs are preserved.
+// ══════════════════════════════════════════════════════════════════════
+
+let _slabRelinkContext = null;
+
+function openRelinkModal(itemId, sessionId, slabIdx) {
+    _slabRelinkContext = { itemId, sessionId, slabIdx };
+
+    // Pre-fill search with PSA subject if available, falling back to
+    // item's product_name — gets the user to matches in one keystroke.
+    let preQuery = '';
+    let preSet = '';
+    const rowId = `${itemId}-${slabIdx}`;
+    // Try to pull PSA subject out of the already-rendered preview panel
+    const previewEl = document.getElementById(`cert-preview-${rowId}`);
+    if (previewEl) {
+        const tds = previewEl.querySelectorAll('td');
+        tds.forEach((td, idx) => {
+            const label = td.textContent.trim().toLowerCase();
+            if (label === 'subject' && tds[idx + 1]) {
+                preQuery = tds[idx + 1].textContent.trim();
+            }
+            if (label === 'set (psa)' && tds[idx + 1]) {
+                preSet = tds[idx + 1].textContent.replace('⚠️','').trim();
+                // Clean up PSA brand-style noise for better cache matches
+                preSet = preSet.replace(/^POKEMON\s*/i, '')
+                               .replace(/\bEN[-\s]?\w*\b/gi, '')
+                               .replace(/\s{2,}/g, ' ').trim();
+            }
+        });
+    }
+    // Fallback to item name from session data
+    if (!preQuery && _currentSessionData) {
+        const item = _currentSessionData.items.find(i => i.id === itemId);
+        if (item) preQuery = item.product_name || '';
+    }
+
+    document.getElementById('relink-body').innerHTML = `
+        <h3 style="margin-bottom:6px;">🔗 Re-link Slab to Correct Card</h3>
+        <p style="color:var(--text-dim); font-size:0.82rem; margin-bottom:12px;">
+            Searches the local Scrydex cache (zero API calls). Pick the right card and the slab's intake record gets the correct TCG ID.
+        </p>
+        <div style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
+            <div style="flex:2;min-width:180px;">
+                <label style="font-size:0.82rem; color:var(--text-dim);">Card name</label>
+                <input type="text" id="slab-relink-query" value="${preQuery.replace(/"/g,'&quot;')}"
+                       placeholder="e.g. Alakazam"
+                       style="width:100%; margin-top:4px;"
+                       onkeydown="if(event.key==='Enter') slabRelinkSearch()">
+            </div>
+            <div style="flex:2;min-width:180px;">
+                <label style="font-size:0.82rem; color:var(--text-dim);">Set (optional)</label>
+                <input type="text" id="slab-relink-set" value="${preSet.replace(/"/g,'&quot;')}"
+                       placeholder="e.g. Base Set 2"
+                       style="width:100%; margin-top:4px;"
+                       onkeydown="if(event.key==='Enter') slabRelinkSearch()">
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="slabRelinkSearch()" style="height:40px;">Search</button>
+        </div>
+        <div id="slab-relink-results"></div>
+        <div style="margin-top:16px; padding-top:12px; border-top:1px solid var(--border);">
+            <h4 style="margin-bottom:8px; font-size:0.82rem; color:var(--text-dim);">Or enter TCGPlayer ID directly:</h4>
+            <div style="display:flex; gap:8px; align-items:flex-end;">
+                <div style="flex:1;">
+                    <input type="number" id="slab-relink-tcgid" placeholder="TCGPlayer Product ID" style="width:100%;">
+                </div>
+                <button class="btn btn-success btn-sm" onclick="slabRelinkByTcgId()" style="height:40px;">Link</button>
+            </div>
+        </div>
+    `;
+    document.getElementById('relink-modal').classList.add('active');
+    setTimeout(() => document.getElementById('slab-relink-query').focus(), 100);
+    // Auto-search if we have a pre-fill
+    if (preQuery) setTimeout(slabRelinkSearch, 120);
+}
+
+async function slabRelinkSearch() {
+    const query = document.getElementById('slab-relink-query').value.trim();
+    const setName = document.getElementById('slab-relink-set').value.trim();
+    const resultsDiv = document.getElementById('slab-relink-results');
+    if (!query && !setName) { resultsDiv.innerHTML = '<p style="color:var(--text-dim);">Enter a name or set</p>'; return; }
+
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+    try {
+        const sr = await fetch('/api/ingest/search-cards', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query, set_name: setName, limit: 30 }),
+        });
+        const sd = await sr.json();
+        if (!sr.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${sd.error}</div>`; return; }
+        const results = sd.results || [];
+        if (!results.length) {
+            resultsDiv.innerHTML = '<div class="alert alert-warning">No cards in cache match. Try fewer words or a different set.</div>';
+            return;
+        }
+
+        resultsDiv.innerHTML = '<div style="max-height:420px; overflow-y:auto;">' + results.map(p => {
+            const tcgId = p.tcgplayer_id;
+            const img = p.image ? `<img src="${p.image}" style="width:40px;height:56px;object-fit:contain;border-radius:3px;margin-right:10px;">` : '';
+            const price = p.market_price != null ? ' · NM $' + p.market_price.toFixed(2) : '';
+            const pname = (p.product_name || '').replace(/'/g,"\\'");
+            const psname = (p.set_name || '').replace(/'/g,"\\'");
+            return `<div class="search-result" style="display:flex;align-items:center;padding:8px 10px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
+                         onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
+                         onclick="selectRelinkCard(${tcgId}, '${pname}', ${p.market_price||0}, '${psname}')">
+                ${img}
+                <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:0.9rem;">${p.product_name}${p.card_number ? ' #' + p.card_number : ''}</div>
+                    <div style="font-size:0.75rem; color:var(--text-dim);">${p.set_name} · TCG#${tcgId}${price}</div>
+                </div>
+            </div>`;
+        }).join('') + '</div>';
+    } catch(err) {
+        resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+async function selectRelinkCard(tcgId, name, price, setName) {
+    const ctx = _slabRelinkContext;
+    if (!ctx) return;
+    try {
+        const r = await fetch(`/api/ingest/item/${ctx.itemId}/relink`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                product_name: name,
+                tcgplayer_id: tcgId,
+                market_price: price,
+                set_name: setName || null,
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Re-link failed'); return; }
+
+        // Update the in-memory session data so subsequent previews on
+        // sibling slabs see the new TCG ID too
+        if (_currentSessionData) {
+            const item = _currentSessionData.items.find(i => i.id === ctx.itemId);
+            if (item) {
+                item.tcgplayer_id = tcgId;
+                item.product_name = name;
+                item.set_name = setName || null;
+                if (price) item.market_price = price;
+            }
+        }
+
+        closeRelink();
+        // Re-fire the preview in place — cert is still in its input
+        previewGradedSlab(ctx.itemId, ctx.sessionId, ctx.slabIdx);
+    } catch(err) { alert(err.message); }
+}
+
+async function slabRelinkByTcgId() {
+    const tcgId = document.getElementById('slab-relink-tcgid').value.trim();
+    if (!tcgId) { alert('Enter a TCGPlayer ID'); return; }
+    const ctx = _slabRelinkContext;
+    if (!ctx) return;
+    try {
+        const r = await fetch(`/api/ingest/item/${ctx.itemId}/relink`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Re-link failed'); return; }
+        if (_currentSessionData) {
+            const item = _currentSessionData.items.find(i => i.id === ctx.itemId);
+            if (item) item.tcgplayer_id = parseInt(tcgId);
+        }
+        closeRelink();
+        previewGradedSlab(ctx.itemId, ctx.sessionId, ctx.slabIdx);
+    } catch(err) { alert(err.message); }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // ADD ITEM
 // ═══════════════════════════════════════════════════════════════════
@@ -4047,7 +4226,17 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
               <tr><td style="color:var(--text-dim);padding-right:8px;">Population</td><td>${pop} at this grade</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Higher</td><td>${higher}${isTop ? ' <span style="color:var(--green);">(top pop)</span>' : ''}</td></tr>
             </table>
-            ${mismatch ? `<div style="margin-top:6px;padding:6px 8px;background:rgba(255,70,70,0.12);border-left:3px solid var(--red);font-size:0.75rem;color:var(--red);">⚠️ PSA brand and cached set name don't match — the intake TCG ID (${d.scrydex_card?.card_name||'?'}) is likely for a different card/set. Re-link before pushing or this listing will have the wrong set.</div>` : ''}
+            ${mismatch ? `
+              <div style="margin-top:6px;padding:6px 8px;background:rgba(255,70,70,0.12);border-left:3px solid var(--red);font-size:0.75rem;color:var(--red);">
+                ⚠️ PSA brand and cached set name don't match — the intake TCG ID (${d.scrydex_card?.card_name||'?'}) is likely for a different card/set.
+                <button class="btn btn-sm" style="margin-left:8px;font-size:0.72rem;padding:3px 8px;background:var(--red);color:#fff;border:none;"
+                  onclick="openRelinkModal('${itemId}','${sessionId}',${slabIdx})">
+                  🔗 Re-link Card
+                </button>
+              </div>` : `
+              <div style="margin-top:6px;font-size:0.72rem;color:var(--text-dim);">
+                <a href="#" onclick="event.preventDefault();openRelinkModal('${itemId}','${sessionId}',${slabIdx})" style="color:var(--text-dim);text-decoration:underline;">🔗 Re-link to a different card</a>
+              </div>`}
           </div>`;
     } else {
         psaHtml = `
