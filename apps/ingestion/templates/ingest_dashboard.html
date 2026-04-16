@@ -4257,11 +4257,22 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
             const hours = Math.round((Date.now() - new Date(sd.fetched_at).getTime()) / 3600000);
             ageStr = hours < 1 ? '< 1h ago' : hours < 48 ? `${hours}h ago` : `${Math.round(hours/24)}d ago`;
         }
+
+        // Data quality: when low=mid=high=market it's a single comp — flag it
+        const allSame = sd.low != null && sd.low === sd.mid && sd.mid === sd.high && sd.high === sd.market;
+        const thinData = allSame || (sd.low != null && sd.high != null && sd.low === sd.high);
+        const qualityBadge = thinData
+            ? '<span style="color:var(--red);font-weight:600;font-size:0.72rem;margin-left:6px;">⚠ single comp — do not trust</span>'
+            : (sd.low != null && sd.high != null && sd.high > 0 && ((sd.high - sd.low) / sd.high * 100) > 80)
+                ? '<span style="color:var(--amber);font-size:0.72rem;margin-left:6px;">wide spread — check comps</span>'
+                : '';
+        const marketStyle = thinData ? 'font-weight:600;color:var(--red);text-decoration:line-through;' : 'font-weight:600;';
+
         scrydexHtml = `
           <div style="flex:1;min-width:240px;">
             <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">📊 Scrydex <span style="color:var(--text-dim);font-weight:400;">· cached ${ageStr}</span></div>
             <table style="font-size:0.78rem;width:100%;">
-              <tr><td style="color:var(--text-dim);padding-right:8px;">Market</td><td style="font-weight:600;">${fmt$(sd.market)}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Market</td><td><span style="${marketStyle}">${fmt$(sd.market)}</span>${qualityBadge}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Range</td><td>${fmt$(sd.low)} / ${fmt$(sd.mid)} / ${fmt$(sd.high)}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Trend 7d</td><td>${fmtPct(sd.trend_7d_pct)}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Trend 30d</td><td>${fmtPct(sd.trend_30d_pct)}</td></tr>
@@ -4284,7 +4295,10 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
     }
 
     // Margin preview — live as you type
-    const suggested = d.scrydex?.suggested_price;
+    // Don't pre-fill from single-comp data (all four prices identical = one sale/listing)
+    const sd = d.scrydex;
+    const thinScrydex = sd && sd.low != null && sd.low === sd.mid && sd.mid === sd.high && sd.high === sd.market;
+    const suggested = (sd && !thinScrydex) ? sd.suggested_price : null;
     const priceVal = suggested != null ? suggested.toFixed(2) : '';
     const cost = d.cost_basis || 0;
 
