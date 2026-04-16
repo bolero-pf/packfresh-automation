@@ -4029,6 +4029,10 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
         const pop = d.psa.total_population != null ? d.psa.total_population.toLocaleString() : '—';
         const higher = d.psa.population_higher != null ? d.psa.population_higher.toLocaleString() : '—';
         const isTop = d.psa.population_higher === 0;
+        const psaSet = d.psa.brand || '—';
+        const scrydexSet = d.scrydex_card?.set_name || '—';
+        const mismatch = d.set_mismatch;
+        const setRowStyle = mismatch ? 'background:rgba(255,70,70,0.12);' : '';
         psaHtml = `
           <div style="flex:1;min-width:240px;">
             <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">🏅 PSA Cert #${cert}</div>
@@ -4036,11 +4040,14 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
               <tr><td style="color:var(--text-dim);padding-right:8px;">Year</td><td>${d.psa.year||'—'}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Subject</td><td>${d.psa.subject||'—'}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Variety</td><td>${d.psa.variety||'—'}</td></tr>
+              <tr style="${setRowStyle}"><td style="color:var(--text-dim);padding-right:8px;">Set (PSA)</td><td>${psaSet}${mismatch ? ' ⚠️' : ''}</td></tr>
+              <tr style="${setRowStyle}"><td style="color:var(--text-dim);padding-right:8px;">Set (cache)</td><td>${scrydexSet}${mismatch ? ' ⚠️' : ''}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Card #</td><td>${d.psa.card_number||'—'}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Grade</td><td>${d.psa.grade_description||`${d.company} ${d.grade}`}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Population</td><td>${pop} at this grade</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Higher</td><td>${higher}${isTop ? ' <span style="color:var(--green);">(top pop)</span>' : ''}</td></tr>
             </table>
+            ${mismatch ? `<div style="margin-top:6px;padding:6px 8px;background:rgba(255,70,70,0.12);border-left:3px solid var(--red);font-size:0.75rem;color:var(--red);">⚠️ PSA brand and cached set name don't match — the intake TCG ID (${d.scrydex_card?.card_name||'?'}) is likely for a different card/set. Re-link before pushing or this listing will have the wrong set.</div>` : ''}
           </div>`;
     } else {
         psaHtml = `

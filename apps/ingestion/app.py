@@ -1652,7 +1652,50 @@ def preview_graded_item(item_id):
         if company != "PSA":
             result["note"] = f"{company} cert lookup not yet implemented — fill price manually"
 
-    # ── Scrydex cache lookup (per-grade) ────────────────────────────────────
+    # ── Scrydex cache lookup: full card row for set-name comparison ────────
+    scrydex_set = None
+    scrydex_card_name = None
+    if tcg_id:
+        card_row = db.query_one("""
+            SELECT expansion_name, product_name, card_number
+            FROM scrydex_price_cache
+            WHERE tcgplayer_id = %s AND product_type = 'card'
+            LIMIT 1
+        """, (int(tcg_id),))
+        if card_row:
+            scrydex_set = card_row.get("expansion_name")
+            scrydex_card_name = card_row.get("product_name")
+    result["scrydex_card"] = {
+        "set_name": scrydex_set,
+        "card_name": scrydex_card_name,
+    }
+
+    # ── Set-name mismatch check (PSA brand vs Scrydex set) ─────────────────
+    # Catches TCG-ID misassignments at intake (e.g. Base Set 2 slab linked to
+    # Legendary Collection). Normalization is crude on purpose — we just want
+    # a heads-up, not a gate.
+    result["set_mismatch"] = False
+    psa_brand = (result.get("psa") or {}).get("brand") or ""
+    if psa_brand and scrydex_set:
+        def _norm(s):
+            import re as _re
+            s = _re.sub(r"(?i)\bpokemon\b", "", s or "")
+            s = _re.sub(r"\b(EN|JP|ENG|JPN|FR|SVP|SWSH|SVI|XY|BW|SM|EX|PROMO)[-\s]?\w*\b", "", s, flags=_re.IGNORECASE)
+            s = _re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+            return s
+        a, b = _norm(psa_brand), _norm(scrydex_set)
+        if a and b:
+            # Match if either normalized string contains the other, or they share
+            # at least half of the shorter string's tokens
+            if a in b or b in a:
+                result["set_mismatch"] = False
+            else:
+                ta, tb = set(a.split()), set(b.split())
+                if ta and tb:
+                    overlap = len(ta & tb) / min(len(ta), len(tb))
+                    result["set_mismatch"] = overlap < 0.5
+
+    # ── Scrydex cache lookup (per-grade pricing) ───────────────────────────
     result["scrydex"] = None
     if tcg_id and grade:
         row = db.query_one("""
