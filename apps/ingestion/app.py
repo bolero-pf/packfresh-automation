@@ -1751,9 +1751,10 @@ def preview_graded_item(item_id):
 
     # ── Scrydex cache lookup (per-grade pricing) ───────────────────────────
     result["scrydex"] = None
+    scrydex_id = None
     if tcg_id and grade:
         row = db.query_one("""
-            SELECT market_price, low_price, mid_price, high_price,
+            SELECT scrydex_id, market_price, low_price, mid_price, high_price,
                    trend_1d_pct, trend_7d_pct, trend_30d_pct, fetched_at
             FROM scrydex_price_cache
             WHERE tcgplayer_id = %s AND price_type = 'graded'
@@ -1762,21 +1763,61 @@ def preview_graded_item(item_id):
             LIMIT 1
         """, (int(tcg_id), company, grade))
         if row:
+            scrydex_id = row.get("scrydex_id")
             def _f(v):
                 return float(v) if v is not None else None
             market = _f(row.get("market_price"))
+            low    = _f(row.get("low_price"))
             mid    = _f(row.get("mid_price"))
+            high   = _f(row.get("high_price"))
+
+            # Detect thin data: nightly sync inline prices often have
+            # market=low=mid=high (single aggregated value, not real comps).
+            # If so, try a live Scrydex listings call for real eBay sold data.
+            thin = (low is not None and low == mid == high == market)
+            comps_count = None
+
+            if thin and scrydex_id:
+                try:
+                    from scrydex_client import ScrydexClient
+                    sx_key  = os.getenv("SCRYDEX_API_KEY", "")
+                    sx_team = os.getenv("SCRYDEX_TEAM_ID", "")
+                    if sx_key and sx_team:
+                        sx = ScrydexClient(sx_key, sx_team, db=db)
+                        listings = sx.get_card_listings(scrydex_id, days=60)
+                        grade_listings = [
+                            float(l["price"])
+                            for l in listings
+                            if (l.get("company") or "").upper() == company
+                            and str(l.get("grade", "")) == str(grade)
+                            and l.get("price") is not None
+                        ]
+                        if grade_listings:
+                            from statistics import median as _median
+                            grade_listings.sort()
+                            low    = grade_listings[0]
+                            high   = grade_listings[-1]
+                            mid    = round(_median(grade_listings), 2)
+                            market = round(sum(grade_listings) / len(grade_listings), 2)
+                            comps_count = len(grade_listings)
+                            thin = False
+                            logger.info(f"Live Scrydex listings for {scrydex_id} {company} {grade}: "
+                                        f"{comps_count} comps, ${low}-${high}, median ${mid}")
+                except Exception as e:
+                    logger.warning(f"Live Scrydex listings fetch failed for {scrydex_id}: {e}")
+
             result["scrydex"] = {
                 "market":        market,
-                "low":           _f(row.get("low_price")),
+                "low":           low,
                 "mid":           mid,
-                "high":          _f(row.get("high_price")),
+                "high":          high,
                 "trend_1d_pct":  _f(row.get("trend_1d_pct")),
                 "trend_7d_pct":  _f(row.get("trend_7d_pct")),
                 "trend_30d_pct": _f(row.get("trend_30d_pct")),
                 "fetched_at":    row["fetched_at"].isoformat() if row.get("fetched_at") else None,
-                # Suggest market, fall back to mid — user can override
                 "suggested_price": market or mid,
+                "comps_count":   comps_count,
+                "source":        "live_listings" if comps_count else "cache",
             }
 
     return jsonify(_serialize(result))

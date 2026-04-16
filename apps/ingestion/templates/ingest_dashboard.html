@@ -4258,14 +4258,17 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
             ageStr = hours < 1 ? '< 1h ago' : hours < 48 ? `${hours}h ago` : `${Math.round(hours/24)}d ago`;
         }
 
-        // Data quality: when low=mid=high=market it's a single comp — flag it
+        // Data quality
         const allSame = sd.low != null && sd.low === sd.mid && sd.mid === sd.high && sd.high === sd.market;
-        const thinData = allSame || (sd.low != null && sd.high != null && sd.low === sd.high);
+        const thinData = !sd.comps_count && (allSame || (sd.low != null && sd.high != null && sd.low === sd.high));
+        const compsLabel = sd.comps_count
+            ? `<span style="color:var(--green);font-size:0.72rem;margin-left:6px;">${sd.comps_count} comps (${sd.source === 'live_listings' ? 'live eBay' : 'cache'})</span>`
+            : '';
         const qualityBadge = thinData
             ? '<span style="color:var(--red);font-weight:600;font-size:0.72rem;margin-left:6px;">⚠ single comp — do not trust</span>'
             : (sd.low != null && sd.high != null && sd.high > 0 && ((sd.high - sd.low) / sd.high * 100) > 80)
                 ? '<span style="color:var(--amber);font-size:0.72rem;margin-left:6px;">wide spread — check comps</span>'
-                : '';
+                : compsLabel;
         const marketStyle = thinData ? 'font-weight:600;color:var(--red);text-decoration:line-through;' : 'font-weight:600;';
 
         scrydexHtml = `
