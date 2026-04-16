@@ -2558,26 +2558,64 @@ def price_compare_enrich():
         return jsonify({"error": str(e)}), 500
 
 
+def _detect_game_from_tags(tags: str) -> str:
+    """Detect game from tags string. Returns game identifier or None."""
+    if not tags:
+        return None
+    t = tags.lower()
+    if "lorcana" in t:
+        return "lorcana"
+    if "one piece" in t:
+        return "onepiece"
+    if "riftbound" in t:
+        return "riftbound"
+    if "magic: the gathering" in t or "magic the gathering" in t or ",mtg," in f",{t}," or t.startswith("mtg,") or t.endswith(",mtg"):
+        return "mtg"
+    if "pokemon" in t or "pokémon" in t:
+        return "pokemon"
+    return None
+
+
 @app.route("/api/price-compare/unmatched", methods=["POST"])
 def price_compare_unmatched():
     """
     Get store items that have no Scrydex cache match.
-    Body: { "filter": "sealed"|"card"|"all", "limit": 50, "offset": 0, "search": "" }
+    Body: { "filter": "sealed"|"card"|"all", "game": "pokemon"|"mtg"|..., "limit": 50, "offset": 0, "search": "" }
     """
     data = request.get_json(silent=True) or {}
     product_filter = data.get("filter", "sealed")
+    game_filter = (data.get("game") or "").strip().lower() or None
     limit = min(int(data.get("limit", 50)), 200)
     offset = int(data.get("offset", 0))
     search = data.get("search", "").strip()
 
+    # Exclude slabs and accessories — they're not TCG products for linking purposes
     where = ["ipc.tcgplayer_id IS NOT NULL", "ipc.is_damaged = FALSE",
              "ipc.tags NOT ILIKE %s",
+             "ipc.tags NOT ILIKE %s",
              "NOT EXISTS (SELECT 1 FROM scrydex_price_cache spc WHERE spc.tcgplayer_id = ipc.tcgplayer_id)"]
-    params = ["%slab%"]
+    params = ["%slab%", "%accessories%"]
 
     if product_filter == "sealed":
-        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
-        params.extend(["%sealed%", "%booster%", "%etb%"])
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%sealed%", "%booster%", "%etb%", "%collection box%", "%tin%"])
+
+    # Game filter via tag matching
+    if game_filter == "pokemon":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%pokemon%", "%pokémon%"])
+    elif game_filter == "mtg":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%magic: the gathering%", "%magic the gathering%"])
+    elif game_filter == "lorcana":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%lorcana%")
+    elif game_filter == "onepiece":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%one piece%")
+    elif game_filter == "riftbound":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%riftbound%")
 
     if search:
         where.append("ipc.title ILIKE %s")
@@ -2602,7 +2640,8 @@ def price_compare_unmatched():
     return jsonify({
         "items": [{"title": i["title"], "tcgplayer_id": i["tcgplayer_id"],
                     "store_price": float(i["shopify_price"]) if i["shopify_price"] else None,
-                    "qty": i["shopify_qty"]} for i in items],
+                    "qty": i["shopify_qty"],
+                    "game": _detect_game_from_tags(i["tags"] or "")} for i in items],
         "total": total, "limit": limit, "offset": offset,
     })
 
@@ -2611,11 +2650,12 @@ def price_compare_unmatched():
 def scrydex_search_for_link():
     """
     Search Scrydex cache for a product to link to.
-    Body: { "query": "surging sparks booster box", "type": "sealed"|"card"|"all" }
+    Body: { "query": "...", "type": "sealed"|"card"|"all", "game": "pokemon"|... }
     """
     data = request.get_json(silent=True) or {}
     query = data.get("query", "").strip()
     product_type = data.get("type", "all")
+    game_filter = (data.get("game") or "").strip().lower() or None
     if not query:
         return jsonify({"results": []})
 
@@ -2626,11 +2666,15 @@ def scrydex_search_for_link():
         where.append("product_type = %s")
         params.append(product_type)
 
+    if game_filter:
+        where.append("game = %s")
+        params.append(game_filter)
+
     # Get each variant as a separate row so PC ETBs show both normal + pokemonCenter
     results = db.query(f"""
         SELECT DISTINCT ON (scrydex_id, variant)
             scrydex_id, product_name, expansion_name, product_type, variant,
-            market_price, low_price, image_medium, tcgplayer_id
+            market_price, low_price, image_medium, tcgplayer_id, game
         FROM scrydex_price_cache
         WHERE {' AND '.join(where)}
         AND condition IN ('NM', 'U') AND price_type = 'raw'
@@ -2651,6 +2695,7 @@ def scrydex_search_for_link():
             "name": r["product_name"],
             "set": r["expansion_name"],
             "type": r["product_type"],
+            "game": r["game"],
             "market": float(r["market_price"]) if r["market_price"] else None,
             "low": float(r["low_price"]) if r["low_price"] else None,
             "image": r["image_medium"],

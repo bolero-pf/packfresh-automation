@@ -106,6 +106,14 @@
     <option value="sealed" selected>Sealed Only</option>
     <option value="all">All Products</option>
   </select>
+  <select id="um-game">
+    <option value="">All Games</option>
+    <option value="pokemon">Pokemon</option>
+    <option value="mtg">MTG</option>
+    <option value="lorcana">Lorcana</option>
+    <option value="onepiece">One Piece</option>
+    <option value="riftbound">Riftbound</option>
+  </select>
   <input type="text" id="um-search" placeholder="Filter store items..." style="width:250px;">
   <button onclick="loadUnmatched()">Filter</button>
   <span class="stats" id="um-stats"></span>
@@ -279,8 +287,12 @@ let umOffset = 0;
 let umTotal = 0;
 const UM_PAGE = 50;
 
+const GAME_LABELS = {pokemon:'Pokemon', mtg:'MTG', lorcana:'Lorcana', onepiece:'One Piece', riftbound:'Riftbound'};
+const GAME_COLORS = {pokemon:'#eab308', mtg:'#dc2626', lorcana:'#8b5cf6', onepiece:'#3b82f6', riftbound:'#10b981'};
+
 async function loadUnmatched() {
   const filter = document.getElementById('um-filter').value;
+  const game = document.getElementById('um-game').value;
   const search = document.getElementById('um-search').value;
   const tbody = document.getElementById('um-tbody');
   tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading...</td></tr>';
@@ -288,7 +300,7 @@ async function loadUnmatched() {
   const resp = await fetch('/api/price-compare/unmatched', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ filter, search, limit: UM_PAGE, offset: umOffset })
+    body: JSON.stringify({ filter, search, game, limit: UM_PAGE, offset: umOffset })
   });
   const data = await resp.json();
   umRows = data.items;
@@ -300,6 +312,12 @@ async function loadUnmatched() {
   document.getElementById('um-nextBtn').disabled = umOffset + UM_PAGE >= umTotal;
 }
 
+function _gameBadge(game) {
+  if (!game || !GAME_LABELS[game]) return '';
+  const color = GAME_COLORS[game] || '#888';
+  return `<span style="background:${color}22;color:${color};padding:1px 6px;border-radius:3px;font-size:0.65rem;font-weight:700;margin-right:4px;">${GAME_LABELS[game]}</span>`;
+}
+
 function renderUnmatched() {
   const tbody = document.getElementById('um-tbody');
   if (!umRows.length) { tbody.innerHTML = '<tr><td colspan="5" class="loading">No unmatched items</td></tr>'; return; }
@@ -309,7 +327,7 @@ function renderUnmatched() {
       ? `<span class="linked-tag">Linked: ${linked.name} ($${linked.market?.toFixed(2) || '?'})</span>`
       : `<button class="link-btn" onclick="openLinkModal(${i})">Search & Link</button>`;
     return `<tr>
-      <td>${r.title}</td>
+      <td>${_gameBadge(r.game)}${r.title}</td>
       <td class="price">${r.store_price != null ? '$' + r.store_price.toFixed(2) : '—'}</td>
       <td class="qty ${(r.qty||0) === 0 ? 'zero' : ''}">${r.qty || 0}</td>
       <td>${linkCell}</td>
@@ -322,6 +340,7 @@ function umPrevPage() { umOffset = Math.max(0, umOffset - UM_PAGE); loadUnmatche
 function umNextPage() { umOffset += UM_PAGE; loadUnmatched(); }
 document.getElementById('um-search').addEventListener('keydown', e => { if (e.key === 'Enter') { umOffset = 0; loadUnmatched(); }});
 document.getElementById('um-filter').addEventListener('change', () => { umOffset = 0; loadUnmatched(); });
+document.getElementById('um-game').addEventListener('change', () => { umOffset = 0; loadUnmatched(); });
 
 // ── Link modal ─────────────────────────────────────
 let linkingIdx = null;
@@ -348,26 +367,48 @@ async function doLinkSearch() {
   const results = document.getElementById('link-results');
   results.innerHTML = '<div class="loading">Searching...</div>';
 
+  // Auto-filter by the item's game (from unmatched row)
+  const itemGame = linkingIdx !== null ? (umRows[linkingIdx]?.game || '') : '';
+
   const resp = await fetch('/api/price-compare/scrydex-search', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ query, type: 'all' })
+    body: JSON.stringify({ query, type: 'all', game: itemGame })
   });
   const data = await resp.json();
 
   if (!data.results.length) {
+    // Fallback: retry without game filter in case the tag was mis-detected
+    if (itemGame) {
+      const resp2 = await fetch('/api/price-compare/scrydex-search', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ query, type: 'all' })
+      });
+      const data2 = await resp2.json();
+      if (data2.results.length) {
+        renderLinkResults(data2.results, `Showing all games — no ${GAME_LABELS[itemGame] || itemGame} match for "${query}"`);
+        return;
+      }
+    }
     results.innerHTML = '<div class="loading">No results. Try different keywords.</div>';
     return;
   }
 
-  results.innerHTML = data.results.map(r => {
+  renderLinkResults(data.results, null);
+}
+
+function renderLinkResults(resultsList, note) {
+  const results = document.getElementById('link-results');
+  const noteHtml = note ? `<div style="font-size:0.78rem; color:var(--amber,#e6a817); margin-bottom:8px; padding:6px 10px; background:rgba(230,168,23,0.1); border-radius:4px;">${note}</div>` : '';
+  results.innerHTML = noteHtml + resultsList.map(r => {
     const variantTag = r.variant && r.variant !== 'normal'
       ? `<span style="background:rgba(139,92,246,0.15);color:#a78bfa;padding:1px 6px;border-radius:3px;font-size:0.7rem;font-weight:600;">${r.variant_label || r.variant}</span>`
       : '';
     return `<div class="link-row" onclick="doLink('${r.scrydex_id}', '${r.variant || 'normal'}')">
       ${r.image ? `<img src="${r.image}" alt="">` : '<div style="width:48px;height:48px;background:var(--bg);border-radius:4px;"></div>'}
       <div class="info">
-        <div class="name">${r.name} ${variantTag}</div>
+        <div class="name">${_gameBadge(r.game)}${r.name} ${variantTag}</div>
         <div class="meta">${r.set || ''} &middot; ${r.type} &middot; ${r.scrydex_id}</div>
       </div>
       <div>
