@@ -558,6 +558,8 @@ def api_cancel_order():
     from service import _log_screening
 
     # Log cancel events before we clear everything
+    _otags = set()
+    _oemail = ""
     try:
         odata = shopify_gql("query($id:ID!){order(id:$id){name tags note customer{email}}}", {"id": order_gid})
         o = odata.get("data", {}).get("order", {})
@@ -597,6 +599,14 @@ def api_cancel_order():
         })
     except Exception as e:
         return jsonify({"error": f"Cancel failed: {e}"}), 500
+
+    # Handle FIRSTTIME5 abuse confirmation before tag cleanup strips the tag
+    if "FIRSTTIME5-review" in _otags and _oemail:
+        try:
+            from service import on_order_cancelled
+            on_order_cancelled(order_gid)
+        except Exception as e:
+            print(f"[screening] FIRSTTIME5 abuse confirmation failed: {e}", flush=True)
 
     # Clean up tags
     from service import on_order_fulfilled
