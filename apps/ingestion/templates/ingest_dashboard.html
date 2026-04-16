@@ -3936,20 +3936,23 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
             const slabLabel = item.qty > 1 ? `Slab ${idx + 1} of ${item.qty}` : `${item.company} ${item.grade}`;
             return `
             <div id="graded-row-${rowId}" data-item-id="${item.id}" data-slab-idx="${idx}"
-                 style="display:flex;gap:10px;align-items:center;padding:10px;background:var(--surface-2);border-radius:8px;margin-bottom:8px;flex-wrap:wrap;">
-                <div style="flex:1;min-width:200px;">
-                    <div style="font-weight:600;font-size:0.9rem;">${item.name}</div>
-                    <div style="font-size:0.78rem;color:var(--text-dim);">${slabLabel} · $${parseFloat(item.price).toFixed(2)}</div>
+                 style="padding:10px;background:var(--surface-2);border-radius:8px;margin-bottom:8px;">
+                <div class="graded-row-line" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                    <div style="flex:1;min-width:200px;">
+                        <div style="font-weight:600;font-size:0.9rem;">${item.name}</div>
+                        <div style="font-size:0.78rem;color:var(--text-dim);">${slabLabel}</div>
+                    </div>
+                    <input type="text" id="cert-input-${rowId}" placeholder="Cert # (e.g. 12345678)"
+                        style="width:170px;font-size:0.85rem;"
+                        onkeydown="if(event.key==='Enter') previewGradedSlab('${item.id}','${sessionId}',${idx})">
+                    <button class="btn btn-secondary btn-sm" id="preview-btn-${rowId}"
+                        onclick="previewGradedSlab('${item.id}','${sessionId}',${idx})"
+                        style="font-size:0.78rem;white-space:nowrap;">
+                        🔍 Preview
+                    </button>
+                    <div id="cert-result-${rowId}" style="font-size:0.8rem;min-width:100px;"></div>
                 </div>
-                <input type="text" id="cert-input-${rowId}" placeholder="Cert # (e.g. 12345678)"
-                    style="width:170px;font-size:0.85rem;"
-                    onkeydown="if(event.key==='Enter') pushGradedSlab('${item.id}','${sessionId}',${idx})">
-                <button class="btn btn-primary btn-sm" id="cert-btn-${rowId}"
-                    onclick="pushGradedSlab('${item.id}','${sessionId}',${idx})"
-                    style="font-size:0.78rem;white-space:nowrap;">
-                    Push Slab
-                </button>
-                <div id="cert-result-${rowId}" style="font-size:0.8rem;min-width:100px;"></div>
+                <div id="cert-preview-${rowId}" style="display:none;margin-top:10px;"></div>
             </div>`;
         }).join('');
         return header + rows;
@@ -3958,7 +3961,7 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
     certPanel.innerHTML = `
         <div style="font-size:1rem;font-weight:700;margin-bottom:12px;">🏅 Graded Slabs — Enter Cert Numbers</div>
         <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:14px;">
-            ${slabCount} slab${slabCount === 1 ? '' : 's'} to push. Each cert becomes its own Shopify product — enter and push one at a time. You can skip any and push them later.
+            ${slabCount} slab${slabCount === 1 ? '' : 's'} to push. For each: enter cert → 🔍 Preview to fetch PSA + Scrydex data → review, set listing price → 🚀 Push Slab Live. Each cert becomes its own Shopify product.
         </p>
         ${slabRowsHtml}
     `;
@@ -3971,51 +3974,222 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
     }
 }
 
-async function pushGradedSlab(itemId, sessionId, slabIdx) {
-    // slabIdx is the row index within this item's qty (0-based). Required when rendered
-    // as qty-many rows; backend splits-off-1 if qty > 1 so each cert gets its own product.
+async function previewGradedSlab(itemId, sessionId, slabIdx) {
     if (slabIdx === undefined) slabIdx = 0;
     const rowId     = `${itemId}-${slabIdx}`;
     const certInput = document.getElementById(`cert-input-${rowId}`);
-    const btn       = document.getElementById(`cert-btn-${rowId}`);
+    const btn       = document.getElementById(`preview-btn-${rowId}`);
     const resultEl  = document.getElementById(`cert-result-${rowId}`);
+    const previewEl = document.getElementById(`cert-preview-${rowId}`);
     const cert      = (certInput?.value || '').trim();
 
     if (!cert) { resultEl.innerHTML = '<span style="color:var(--red);">Enter cert #</span>'; return; }
 
     btn.disabled = true;
     btn.textContent = '⟳';
+    resultEl.innerHTML = '<span style="color:var(--text-dim);">Looking up...</span>';
+
+    try {
+        const r = await fetch(`/api/ingest/item/${itemId}/preview-graded`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cert_number: cert }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            btn.disabled = false; btn.textContent = '🔍 Preview';
+            resultEl.innerHTML = `<span style="color:var(--red);">❌ ${d.error||'Preview failed'}</span>`;
+            return;
+        }
+
+        resultEl.innerHTML = '<span style="color:var(--green);">✓ Preview ready</span>';
+        btn.disabled = false; btn.textContent = '🔄 Re-lookup';
+        previewEl.style.display = 'block';
+        previewEl.innerHTML = _renderGradedPreview(d, itemId, sessionId, slabIdx, cert);
+    } catch(err) {
+        btn.disabled = false; btn.textContent = '🔍 Preview';
+        resultEl.innerHTML = `<span style="color:var(--red);">❌ ${err.message}</span>`;
+    }
+}
+
+function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
+    const rowId = `${itemId}-${slabIdx}`;
+    const fmt$ = (v) => v == null ? '—' : '$' + Number(v).toFixed(2);
+    const fmtPct = (v) => {
+        if (v == null) return '—';
+        const arrow = v > 0.5 ? ' ↑' : v < -0.5 ? ' ↓' : '';
+        const color = v > 0.5 ? 'var(--green)' : v < -0.5 ? 'var(--red)' : 'var(--text-dim)';
+        const sign = v > 0 ? '+' : '';
+        return `<span style="color:${color};">${sign}${v.toFixed(1)}%${arrow}</span>`;
+    };
+
+    // PSA block
+    let psaHtml = '';
+    if (d.psa) {
+        const pop = d.psa.total_population != null ? d.psa.total_population.toLocaleString() : '—';
+        const higher = d.psa.population_higher != null ? d.psa.population_higher.toLocaleString() : '—';
+        const isTop = d.psa.population_higher === 0;
+        psaHtml = `
+          <div style="flex:1;min-width:240px;">
+            <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">🏅 PSA Cert #${cert}</div>
+            <table style="font-size:0.78rem;width:100%;">
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Year</td><td>${d.psa.year||'—'}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Subject</td><td>${d.psa.subject||'—'}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Variety</td><td>${d.psa.variety||'—'}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Card #</td><td>${d.psa.card_number||'—'}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Grade</td><td>${d.psa.grade_description||`${d.company} ${d.grade}`}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Population</td><td>${pop} at this grade</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Higher</td><td>${higher}${isTop ? ' <span style="color:var(--green);">(top pop)</span>' : ''}</td></tr>
+            </table>
+          </div>`;
+    } else {
+        psaHtml = `
+          <div style="flex:1;min-width:240px;">
+            <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">${d.company} ${d.grade} · Cert #${cert}</div>
+            <div style="font-size:0.78rem;color:var(--text-dim);">
+              ${d.note || `${d.company} cert data not available — fill price manually below.`}
+            </div>
+          </div>`;
+    }
+
+    // Scrydex block
+    let scrydexHtml = '';
+    if (d.scrydex) {
+        const sd = d.scrydex;
+        let ageStr = '—';
+        if (sd.fetched_at) {
+            const hours = Math.round((Date.now() - new Date(sd.fetched_at).getTime()) / 3600000);
+            ageStr = hours < 1 ? '< 1h ago' : hours < 48 ? `${hours}h ago` : `${Math.round(hours/24)}d ago`;
+        }
+        scrydexHtml = `
+          <div style="flex:1;min-width:240px;">
+            <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">📊 Scrydex <span style="color:var(--text-dim);font-weight:400;">· cached ${ageStr}</span></div>
+            <table style="font-size:0.78rem;width:100%;">
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Market</td><td style="font-weight:600;">${fmt$(sd.market)}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Range</td><td>${fmt$(sd.low)} / ${fmt$(sd.mid)} / ${fmt$(sd.high)}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Trend 7d</td><td>${fmtPct(sd.trend_7d_pct)}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Trend 30d</td><td>${fmtPct(sd.trend_30d_pct)}</td></tr>
+            </table>
+          </div>`;
+    } else {
+        scrydexHtml = `
+          <div style="flex:1;min-width:240px;">
+            <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">📊 Scrydex</div>
+            <div style="font-size:0.78rem;color:var(--text-dim);">No cached ${d.company} ${d.grade} data for this card — comp it yourself and enter a price.</div>
+          </div>`;
+    }
+
+    // Image thumbs
+    let imgHtml = '';
+    if (d.images && d.images.length) {
+        imgHtml = `<div style="display:flex;gap:4px;margin-top:6px;">
+            ${d.images.slice(0, 2).map(u => `<img src="${u}" style="width:55px;height:75px;object-fit:cover;border-radius:4px;border:1px solid var(--border);">`).join('')}
+        </div>`;
+    }
+
+    // Margin preview — live as you type
+    const suggested = d.scrydex?.suggested_price;
+    const priceVal = suggested != null ? suggested.toFixed(2) : '';
+    const cost = d.cost_basis || 0;
+
+    return `
+      <div style="border-top:1px dashed var(--border);padding-top:10px;">
+        <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;">
+            ${psaHtml}
+            ${scrydexHtml}
+            ${imgHtml ? `<div>${imgHtml}</div>` : ''}
+        </div>
+        <div style="display:flex;gap:14px;align-items:center;margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);flex-wrap:wrap;">
+            <div style="font-size:0.8rem;">
+                <span style="color:var(--text-dim);">Cost:</span> <strong>${fmt$(cost)}</strong>
+                &nbsp;·&nbsp;
+                <span style="color:var(--text-dim);">Margin:</span> <span id="margin-${rowId}">—</span>
+            </div>
+            <div style="flex:1;min-width:160px;"></div>
+            <label style="font-size:0.82rem;color:var(--text-dim);">Listing price $</label>
+            <input type="number" step="0.01" min="0" id="price-input-${rowId}"
+                value="${priceVal}"
+                placeholder="enter price"
+                oninput="_updateMarginPreview('${rowId}', ${cost})"
+                style="width:120px;font-size:0.9rem;padding:6px;">
+            <button class="btn btn-success btn-sm" id="push-btn-${rowId}"
+                onclick="pushGradedSlab('${itemId}','${sessionId}',${slabIdx})"
+                style="font-size:0.82rem;padding:8px 14px;white-space:nowrap;">
+                🚀 Push Slab Live
+            </button>
+        </div>
+      </div>`;
+}
+
+function _updateMarginPreview(rowId, cost) {
+    const el = document.getElementById(`margin-${rowId}`);
+    const priceEl = document.getElementById(`price-input-${rowId}`);
+    if (!el || !priceEl) return;
+    const price = parseFloat(priceEl.value);
+    if (!price || price <= 0 || !cost) { el.textContent = '—'; return; }
+    const pct = ((price - cost) / price * 100);
+    const color = pct > 20 ? 'var(--green)' : pct > 5 ? 'var(--amber)' : 'var(--red)';
+    el.innerHTML = `<strong style="color:${color};">${pct.toFixed(1)}%</strong>`;
+}
+
+async function pushGradedSlab(itemId, sessionId, slabIdx) {
+    // slabIdx is the row index within this item's qty (0-based). Required when rendered
+    // as qty-many rows; backend splits-off-1 if qty > 1 so each cert gets its own product.
+    if (slabIdx === undefined) slabIdx = 0;
+    const rowId     = `${itemId}-${slabIdx}`;
+    const certInput = document.getElementById(`cert-input-${rowId}`);
+    const priceInput = document.getElementById(`price-input-${rowId}`);
+    const pushBtn   = document.getElementById(`push-btn-${rowId}`);
+    const resultEl  = document.getElementById(`cert-result-${rowId}`);
+    const cert      = (certInput?.value || '').trim();
+    const priceStr  = (priceInput?.value || '').trim();
+
+    if (!cert) { resultEl.innerHTML = '<span style="color:var(--red);">Enter cert #</span>'; return; }
+    if (!priceStr) {
+        resultEl.innerHTML = '<span style="color:var(--red);">Enter a listing price</span>';
+        priceInput?.focus();
+        return;
+    }
+    const price = parseFloat(priceStr);
+    if (!price || price <= 0) {
+        resultEl.innerHTML = '<span style="color:var(--red);">Price must be > 0</span>';
+        return;
+    }
+
+    if (pushBtn) { pushBtn.disabled = true; pushBtn.textContent = '⟳ Pushing...'; }
     resultEl.innerHTML = '<span style="color:var(--text-dim);">Pushing...</span>';
 
     try {
         const r = await fetch(`/api/ingest/item/${itemId}/push-graded`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cert_number: cert, session_id: sessionId }),
+            body: JSON.stringify({ cert_number: cert, session_id: sessionId, price }),
         });
         const d = await r.json();
         if (!r.ok) {
-            btn.disabled = false; btn.textContent = 'Push Slab';
+            if (pushBtn) { pushBtn.disabled = false; pushBtn.textContent = '🚀 Push Slab Live'; }
             resultEl.innerHTML = `<span style="color:var(--red);">❌ ${d.error||'Failed'}</span>`;
             return;
         }
 
-        // Success — lock just this slab's row
+        // Success — collapse the whole row into a status line
         const row = document.getElementById(`graded-row-${rowId}`);
         if (row) {
             const actionLabel = d.action === 'added_variant' ? '✅ Added variant' : '🆕 New listing';
             row.style.opacity = '0.6';
             row.innerHTML = `
-                <div style="flex:1;">
-                    <div style="font-weight:600;font-size:0.9rem;">${d.title || 'Slab'}</div>
-                    <div style="font-size:0.78rem;color:var(--text-dim);">Cert: ${cert}</div>
+                <div style="display:flex;gap:10px;align-items:center;">
+                    <div style="flex:1;">
+                        <div style="font-weight:600;font-size:0.9rem;">${d.title || 'Slab'}</div>
+                        <div style="font-size:0.78rem;color:var(--text-dim);">Cert: ${cert} · Listed at $${price.toFixed(2)}</div>
+                    </div>
+                    <span style="color:var(--green);font-size:0.85rem;">${actionLabel}</span>
                 </div>
-                <span style="color:var(--green);font-size:0.85rem;">${actionLabel}</span>
             `;
         }
         _pushedItemIds.add(itemId);
     } catch(err) {
-        btn.disabled = false; btn.textContent = 'Push Slab';
+        if (pushBtn) { pushBtn.disabled = false; pushBtn.textContent = '🚀 Push Slab Live'; }
         resultEl.innerHTML = `<span style="color:var(--red);">❌ ${err.message}</span>`;
     }
 }

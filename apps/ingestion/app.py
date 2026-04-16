@@ -25,10 +25,11 @@ import product_enrichment as enrichment
 from cache_manager import CacheManager
 try:
     import psa_client
-    from psa_client import PSAQuotaHit
+    from psa_client import PSAQuotaHit, PSANotFound
 except ImportError:
     psa_client = None
     PSAQuotaHit = Exception
+    PSANotFound = Exception
 try:
     from storage import assign_bins, release_bins, _canonical_card_type, assign_display, get_binder_capacity
 except ImportError as e:
@@ -1585,6 +1586,104 @@ def store_check(session_id):
 # RAW CARD + GRADED SLAB ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════
 
+@app.route("/api/ingest/item/<item_id>/preview-graded", methods=["POST"])
+def preview_graded_item(item_id):
+    """
+    Look up a cert and return all decision-making data WITHOUT creating a Shopify listing.
+
+    Calls the grader's API (PSA for now; BGS/CGC to follow) for cert + images + pop.
+    Reads Scrydex local cache for per-grade market/low/mid/high + trends. Reads item
+    cost basis from intake_items.
+
+    POST body: { "cert_number": "12345678" }
+    """
+    data = request.get_json(silent=True) or {}
+    cert_number = (data.get("cert_number") or "").strip()
+    if not cert_number:
+        return jsonify({"error": "cert_number required"}), 400
+
+    item = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+
+    company = (item.get("grade_company") or "PSA").upper()
+    grade   = str(item.get("grade_value") or "").strip()
+    tcg_id  = item.get("tcgplayer_id")
+    qty     = max(1, int(item.get("quantity") or 1))
+    unit_cost = float(item.get("offer_price") or 0) / qty
+
+    result = {
+        "company":     company,
+        "grade":       grade,
+        "cert_number": cert_number,
+        "product_name": item.get("product_name"),
+        "set_name":    item.get("set_name"),
+        "cost_basis":  round(unit_cost, 2),
+    }
+
+    # ── Grader lookup (cert + images + pop) ─────────────────────────────────
+    # PSA is wired. BGS/CGC/SGC: return placeholder, user fills price manually.
+    if company == "PSA" and psa_client:
+        try:
+            psa_cert = psa_client.get_psa_data(cert_number)
+            result["psa"] = {
+                "year":                psa_cert.get("Year"),
+                "subject":              psa_cert.get("Subject"),
+                "brand":                psa_cert.get("Brand"),
+                "variety":              psa_cert.get("Variety"),
+                "card_number":          psa_cert.get("CardNumber"),
+                "grade_description":    psa_cert.get("GradeDescription"),
+                "total_population":     psa_cert.get("TotalPopulation"),
+                "population_higher":    psa_cert.get("PopulationHigher"),
+                "qualifier_population": psa_cert.get("TotalPopulationWithQualifier"),
+            }
+            result["images"] = psa_client.get_psa_images(cert_number)
+        except PSANotFound:
+            return jsonify({"error": f"PSA cert {cert_number} not found"}), 404
+        except PSAQuotaHit as e:
+            return jsonify({"error": f"PSA API quota hit — try again tomorrow: {e}"}), 429
+        except Exception as e:
+            logger.exception(f"PSA preview failed for cert {cert_number}: {e}")
+            return jsonify({"error": f"PSA lookup failed: {e}"}), 500
+    else:
+        result["psa"] = None
+        result["images"] = []
+        if company != "PSA":
+            result["note"] = f"{company} cert lookup not yet implemented — fill price manually"
+
+    # ── Scrydex cache lookup (per-grade) ────────────────────────────────────
+    result["scrydex"] = None
+    if tcg_id and grade:
+        row = db.query_one("""
+            SELECT market_price, low_price, mid_price, high_price,
+                   trend_1d_pct, trend_7d_pct, trend_30d_pct, fetched_at
+            FROM scrydex_price_cache
+            WHERE tcgplayer_id = %s AND price_type = 'graded'
+              AND grade_company = %s AND grade_value = %s
+            ORDER BY fetched_at DESC
+            LIMIT 1
+        """, (int(tcg_id), company, grade))
+        if row:
+            def _f(v):
+                return float(v) if v is not None else None
+            market = _f(row.get("market_price"))
+            mid    = _f(row.get("mid_price"))
+            result["scrydex"] = {
+                "market":        market,
+                "low":           _f(row.get("low_price")),
+                "mid":           mid,
+                "high":          _f(row.get("high_price")),
+                "trend_1d_pct":  _f(row.get("trend_1d_pct")),
+                "trend_7d_pct":  _f(row.get("trend_7d_pct")),
+                "trend_30d_pct": _f(row.get("trend_30d_pct")),
+                "fetched_at":    row["fetched_at"].isoformat() if row.get("fetched_at") else None,
+                # Suggest market, fall back to mid — user can override
+                "suggested_price": market or mid,
+            }
+
+    return jsonify(_serialize(result))
+
+
 @app.route("/api/ingest/item/<item_id>/push-graded", methods=["POST"])
 def push_graded_item(item_id):
     """
@@ -1605,6 +1704,7 @@ def push_graded_item(item_id):
     data        = request.get_json(silent=True) or {}
     cert_number = (data.get("cert_number") or "").strip()
     session_id  = data.get("session_id")
+    price_override = data.get("price")  # From preview panel — user's chosen listing price
 
     if not cert_number:
         return jsonify({"error": "cert_number is required"}), 400
@@ -1628,7 +1728,17 @@ def push_graded_item(item_id):
     grade_company = (item.get("grade_company") or "PSA").upper()
     grade_value   = item.get("grade_value") or "9"
     tcg_id        = item.get("tcgplayer_id")
-    price         = float(item.get("offer_price") or item.get("market_price") or 0)
+    # User-chosen price from preview panel; fall back to market (what we valued it at)
+    # then offer (cost). Previously defaulted to offer which listed at cost = 0 margin.
+    if price_override is not None and price_override != "":
+        try:
+            price = float(price_override)
+        except (TypeError, ValueError):
+            return jsonify({"error": "price must be a number"}), 400
+        if price <= 0:
+            return jsonify({"error": "price must be greater than 0"}), 400
+    else:
+        price = float(item.get("market_price") or item.get("offer_price") or 0)
 
     # Fetch PPT card data for clean name
     ppt_card = None
