@@ -1739,8 +1739,13 @@ async function startRouteSession(sessionId) {
         // Start showing cards immediately
         _renderSessionCard();
 
-        // Kick off enrichment in background
-        const er = await fetch(`/api/ingest/session/${sessionId}/enrich-route`, { method: 'POST' });
+        // Kick off enrichment in background — force=true ensures fresh data
+        // (picks up any tcg_id changes since last session start)
+        const er = await fetch(`/api/ingest/session/${sessionId}/enrich-route`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ force: true })
+        });
         const ej = await er.json();
 
         if (ej.status === 'complete' && !ej.job_id) {
