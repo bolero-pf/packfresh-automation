@@ -83,7 +83,12 @@ def _extract_tcg_id(card: dict) -> int | None:
 
 def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_name: str,
                         product_type: str, tcg_id: int | None) -> list[tuple]:
-    """Extract all price rows from a card or sealed item. Returns list of param tuples."""
+    """Extract all price rows from a card or sealed item. Returns list of param tuples.
+
+    If a variant has no price data, still emit a placeholder row so the product
+    exists in cache (searchable, linkable) — prices will fill in later syncs
+    when Scrydex starts tracking them.
+    """
     scrydex_id = item.get("id")
     if not scrydex_id:
         return []
@@ -94,9 +99,25 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
     img_s, img_m, img_l = _extract_images(item)
 
     rows = []
-    for v in (item.get("variants") or []):
+    variants = item.get("variants") or [{"name": "normal", "prices": []}]
+    for v in variants:
         variant_name = v.get("name", "normal")
-        for p in (v.get("prices") or []):
+        prices = v.get("prices") or []
+
+        if not prices:
+            # No price data yet — emit placeholder row with null prices.
+            # Default condition: U (unopened) for sealed, NM for cards.
+            default_cond = "U" if product_type == "sealed" else "NM"
+            rows.append((
+                game, scrydex_id, tcg_id, expansion_id, expansion_name,
+                product_type, name, card_number, rarity,
+                variant_name, default_cond, "raw", None, None,
+                None, None, None, None, None, None, None,
+                img_s, img_m, img_l,
+            ))
+            continue
+
+        for p in prices:
             condition = p.get("condition", "NM")
             price_type = p.get("type", "raw")
             trends = p.get("trends") or {}
