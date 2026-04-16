@@ -25,11 +25,12 @@ import product_enrichment as enrichment
 from cache_manager import CacheManager
 try:
     import psa_client
-    from psa_client import PSAQuotaHit, PSANotFound
+    from psa_client import PSAQuotaHit, PSANotFound, ShopifyCreateError
 except ImportError:
     psa_client = None
     PSAQuotaHit = Exception
     PSANotFound = Exception
+    ShopifyCreateError = Exception
 try:
     from storage import assign_bins, release_bins, _canonical_card_type, assign_display, get_binder_capacity
 except ImportError as e:
@@ -1762,6 +1763,12 @@ def push_graded_item(item_id):
         )
     except PSAQuotaHit as e:
         return jsonify({"error": f"PSA API quota hit — try again tomorrow: {e}"}), 429
+    except ShopifyCreateError as e:
+        logger.exception(f"push_graded_item failed for item {item_id}: {e}")
+        return jsonify({
+            "error": f"Shopify rejected the listing ({e.status_code})",
+            "shopify_body": e.body,
+        }), 502
     except Exception as e:
         logger.exception(f"push_graded_item failed for item {item_id}: {e}")
         return jsonify({"error": str(e)}), 500

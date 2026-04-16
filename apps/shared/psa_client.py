@@ -45,6 +45,14 @@ class PSANotFound(Exception):
     pass
 
 
+class ShopifyCreateError(Exception):
+    """Shopify refused a product/variant create — carries status + parsed body."""
+    def __init__(self, message, status_code=None, body=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PSA API
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -359,7 +367,18 @@ def create_graded_listing(
 
     r = requests.post(url, headers=_shopify_headers(shopify_token),
                       json=payload, timeout=30)
-    r.raise_for_status()
+    if not r.ok:
+        # Shopify 422 errors are meaningless without the body — surface it
+        try:
+            body = r.json()
+        except Exception:
+            body = r.text
+        logger.error(f"Shopify product create failed: {r.status_code} — "
+                     f"body: {body} — payload keys: {list(payload['product'].keys())}")
+        raise ShopifyCreateError(
+            f"Shopify rejected product create ({r.status_code}): {body}",
+            status_code=r.status_code, body=body,
+        )
     result = r.json()
 
     # Pre-wire publications so flipping to ACTIVE later is instant
@@ -419,7 +438,16 @@ def add_graded_variant(
 
     r = requests.post(f"{base}/products/{shopify_product_id}/variants.json",
                       headers=hdrs, json=variant_payload, timeout=20)
-    r.raise_for_status()
+    if not r.ok:
+        try:
+            body = r.json()
+        except Exception:
+            body = r.text
+        logger.error(f"Shopify add-variant failed: {r.status_code} — body: {body}")
+        raise ShopifyCreateError(
+            f"Shopify rejected variant add ({r.status_code}): {body}",
+            status_code=r.status_code, body=body,
+        )
     return r.json()
 
 
