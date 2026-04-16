@@ -501,6 +501,36 @@ def verify_item(item_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/ingest/item/<item_id>/convert-type", methods=["POST"])
+def convert_item_type_route(item_id):
+    """
+    Flip a raw card ↔ graded slab during verify.
+
+    POST body:
+        { "to_graded": true, "grade_company": "PSA", "grade_value": "10", "price_override": null }
+        { "to_graded": false, "condition": "NM", "price_override": null }
+    """
+    data = request.get_json(silent=True) or {}
+    to_graded = bool(data.get("to_graded"))
+    price_override = data.get("price_override")
+    try:
+        result = ingest.convert_item_type(
+            item_id,
+            to_graded=to_graded,
+            condition=data.get("condition"),
+            grade_company=data.get("grade_company"),
+            grade_value=data.get("grade_value"),
+            ppt_client=ppt,
+            price_override=float(price_override) if price_override is not None else None,
+        )
+        return jsonify({"success": True, "item": _serialize(result)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"convert_item_type failed for item {item_id}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ingest/item/<item_id>/undo-verify", methods=["POST"])
 def undo_verify(item_id):
     """Reset an item back to unverified good status."""
@@ -1607,7 +1637,7 @@ def push_graded_item(item_id):
             cert_number=cert_number,
             price=price,
             ppt_card=ppt_card,
-            shopify_domain=shopify.domain,
+            shopify_domain=shopify.store,
             shopify_token=shopify.token,
             db=db,
         )

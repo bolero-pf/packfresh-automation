@@ -979,6 +979,7 @@ function _renderVerifyRow(item, sessionId) {
                 <button class="verify-btn action-trigger" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
                 <div class="action-dropdown">
                     <button onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${co}', '${gr}')">✏️ Change Grade</button>
+                    <button onclick="convertToRaw('${item.id}', '${sessionId}')">↺ Convert to Raw</button>
                     <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
                 </div>
             </div>
@@ -991,6 +992,7 @@ function _renderVerifyRow(item, sessionId) {
                 <button class="verify-btn action-trigger" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
                 <div class="action-dropdown">
                     <button onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Change Condition</button>
+                    <button onclick="convertToGraded('${item.id}', '${sessionId}')">⭐ Convert to Graded</button>
                     <button onclick="undoVerify('${item.id}', '${sessionId}')">↩ Undo</button>
                 </div>
             </div>
@@ -1013,11 +1015,13 @@ function _renderVerifyRow(item, sessionId) {
         if (item.is_graded) {
             extraActions = `
                 <button onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${item.grade_company||'PSA'}', '${item.grade_value||''}')">✏️ Change Grade</button>
+                <button onclick="convertToRaw('${item.id}', '${sessionId}')">↺ Convert to Raw</button>
                 <button onclick="editVerifyQty('${item.id}', '${sessionId}', ${item.quantity||1})">📦 Edit Qty</button>
                 <button onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>`;
         } else if (ptype === 'raw') {
             extraActions = `
                 <button onclick="verifyRawCard('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Change Condition</button>
+                <button onclick="convertToGraded('${item.id}', '${sessionId}')">⭐ Convert to Graded</button>
                 <button onclick="editVerifyQty('${item.id}', '${sessionId}', ${item.quantity||1})">📦 Edit Qty</button>
                 <button onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>`;
         } else {
@@ -1292,6 +1296,120 @@ async function verifyGradedSlab(itemId, sessionId, currentCompany, currentGrade)
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body),
         });
+        viewSession(sessionId, true);
+    } catch(err) { alert(err.message); }
+}
+
+async function convertToGraded(itemId, sessionId) {
+    // Flip a raw card over to graded — e.g. JP card miscategorized as NM
+    const overlay = document.getElementById('prompt-overlay');
+    document.getElementById('prompt-title').textContent = 'Convert to Graded Slab';
+    document.getElementById('prompt-msg').textContent = 'This card is actually graded. Pick company + grade. Price will be looked up from PPT — override if needed.';
+    const area = document.getElementById('prompt-input-area');
+    area.innerHTML = `
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+            <select id="grade-company-input" style="font-size:0.9rem; padding:6px;">
+                <option value="PSA" selected>PSA</option>
+                <option value="CGC">CGC</option>
+                <option value="BGS">BGS</option>
+                <option value="SGC">SGC</option>
+                <option value="AGS">AGS</option>
+            </select>
+            <input id="grade-value-input" type="text" value="10" placeholder="e.g. 10, 9.5" style="width:80px; font-size:0.9rem; padding:6px;">
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+            <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
+            <input id="grade-price-input" type="number" step="0.01" min="0" placeholder="leave blank for PPT lookup" style="flex:1; font-size:0.9rem; padding:6px;">
+        </div>`;
+    overlay.style.display = 'flex';
+    setTimeout(() => document.getElementById('grade-value-input').focus(), 50);
+
+    const result = await new Promise(resolve => {
+        const ok = () => {
+            overlay.style.display = 'none';
+            const priceVal = document.getElementById('grade-price-input').value.trim();
+            resolve({
+                company: document.getElementById('grade-company-input').value,
+                grade: document.getElementById('grade-value-input').value.trim(),
+                price_override: priceVal ? parseFloat(priceVal) : null,
+            });
+        };
+        document.getElementById('prompt-ok').onclick = ok;
+        document.getElementById('prompt-cancel').onclick = () => {
+            overlay.style.display = 'none';
+            resolve(null);
+        };
+        document.getElementById('grade-value-input').onkeydown = (e) => { if (e.key === 'Enter') ok(); };
+        document.getElementById('grade-price-input').onkeydown = (e) => { if (e.key === 'Enter') ok(); };
+    });
+    if (!result) return;
+    if (!result.grade) { alert('Grade value is required'); return; }
+
+    try {
+        const body = {
+            to_graded: true,
+            grade_company: result.company,
+            grade_value: result.grade,
+            price_override: result.price_override,
+        };
+        const r = await fetch(`/api/ingest/item/${itemId}/convert-type`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Conversion failed'); return; }
+        viewSession(sessionId, true);
+    } catch(err) { alert(err.message); }
+}
+
+async function convertToRaw(itemId, sessionId) {
+    // Flip a graded slab back to raw — e.g. slab was actually a reholder / ungraded
+    const conditions = ['NM', 'LP', 'MP', 'HP', 'DMG'];
+    const overlay = document.getElementById('prompt-overlay');
+    document.getElementById('prompt-title').textContent = 'Convert to Raw Card';
+    document.getElementById('prompt-msg').textContent = 'This is actually an ungraded card. Pick condition. Price will be looked up from PPT — override if needed.';
+    const area = document.getElementById('prompt-input-area');
+    area.innerHTML = `
+        <div style="margin-bottom:8px;">
+            ${conditions.map(c =>
+                `<button class="btn btn-sm" style="margin:4px; min-width:60px; padding:8px 16px; font-size:0.9rem;" onclick="document.getElementById('prompt-input-area').dataset.val='${c}'; this.parentElement.querySelectorAll('button').forEach(b=>b.style.background=''); this.style.background='var(--accent)'; this.style.color='#fff';">${c}</button>`
+            ).join('')}
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+            <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
+            <input id="raw-price-override" type="number" step="0.01" min="0" placeholder="leave blank for PPT" style="flex:1; font-size:0.9rem; padding:6px;">
+        </div>`;
+    area.dataset.val = 'NM';
+    overlay.style.display = 'flex';
+
+    const result = await new Promise(resolve => {
+        document.getElementById('prompt-ok').onclick = () => {
+            overlay.style.display = 'none';
+            const priceVal = document.getElementById('raw-price-override')?.value?.trim();
+            resolve({
+                condition: area.dataset.val || 'NM',
+                price_override: priceVal ? parseFloat(priceVal) : null,
+            });
+        };
+        document.getElementById('prompt-cancel').onclick = () => {
+            overlay.style.display = 'none';
+            resolve(null);
+        };
+    });
+    if (result === null) return;
+
+    try {
+        const body = {
+            to_graded: false,
+            condition: result.condition,
+            price_override: result.price_override,
+        };
+        const r = await fetch(`/api/ingest/item/${itemId}/convert-type`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Conversion failed'); return; }
         viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }

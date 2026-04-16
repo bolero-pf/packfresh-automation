@@ -434,6 +434,102 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
+def convert_item_type(item_id: str, to_graded: bool,
+                      condition: str = None,
+                      grade_company: str = None, grade_value: str = None,
+                      ppt_client=None, price_override: float = None) -> dict:
+    """
+    Convert an intake item between raw and graded.
+
+    Use cases:
+      - Item was entered as raw NM but is actually PSA 10 (common for JP cards
+        that aren't in TCGplayer's graded database)
+      - Item was entered as graded but the slab turned out to be a reholder or
+        the grader's not recognized — drop back to raw
+
+    Flipping is_graded:
+      → graded: sets grade_company/grade_value, clears condition, looks up PPT
+                graded price or uses price_override
+      → raw:    clears grade_company/grade_value/cert_number, sets condition,
+                looks up PPT condition price or uses price_override
+    """
+    from price_provider import PriceProvider, FALLBACK_MULTIPLIERS
+
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    qty = item.get("quantity", 1)
+    tcg_id = item.get("tcgplayer_id")
+
+    new_market = None
+    if price_override is not None:
+        new_market = Decimal(str(price_override)).quantize(Decimal("0.01"))
+
+    if to_graded:
+        company = (grade_company or "PSA").upper()
+        grade = str(grade_value or "").strip()
+        if not grade:
+            raise ValueError("grade_value is required when converting to graded")
+
+        if new_market is None and tcg_id and ppt_client:
+            try:
+                card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+                if card_data:
+                    graded_price = PriceProvider.get_graded_price(card_data, company, grade)
+                    if graded_price is not None:
+                        new_market = graded_price
+            except Exception as e:
+                logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
+
+        updates = [
+            "is_graded = TRUE",
+            "grade_company = %s",
+            "grade_value = %s",
+            "condition = NULL",
+        ]
+        params = [company, grade]
+    else:
+        cond = (condition or "NM").upper().strip()
+        valid = {"NM", "LP", "MP", "HP", "DMG"}
+        if cond not in valid:
+            raise ValueError(f"Invalid condition: {cond}. Must be NM, LP, MP, HP, or DMG")
+
+        if new_market is None and tcg_id and ppt_client:
+            try:
+                card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+                if card_data:
+                    cond_price = PriceProvider.extract_condition_price(
+                        card_data, cond, variant=item.get("variant"))
+                    if cond_price is not None:
+                        new_market = cond_price
+            except Exception as e:
+                logger.warning(f"PPT condition lookup failed for TCG#{tcg_id}: {e}")
+
+        updates = [
+            "is_graded = FALSE",
+            "grade_company = NULL",
+            "grade_value = NULL",
+            "cert_number = NULL",
+            "condition = %s",
+        ]
+        params = [cond]
+
+    if new_market is not None:
+        new_offer = (new_market * offer_pct * qty).quantize(Decimal("0.01"))
+        updates.extend(["market_price = %s", "offer_price = %s"])
+        params.extend([new_market, new_offer])
+
+    params.append(item_id)
+    execute(f"UPDATE intake_items SET {', '.join(updates)} WHERE id = %s", tuple(params))
+
+    if new_market is not None:
+        _recalculate_session_totals(item["session_id"])
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+
 def override_item_price(item_id: str, price: float) -> dict:
     """Override an item's market price and recalculate offer."""
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
