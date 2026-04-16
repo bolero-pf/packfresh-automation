@@ -116,6 +116,7 @@
   </select>
   <input type="text" id="um-search" placeholder="Filter store items..." style="width:250px;">
   <button onclick="loadUnmatched()">Filter</button>
+  <button onclick="exportUnmatched()" style="background:var(--accent,#4f7df9);color:white;">Export CSV</button>
   <span class="stats" id="um-stats"></span>
 </div>
 
@@ -334,6 +335,45 @@ function renderUnmatched() {
       <td style="color:var(--dim);font-size:0.78rem;">${r.tcgplayer_id}</td>
     </tr>`;
   }).join('');
+}
+
+async function exportUnmatched() {
+  const btn = event.target;
+  const filter = document.getElementById('um-filter').value;
+  const game = document.getElementById('um-game').value;
+  const origLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Enriching via PPT...';
+
+  try {
+    const resp = await fetch('/api/price-compare/export-unmatched', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ filter, game, enrich_limit: 200 })
+    });
+    if (!resp.ok) { alert('Export failed'); return; }
+
+    const total = resp.headers.get('X-Total-Items') || '?';
+    const enriched = resp.headers.get('X-Enriched-This-Run') || '0';
+    const cached = resp.headers.get('X-Already-Cached') || '0';
+    const pending = resp.headers.get('X-Pending-Enrich') || '0';
+
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const filename = resp.headers.get('Content-Disposition')?.match(/filename="(.+?)"/)?.[1] || 'unmatched.csv';
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    let msg = `Exported ${total} items. Cached: ${cached}, newly enriched: ${enriched}`;
+    if (parseInt(pending) > 0) msg += `. ${pending} still need PPT enrichment — export again to continue.`;
+    alert(msg);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origLabel;
+  }
 }
 
 function umPrevPage() { umOffset = Math.max(0, umOffset - UM_PAGE); loadUnmatched(); }

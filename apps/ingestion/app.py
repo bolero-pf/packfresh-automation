@@ -2646,6 +2646,146 @@ def price_compare_unmatched():
     })
 
 
+@app.route("/api/price-compare/export-unmatched", methods=["POST"])
+def export_unmatched():
+    """
+    Export unmatched items as CSV, with PPT-enriched set info and MCAP flag.
+    First run will hit PPT for items without cached set info (slow).
+    Subsequent runs reuse cached data (fast).
+
+    Body: { "game": "pokemon"|..., "filter": "sealed"|"all", "enrich_limit": 200 }
+    """
+    from flask import Response
+    import csv
+    from io import StringIO
+
+    data = request.get_json(silent=True) or {}
+    game_filter = (data.get("game") or "").strip().lower() or None
+    product_filter = data.get("filter", "sealed")
+    enrich_limit = min(int(data.get("enrich_limit", 200)), 500)
+
+    # Get all unmatched items (same filtering as unmatched endpoint)
+    where = ["ipc.tcgplayer_id IS NOT NULL", "ipc.is_damaged = FALSE",
+             "ipc.tags NOT ILIKE %s", "ipc.tags NOT ILIKE %s",
+             "NOT EXISTS (SELECT 1 FROM scrydex_price_cache spc WHERE spc.tcgplayer_id = ipc.tcgplayer_id)"]
+    params = ["%slab%", "%accessories%"]
+
+    if product_filter == "sealed":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%sealed%", "%booster%", "%etb%", "%collection box%", "%tin%"])
+
+    if game_filter == "pokemon":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%pokemon%", "%pokémon%"])
+    elif game_filter == "mtg":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%magic: the gathering%", "%magic the gathering%"])
+    elif game_filter == "lorcana":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%lorcana%")
+    elif game_filter == "onepiece":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%one piece%")
+    elif game_filter == "riftbound":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%riftbound%")
+
+    items = db.query(f"""
+        SELECT ipc.title, ipc.tcgplayer_id, ipc.shopify_price, ipc.shopify_qty, ipc.tags
+        FROM inventory_product_cache ipc
+        WHERE {' AND '.join(where)}
+        ORDER BY ipc.title
+    """, tuple(params))
+
+    # Enrich with cached PPT set data
+    tcg_ids = [i["tcgplayer_id"] for i in items]
+    cached = {}
+    if tcg_ids:
+        rows = db.query(f"""
+            SELECT tcgplayer_id, set_name, product_name, is_mcap
+            FROM tcgplayer_set_lookup
+            WHERE tcgplayer_id IN ({",".join(["%s"] * len(tcg_ids))})
+        """, tuple(tcg_ids))
+        cached = {r["tcgplayer_id"]: r for r in rows}
+
+    # Find items without cached set info — enrich up to enrich_limit via PPT
+    uncached = [i for i in items if i["tcgplayer_id"] not in cached]
+    enriched_count = 0
+    enrich_errors = 0
+    if ppt and uncached:
+        MCAP_KEYWORDS = ("miscellaneous cards & products", "miscellaneous")
+        for item in uncached[:enrich_limit]:
+            if ppt.should_throttle():
+                break
+            tcg_id = item["tcgplayer_id"]
+            try:
+                # Try sealed first (faster for our use case)
+                ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+                if not ppt_item:
+                    ppt_item = ppt.get_card_by_tcgplayer_id(tcg_id)
+                if ppt_item:
+                    set_name = ppt_item.get("setName", "") or ""
+                    ppt_name = ppt_item.get("name", "") or ""
+                    is_mcap = set_name.lower() in MCAP_KEYWORDS
+                    db.execute("""
+                        INSERT INTO tcgplayer_set_lookup (tcgplayer_id, set_name, product_name, is_mcap, looked_up_at)
+                        VALUES (%s, %s, %s, %s, NOW())
+                        ON CONFLICT (tcgplayer_id) DO UPDATE SET
+                            set_name = EXCLUDED.set_name,
+                            product_name = EXCLUDED.product_name,
+                            is_mcap = EXCLUDED.is_mcap,
+                            looked_up_at = NOW()
+                    """, (tcg_id, set_name, ppt_name, is_mcap))
+                    cached[tcg_id] = {"tcgplayer_id": tcg_id, "set_name": set_name,
+                                       "product_name": ppt_name, "is_mcap": is_mcap}
+                    enriched_count += 1
+                else:
+                    # Not found on PPT — mark so we don't retry
+                    db.execute("""
+                        INSERT INTO tcgplayer_set_lookup (tcgplayer_id, set_name, product_name, is_mcap, looked_up_at)
+                        VALUES (%s, NULL, NULL, FALSE, NOW())
+                        ON CONFLICT (tcgplayer_id) DO UPDATE SET looked_up_at = NOW()
+                    """, (tcg_id,))
+                    cached[tcg_id] = {"tcgplayer_id": tcg_id, "set_name": None, "product_name": None, "is_mcap": False}
+            except Exception as e:
+                logger.warning(f"PPT enrich failed for {tcg_id}: {e}")
+                enrich_errors += 1
+
+    # Build CSV
+    buf = StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["tcgplayer_id", "game", "set_name", "is_mcap", "product_name_store",
+                     "product_name_ppt", "store_price", "qty", "tags"])
+    for item in items:
+        c = cached.get(item["tcgplayer_id"], {})
+        game = _detect_game_from_tags(item["tags"] or "") or ""
+        writer.writerow([
+            item["tcgplayer_id"],
+            game,
+            c.get("set_name") or "",
+            "YES" if c.get("is_mcap") else "",
+            item["title"] or "",
+            c.get("product_name") or "",
+            f"{float(item['shopify_price']):.2f}" if item["shopify_price"] else "",
+            item["shopify_qty"] or 0,
+            item["tags"] or "",
+        ])
+
+    csv_data = buf.getvalue()
+    filename = f"unmatched-{game_filter or 'all'}-{product_filter}.csv"
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Total-Items": str(len(items)),
+            "X-Enriched-This-Run": str(enriched_count),
+            "X-Already-Cached": str(len(items) - len(uncached)),
+            "X-Pending-Enrich": str(max(0, len(uncached) - enrich_limit)),
+        }
+    )
+
+
 @app.route("/api/price-compare/scrydex-search", methods=["POST"])
 def scrydex_search_for_link():
     """
