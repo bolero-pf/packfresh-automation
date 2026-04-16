@@ -314,6 +314,163 @@ def _prewire_publications(product_gid: str, shopify_domain: str, shopify_token: 
                 logger.warning(f"prewire publication error: {msg}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PSA image pipeline — download → matte on 2000×2000 transparent canvas → stage
+# upload to Shopify → fileCreate → wait for public URL. Keeps all graded slab
+# listings visually consistent on the storefront.
+#
+# Content area is 950×1600 centered, giving ~26% side margins and ~10% top/bottom
+# so the slab sits inside a clean border on PDP zoom.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_MATTE_SIZE   = (2000, 2000)
+_CONTENT_SIZE = (950, 1600)
+
+
+def _download_image(url: str) -> Image.Image:
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    return Image.open(io.BytesIO(r.content)).convert("RGBA")
+
+
+def _matte_card_rgba(src_im: Image.Image) -> Image.Image:
+    """Scale-to-fit within CONTENT_SIZE, center on transparent 2000×2000 canvas."""
+    cw, ch = _CONTENT_SIZE
+    mw, mh = _MATTE_SIZE
+    sw, sh = src_im.size
+    scale = min(cw / sw, ch / sh)
+    nw, nh = max(1, int(round(sw * scale))), max(1, int(round(sh * scale)))
+    # Pillow ≥10 removed top-level Image.LANCZOS — use Resampling enum
+    resized = src_im.resize((nw, nh), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGBA", (mw, mh), (0, 0, 0, 0))
+    canvas.alpha_composite(resized, ((mw - nw) // 2, (mh - nh) // 2))
+    return canvas
+
+
+def _png_bytes(im: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    im.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _stage_upload_png(filename: str, data: bytes,
+                      shopify_domain: str, shopify_token: str) -> dict:
+    """stagedUploadsCreate → POST to S3 → return stagedTarget (has resourceUrl)."""
+    m = """
+    mutation StagedUploads($input: [StagedUploadInput!]!) {
+      stagedUploadsCreate(input: $input) {
+        stagedTargets { url resourceUrl parameters { name value } }
+        userErrors { field message }
+      }
+    }"""
+    out = _gql(shopify_domain, shopify_token, m, {
+        "input": [{
+            "resource": "IMAGE",
+            "filename": filename,
+            "mimeType": "image/png",
+            "httpMethod": "POST",
+        }],
+    })
+    errs = (out.get("data", {}).get("stagedUploadsCreate", {}) or {}).get("userErrors") or []
+    if errs:
+        raise RuntimeError(f"stagedUploadsCreate: {errs}")
+    targets = out["data"]["stagedUploadsCreate"]["stagedTargets"]
+    if not targets:
+        raise RuntimeError("stagedUploadsCreate returned no targets")
+    target = targets[0]
+
+    form  = {p["name"]: p["value"] for p in target["parameters"]}
+    files = {"file": (filename, data, "image/png")}
+    r = requests.post(target["url"], data=form, files=files, timeout=60)
+    r.raise_for_status()
+    return target
+
+
+def _file_create_public(staged_target: dict, filename: str, alt_text: str,
+                        shopify_domain: str, shopify_token: str) -> str:
+    """fileCreate from stagedTarget.resourceUrl, poll until MediaImage.url populates."""
+    m = """
+    mutation FileCreate($files: [FileCreateInput!]!) {
+      fileCreate(files: $files) {
+        files {
+          __typename
+          ... on MediaImage { id image { url altText } }
+          ... on GenericFile { id }
+        }
+        userErrors { field message }
+      }
+    }"""
+    out = _gql(shopify_domain, shopify_token, m, {
+        "files": [{
+            "originalSource": staged_target["resourceUrl"],
+            "contentType": "IMAGE",
+            "alt":      alt_text or None,
+            "filename": filename or None,
+        }],
+    })
+    errs = out["data"]["fileCreate"].get("userErrors") or []
+    if errs:
+        raise RuntimeError(f"fileCreate: {errs}")
+    files = out["data"]["fileCreate"]["files"]
+    if not files:
+        raise RuntimeError("fileCreate returned no files")
+    fid = files[0]["id"]
+
+    q = """
+    query FileNode($id: ID!) {
+      node(id: $id) {
+        __typename
+        ... on MediaImage { image { url } }
+        ... on GenericFile { url }
+      }
+    }"""
+    for _ in range(20):  # ~10s
+        jj = _gql(shopify_domain, shopify_token, q, {"id": fid})
+        node = jj["data"]["node"]
+        if node["__typename"] == "MediaImage":
+            url = (node.get("image") or {}).get("url")
+            if url:
+                return url
+        elif node["__typename"] == "GenericFile":
+            url = node.get("url")
+            if url:
+                return url
+        time.sleep(0.5)
+    raise TimeoutError(f"Timed out waiting for MediaImage URL (file {fid})")
+
+
+def _slugify_filename(title: str, idx: int) -> str:
+    v = unicodedata.normalize("NFKD", title or "slab").encode("ascii", "ignore").decode("ascii")
+    v = re.sub(r"[^a-zA-Z0-9]+", "-", v)
+    v = re.sub(r"-{2,}", "-", v).strip("-").lower() or "slab"
+    return f"{v}-{idx + 1}.png"
+
+
+def matte_and_host_psa_images(raw_urls: list[str], title: str,
+                              shopify_domain: str, shopify_token: str) -> list[str]:
+    """
+    Download each PSA CDN image → matte on transparent 2000×2000 → upload to Shopify
+    Files → return the Shopify-hosted URLs.
+
+    Any per-image failure logs a warning and falls back to the raw CDN URL for that
+    image so one corrupt scan doesn't block the whole slab.
+    """
+    processed: list[str] = []
+    for i, src in enumerate(raw_urls or []):
+        fname = _slugify_filename(title, i)
+        try:
+            im     = _download_image(src)
+            matted = _matte_card_rgba(im)
+            png    = _png_bytes(matted)
+            staged = _stage_upload_png(fname, png, shopify_domain, shopify_token)
+            public = _file_create_public(staged, fname, title, shopify_domain, shopify_token)
+            processed.append(public)
+        except Exception as e:
+            logger.warning(f"PSA image matte/host failed for {src} — falling back to raw CDN: {e}")
+            processed.append(src)
+    return processed
+
+
 def create_graded_listing(
     title: str,
     description: str,
@@ -355,11 +512,11 @@ def create_graded_listing(
             }],
             # Store tcgplayer_id as metafield so cache can key on it later
             "metafields": [
-                {"namespace": "pf", "key": "tcgplayer_id",
+                {"namespace": "pf_slab", "key": "tcgplayer_id",
                  "value": str(tcgplayer_id or ""), "type": "single_line_text_field"},
-                {"namespace": "pf", "key": "grade_company",
+                {"namespace": "pf_slab", "key": "grade_company",
                  "value": tags[1] if len(tags) > 1 else "", "type": "single_line_text_field"},
-                {"namespace": "pf", "key": "grade_value",
+                {"namespace": "pf_slab", "key": "grade_value",
                  "value": cert_number, "type": "single_line_text_field"},
             ] if tcgplayer_id else [],
         }
@@ -505,6 +662,14 @@ def push_graded_slab(
     title       = build_title(psa_cert, ppt_card, company, grade_value)
     description = build_description(psa_cert, ppt_card, company, grade_value)
     tags        = infer_tags(title, company, grade_value)
+
+    # ── 2a. Matte PSA scans onto 2000×2000 transparent canvas + host on Shopify ─
+    # Legacy psa_lookup behavior — keeps graded PDP look consistent. Per-image
+    # failures fall back to the raw PSA CDN URL so one bad scan doesn't block push.
+    if image_urls:
+        image_urls = matte_and_host_psa_images(
+            image_urls, title, shopify_domain, shopify_token,
+        )
 
     # ── 3. Find existing listing ─────────────────────────────────────────────
     existing = find_existing_slab(tcgplayer_id, company, grade_value, db)
