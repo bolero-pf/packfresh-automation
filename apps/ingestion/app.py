@@ -1654,6 +1654,8 @@ def auto_route_session(session_id):
     Rules: <$1 = bulk, $1-$5 = display (if binder capacity), else storage.
     Does NOT overwrite items that have already been manually routed.
     """
+    # Only consider items NOT yet manually reviewed — auto-route should never
+    # overwrite a user's decision.
     items = db.query("""
         SELECT id, market_price, quantity, routing_destination
         FROM intake_items
@@ -1663,17 +1665,28 @@ def auto_route_session(session_id):
           AND item_status IN ('good', 'damaged')
           AND is_mapped = TRUE
           AND pushed_at IS NULL
+          AND routing_reviewed_at IS NULL
         ORDER BY COALESCE(market_price, 0) ASC
     """, (session_id,))
 
     if not items:
-        return jsonify({"error": "No raw items to route"}), 400
+        # Not an error — just means all items have been reviewed already
+        return jsonify({"success": True, "routed": {"storage": 0, "display": 0, "grade": 0, "bulk": 0},
+                        "skipped_reviewed": True})
 
-    # Get total binder capacity
+    # Get total binder capacity, accounting for items already routed to display
     binder_remaining = 0
     if get_binder_capacity:
         binders = get_binder_capacity(db)
         binder_remaining = sum(b["available"] for b in binders)
+
+    # Subtract qty already routed to display by reviewed items
+    already_displayed = db.query_one("""
+        SELECT COALESCE(SUM(quantity), 0) as qty FROM intake_items
+        WHERE session_id = %s AND product_type = 'raw' AND routing_destination = 'display'
+          AND routing_reviewed_at IS NOT NULL
+    """, (session_id,))
+    binder_remaining = max(0, binder_remaining - int(already_displayed["qty"] or 0))
 
     routed = {"storage": 0, "display": 0, "grade": 0, "bulk": 0}
 
@@ -1689,8 +1702,10 @@ def auto_route_session(session_id):
         else:
             dest = "storage"
 
+        # Do NOT set routing_reviewed_at — these are only defaults, user hasn't decided
         db.execute("""
-            UPDATE intake_items SET routing_destination = %s WHERE id = %s
+            UPDATE intake_items SET routing_destination = %s
+            WHERE id = %s AND routing_reviewed_at IS NULL
         """, (dest, item["id"]))
         routed[dest] += qty
 
@@ -1699,7 +1714,7 @@ def auto_route_session(session_id):
 
 @app.route("/api/ingest/session/<session_id>/route-card", methods=["POST"])
 def route_card(session_id):
-    """Set routing destination for a single item."""
+    """Set routing destination for a single item — marks item as reviewed."""
     data = request.get_json(silent=True) or {}
     item_id = data.get("item_id")
     destination = data.get("destination")
@@ -1708,7 +1723,8 @@ def route_card(session_id):
         return jsonify({"error": f"item_id required, destination must be one of {ROUTING_DESTINATIONS}"}), 400
 
     db.execute("""
-        UPDATE intake_items SET routing_destination = %s
+        UPDATE intake_items
+        SET routing_destination = %s, routing_reviewed_at = NOW()
         WHERE id = %s AND session_id = %s
     """, (destination, item_id, session_id))
 
@@ -1717,7 +1733,7 @@ def route_card(session_id):
 
 @app.route("/api/ingest/session/<session_id>/route-batch", methods=["POST"])
 def route_batch(session_id):
-    """Batch route multiple items to the same destination."""
+    """Batch route multiple items to the same destination — marks all as reviewed."""
     data = request.get_json(silent=True) or {}
     item_ids = data.get("item_ids", [])
     destination = data.get("destination")
@@ -1727,11 +1743,41 @@ def route_batch(session_id):
 
     for item_id in item_ids:
         db.execute("""
-            UPDATE intake_items SET routing_destination = %s
+            UPDATE intake_items
+            SET routing_destination = %s, routing_reviewed_at = NOW()
             WHERE id = %s AND session_id = %s
         """, (destination, item_id, session_id))
 
     return jsonify({"success": True, "count": len(item_ids)})
+
+
+@app.route("/api/ingest/session/<session_id>/route-progress")
+def route_progress(session_id):
+    """Return routing session progress (how many reviewed, total)."""
+    row = db.query_one("""
+        SELECT
+            COUNT(*) FILTER (WHERE item_status IN ('good','damaged')
+                             AND is_mapped = TRUE
+                             AND pushed_at IS NULL
+                             AND is_graded IS NOT TRUE
+                             AND product_type = 'raw') AS total_routable,
+            COUNT(*) FILTER (WHERE item_status IN ('good','damaged')
+                             AND is_mapped = TRUE
+                             AND pushed_at IS NULL
+                             AND is_graded IS NOT TRUE
+                             AND product_type = 'raw'
+                             AND routing_reviewed_at IS NOT NULL) AS reviewed
+        FROM intake_items
+        WHERE session_id = %s
+    """, (session_id,))
+    total = row["total_routable"] or 0
+    reviewed = row["reviewed"] or 0
+    return jsonify({
+        "total": total,
+        "reviewed": reviewed,
+        "has_progress": reviewed > 0 and reviewed < total,
+        "complete": total > 0 and reviewed == total,
+    })
 
 
 @app.route("/api/ingest/session/<session_id>/split-route", methods=["POST"])
@@ -1882,7 +1928,7 @@ def route_summary(session_id):
     """Get routing status for a session's raw items."""
     items = db.query("""
         SELECT id, product_name, set_name, condition, market_price, quantity,
-               routing_destination, tcgplayer_id, card_number, offer_price
+               routing_destination, routing_reviewed_at, tcgplayer_id, card_number, offer_price
         FROM intake_items
         WHERE session_id = %s
           AND product_type = 'raw'

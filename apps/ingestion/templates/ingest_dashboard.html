@@ -1480,6 +1480,13 @@ function _renderRouteCards(sessionId, data) {
     const binders = data.binder_capacity || [];
     const binderAvail = binders.reduce((s, b) => s + (b.available || 0), 0);
 
+    // Progress: how many reviewed vs total
+    const reviewedCount = items.filter(i => i.routing_reviewed_at).length;
+    const totalCount = items.length;
+    const startLabel = reviewedCount === 0 ? 'Start Session'
+        : reviewedCount >= totalCount ? 'Review Session'
+        : `Resume (${reviewedCount}/${totalCount})`;
+
     // Summary bar
     let html = `<div class="card" style="position:sticky; top:0; z-index:10; border-color:var(--accent);">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
@@ -1492,7 +1499,7 @@ function _renderRouteCards(sessionId, data) {
             </div>
             <div style="display:flex; gap:8px; flex-shrink:0;">
                 <button class="btn btn-primary" onclick="startRouteSession('${sessionId}')" style="font-size:1rem; padding:10px 24px; white-space:nowrap;">
-                    Start Session
+                    ${startLabel}
                 </button>
                 <button class="btn btn-success" onclick="switchStage('push')" style="font-size:1rem; padding:10px 24px; white-space:nowrap;">
                     Push All &rarr;
@@ -1707,12 +1714,18 @@ async function startRouteSession(sessionId) {
             grading_economics: {},
             _enrichLoading: true,  // flag: PPT data not yet loaded
         })));
-        _rsIndex = 0;
+
+        // Resume: jump to first item that hasn't been reviewed yet
+        const firstUnreviewed = _rsItems.findIndex(i => !i.routing_reviewed_at);
+        _rsIndex = firstUnreviewed >= 0 ? firstUnreviewed : 0;
 
         _rsCounts = { storage: 0, display: 0, grade: 0, bulk: 0 };
         for (const item of _rsItems) {
-            const dest = item.routing_destination || 'storage';
-            _rsCounts[dest] = (_rsCounts[dest] || 0) + (item.quantity || 1);
+            // Only count reviewed items toward the totals — unreviewed are "not decided yet"
+            if (item.routing_reviewed_at) {
+                const dest = item.routing_destination || 'storage';
+                _rsCounts[dest] = (_rsCounts[dest] || 0) + (item.quantity || 1);
+            }
         }
 
         if (!_rsItems.length) {
@@ -2025,29 +2038,50 @@ async function _rsSetDest(destination) {
 
     // Update local state immediately
     item.routing_destination = destination;
+    item.routing_reviewed_at = new Date().toISOString();
     _rsCounts[oldDest] = (_rsCounts[oldDest] || 0) - qty;
     _rsCounts[destination] = (_rsCounts[destination] || 0) + qty;
 
-    // Also update _routeData for when we exit
+    // Update _routeData for when we exit
     if (_routeData) {
         const ri = _routeData.items.find(i => i.id === item.id);
-        if (ri) ri.routing_destination = destination;
+        if (ri) { ri.routing_destination = destination; ri.routing_reviewed_at = item.routing_reviewed_at; }
         _routeData.by_destination = { ..._rsCounts };
     }
 
-    // Flash the button
     const btn = document.getElementById(`rs-btn-${destination}`);
     if (btn) {
         btn.style.transform = 'scale(1.08)';
         setTimeout(() => { if (btn) btn.style.transform = ''; }, 150);
     }
 
-    // Fire-and-forget server update
-    fetch(`/api/ingest/session/${_rsSessionId}/route-card`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item_id: item.id, destination }),
-    }).catch(e => console.error('Route save failed:', e));
+    // Await the save — if it fails, roll back + alert so user doesn't lose work
+    try {
+        const r = await fetch(`/api/ingest/session/${_rsSessionId}/route-card`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: item.id, destination }),
+        });
+        if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            // Roll back local state
+            item.routing_destination = oldDest;
+            item.routing_reviewed_at = null;
+            _rsCounts[destination] = (_rsCounts[destination] || 0) - qty;
+            _rsCounts[oldDest] = (_rsCounts[oldDest] || 0) + qty;
+            alert('Save failed: ' + (err.error || r.status) + '. Your choice was not saved — try again.');
+            _renderSessionCard();
+            return;
+        }
+    } catch(e) {
+        item.routing_destination = oldDest;
+        item.routing_reviewed_at = null;
+        _rsCounts[destination] = (_rsCounts[destination] || 0) - qty;
+        _rsCounts[oldDest] = (_rsCounts[oldDest] || 0) + qty;
+        alert('Save failed (network): ' + e.message);
+        _renderSessionCard();
+        return;
+    }
 
     // Auto-advance after brief pause
     setTimeout(() => {
@@ -2191,8 +2225,10 @@ function _rsKeyHandler(e) {
     else if (key === 'escape') { e.preventDefault(); exitRouteSession(); }
 }
 
-function _rsAccept() {
-    // Accept the current destination as-is and advance (no server call needed — it's already set)
+async function _rsAccept() {
+    // Accept the current destination — saves to server to mark reviewed, then advances.
+    // Necessary even if destination hasn't changed: otherwise "accepted defaults" look
+    // indistinguishable from "never reviewed" on resume.
     const item = _rsItems[_rsIndex];
     if (!item) return;
     const dest = item.routing_destination || 'storage';
@@ -2202,6 +2238,29 @@ function _rsAccept() {
     if (btn) {
         btn.style.transform = 'scale(1.08)';
         setTimeout(() => { if (btn) btn.style.transform = ''; }, 150);
+    }
+
+    // Save (marks routing_reviewed_at) unless already reviewed recently
+    if (!item.routing_reviewed_at) {
+        try {
+            const r = await fetch(`/api/ingest/session/${_rsSessionId}/route-card`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ item_id: item.id, destination: dest }),
+            });
+            if (!r.ok) {
+                alert('Could not record decision — try again.');
+                return;
+            }
+            item.routing_reviewed_at = new Date().toISOString();
+            if (_routeData) {
+                const ri = _routeData.items.find(i => i.id === item.id);
+                if (ri) ri.routing_reviewed_at = item.routing_reviewed_at;
+            }
+        } catch(e) {
+            alert('Save failed (network): ' + e.message);
+            return;
+        }
     }
 
     setTimeout(() => {
