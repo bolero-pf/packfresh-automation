@@ -1977,9 +1977,13 @@ def enrich_route(session_id):
     if not ppt:
         return jsonify({"error": "PPT not configured"}), 503
 
-    # If cache already exists for this session, skip re-fetch
-    if session_id in _enrich_cache:
+    # If cache already exists for this session, skip re-fetch unless forced
+    data = request.get_json(silent=True) or {}
+    force = data.get("force", False)
+    if session_id in _enrich_cache and not force:
         return jsonify({"job_id": None, "status": "complete", "total": len(_enrich_cache[session_id])})
+    if force:
+        _enrich_cache.pop(session_id, None)
 
     items = db.query("""
         SELECT id, product_name, set_name, condition, market_price, quantity,
