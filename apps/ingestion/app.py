@@ -1749,76 +1749,131 @@ def preview_graded_item(item_id):
                     overlap = len(ta & tb) / min(len(ta), len(tb))
                     result["set_mismatch"] = overlap < 0.5
 
-    # ── Scrydex cache lookup (per-grade pricing) ───────────────────────────
+    # ── Scrydex graded pricing (always live for slabs) ──────────────────────
+    # Cached nightly data is unreliable for graded (single-value aggregates).
+    # For a per-slab preview, 1 credit to get real eBay comps is worth it.
     result["scrydex"] = None
-    scrydex_id = None
     if tcg_id and grade:
-        row = db.query_one("""
-            SELECT scrydex_id, market_price, low_price, mid_price, high_price,
-                   trend_1d_pct, trend_7d_pct, trend_30d_pct, fetched_at
-            FROM scrydex_price_cache
-            WHERE tcgplayer_id = %s AND price_type = 'graded'
-              AND grade_company = %s AND grade_value = %s
-            ORDER BY fetched_at DESC
+        # Resolve scrydex_id from cache (free — no API call)
+        id_row = db.query_one("""
+            SELECT scrydex_id FROM scrydex_price_cache
+            WHERE tcgplayer_id = %s AND product_type = 'card'
             LIMIT 1
-        """, (int(tcg_id), company, grade))
-        if row:
-            scrydex_id = row.get("scrydex_id")
-            def _f(v):
-                return float(v) if v is not None else None
-            market = _f(row.get("market_price"))
-            low    = _f(row.get("low_price"))
-            mid    = _f(row.get("mid_price"))
-            high   = _f(row.get("high_price"))
+        """, (int(tcg_id),))
+        scrydex_id = id_row.get("scrydex_id") if id_row else None
 
-            # Detect thin data: nightly sync inline prices often have
-            # market=low=mid=high (single aggregated value, not real comps).
-            # If so, try a live Scrydex listings call for real eBay sold data.
-            thin = (low is not None and low == mid == high == market)
-            comps_count = None
+        if scrydex_id:
+            try:
+                from scrydex_client import ScrydexClient
+                from datetime import datetime, timedelta, timezone
+                from statistics import median as _median
+                sx_key  = os.getenv("SCRYDEX_API_KEY", "")
+                sx_team = os.getenv("SCRYDEX_TEAM_ID", "")
+                if sx_key and sx_team:
+                    sx = ScrydexClient(sx_key, sx_team, db=db)
+                    listings = sx.get_card_listings(scrydex_id, days=90)
 
-            if thin and scrydex_id:
-                try:
-                    from scrydex_client import ScrydexClient
-                    sx_key  = os.getenv("SCRYDEX_API_KEY", "")
-                    sx_team = os.getenv("SCRYDEX_TEAM_ID", "")
-                    if sx_key and sx_team:
-                        sx = ScrydexClient(sx_key, sx_team, db=db)
-                        listings = sx.get_card_listings(scrydex_id, days=60)
-                        grade_listings = [
-                            float(l["price"])
-                            for l in listings
-                            if (l.get("company") or "").upper() == company
-                            and str(l.get("grade", "")) == str(grade)
-                            and l.get("price") is not None
-                        ]
-                        if grade_listings:
-                            from statistics import median as _median
-                            grade_listings.sort()
-                            low    = grade_listings[0]
-                            high   = grade_listings[-1]
-                            mid    = round(_median(grade_listings), 2)
-                            market = round(sum(grade_listings) / len(grade_listings), 2)
-                            comps_count = len(grade_listings)
-                            thin = False
-                            logger.info(f"Live Scrydex listings for {scrydex_id} {company} {grade}: "
-                                        f"{comps_count} comps, ${low}-${high}, median ${mid}")
-                except Exception as e:
-                    logger.warning(f"Live Scrydex listings fetch failed for {scrydex_id}: {e}")
+                    # Filter to this exact grade
+                    now = datetime.now(timezone.utc)
+                    grade_sales = []
+                    for l in listings:
+                        if ((l.get("company") or "").upper() != company
+                                or str(l.get("grade", "")) != str(grade)
+                                or l.get("price") is None):
+                            continue
+                        price_val = float(l["price"])
+                        # Parse date — try common formats
+                        sale_date = None
+                        for dfield in ("date", "sold_date", "sold_at", "listed_at"):
+                            ds = l.get(dfield)
+                            if ds:
+                                try:
+                                    sale_date = datetime.fromisoformat(str(ds).replace("Z", "+00:00"))
+                                    if sale_date.tzinfo is None:
+                                        sale_date = sale_date.replace(tzinfo=timezone.utc)
+                                except Exception:
+                                    pass
+                                break
+                        grade_sales.append({"price": price_val, "date": sale_date})
 
-            result["scrydex"] = {
-                "market":        market,
-                "low":           low,
-                "mid":           mid,
-                "high":          high,
-                "trend_1d_pct":  _f(row.get("trend_1d_pct")),
-                "trend_7d_pct":  _f(row.get("trend_7d_pct")),
-                "trend_30d_pct": _f(row.get("trend_30d_pct")),
-                "fetched_at":    row["fetched_at"].isoformat() if row.get("fetched_at") else None,
-                "suggested_price": market or mid,
-                "comps_count":   comps_count,
-                "source":        "live_listings" if comps_count else "cache",
-            }
+                    if grade_sales:
+                        prices_all = [s["price"] for s in grade_sales]
+                        prices_all.sort()
+
+                        # Bucket by recency for trend calculation
+                        prices_7d  = [s["price"] for s in grade_sales
+                                      if s["date"] and (now - s["date"]).days <= 7]
+                        prices_30d = [s["price"] for s in grade_sales
+                                      if s["date"] and (now - s["date"]).days <= 30]
+                        prices_older = [s["price"] for s in grade_sales
+                                        if s["date"] and 30 < (now - s["date"]).days <= 90]
+
+                        avg_all = sum(prices_all) / len(prices_all)
+                        med_all = _median(prices_all)
+
+                        # Trend: compare recent average to older average
+                        trend_7d = None
+                        trend_30d = None
+                        if prices_7d and prices_older:
+                            avg_7d = sum(prices_7d) / len(prices_7d)
+                            avg_old = sum(prices_older) / len(prices_older)
+                            if avg_old > 0:
+                                trend_7d = round((avg_7d - avg_old) / avg_old * 100, 1)
+                        if prices_30d and prices_older:
+                            avg_30d = sum(prices_30d) / len(prices_30d)
+                            avg_old = sum(prices_older) / len(prices_older)
+                            if avg_old > 0:
+                                trend_30d = round((avg_30d - avg_old) / avg_old * 100, 1)
+
+                        result["scrydex"] = {
+                            "market":        round(avg_all, 2),
+                            "low":           prices_all[0],
+                            "mid":           round(med_all, 2),
+                            "high":          prices_all[-1],
+                            "trend_7d_pct":  trend_7d,
+                            "trend_30d_pct": trend_30d,
+                            "trend_1d_pct":  None,
+                            "fetched_at":    now.isoformat(),
+                            "suggested_price": round(med_all, 2),
+                            "comps_count":   len(prices_all),
+                            "comps_7d":      len(prices_7d),
+                            "comps_30d":     len(prices_30d),
+                            "source":        "live_listings",
+                        }
+                        logger.info(f"Live Scrydex listings for {scrydex_id} {company} {grade}: "
+                                    f"{len(prices_all)} comps (7d:{len(prices_7d)}, 30d:{len(prices_30d)}), "
+                                    f"${prices_all[0]}-${prices_all[-1]}, median ${med_all:.2f}")
+            except Exception as e:
+                logger.warning(f"Live Scrydex listings fetch failed for {scrydex_id}: {e}")
+
+        # Fallback to cache if live didn't populate
+        if not result["scrydex"] and tcg_id:
+            row = db.query_one("""
+                SELECT market_price, low_price, mid_price, high_price,
+                       trend_1d_pct, trend_7d_pct, trend_30d_pct, fetched_at
+                FROM scrydex_price_cache
+                WHERE tcgplayer_id = %s AND price_type = 'graded'
+                  AND grade_company = %s AND grade_value = %s
+                ORDER BY fetched_at DESC LIMIT 1
+            """, (int(tcg_id), company, grade))
+            if row:
+                def _f(v):
+                    return float(v) if v is not None else None
+                market = _f(row.get("market_price"))
+                mid    = _f(row.get("mid_price"))
+                result["scrydex"] = {
+                    "market":        market,
+                    "low":           _f(row.get("low_price")),
+                    "mid":           mid,
+                    "high":          _f(row.get("high_price")),
+                    "trend_1d_pct":  _f(row.get("trend_1d_pct")),
+                    "trend_7d_pct":  _f(row.get("trend_7d_pct")),
+                    "trend_30d_pct": _f(row.get("trend_30d_pct")),
+                    "fetched_at":    row["fetched_at"].isoformat() if row.get("fetched_at") else None,
+                    "suggested_price": market or mid,
+                    "comps_count":   None,
+                    "source":        "cache",
+                }
 
     return jsonify(_serialize(result))
 
