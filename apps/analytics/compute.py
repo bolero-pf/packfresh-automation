@@ -355,11 +355,30 @@ def snapshot_inventory():
 
 
 def run_full_pipeline():
-    """Run the complete pipeline: snapshot inventory + ingest orders + recompute metrics."""
-    # 1. Snapshot today's inventory levels (for OOS tracking)
+    """
+    Run the complete analytics pipeline:
+      1. Snapshot market prices (before nightly scrydex sync overwrites)
+      2. Snapshot inventory levels (for OOS tracking)
+      3. Ingest orders from Shopify
+      4. Recompute velocity metrics
+      5. Classify product taxonomy
+      6. Sync customer orders + summaries
+      7. Compute daily business summary
+      8. Compute realized margins
+    """
+    results = {}
+
+    # 1. Snapshot scrydex prices to history
+    try:
+        from price_history import snapshot_scrydex_prices
+        results["price_history"] = snapshot_scrydex_prices()
+    except Exception as e:
+        logger.exception(f"Price history snapshot failed: {e}")
+
+    # 2. Snapshot today's inventory levels (for OOS tracking)
     snapshot_inventory()
 
-    # 2. Ingest orders
+    # 3. Ingest orders
     meta = db.query_one("SELECT value FROM analytics_meta WHERE key = 'last_order_ingest'")
     if meta and meta["value"]:
         # Incremental: pull from day before last run to catch any stragglers
@@ -369,7 +388,34 @@ def run_full_pipeline():
     else:
         # First run: full 90-day backfill
         ingest_result = ingest_orders(full_backfill=True)
+    results.update(ingest_result)
 
-    # 3. Recompute velocity metrics
+    # 4. Recompute velocity metrics
     compute_result = recompute_analytics()
-    return {**ingest_result, **compute_result}
+    results.update(compute_result)
+
+    # 5. Classify product taxonomy
+    try:
+        from taxonomy import classify_taxonomy
+        results["taxonomy"] = classify_taxonomy()
+    except Exception as e:
+        logger.exception(f"Taxonomy classification failed: {e}")
+
+    # 6. Sync customer orders + summaries
+    try:
+        from customers import sync_customer_orders, recompute_customer_summaries, compute_daily_business_summary
+        results["customer_orders"] = sync_customer_orders()
+        results["customer_summaries"] = recompute_customer_summaries()
+        # 7. Daily business summary for today
+        results["daily_summary"] = compute_daily_business_summary(date.today())
+    except Exception as e:
+        logger.exception(f"Customer pipeline failed: {e}")
+
+    # 8. Compute realized margins
+    try:
+        from margins import compute_realized_margins
+        results["margins"] = compute_realized_margins()
+    except Exception as e:
+        logger.exception(f"Margin computation failed: {e}")
+
+    return results

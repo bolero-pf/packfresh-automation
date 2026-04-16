@@ -67,7 +67,7 @@ def run_analytics():
 
 @app.route("/run/backfill", methods=["POST"])
 def run_backfill():
-    """Force a full 90-day backfill (slower, use sparingly)."""
+    """Force a full backfill — 90d orders + 365d customers (slower, use sparingly)."""
     secret = request.headers.get("X-Flow-Secret", "")
     flow_secret = os.environ.get("VIP_FLOW_SECRET", "")
     try:
@@ -80,15 +80,54 @@ def run_backfill():
 
     def _run():
         try:
-            from compute import ingest_orders, recompute_analytics
+            from compute import ingest_orders, recompute_analytics, snapshot_inventory
+            from price_history import snapshot_scrydex_prices
+            from taxonomy import classify_taxonomy
+            from customers import sync_customer_orders, recompute_customer_summaries, backfill_daily_summaries
+            from margins import compute_realized_margins
+
+            snapshot_scrydex_prices()
+            snapshot_inventory()
             ingest_orders(full_backfill=True)
             recompute_analytics()
+            classify_taxonomy()
+            sync_customer_orders(full_backfill=True)
+            recompute_customer_summaries()
+            backfill_daily_summaries(days=365)
+            compute_realized_margins()
             logger.info("Full backfill complete")
         except Exception as e:
             logger.exception(f"Backfill failed: {e}")
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({"ok": True, "started": True, "mode": "backfill"})
+
+
+@app.route("/run/migrate", methods=["POST"])
+def run_migrate():
+    """Run the v2 migration script to create new analytics tables."""
+    try:
+        from auth import get_current_user
+        user = get_current_user()
+    except Exception:
+        user = None
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        import subprocess
+        import sys
+        result = subprocess.run(
+            [sys.executable, "migrate_analytics_v2.py"],
+            capture_output=True, text=True, timeout=30
+        )
+        return jsonify({
+            "ok": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/analytics", methods=["POST"])
