@@ -2646,6 +2646,142 @@ def price_compare_unmatched():
     })
 
 
+_enrich_unmatched_jobs = {}  # {job_id: {status, progress, total, errors, started_at}}
+
+
+def _enrich_unmatched_worker(job_id: str, tcg_ids: list[int]):
+    """Background worker: enrich a batch of tcgplayer_ids via PPT, with rate-limit pauses."""
+    import time as _time
+    job = _enrich_unmatched_jobs[job_id]
+    MCAP_KEYWORDS = ("miscellaneous cards & products", "miscellaneous")
+
+    for i, tcg_id in enumerate(tcg_ids):
+        if job.get("cancelled"):
+            job["status"] = "cancelled"
+            return
+
+        # Wait out rate limits if we hit them
+        wait_count = 0
+        while ppt and ppt.should_throttle() and wait_count < 120:
+            rate_info = ppt.get_rate_limit_info()
+            retry_after = rate_info.get("retry_after") or 5
+            job["status"] = f"rate_limited (waiting {retry_after}s)"
+            _time.sleep(min(retry_after, 5))
+            wait_count += 1
+
+        job["status"] = "running"
+        try:
+            ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+            if not ppt_item:
+                ppt_item = ppt.get_card_by_tcgplayer_id(tcg_id)
+            if ppt_item:
+                set_name = ppt_item.get("setName", "") or ""
+                ppt_name = ppt_item.get("name", "") or ""
+                is_mcap = set_name.lower() in MCAP_KEYWORDS
+                db.execute("""
+                    INSERT INTO tcgplayer_set_lookup (tcgplayer_id, set_name, product_name, is_mcap, looked_up_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (tcgplayer_id) DO UPDATE SET
+                        set_name = EXCLUDED.set_name,
+                        product_name = EXCLUDED.product_name,
+                        is_mcap = EXCLUDED.is_mcap,
+                        looked_up_at = NOW()
+                """, (tcg_id, set_name, ppt_name, is_mcap))
+            else:
+                db.execute("""
+                    INSERT INTO tcgplayer_set_lookup (tcgplayer_id, set_name, product_name, is_mcap, looked_up_at)
+                    VALUES (%s, NULL, NULL, FALSE, NOW())
+                    ON CONFLICT (tcgplayer_id) DO UPDATE SET looked_up_at = NOW()
+                """, (tcg_id,))
+                job["not_found"] = job.get("not_found", 0) + 1
+        except Exception as e:
+            logger.warning(f"Unmatched enrich failed for tcg={tcg_id}: {e}")
+            job["errors"] = job.get("errors", 0) + 1
+
+        job["progress"] = i + 1
+
+    job["status"] = "complete"
+
+
+@app.route("/api/price-compare/enrich-unmatched-start", methods=["POST"])
+def enrich_unmatched_start():
+    """Start a background job to PPT-enrich all unmatched items.
+    Body: { "filter": "sealed"|"all", "game": "pokemon"|... } — same filters as unmatched endpoint.
+    """
+    if not ppt:
+        return jsonify({"error": "PPT not configured"}), 503
+
+    data = request.get_json(silent=True) or {}
+    product_filter = data.get("filter", "sealed")
+    game_filter = (data.get("game") or "").strip().lower() or None
+
+    where = ["ipc.tcgplayer_id IS NOT NULL", "ipc.is_damaged = FALSE",
+             "ipc.tags NOT ILIKE %s", "ipc.tags NOT ILIKE %s",
+             "NOT EXISTS (SELECT 1 FROM scrydex_price_cache spc WHERE spc.tcgplayer_id = ipc.tcgplayer_id)",
+             "NOT EXISTS (SELECT 1 FROM tcgplayer_set_lookup tsl WHERE tsl.tcgplayer_id = ipc.tcgplayer_id)"]
+    params = ["%slab%", "%accessories%"]
+
+    if product_filter == "sealed":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%sealed%", "%booster%", "%etb%", "%collection box%", "%tin%"])
+
+    if game_filter == "pokemon":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%pokemon%", "%pokémon%"])
+    elif game_filter == "mtg":
+        where.append("(ipc.tags ILIKE %s OR ipc.tags ILIKE %s)")
+        params.extend(["%magic: the gathering%", "%magic the gathering%"])
+    elif game_filter == "lorcana":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%lorcana%")
+    elif game_filter == "onepiece":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%one piece%")
+    elif game_filter == "riftbound":
+        where.append("ipc.tags ILIKE %s")
+        params.append("%riftbound%")
+
+    rows = db.query(f"""
+        SELECT DISTINCT ipc.tcgplayer_id FROM inventory_product_cache ipc
+        WHERE {' AND '.join(where)}
+    """, tuple(params))
+    tcg_ids = [r["tcgplayer_id"] for r in rows]
+
+    if not tcg_ids:
+        return jsonify({"job_id": None, "status": "complete", "total": 0,
+                        "message": "Nothing to enrich — all items already looked up"})
+
+    import uuid as _uuid, threading as _threading
+    job_id = str(_uuid.uuid4())
+    _enrich_unmatched_jobs[job_id] = {
+        "status": "running", "progress": 0, "total": len(tcg_ids),
+        "errors": 0, "not_found": 0, "cancelled": False,
+    }
+
+    thread = _threading.Thread(target=_enrich_unmatched_worker, args=(job_id, tcg_ids), daemon=True)
+    thread.start()
+
+    return jsonify({"job_id": job_id, "status": "running", "total": len(tcg_ids)})
+
+
+@app.route("/api/price-compare/enrich-unmatched-job/<job_id>")
+def enrich_unmatched_job(job_id):
+    """Poll status of a background enrichment job."""
+    job = _enrich_unmatched_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
+
+
+@app.route("/api/price-compare/enrich-unmatched-cancel/<job_id>", methods=["POST"])
+def enrich_unmatched_cancel(job_id):
+    """Cancel a running background enrichment job."""
+    job = _enrich_unmatched_jobs.get(job_id)
+    if job:
+        job["cancelled"] = True
+    return jsonify({"ok": True})
+
+
 @app.route("/api/price-compare/export-unmatched", methods=["POST"])
 def export_unmatched():
     """

@@ -116,8 +116,19 @@
   </select>
   <input type="text" id="um-search" placeholder="Filter store items..." style="width:250px;">
   <button onclick="loadUnmatched()">Filter</button>
+  <button id="um-enrich-btn" onclick="startEnrichAll()" style="background:var(--accent,#4f7df9);color:white;">Enrich All</button>
   <button onclick="exportUnmatched()" style="background:var(--accent,#4f7df9);color:white;">Export CSV</button>
   <span class="stats" id="um-stats"></span>
+</div>
+<div id="um-enrich-progress" style="display:none; padding:10px 14px; margin:8px 0; background:var(--card); border:1px solid var(--border); border-radius:6px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+    <span id="um-enrich-status" style="font-size:0.85rem; font-weight:600;">Starting…</span>
+    <button id="um-enrich-cancel" onclick="cancelEnrichAll()" style="font-size:0.75rem; padding:3px 10px; background:transparent; color:var(--dim); border:1px solid var(--border); border-radius:4px; cursor:pointer;">Cancel</button>
+  </div>
+  <div style="width:100%; height:8px; background:var(--bg); border-radius:4px; overflow:hidden;">
+    <div id="um-enrich-bar" style="width:0%; height:100%; background:var(--accent,#4f7df9); transition:width 0.3s;"></div>
+  </div>
+  <div id="um-enrich-counts" style="font-size:0.72rem; color:var(--dim); margin-top:4px;"></div>
 </div>
 
 <table>
@@ -335,6 +346,75 @@ function renderUnmatched() {
       <td style="color:var(--dim);font-size:0.78rem;">${r.tcgplayer_id}</td>
     </tr>`;
   }).join('');
+}
+
+let _enrichJobId = null;
+let _enrichPollTimer = null;
+
+async function startEnrichAll() {
+  const filter = document.getElementById('um-filter').value;
+  const game = document.getElementById('um-game').value;
+  const btn = document.getElementById('um-enrich-btn');
+
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/price-compare/enrich-unmatched-start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ filter, game })
+    });
+    const data = await resp.json();
+    if (!resp.ok) { alert('Failed to start: ' + (data.error || 'unknown')); btn.disabled = false; return; }
+
+    if (!data.job_id) {
+      alert(data.message || 'Nothing to enrich');
+      btn.disabled = false;
+      return;
+    }
+
+    _enrichJobId = data.job_id;
+    const panel = document.getElementById('um-enrich-progress');
+    panel.style.display = 'block';
+    document.getElementById('um-enrich-status').textContent = `Enriching 0 / ${data.total}`;
+    document.getElementById('um-enrich-bar').style.width = '0%';
+    _enrichPollTimer = setInterval(pollEnrichJob, 1000);
+  } catch(e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+  }
+}
+
+async function pollEnrichJob() {
+  if (!_enrichJobId) return;
+  try {
+    const resp = await fetch(`/api/price-compare/enrich-unmatched-job/${_enrichJobId}`);
+    const job = await resp.json();
+    const pct = job.total > 0 ? Math.round(job.progress / job.total * 100) : 0;
+    document.getElementById('um-enrich-bar').style.width = pct + '%';
+    document.getElementById('um-enrich-status').textContent =
+      `${job.status} — ${job.progress} / ${job.total} (${pct}%)`;
+    document.getElementById('um-enrich-counts').textContent =
+      `Not found in PPT: ${job.not_found || 0} · Errors: ${job.errors || 0}`;
+
+    if (job.status === 'complete' || job.status === 'cancelled') {
+      clearInterval(_enrichPollTimer);
+      _enrichPollTimer = null;
+      document.getElementById('um-enrich-btn').disabled = false;
+      if (job.status === 'complete') {
+        document.getElementById('um-enrich-status').textContent =
+          `Done! ${job.progress} enriched (${job.not_found || 0} not found in PPT). Click Export CSV.`;
+      }
+      _enrichJobId = null;
+    }
+  } catch(e) {
+    console.error('Poll failed:', e);
+  }
+}
+
+async function cancelEnrichAll() {
+  if (!_enrichJobId) return;
+  if (!confirm('Cancel enrichment? Items already processed are saved.')) return;
+  await fetch(`/api/price-compare/enrich-unmatched-cancel/${_enrichJobId}`, { method: 'POST' });
 }
 
 async function exportUnmatched() {
