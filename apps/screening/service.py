@@ -219,6 +219,9 @@ def _normalize_address(addr: dict | None) -> str:
     street = (addr.get("address1") or "").strip().lower()
     street = re.sub(r"\s*(apt|suite|ste|unit|#)\s*\S*$", "", street, flags=re.I)
     zipcode = (addr.get("zip") or "").strip().replace("-", "").replace(" ", "")
+    # Truncate to 5 digits — ZIP+4 variants (92009 vs 920092285) must match
+    if zipcode and len(zipcode) > 5 and zipcode[:5].isdigit():
+        zipcode = zipcode[:5]
     if not street or not zipcode:
         return ""
     return f"{street} {zipcode}"
