@@ -612,7 +612,13 @@ function showList() {
 // ── STAGE STATE ──────────────────────────────────────────────────────────
 let _currentStage = 'verify';  // 'verify' | 'breakdown' | 'route' | 'push'
 let _currentSessionData = null;
-let _currentSortBy = 'default';  // 'default' | 'alpha' | 'price-high' | 'price-low'
+// Persisted to localStorage so it survives page refresh — critical for resuming
+// routing sessions at the right card (resume index is sort-dependent).
+let _currentSortBy = (typeof localStorage !== 'undefined' && localStorage.getItem('pf_sort_by')) || 'alpha';
+function _setSort(v) {
+    _currentSortBy = v;
+    try { localStorage.setItem('pf_sort_by', v); } catch(e) {}
+}
 let _currentGroupBy = 'none';    // 'none' | 'type' | 'set'
 
 function _classifyProductType(item) {
@@ -660,7 +666,7 @@ function _renderSortToolbar() {
             <option value="set" ${_currentGroupBy==='set'?'selected':''}>Set</option>
         </select>
         <label style="margin-left:8px;">Sort:</label>
-        <select onchange="_currentSortBy=this.value; _rerenderStage();">
+        <select onchange="_setSort(this.value); _rerenderStage();">
             <option value="default" ${_currentSortBy==='default'?'selected':''}>Default</option>
             <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>Alphabetical</option>
             <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price (High→Low)</option>
@@ -1515,7 +1521,7 @@ function _renderRouteCards(sessionId, data) {
     html += `<div class="card" style="padding:8px 12px;">
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <label style="font-size:0.82rem;">Sort:</label>
-            <select onchange="_currentSortBy=this.value; _renderRouteCards('${sessionId}', _routeData);" style="font-size:0.82rem; padding:4px 8px;">
+            <select onchange="_setSort(this.value); _renderRouteCards('${sessionId}', _routeData);" style="font-size:0.82rem; padding:4px 8px;">
                 <option value="default" ${_currentSortBy==='default'?'selected':''}>Default (Price Low→High)</option>
                 <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>Alphabetical</option>
                 <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price (High→Low)</option>
@@ -3643,7 +3649,7 @@ function _renderBarcodeSection(panel, sessionId) {
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
             <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${sorted.length})</div>
             <div style="display:flex; gap:8px; align-items:center;">
-                <select onchange="_currentSortBy=this.value; _renderBarcodeSection(document.getElementById('session-barcode-section'), '${sessionId}');" style="font-size:0.82rem; padding:4px 8px;">
+                <select onchange="_setSort(this.value); _renderBarcodeSection(document.getElementById('session-barcode-section'), '${sessionId}');" style="font-size:0.82rem; padding:4px 8px;">
                     <option value="default" ${_currentSortBy==='default'?'selected':''}>Default</option>
                     <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>A→Z</option>
                     <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price ↓</option>
