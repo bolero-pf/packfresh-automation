@@ -4295,11 +4295,6 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
                     '</table></div>';
             })() : ''}
           </div>`;
-        // Debug: show raw listing sample if dates aren't parsing
-        if (sd.undated_count > 0 && sd._debug_sample) {
-            scrydexHtml += `<details style="margin-top:6px;"><summary style="font-size:0.65rem;color:var(--text-dim);cursor:pointer;">debug: raw listing fields</summary>
-                <pre style="font-size:0.6rem;max-height:120px;overflow:auto;background:var(--surface);padding:6px;border-radius:4px;margin-top:4px;">${JSON.stringify(sd._debug_sample, null, 2)}</pre></details>`;
-        }
         scrydexHtml += '</div>';
     } else {
         scrydexHtml = `

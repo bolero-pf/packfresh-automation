@@ -131,22 +131,11 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
     dated_sales = [{"price": s["price"], "date": s["date"].isoformat() if s["date"] else None}
                    for s in sorted(sales, key=lambda x: x["date"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)]
 
-    # Grab a sample listing for debugging date field issues
-    sample_listing = None
-    for l in raw_listings:
-        if ((l.get("company") or "").upper() == company
-                and str(l.get("grade", "")) == grade):
-            sample_listing = {k: str(v)[:80] for k, v in l.items()}
-            break
-
     logger.info(f"Live comps for {scrydex_id} {company} {grade}: "
                 f"{len(prices_all)} total (7d:{len(prices_7d)}, 30d:{len(prices_30d)}, "
                 f"undated:{undated_count}), "
                 f"${prices_all[0]:.2f}-${prices_all[-1]:.2f}, "
                 f"30d avg ${market:.2f}, all-time median ${med_all:.2f}")
-    if sample_listing:
-        logger.info(f"  Sample listing fields: {sample_listing}")
-
     return {
         "market":        market,
         "low":           prices_all[0],
@@ -163,7 +152,6 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
         "undated_count": undated_count,
         "source":        "live_listings",
         "sales":         dated_sales,
-        "_debug_sample":  sample_listing,  # temporary — shows raw listing fields
     }
 
 
@@ -203,26 +191,15 @@ def _fallback_from_cache(tcgplayer_id: int, company: str, grade: str, db) -> Opt
     }
 
 
-_DATE_FIELDS_LOGGED = False
-
 def _parse_date(listing: dict) -> Optional[datetime]:
-    """Try all plausible date field names from Scrydex listing data."""
-    global _DATE_FIELDS_LOGGED
-    if not _DATE_FIELDS_LOGGED:
-        # Log the actual keys from the first listing so we know what Scrydex sends
-        logger.info(f"Scrydex listing keys: {sorted(listing.keys())}")
-        _DATE_FIELDS_LOGGED = True
-
-    # Try every plausible field name
-    for field in ("date", "sold_date", "sold_at", "listed_at", "created_at",
-                  "end_time", "endTime", "sale_date", "timestamp", "time",
-                  "endedAt", "ended_at", "closedAt", "closed_at"):
+    """Parse sale date from a Scrydex listing. Scrydex uses sold_at with slash format (2026/04/15)."""
+    for field in ("sold_at", "date", "sold_date"):
         ds = listing.get(field)
         if not ds:
             continue
         try:
-            s = str(ds).strip()
-            # ISO format (most common)
+            s = str(ds).strip().replace("/", "-")
+            # ISO format (most common) — also handles 2026/04/15 slash dates
             dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
