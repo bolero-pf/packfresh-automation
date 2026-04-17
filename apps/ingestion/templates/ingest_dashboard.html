@@ -1863,12 +1863,13 @@ async function startRouteSession(sessionId) {
         // Start showing cards immediately
         _renderSessionCard();
 
-        // Kick off enrichment in background — force=true ensures fresh data
-        // (picks up any tcg_id changes since last session start)
+        // Kick off enrichment in background — reuses cache if the session was
+        // already enriched in this process, so re-entering a session after a
+        // quick exit doesn't re-hit PPT/Scrydex for every card.
         const er = await fetch(`/api/ingest/session/${sessionId}/enrich-route`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ force: true })
+            body: JSON.stringify({})
         });
         const ej = await er.json();
 
