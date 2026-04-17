@@ -164,10 +164,23 @@ def build_title(psa_cert: Optional[dict], ppt_card: Optional[dict],
     if psa_cert:
         year = (psa_cert.get("Year") or "").strip()
 
+    # Check if PPT data is usable (not Japanese/non-ASCII) — PSA labels are
+    # always English so for JP cards we prefer PSA as the title source.
+    def _is_ascii(s: str) -> bool:
+        try:
+            s.encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
+
+    ppt_usable = False
     if ppt_card:
-        # PPT is source of truth for name + set
         card_name   = (ppt_card.get("name") or ppt_card.get("productName") or "").strip()
         set_name    = (ppt_card.get("setName") or ppt_card.get("set_name") or "").strip()
+        ppt_usable  = _is_ascii(card_name) and _is_ascii(set_name)
+
+    if ppt_card and ppt_usable:
+        # PPT is source of truth for name + set (English cards)
         card_number = (ppt_card.get("cardNumber") or ppt_card.get("number") or "").strip()
 
         parts = [p for p in [year, "Pokemon", set_name, card_name] if p]
@@ -207,9 +220,21 @@ def build_description(psa_cert: Optional[dict], ppt_card: Optional[dict],
     year       = (psa_cert.get("Year") or "") if psa_cert else ""
     population = (psa_cert.get("TotalPopulation") or "") if psa_cert else ""
 
-    if ppt_card:
-        card_name   = ppt_card.get("name") or ppt_card.get("productName") or ""
-        set_name    = ppt_card.get("setName") or ppt_card.get("set_name") or ""
+    # Same ASCII check as build_title — use PSA for JP cards
+    def _is_ascii(s: str) -> bool:
+        try:
+            s.encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
+
+    _ppt_name = (ppt_card.get("name") or ppt_card.get("productName") or "") if ppt_card else ""
+    _ppt_set  = (ppt_card.get("setName") or ppt_card.get("set_name") or "") if ppt_card else ""
+    _ppt_ok   = ppt_card and _is_ascii(_ppt_name) and _is_ascii(_ppt_set)
+
+    if _ppt_ok:
+        card_name   = _ppt_name
+        set_name    = _ppt_set
         card_number = ppt_card.get("cardNumber") or ppt_card.get("number") or ""
         rarity      = ppt_card.get("rarity") or ""
     elif psa_cert:
