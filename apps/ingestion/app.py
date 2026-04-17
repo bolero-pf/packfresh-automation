@@ -853,6 +853,8 @@ def _enrich_route_worker(job_id, session_id, items):
     job["total"] = len(unique)
     errors = 0
 
+    from graded_pricing import get_all_graded_comps
+
     for i, (tcg_id_str, item) in enumerate(unique.items()):
         try:
             card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id_str))
@@ -860,7 +862,13 @@ def _enrich_route_worker(job_id, session_id, items):
                 image_url = (card_data.get("imageCdnUrl800")
                              or card_data.get("imageCdnUrl")
                              or card_data.get("imageCdnUrl400"))
-                graded_prices = PriceProvider.extract_graded_prices(card_data)
+
+                # Live eBay comps for graded prices — one API call per card
+                # returns all grades. Falls back to cache aggregate if API unavailable.
+                graded_prices = get_all_graded_comps(int(tcg_id_str), db)
+                if not graded_prices:
+                    graded_prices = PriceProvider.extract_graded_prices(card_data)
+
                 raw_price = float(item.get("market_price") or 0)
                 condition = item.get("condition") or "NM"
                 economics = _calc_grading_economics(graded_prices, raw_price, condition)

@@ -262,6 +262,94 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
     }
 
 
+def get_all_graded_comps(tcgplayer_id: int, db, *, days: int = 90) -> dict:
+    """
+    Fetch live eBay comps for ALL grades of a card in a single API call.
+
+    Returns dict matching the shape of PriceProvider.extract_graded_prices():
+        {"PSA": {"10": {"price": 450.0, "confidence": "high", "count": 67, ...}, "9": {...}}, ...}
+
+    One Scrydex credit. Used by the grading economics calculator so the 60/40
+    EV computation uses real market data instead of unreliable cache aggregates.
+    """
+    company_map = {}  # {"PSA": {"10": {price, confidence, count}, ...}}
+
+    id_row = db.query_one("""
+        SELECT scrydex_id FROM scrydex_price_cache
+        WHERE tcgplayer_id = %s AND product_type = 'card'
+        LIMIT 1
+    """, (int(tcgplayer_id),))
+    scrydex_id = id_row.get("scrydex_id") if id_row else None
+    if not scrydex_id:
+        return {}
+
+    sx_key  = os.getenv("SCRYDEX_API_KEY", "")
+    sx_team = os.getenv("SCRYDEX_TEAM_ID", "")
+    if not sx_key or not sx_team:
+        return {}
+
+    try:
+        from scrydex_client import ScrydexClient
+        sx = ScrydexClient(sx_key, sx_team, db=db)
+        raw_listings = sx.get_card_listings(scrydex_id, days=days)
+    except Exception as e:
+        logger.warning(f"Scrydex listings call failed for {scrydex_id}: {e}")
+        return {}
+
+    if not raw_listings:
+        return {}
+
+    now = datetime.now(timezone.utc)
+
+    # Group all listings by company + grade
+    from collections import defaultdict
+    buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for l in raw_listings:
+        co = (l.get("company") or "").upper()
+        gr = str(l.get("grade", "")).strip()
+        if not co or not gr or l.get("price") is None:
+            continue
+        sale_date = _parse_date(l)
+        buckets[(co, gr)].append({"price": float(l["price"]), "date": sale_date})
+
+    # Compute smart market for each company+grade bucket
+    for (co, gr), sales in buckets.items():
+        if not sales:
+            continue
+
+        # Velocity-adaptive window (same logic as single-grade)
+        dated = sorted([s for s in sales if s["date"]], key=lambda s: s["date"], reverse=True)
+        if len(dated) >= 2:
+            span = max(1, (dated[0]["date"] - dated[-1]["date"]).days)
+            vel = len(dated) / span
+        else:
+            vel = 0
+        lookback = max(3, min(30, round(15 / vel))) if vel > 0 else 30
+        recent = [s for s in sales if s["date"] and (now - s["date"]).days <= lookback]
+        if len(recent) < 5:
+            recent = [s for s in sales if s["date"] and (now - s["date"]).days <= 30]
+        if not recent:
+            recent = sales
+
+        market, kept, dropped = _compute_smart_market(recent, now)
+        count = len(sales)
+
+        # Confidence from count
+        confidence = "high" if count >= 10 else "medium" if count >= 4 else "low"
+
+        company_map.setdefault(co, {})[gr] = {
+            "price":      market,
+            "confidence": confidence,
+            "count":      count,
+            "method":     "live_listings",
+        }
+
+    logger.info(f"All graded comps for {scrydex_id}: "
+                f"{sum(len(g) for g in company_map.values())} grade buckets from "
+                f"{len(raw_listings)} listings")
+    return company_map
+
+
 def _fallback_from_cache(tcgplayer_id: int, company: str, grade: str, db) -> Optional[dict]:
     """Read from scrydex_price_cache — unreliable for graded but better than nothing."""
     row = db.query_one("""
