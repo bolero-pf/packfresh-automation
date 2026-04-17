@@ -259,18 +259,52 @@ def get_session(session_id):
     # Include missing items so Verify tab can display them
     items = ingest.get_session_items(session_id, include_missing=True)
 
-    # Enrich items with store prices from inventory_product_cache
+    # Enrich items with store prices from inventory_product_cache.
+    # One tcgplayer_id can map to multiple store listings (raw + graded slabs at
+    # different grades). Keep all candidates per tcg_id and match per-item based
+    # on is_graded / grade_company / grade_value so a raw card never shows a
+    # graded listing's price.
     tcg_ids = list(set(int(i["tcgplayer_id"]) for i in items if i.get("tcgplayer_id")))
-    store_map = {}
+    store_candidates: dict[int, list[dict]] = {}
     if tcg_ids:
         try:
             ph = ",".join(["%s"] * len(tcg_ids))
             store_rows = db.query(
-                f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+                f"SELECT tcgplayer_id, shopify_price, shopify_qty, tags FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
                 tuple(tcg_ids))
-            store_map = {r["tcgplayer_id"]: r for r in store_rows}
+            for r in store_rows:
+                store_candidates.setdefault(r["tcgplayer_id"], []).append(r)
         except Exception:
             pass
+
+    def _pick_store_listing(item):
+        rows = store_candidates.get(item.get("tcgplayer_id")) or []
+        if not rows:
+            return None
+        is_graded = bool(item.get("is_graded"))
+        company = (item.get("grade_company") or "").strip().upper()
+        grade = str(item.get("grade_value") or "").strip()
+
+        def tags_of(r):
+            return (r.get("tags") or "").lower()
+
+        def is_slab(r):
+            t = tags_of(r)
+            return ("slab" in t) or ("graded" in t) or ("grade-" in t) \
+                or any(k in t for k in ("psa", "bgs", "cgc", "sgc"))
+
+        if is_graded:
+            # Must match company + grade if we have them
+            exact = [r for r in rows if is_slab(r)
+                     and (not company or company.lower() in tags_of(r))
+                     and (not grade or f"grade-{grade}".lower() in tags_of(r))]
+            if exact:
+                return exact[0]
+            # Company matches but grade doesn't → still wrong price, don't fall back
+            return None
+        # Raw item: pick only non-slab listings
+        raw_rows = [r for r in rows if not is_slab(r)]
+        return raw_rows[0] if raw_rows else None
 
     # Enrich with velocity data (prefer non-damaged variant with most sales)
     velocity_map = {}
@@ -295,7 +329,7 @@ def get_session(session_id):
     serialized = []
     for i in items:
         d = _serialize(i)
-        sp = store_map.get(i.get("tcgplayer_id"))
+        sp = _pick_store_listing(i)
         d["store_price"] = float(sp["shopify_price"]) if sp and sp.get("shopify_price") else None
         d["store_qty"] = int(sp["shopify_qty"] or 0) if sp else None
         vel = velocity_map.get(i.get("tcgplayer_id"))
