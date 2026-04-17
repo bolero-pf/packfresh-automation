@@ -77,6 +77,13 @@ def api_set_tier():
     except Exception as e:
         return jsonify({"error": f"Tag update failed: {e}"}), 500
 
+    # Sync Discord role
+    try:
+        from discord import sync_discord_role
+        sync_discord_role(customer_gid, new_tier)
+    except Exception as e:
+        logging.warning(f"Discord sync failed on set-tier: {e}")
+
     return jsonify({"ok": True, "tier": new_tier, "lock": lock_obj})
 
 

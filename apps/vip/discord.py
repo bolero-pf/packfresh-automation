@@ -222,6 +222,9 @@ def sync_discord_role(customer_gid: str, tier: str, *, discord_user_id: str = No
         "Content-Type": "application/json",
     }
 
+    print(f"[discord] sync_discord_role customer={customer_gid} tier={tier} "
+          f"discord_user={discord_user_id} guild={DISCORD_GUILD_ID}", flush=True)
+
     ok = True
     for role_tier, role_id in DISCORD_ROLE_MAP.items():
         if not role_id:
@@ -233,9 +236,9 @@ def sync_discord_role(customer_gid: str, tier: str, *, discord_user_id: str = No
                     f"{discord_user_id}/roles/{role_id}",
                     headers=headers, timeout=10,
                 )
+                print(f"[discord] ADD {role_tier} role={role_id} → {r.status_code} "
+                      f"{r.text[:200] if r.status_code not in (200,204) else 'ok'}", flush=True)
                 if r.status_code not in (200, 204):
-                    logger.error(f"Discord add role {role_tier} failed: "
-                                 f"{r.status_code} {r.text[:200]}")
                     ok = False
             else:
                 r = http_requests.delete(
@@ -243,9 +246,10 @@ def sync_discord_role(customer_gid: str, tier: str, *, discord_user_id: str = No
                     f"{discord_user_id}/roles/{role_id}",
                     headers=headers, timeout=10,
                 )
+                print(f"[discord] REMOVE {role_tier} role={role_id} → {r.status_code}", flush=True)
                 # 204=removed, 404=didn't have it — both fine
         except Exception as e:
-            logger.error(f"Discord role sync error for {role_tier}: {e}")
+            print(f"[discord] ERROR {role_tier}: {e}", flush=True)
             ok = False
 
     return ok
