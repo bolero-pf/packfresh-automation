@@ -18,6 +18,7 @@ intake) and nightly batch updates (~100 slabs = ~100 credits).
 Falls back to scrydex_price_cache if no SCRYDEX_API_KEY or API call fails.
 """
 
+import math
 import os
 import logging
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,82 @@ from statistics import median as _median
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ── Market price computation ─────────────────────────────────────────────────
+# IQR outlier removal → protect recent tail → exponential recency weighting.
+# Half-life of 14 days: a sale today weighs ~16× more than one 8 weeks ago.
+
+_HALF_LIFE_DAYS = 14.0
+_DECAY = math.log(2) / _HALF_LIFE_DAYS
+
+
+def _compute_smart_market(sales: list[dict], now: datetime) -> tuple[float, int, int]:
+    """
+    Compute market price from raw sales using:
+      1. IQR-based outlier removal (1.5× IQR)
+      2. Protect the most recent N sales from being dropped as outliers —
+         they represent the current market, not noise
+      3. Exponential recency-weighted average (14-day half-life)
+
+    Returns (market_price, kept_count, dropped_count).
+    """
+    if not sales:
+        return 0.0, 0, 0
+
+    # Sort by date descending (most recent first); undated go to the end
+    min_dt = datetime.min.replace(tzinfo=timezone.utc)
+    ordered = sorted(sales, key=lambda s: s["date"] or min_dt, reverse=True)
+    n = len(ordered)
+
+    if n < 4:
+        avg = round(sum(s["price"] for s in ordered) / n, 2)
+        return avg, n, 0
+
+    # IQR bounds
+    sorted_prices = sorted(s["price"] for s in ordered)
+    q1 = sorted_prices[n // 4]
+    q3 = sorted_prices[(3 * n) // 4]
+    iqr = q3 - q1
+    low_bound  = q1 - 1.5 * iqr
+    high_bound = q3 + 1.5 * iqr
+
+    # Protect the tail: most recent N sales can't be outliers.
+    # Scale with dataset size — at least 5, up to ~10% of total, capped at 20.
+    protect_n = min(max(n // 10, 5), 20, n)
+
+    kept = []
+    dropped = 0
+    for i, s in enumerate(ordered):
+        p = s["price"]
+        in_bounds = low_bound <= p <= high_bound
+        in_tail   = i < protect_n
+        if in_bounds or in_tail:
+            kept.append(s)
+        else:
+            dropped += 1
+
+    if not kept:
+        kept = ordered  # safety: never drop everything
+
+    # Recency-weighted average
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for s in kept:
+        if s["date"]:
+            days_ago = max(0, (now - s["date"]).total_seconds() / 86400)
+        else:
+            days_ago = 45.0  # undated gets mid-range weight
+        w = math.exp(-_DECAY * days_ago)
+        weighted_sum += s["price"] * w
+        total_weight += w
+
+    if total_weight > 0:
+        market = round(weighted_sum / total_weight, 2)
+    else:
+        market = round(sum(s["price"] for s in kept) / len(kept), 2)
+
+    return market, len(kept), dropped
 
 
 def get_live_graded_comps(
@@ -105,23 +182,20 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
     med_all = round(_median(prices_all), 2)
 
     # Bucket by recency
-    dated_sales_objs = [s for s in sales if s["date"]]
-    undated_count = len(sales) - len(dated_sales_objs)
+    undated_count = sum(1 for s in sales if not s["date"])
     prices_7d    = [s["price"] for s in sales if s["date"] and (now - s["date"]).days <= 7]
     prices_30d   = [s["price"] for s in sales if s["date"] and (now - s["date"]).days <= 30]
     prices_older = [s["price"] for s in sales if s["date"] and 30 < (now - s["date"]).days <= days]
 
     if undated_count > 0:
-        logger.warning(f"  {undated_count}/{len(sales)} listings have no parseable date — "
-                       f"trends may be inaccurate")
+        logger.warning(f"  {undated_count}/{len(sales)} listings have no parseable date")
 
-    # Market price: use the freshest reliable window.
-    # 7d avg is the actual current market for pricing decisions.
-    # 30d avg is useful context but lags on fast-moving cards.
+    # Smart market price: IQR outlier removal + protect recent tail + recency weighting
+    market, kept, dropped = _compute_smart_market(sales, now)
+
+    # Simple window averages for context (no outlier removal on these — raw signal)
     avg_7d  = round(sum(prices_7d) / len(prices_7d), 2) if prices_7d else None
     avg_30d = round(sum(prices_30d) / len(prices_30d), 2) if prices_30d else None
-    avg_all = round(sum(prices_all) / len(prices_all), 2)
-    market  = avg_7d or avg_30d or avg_all
 
     # Trend: compare recent average to older average
     trend_7d = _compute_trend(prices_7d, prices_older)
@@ -132,15 +206,13 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
                    for s in sorted(sales, key=lambda x: x["date"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)]
 
     logger.info(f"Live comps for {scrydex_id} {company} {grade}: "
-                f"{len(prices_all)} total (7d:{len(prices_7d)}, 30d:{len(prices_30d)}, "
-                f"undated:{undated_count}), "
-                f"${prices_all[0]:.2f}-${prices_all[-1]:.2f}, "
-                f"30d avg ${market:.2f}, all-time median ${med_all:.2f}")
+                f"{len(sales)} total, {kept} kept, {dropped} outliers dropped, "
+                f"market ${market:.2f} (7d avg ${avg_7d}, 30d avg ${avg_30d}), "
+                f"range ${prices_all[0]:.2f}-${prices_all[-1]:.2f}")
     return {
-        "market":        market,      # 7d avg > 30d avg > all-time avg
-        "avg_7d":        avg_7d,
-        "avg_30d":       avg_30d,
-        "avg_all":       avg_all,
+        "market":        market,      # recency-weighted, outlier-cleaned
+        "avg_7d":        avg_7d,      # raw 7d average (no outlier removal)
+        "avg_30d":       avg_30d,     # raw 30d average
         "low":           prices_all[0],
         "mid":           med_all,
         "high":          prices_all[-1],
@@ -149,7 +221,9 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
         "trend_1d_pct":  None,
         "fetched_at":    now.isoformat(),
         "suggested_price": market,
-        "comps_count":   len(prices_all),
+        "comps_count":   len(sales),
+        "comps_kept":    kept,
+        "outliers_dropped": dropped,
         "comps_7d":      len(prices_7d),
         "comps_30d":     len(prices_30d),
         "undated_count": undated_count,
