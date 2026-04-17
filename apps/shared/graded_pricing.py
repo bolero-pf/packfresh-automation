@@ -102,13 +102,26 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
         return None
 
     prices_all = sorted(s["price"] for s in sales)
-    avg_all = round(sum(prices_all) / len(prices_all), 2)
     med_all = round(_median(prices_all), 2)
 
-    # Bucket by recency for trend calculation
-    prices_7d  = [s["price"] for s in sales if s["date"] and (now - s["date"]).days <= 7]
-    prices_30d = [s["price"] for s in sales if s["date"] and (now - s["date"]).days <= 30]
+    # Bucket by recency
+    dated_sales_objs = [s for s in sales if s["date"]]
+    undated_count = len(sales) - len(dated_sales_objs)
+    prices_7d    = [s["price"] for s in sales if s["date"] and (now - s["date"]).days <= 7]
+    prices_30d   = [s["price"] for s in sales if s["date"] and (now - s["date"]).days <= 30]
     prices_older = [s["price"] for s in sales if s["date"] and 30 < (now - s["date"]).days <= days]
+
+    if undated_count > 0:
+        logger.warning(f"  {undated_count}/{len(sales)} listings have no parseable date — "
+                       f"trends may be inaccurate")
+
+    # Market price: use 30-day average (current market), not 90-day average
+    # which gets dragged down by older sales on appreciating cards. Fall back
+    # to all-time average only if no dated 30d window.
+    if prices_30d:
+        market = round(sum(prices_30d) / len(prices_30d), 2)
+    else:
+        market = round(sum(prices_all) / len(prices_all), 2)
 
     # Trend: compare recent average to older average
     trend_7d = _compute_trend(prices_7d, prices_older)
@@ -119,11 +132,13 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
                    for s in sorted(sales, key=lambda x: x["date"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)]
 
     logger.info(f"Live comps for {scrydex_id} {company} {grade}: "
-                f"{len(prices_all)} total (7d:{len(prices_7d)}, 30d:{len(prices_30d)}), "
-                f"${prices_all[0]:.2f}-${prices_all[-1]:.2f}, median ${med_all:.2f}")
+                f"{len(prices_all)} total (7d:{len(prices_7d)}, 30d:{len(prices_30d)}, "
+                f"undated:{undated_count}), "
+                f"${prices_all[0]:.2f}-${prices_all[-1]:.2f}, "
+                f"30d avg ${market:.2f}, all-time median ${med_all:.2f}")
 
     return {
-        "market":        avg_all,
+        "market":        market,
         "low":           prices_all[0],
         "mid":           med_all,
         "high":          prices_all[-1],
@@ -131,10 +146,11 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
         "trend_30d_pct": trend_30d,
         "trend_1d_pct":  None,
         "fetched_at":    now.isoformat(),
-        "suggested_price": med_all,
+        "suggested_price": market,  # 30d avg as the anchor, not all-time median
         "comps_count":   len(prices_all),
         "comps_7d":      len(prices_7d),
         "comps_30d":     len(prices_30d),
+        "undated_count": undated_count,
         "source":        "live_listings",
         "sales":         dated_sales,
     }
@@ -176,17 +192,40 @@ def _fallback_from_cache(tcgplayer_id: int, company: str, grade: str, db) -> Opt
     }
 
 
+_DATE_FIELDS_LOGGED = False
+
 def _parse_date(listing: dict) -> Optional[datetime]:
-    """Try common date field names and formats from Scrydex listing data."""
-    for field in ("date", "sold_date", "sold_at", "listed_at"):
+    """Try all plausible date field names from Scrydex listing data."""
+    global _DATE_FIELDS_LOGGED
+    if not _DATE_FIELDS_LOGGED:
+        # Log the actual keys from the first listing so we know what Scrydex sends
+        logger.info(f"Scrydex listing keys: {sorted(listing.keys())}")
+        _DATE_FIELDS_LOGGED = True
+
+    # Try every plausible field name
+    for field in ("date", "sold_date", "sold_at", "listed_at", "created_at",
+                  "end_time", "endTime", "sale_date", "timestamp", "time",
+                  "endedAt", "ended_at", "closedAt", "closed_at"):
         ds = listing.get(field)
         if not ds:
             continue
         try:
-            dt = datetime.fromisoformat(str(ds).replace("Z", "+00:00"))
+            s = str(ds).strip()
+            # ISO format (most common)
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
+        except Exception:
+            pass
+        # Try epoch timestamp (seconds or milliseconds)
+        try:
+            ts = float(ds)
+            if ts > 1e12:  # milliseconds
+                ts /= 1000
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            if dt.year >= 2020:  # sanity check
+                return dt
         except Exception:
             pass
     return None
