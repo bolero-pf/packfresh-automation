@@ -751,6 +751,13 @@ def _push_vip_to_klaviyo(gid: str):
         "vip_last_change": now.isoformat(),
     }
 
+    # Include Discord link URL so Klaviyo emails can link directly
+    try:
+        from discord import generate_link_url
+        props["discord_link_url"] = generate_link_url(gid)
+    except Exception:
+        pass
+
     email = state.get("email")
     external_id = gid.split("/")[-1]
     upsert_profile(email=email, external_id=external_id, properties=props)

@@ -1,0 +1,138 @@
+{% comment %}
+  Discord VIP Connection Page
+  Create as a new page in Shopify Admin > Online Store > Pages
+  Set the template to "page.discord" (or paste into a custom Liquid page)
+
+  To use as a custom template:
+  1. In your Shopify theme, create templates/page.discord.liquid
+  2. Paste this content
+  3. Create a new Page in Shopify admin, select "discord" as the template
+{% endcomment %}
+
+<div class="discord-connect-page">
+  <style>
+    .discord-connect-page {
+      max-width: 600px;
+      margin: 40px auto;
+      padding: 0 20px;
+      font-family: inherit;
+      text-align: center;
+    }
+    .discord-card {
+      background: #1a1b23;
+      border: 1px solid #2a2b35;
+      border-radius: 16px;
+      padding: 40px;
+      margin-top: 24px;
+    }
+    .discord-logo {
+      width: 64px;
+      height: 64px;
+      margin-bottom: 20px;
+    }
+    .discord-card h2 {
+      color: #e4e4e7;
+      font-size: 1.5rem;
+      margin: 0 0 12px;
+    }
+    .discord-card p {
+      color: #a1a1aa;
+      line-height: 1.7;
+      margin: 0 0 24px;
+      font-size: 0.95rem;
+    }
+    .discord-btn {
+      display: inline-block;
+      background: #5865F2;
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      padding: 14px 32px;
+      border-radius: 10px;
+      text-decoration: none;
+      transition: background 0.15s;
+    }
+    .discord-btn:hover {
+      background: #4752c4;
+      color: #fff;
+    }
+    .discord-login-msg {
+      color: #a1a1aa;
+      font-size: 0.95rem;
+      margin-top: 16px;
+    }
+    .discord-login-msg a {
+      color: #5865F2;
+    }
+    .discord-tiers {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      margin: 24px 0 8px;
+      flex-wrap: wrap;
+    }
+    .discord-tier {
+      background: #22232d;
+      border: 1px solid #2a2b35;
+      border-radius: 10px;
+      padding: 14px 20px;
+      min-width: 140px;
+    }
+    .discord-tier .name {
+      font-weight: 600;
+      font-size: 0.9rem;
+      margin-bottom: 4px;
+    }
+    .discord-tier .req {
+      color: #a1a1aa;
+      font-size: 0.78rem;
+    }
+    .tier-vip1 .name { color: #e8c547; }
+    .tier-vip2 .name { color: #a78bfa; }
+    .tier-vip3 .name { color: #f59e0b; }
+  </style>
+
+  <div class="discord-card">
+    <svg class="discord-logo" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="256" height="256" rx="40" fill="#5865F2"/>
+      <path d="M197.308 64.797C184.669 59.042 171.22 54.782 157.2 52.2C155.435 55.393 153.373 59.607 151.932 62.943C137.032 60.543 122.268 60.543 107.638 62.943C106.197 59.607 104.088 55.393 102.308 52.2C88.273 54.782 74.81 59.057 62.171 64.827C36.534 103.367 29.694 140.932 33.114 177.972C49.814 190.572 66.004 198.422 81.914 203.572C85.884 198.207 89.434 192.527 92.504 186.567C86.774 184.447 81.284 181.837 76.084 178.817C77.524 177.747 78.934 176.627 80.294 175.477C112.874 190.547 148.054 190.547 180.244 175.477C181.619 176.627 183.029 177.747 184.454 178.817C179.239 181.852 173.734 184.462 168.004 186.582C171.074 192.527 174.609 198.222 178.594 203.587C194.519 198.437 210.724 190.587 227.424 177.972C231.434 135.672 220.884 98.422 197.308 64.797ZM101.318 153.867C92.098 153.867 84.548 145.347 84.548 134.937C84.548 124.527 91.928 116.007 101.318 116.007C110.708 116.007 118.258 124.527 118.088 134.937C118.103 145.347 110.708 153.867 101.318 153.867ZM155.22 153.867C146 153.867 138.45 145.347 138.45 134.937C138.45 124.527 145.83 116.007 155.22 116.007C164.61 116.007 172.16 124.527 171.99 134.937C171.99 145.347 164.61 153.867 155.22 153.867Z" fill="white"/>
+    </svg>
+
+    <h2>Connect Your Discord</h2>
+    <p>Link your account to automatically unlock your VIP role on our Discord server. Your role updates automatically when your tier changes.</p>
+
+    <div class="discord-tiers">
+      <div class="discord-tier tier-vip1">
+        <div class="name">Adventurer</div>
+        <div class="req">$500+ in 90 days</div>
+      </div>
+      <div class="discord-tier tier-vip2">
+        <div class="name">Guardian</div>
+        <div class="req">$1,250+ in 90 days</div>
+      </div>
+      <div class="discord-tier tier-vip3">
+        <div class="name">Champion</div>
+        <div class="req">$2,500+ in 90 days</div>
+      </div>
+    </div>
+
+    {% if customer %}
+      <div style="margin-top: 28px;">
+        <a href="https://vip.pack-fresh.com/discord/link?customer_id=gid://shopify/Customer/{{ customer.id }}"
+           class="discord-btn">
+          Connect Discord
+        </a>
+        <div style="color: #6b7280; font-size: 0.8rem; margin-top: 12px;">
+          Logged in as {{ customer.email }}
+        </div>
+      </div>
+    {% else %}
+      <div style="margin-top: 28px;">
+        <p class="discord-login-msg">
+          <a href="/account/login?return_url=/pages/discord">Log in to your account</a>
+          to connect your Discord.
+        </p>
+      </div>
+    {% endif %}
+  </div>
+</div>
