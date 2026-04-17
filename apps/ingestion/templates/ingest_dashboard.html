@@ -4277,7 +4277,7 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
 
         scrydexHtml = `
           <div style="flex:1;min-width:240px;">
-            <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">📊 Scrydex <span style="color:var(--text-dim);font-weight:400;">· cached ${ageStr}</span></div>
+            <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">📊 Scrydex <span style="color:${sd.source === 'live_listings' ? 'var(--green)' : 'var(--text-dim)'};font-weight:400;">· ${sd.source === 'live_listings' ? 'live eBay' : 'cached'} ${ageStr}${sd.undated_count ? ` · <span style="color:var(--red);">${sd.undated_count} undated</span>` : ''}</span></div>
             <table style="font-size:0.78rem;width:100%;">
               <tr><td style="color:var(--text-dim);padding-right:8px;">Market</td><td><span style="${marketStyle}">${fmt$(sd.market)}</span>${qualityBadge}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Range</td><td>${fmt$(sd.low)} / ${fmt$(sd.mid)} / ${fmt$(sd.high)}</td></tr>
@@ -4295,6 +4295,12 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
                     '</table></div>';
             })() : ''}
           </div>`;
+        // Debug: show raw listing sample if dates aren't parsing
+        if (sd.undated_count > 0 && sd._debug_sample) {
+            scrydexHtml += `<details style="margin-top:6px;"><summary style="font-size:0.65rem;color:var(--text-dim);cursor:pointer;">debug: raw listing fields</summary>
+                <pre style="font-size:0.6rem;max-height:120px;overflow:auto;background:var(--surface);padding:6px;border-radius:4px;margin-top:4px;">${JSON.stringify(sd._debug_sample, null, 2)}</pre></details>`;
+        }
+        scrydexHtml += '</div>';
     } else {
         scrydexHtml = `
           <div style="flex:1;min-width:240px;">

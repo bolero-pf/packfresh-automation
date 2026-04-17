@@ -131,11 +131,21 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
     dated_sales = [{"price": s["price"], "date": s["date"].isoformat() if s["date"] else None}
                    for s in sorted(sales, key=lambda x: x["date"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)]
 
+    # Grab a sample listing for debugging date field issues
+    sample_listing = None
+    for l in raw_listings:
+        if ((l.get("company") or "").upper() == company
+                and str(l.get("grade", "")) == grade):
+            sample_listing = {k: str(v)[:80] for k, v in l.items()}
+            break
+
     logger.info(f"Live comps for {scrydex_id} {company} {grade}: "
                 f"{len(prices_all)} total (7d:{len(prices_7d)}, 30d:{len(prices_30d)}, "
                 f"undated:{undated_count}), "
                 f"${prices_all[0]:.2f}-${prices_all[-1]:.2f}, "
                 f"30d avg ${market:.2f}, all-time median ${med_all:.2f}")
+    if sample_listing:
+        logger.info(f"  Sample listing fields: {sample_listing}")
 
     return {
         "market":        market,
@@ -146,13 +156,14 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
         "trend_30d_pct": trend_30d,
         "trend_1d_pct":  None,
         "fetched_at":    now.isoformat(),
-        "suggested_price": market,  # 30d avg as the anchor, not all-time median
+        "suggested_price": market,
         "comps_count":   len(prices_all),
         "comps_7d":      len(prices_7d),
         "comps_30d":     len(prices_30d),
         "undated_count": undated_count,
         "source":        "live_listings",
         "sales":         dated_sales,
+        "_debug_sample":  sample_listing,  # temporary — shows raw listing fields
     }
 
 
