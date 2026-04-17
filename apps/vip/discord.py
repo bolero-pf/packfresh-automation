@@ -160,6 +160,12 @@ def discord_callback():
         logger.error(f"Discord user data missing id: {user_data}")
         return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=profile_error")
 
+    # Check if this customer previously had a different Discord user linked —
+    # if so, strip VIP roles from the old Discord user.
+    old_link = get_discord_link(customer_gid)
+    if old_link and old_link["discord_user_id"] != discord_user_id:
+        sync_discord_role(customer_gid, "VIP0", discord_user_id=old_link["discord_user_id"])
+
     # Store the link (one Discord user = one Shopify customer)
     # Remove any existing link for this Discord user first (they may be re-linking
     # to a different Shopify account), then upsert by Shopify customer.
