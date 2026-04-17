@@ -190,13 +190,38 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
     if undated_count > 0:
         logger.warning(f"  {undated_count}/{len(sales)} listings have no parseable date")
 
-    # Smart market price: only feed last 30 days into the computation.
-    # Older data is for trend context, not pricing — a sale from 2 months ago
-    # at $300 shouldn't drag down a card that's currently selling at $450.
-    recent_sales = [s for s in sales if s["date"] and (now - s["date"]).days <= 30]
+    # Velocity-adaptive window: use just enough recent sales for a reliable
+    # signal, not so many that old prices dilute a moving market.
+    #
+    # Target ~15 non-outlier sales — enough for confidence, few enough to
+    # track momentum. Lookback = target / velocity (sales per day).
+    # Floor 3 days, cap 30 days.
+    dated_sorted = sorted(
+        [s for s in sales if s["date"]],
+        key=lambda s: s["date"], reverse=True,
+    )
+    if len(dated_sorted) >= 2:
+        span_days = max(1, (dated_sorted[0]["date"] - dated_sorted[-1]["date"]).days)
+        velocity = len(dated_sorted) / span_days  # sales per day
+    else:
+        velocity = 0
+
+    target_n = 15
+    if velocity > 0:
+        lookback_days = max(3, min(30, round(target_n / velocity)))
+    else:
+        lookback_days = 30
+
+    recent_sales = [s for s in sales if s["date"] and (now - s["date"]).days <= lookback_days]
+    if len(recent_sales) < 5:
+        # Not enough in adaptive window — widen to 30d
+        recent_sales = [s for s in sales if s["date"] and (now - s["date"]).days <= 30]
     if not recent_sales:
-        recent_sales = sales  # fallback if no dated sales in 30d window
+        recent_sales = sales
+
     market, kept, dropped = _compute_smart_market(recent_sales, now)
+    logger.info(f"  Velocity: {velocity:.1f}/day, lookback: {lookback_days}d, "
+                f"fed {len(recent_sales)} sales into market calc")
 
     # Simple window averages for context (no outlier removal on these — raw signal)
     avg_7d  = round(sum(prices_7d) / len(prices_7d), 2) if prices_7d else None
