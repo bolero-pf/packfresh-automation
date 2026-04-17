@@ -128,43 +128,56 @@ def _resolve_scrydex_id(tcgplayer_id: int | None, db, *,
     if card_number:
         clean_num = card_number.split("/")[0].lstrip("0") or "0"
 
+    # Build partial set patterns: "Tag Team GX All Stars" → ['%tag%team%']
+    # JP sets have mixed language names (TAG TEAM GX タッグオールスターズ) so
+    # full-string ILIKE fails. Use just the first 2 significant words.
+    set_patterns = []
+    if set_name:
+        words = [w for w in set_name.strip().split() if len(w) > 2]
+        if len(words) >= 2:
+            set_patterns.append(f"%{words[0]}%{words[1]}%")
+        if words:
+            set_patterns.append(f"%{words[0]}%")
+
     # Strategy 2: card_number + set (JP cards have Japanese names but same numbers)
-    if clean_num and set_name:
-        row = db.query_one("""
-            SELECT scrydex_id FROM scrydex_price_cache
-            WHERE product_type = 'card'
-              AND card_number = %s
-              AND expansion_name ILIKE %s
-            ORDER BY fetched_at DESC LIMIT 1
-        """, (clean_num, f"%{set_name.strip()}%"))
-        if row:
-            logger.info(f"Resolved scrydex_id by card# + set: #{clean_num} / '{set_name}' -> {row['scrydex_id']}")
-            return row["scrydex_id"]
+    if clean_num:
+        for pat in (set_patterns or [None]):
+            where = "product_type = 'card' AND card_number = %s"
+            params = [clean_num]
+            if pat:
+                where += " AND expansion_name ILIKE %s"
+                params.append(pat)
+            row = db.query_one(f"""
+                SELECT scrydex_id FROM scrydex_price_cache
+                WHERE {where}
+                ORDER BY fetched_at DESC LIMIT 1
+            """, tuple(params))
+            if row:
+                logger.info(f"Resolved scrydex_id by card# + set: #{clean_num} / pattern '{pat}' -> {row['scrydex_id']}")
+                return row["scrydex_id"]
 
     # Strategy 3: name + set (English names)
-    if card_name and set_name:
-        row = db.query_one("""
-            SELECT scrydex_id FROM scrydex_price_cache
-            WHERE product_type = 'card'
-              AND product_name ILIKE %s
-              AND expansion_name ILIKE %s
-            ORDER BY fetched_at DESC LIMIT 1
-        """, (f"%{card_name.strip()}%", f"%{set_name.strip()}%"))
-        if row:
-            logger.info(f"Resolved scrydex_id by name + set: '{card_name}' / '{set_name}' -> {row['scrydex_id']}")
-            return row["scrydex_id"]
-
-    # Strategy 4: name alone (broadest — may match wrong variant)
     if card_name:
-        row = db.query_one("""
-            SELECT scrydex_id FROM scrydex_price_cache
-            WHERE product_type = 'card' AND product_name ILIKE %s
-            ORDER BY fetched_at DESC LIMIT 1
-        """, (f"%{card_name.strip()}%",))
-        if row:
-            logger.info(f"Resolved scrydex_id by name only: '{card_name}' -> {row['scrydex_id']}")
-            return row["scrydex_id"]
+        # Strip parenthetical notes like "(JP)" from card name
+        import re
+        clean_name = re.sub(r'\s*\([^)]*\)\s*', ' ', card_name).strip()
+        for pat in (set_patterns or [None]):
+            where = "product_type = 'card' AND product_name ILIKE %s"
+            params = [f"%{clean_name}%"]
+            if pat:
+                where += " AND expansion_name ILIKE %s"
+                params.append(pat)
+            row = db.query_one(f"""
+                SELECT scrydex_id FROM scrydex_price_cache
+                WHERE {where}
+                ORDER BY fetched_at DESC LIMIT 1
+            """, tuple(params))
+            if row:
+                logger.info(f"Resolved scrydex_id by name + set: '{clean_name}' / '{pat}' -> {row['scrydex_id']}")
+                return row["scrydex_id"]
 
+    logger.warning(f"Could not resolve scrydex_id for TCG#{tcgplayer_id} / "
+                   f"'{card_name}' #{card_number} / set '{set_name}'")
     return None
 
 
