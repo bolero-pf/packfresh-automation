@@ -190,8 +190,13 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
     if undated_count > 0:
         logger.warning(f"  {undated_count}/{len(sales)} listings have no parseable date")
 
-    # Smart market price: IQR outlier removal + protect recent tail + recency weighting
-    market, kept, dropped = _compute_smart_market(sales, now)
+    # Smart market price: only feed last 30 days into the computation.
+    # Older data is for trend context, not pricing — a sale from 2 months ago
+    # at $300 shouldn't drag down a card that's currently selling at $450.
+    recent_sales = [s for s in sales if s["date"] and (now - s["date"]).days <= 30]
+    if not recent_sales:
+        recent_sales = sales  # fallback if no dated sales in 30d window
+    market, kept, dropped = _compute_smart_market(recent_sales, now)
 
     # Simple window averages for context (no outlier removal on these — raw signal)
     avg_7d  = round(sum(prices_7d) / len(prices_7d), 2) if prices_7d else None
