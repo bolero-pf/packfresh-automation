@@ -81,11 +81,33 @@ def _psa_get(url: str, stop_on_quota: bool = True) -> dict:
     resp.raise_for_status()
 
 
+# ── PSA response cache ────────────────────────────────────────────────────────
+# Preview + push both call get_psa_data/get_psa_images for the same cert.
+# Without caching that's 4 PSA API hits per slab (2 preview + 2 push) on a
+# 50/day quota. Cache responses in memory — TTL 2 hours, plenty for a
+# preview→push cycle.
+
+_psa_cert_cache: dict[str, dict]     = {}  # cert_number -> PSACert dict
+_psa_image_cache: dict[str, list]    = {}  # cert_number -> [image_urls]
+_psa_cache_times: dict[str, float]   = {}  # cert_number -> timestamp
+_PSA_CACHE_TTL = 7200  # 2 hours
+
+
+def _psa_cache_valid(cert_number: str) -> bool:
+    return (cert_number in _psa_cache_times
+            and (time.time() - _psa_cache_times[cert_number]) < _PSA_CACHE_TTL)
+
+
 def get_psa_data(cert_number: str) -> dict:
     """
     Fetch PSA cert data. Returns the PSACert dict.
+    Cached in memory for 2 hours — preview + push share the same response.
     Raises PSANotFound if cert doesn't exist, PSAQuotaHit on rate limit.
     """
+    if cert_number in _psa_cert_cache and _psa_cache_valid(cert_number):
+        logger.debug(f"PSA cert cache HIT for {cert_number}")
+        return _psa_cert_cache[cert_number]
+
     if not PSA_API_KEY:
         raise RuntimeError("PSA_API_KEY not configured")
     url = f"{PSA_API_BASE}/GetByCertNumber/{cert_number}"
@@ -93,14 +115,22 @@ def get_psa_data(cert_number: str) -> dict:
     cert = data.get("PSACert")
     if not cert:
         raise PSANotFound(f"No PSACert in response for {cert_number}")
+
+    _psa_cert_cache[cert_number] = cert
+    _psa_cache_times[cert_number] = time.time()
     return cert
 
 
 def get_psa_images(cert_number: str) -> list[str]:
     """
     Fetch PSA cert image URLs. Front image first.
+    Cached in memory for 2 hours alongside cert data.
     Returns empty list on failure (non-fatal).
     """
+    if cert_number in _psa_image_cache and _psa_cache_valid(cert_number):
+        logger.debug(f"PSA image cache HIT for {cert_number}")
+        return _psa_image_cache[cert_number]
+
     if not PSA_API_KEY:
         return []
     try:
@@ -110,7 +140,10 @@ def get_psa_images(cert_number: str) -> list[str]:
             return []
         # Sort so IsFrontImage=True comes first
         data = sorted(data, key=lambda x: not x.get("IsFrontImage", False))
-        return [entry["ImageURL"] for entry in data if entry.get("ImageURL")]
+        urls = [entry["ImageURL"] for entry in data if entry.get("ImageURL")]
+        _psa_image_cache[cert_number] = urls
+        _psa_cache_times[cert_number] = time.time()
+        return urls
     except Exception as e:
         logger.warning(f"PSA image fetch failed for {cert_number}: {e}")
         return []
