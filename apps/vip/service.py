@@ -675,6 +675,14 @@ def write_state(customer_gid: str, *, rolling=None, tier=None, lock=None, prov=N
     if norm_tier is not None:
         set_vip_tag(customer_gid, norm_tier)
 
+    # Sync Discord role if linked
+    try:
+        from discord import sync_discord_role
+        if norm_tier is not None:
+            sync_discord_role(customer_gid, norm_tier)
+    except Exception as e:
+        print(f"[vip] Discord sync skipped: {e}", flush=True)
+
 
 def _needs_vip_tag_update(current_tags: set[str], desired: set[str]) -> bool:
     def vip_only(s): return {t for t in s if t.startswith("VIP")}

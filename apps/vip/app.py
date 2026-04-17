@@ -14,9 +14,21 @@ app = Flask(__name__)
 from routes import bp as vip_bp
 app.register_blueprint(vip_bp)
 
+from discord import bp as discord_bp
+app.register_blueprint(discord_bp)
+
+# DB pool for discord_links table
+from db import init_pool
+if os.getenv("DATABASE_URL"):
+    try:
+        init_pool()
+        logging.info("DB pool initialized for Discord links")
+    except Exception as e:
+        logging.warning(f"DB pool init failed (Discord links won't work): {e}")
 
 from auth import register_auth_hooks
-register_auth_hooks(app, roles=["owner", "manager"], public_prefixes=('/vip/',))
+register_auth_hooks(app, roles=["owner", "manager"],
+                    public_prefixes=('/vip/', '/discord/link', '/discord/callback'))
 
 
 @app.route("/")
