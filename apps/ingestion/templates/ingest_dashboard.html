@@ -4094,6 +4094,8 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
         return {
             id,
             name:    item.product_name || 'Unknown',
+            set_name: item.set_name || '',
+            card_number: item.card_number || '',
             company: item.grade_company || 'PSA',
             grade:   item.grade_value || '?',
             price:   item.market_price || '0',
@@ -4107,8 +4109,9 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
 
     const slabCount = gradedRows.reduce((s, r) => s + r.qty, 0);
     const slabRowsHtml = gradedRows.map(item => {
+        const setInfo = [item.set_name, item.card_number ? '#' + item.card_number : ''].filter(Boolean).join(' ');
         const header = item.qty > 1
-            ? `<div style="font-size:0.78rem;color:var(--accent);font-weight:600;margin:10px 0 4px;">${item.qty}× ${item.name} — ${item.company} ${item.grade}</div>`
+            ? `<div style="font-size:0.78rem;color:var(--accent);font-weight:600;margin:10px 0 4px;">${item.qty}× ${item.name}${setInfo ? ' — ' + setInfo : ''} — ${item.company} ${item.grade}</div>`
             : '';
         const rows = Array.from({length: item.qty}, (_, idx) => {
             const rowId = `${item.id}-${idx}`;
@@ -4118,8 +4121,8 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
                  style="padding:10px;background:var(--surface-2);border-radius:8px;margin-bottom:8px;">
                 <div class="graded-row-line" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
                     <div style="flex:1;min-width:200px;">
-                        <div style="font-weight:600;font-size:0.9rem;">${item.name}</div>
-                        <div style="font-size:0.78rem;color:var(--text-dim);">${slabLabel}</div>
+                        <div style="font-weight:600;font-size:0.9rem;">${item.name}${item.card_number ? ' <small style="color:var(--text-dim);">#' + item.card_number + '</small>' : ''}</div>
+                        <div style="font-size:0.78rem;color:var(--text-dim);">${item.set_name ? item.set_name + ' · ' : ''}${slabLabel}</div>
                     </div>
                     <input type="text" id="cert-input-${rowId}" placeholder="Cert # (e.g. 12345678)"
                         style="width:170px;font-size:0.85rem;"
