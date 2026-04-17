@@ -80,9 +80,12 @@ def api_set_tier():
     # Sync Discord role
     try:
         from discord import sync_discord_role
+        print(f"[vip] set-tier calling discord sync: {customer_gid} → {new_tier}", flush=True)
         sync_discord_role(customer_gid, new_tier)
     except Exception as e:
-        logging.warning(f"Discord sync failed on set-tier: {e}")
+        print(f"[vip] Discord sync failed on set-tier: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
     return jsonify({"ok": True, "tier": new_tier, "lock": lock_obj})
 
