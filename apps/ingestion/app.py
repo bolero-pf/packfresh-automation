@@ -865,7 +865,11 @@ def _enrich_route_worker(job_id, session_id, items):
 
                 # Live eBay comps for graded prices — one API call per card
                 # returns all grades. Falls back to cache aggregate if API unavailable.
-                graded_prices = get_all_graded_comps(int(tcg_id_str), db)
+                graded_prices = get_all_graded_comps(
+                    int(tcg_id_str), db,
+                    card_name=item.get("product_name"),
+                    set_name=item.get("set_name"),
+                )
                 if not graded_prices:
                     graded_prices = PriceProvider.extract_graded_prices(card_data)
 
@@ -1758,10 +1762,16 @@ def preview_graded_item(item_id):
                     result["set_mismatch"] = overlap < 0.5
 
     # ── Scrydex graded pricing (always live for slabs) ──────────────────────
+    # Pass card_name + set_name so JP cards without tcgplayer_id can still
+    # be resolved by name search in the cache.
     from graded_pricing import get_live_graded_comps
     result["scrydex"] = None
-    if tcg_id and grade:
-        result["scrydex"] = get_live_graded_comps(int(tcg_id), company, grade, db)
+    if grade:
+        result["scrydex"] = get_live_graded_comps(
+            int(tcg_id) if tcg_id else None, company, grade, db,
+            card_name=item.get("product_name"),
+            set_name=item.get("set_name"),
+        )
 
     return jsonify(_serialize(result))
 

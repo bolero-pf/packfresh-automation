@@ -104,13 +104,49 @@ def _compute_smart_market(sales: list[dict], now: datetime) -> tuple[float, int,
     return market, len(kept), dropped
 
 
+def _resolve_scrydex_id(tcgplayer_id: int | None, db, *,
+                        card_name: str = None, set_name: str = None) -> str | None:
+    """
+    Resolve a scrydex_id, trying tcgplayer_id first, then name+set search.
+    JP cards often have no TCG ID but exist in the cache by name.
+    """
+    if tcgplayer_id:
+        row = db.query_one("""
+            SELECT scrydex_id FROM scrydex_price_cache
+            WHERE tcgplayer_id = %s AND product_type = 'card'
+            LIMIT 1
+        """, (int(tcgplayer_id),))
+        if row:
+            return row["scrydex_id"]
+
+    # Fallback: name + set search (handles JP cards without TCG IDs)
+    if card_name:
+        where = ["product_type = 'card'", "product_name ILIKE %s"]
+        params: list = [f"%{card_name.strip()}%"]
+        if set_name:
+            where.append("expansion_name ILIKE %s")
+            params.append(f"%{set_name.strip()}%")
+        row = db.query_one(f"""
+            SELECT scrydex_id FROM scrydex_price_cache
+            WHERE {' AND '.join(where)}
+            ORDER BY fetched_at DESC LIMIT 1
+        """, tuple(params))
+        if row:
+            logger.info(f"Resolved scrydex_id by name: '{card_name}' / '{set_name}' -> {row['scrydex_id']}")
+            return row["scrydex_id"]
+
+    return None
+
+
 def get_live_graded_comps(
-    tcgplayer_id: int,
+    tcgplayer_id: int | None,
     grade_company: str,
     grade_value: str,
     db,
     *,
     days: int = 90,
+    card_name: str = None,
+    set_name: str = None,
 ) -> Optional[dict]:
     """
     Fetch real eBay sold comps for a specific graded card from Scrydex listings API.
@@ -119,22 +155,21 @@ def get_live_graded_comps(
     comp counts per window, and raw sales list for outlier visibility. Returns None
     if the card isn't in our Scrydex mapping or no comps found at all.
 
+    For JP cards without a tcgplayer_id, pass card_name + set_name for name-based
+    cache lookup to find the scrydex_id.
+
     Falls back to scrydex_price_cache (unreliable) if API call fails.
     """
     company = grade_company.upper().strip()
     grade   = str(grade_value).strip()
 
-    # Resolve scrydex_id from cache (free DB read, no API call)
-    id_row = db.query_one("""
-        SELECT scrydex_id FROM scrydex_price_cache
-        WHERE tcgplayer_id = %s AND product_type = 'card'
-        LIMIT 1
-    """, (int(tcgplayer_id),))
-    scrydex_id = id_row.get("scrydex_id") if id_row else None
+    scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name, set_name=set_name)
 
     if not scrydex_id:
-        logger.debug(f"No scrydex_id for TCG#{tcgplayer_id} — falling back to cache")
-        return _fallback_from_cache(tcgplayer_id, company, grade, db)
+        logger.debug(f"No scrydex_id for TCG#{tcgplayer_id} / '{card_name}' — falling back to cache")
+        if tcgplayer_id:
+            return _fallback_from_cache(tcgplayer_id, company, grade, db)
+        return None
 
     # Try live listings
     result = _fetch_live(scrydex_id, company, grade, db, days=days)
@@ -262,7 +297,8 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
     }
 
 
-def get_all_graded_comps(tcgplayer_id: int, db, *, days: int = 90) -> dict:
+def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
+                         card_name: str = None, set_name: str = None) -> dict:
     """
     Fetch live eBay comps for ALL grades of a card in a single API call.
 
@@ -271,15 +307,12 @@ def get_all_graded_comps(tcgplayer_id: int, db, *, days: int = 90) -> dict:
 
     One Scrydex credit. Used by the grading economics calculator so the 60/40
     EV computation uses real market data instead of unreliable cache aggregates.
-    """
-    company_map = {}  # {"PSA": {"10": {price, confidence, count}, ...}}
 
-    id_row = db.query_one("""
-        SELECT scrydex_id FROM scrydex_price_cache
-        WHERE tcgplayer_id = %s AND product_type = 'card'
-        LIMIT 1
-    """, (int(tcgplayer_id),))
-    scrydex_id = id_row.get("scrydex_id") if id_row else None
+    For JP cards without tcgplayer_id, pass card_name + set_name.
+    """
+    company_map = {}
+
+    scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name, set_name=set_name)
     if not scrydex_id:
         return {}
 
