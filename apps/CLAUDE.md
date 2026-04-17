@@ -59,6 +59,7 @@
 - Klaviyo integration is in shared/klaviyo.py — don't change properties without discussing
 - Environment variables are in Railway, not committed
 - **Never break live services during migration** — two-phase: add new, verify, then remove old
+- **Price lookup hierarchy for graded/raw cards**: Scrydex live eBay comps (`get_live_graded_comps`) → Scrydex cache (`scrydex_price_cache`) → PPT as last resort. PPT graded data is unreliable (often 3x off). Always prefer Scrydex.
 
 ## Per-Service CLAUDE.md
 - Each service directory has its own CLAUDE.md with architecture notes

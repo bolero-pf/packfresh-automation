@@ -375,10 +375,11 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
 
 
 def update_item_grade(item_id: str, grade_company: str = None, grade_value: str = None,
-                      ppt_client=None, price_override: float = None) -> dict:
+                      ppt_client=None, price_override: float = None,
+                      db_module=None) -> dict:
     """
     Update a graded slab's company/grade and recalculate its offer price.
-    Uses price_override if provided, then PPT graded pricing, then keeps existing price.
+    Uses price_override if provided, then Scrydex live → cache → PPT fallback.
     """
     from price_provider import PriceProvider
 
@@ -407,16 +408,36 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
     new_market = None
     if price_override is not None:
         new_market = Decimal(str(price_override)).quantize(Decimal("0.01"))
-    elif grade_changed and tcg_id and ppt_client:
-        # Only look up price when grade actually changed
-        try:
-            card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
-            if card_data:
-                graded_price = PriceProvider.get_graded_price(card_data, company, grade)
-                if graded_price is not None:
-                    new_market = graded_price
-        except Exception as e:
-            logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
+    elif grade_changed and tcg_id:
+        # Scrydex first (live eBay comps → cache)
+        if db_module:
+            try:
+                from graded_pricing import get_live_graded_comps
+                comps = get_live_graded_comps(
+                    int(tcg_id), company, grade, db_module,
+                    card_name=item.get("product_name"),
+                    set_name=item.get("set_name"),
+                    card_number=item.get("card_number"),
+                )
+                if comps and comps.get("market"):
+                    new_market = Decimal(str(comps["market"])).quantize(Decimal("0.01"))
+                    logger.info(f"Grade update price from Scrydex ({comps.get('source', '?')}): "
+                                f"${new_market} for {company} {grade} TCG#{tcg_id}")
+            except Exception as e:
+                logger.warning(f"Scrydex graded lookup failed for TCG#{tcg_id}: {e}")
+
+        # PPT fallback
+        if new_market is None and ppt_client:
+            try:
+                card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+                if card_data:
+                    graded_price = PriceProvider.get_graded_price(card_data, company, grade)
+                    if graded_price is not None:
+                        new_market = graded_price
+                        logger.info(f"Grade update price from PPT fallback: ${new_market} "
+                                    f"for {company} {grade} TCG#{tcg_id}")
+            except Exception as e:
+                logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
 
     updates = ["grade_company = %s", "grade_value = %s"]
     params = [company, grade]
@@ -437,7 +458,8 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
 def convert_item_type(item_id: str, to_graded: bool,
                       condition: str = None,
                       grade_company: str = None, grade_value: str = None,
-                      ppt_client=None, price_override: float = None) -> dict:
+                      ppt_client=None, price_override: float = None,
+                      db_module=None) -> dict:
     """
     Convert an intake item between raw and graded.
 
@@ -448,10 +470,10 @@ def convert_item_type(item_id: str, to_graded: bool,
         the grader's not recognized — drop back to raw
 
     Flipping is_graded:
-      → graded: sets grade_company/grade_value, clears condition, looks up PPT
-                graded price or uses price_override
+      → graded: sets grade_company/grade_value, clears condition, looks up
+                Scrydex live → Scrydex cache → PPT graded price, or uses price_override
       → raw:    clears grade_company/grade_value/cert_number, sets condition,
-                looks up PPT condition price or uses price_override
+                looks up condition price or uses price_override
     """
     from price_provider import PriceProvider, FALLBACK_MULTIPLIERS
 
@@ -474,15 +496,37 @@ def convert_item_type(item_id: str, to_graded: bool,
         if not grade:
             raise ValueError("grade_value is required when converting to graded")
 
-        if new_market is None and tcg_id and ppt_client:
-            try:
-                card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
-                if card_data:
-                    graded_price = PriceProvider.get_graded_price(card_data, company, grade)
-                    if graded_price is not None:
-                        new_market = graded_price
-            except Exception as e:
-                logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
+        # Price lookup: Scrydex live listings → Scrydex cache → PPT fallback
+        if new_market is None and tcg_id:
+            # Try Scrydex first (live eBay comps)
+            if db_module:
+                try:
+                    from graded_pricing import get_live_graded_comps
+                    comps = get_live_graded_comps(
+                        int(tcg_id), company, grade, db_module,
+                        card_name=item.get("product_name"),
+                        set_name=item.get("set_name"),
+                        card_number=item.get("card_number"),
+                    )
+                    if comps and comps.get("market"):
+                        new_market = Decimal(str(comps["market"])).quantize(Decimal("0.01"))
+                        logger.info(f"Graded price from Scrydex ({comps.get('source', '?')}): "
+                                    f"${new_market} for {company} {grade} TCG#{tcg_id}")
+                except Exception as e:
+                    logger.warning(f"Scrydex graded lookup failed for TCG#{tcg_id}: {e}")
+
+            # PPT fallback
+            if new_market is None and ppt_client:
+                try:
+                    card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+                    if card_data:
+                        graded_price = PriceProvider.get_graded_price(card_data, company, grade)
+                        if graded_price is not None:
+                            new_market = graded_price
+                            logger.info(f"Graded price from PPT fallback: ${new_market} "
+                                        f"for {company} {grade} TCG#{tcg_id}")
+                except Exception as e:
+                    logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
 
         updates = [
             "is_graded = TRUE",

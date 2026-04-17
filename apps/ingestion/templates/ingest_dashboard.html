@@ -1249,7 +1249,7 @@ async function verifyGradedSlab(itemId, sessionId, currentCompany, currentGrade)
     // Let user confirm or change grade company + value, with price override
     const overlay = document.getElementById('prompt-overlay');
     document.getElementById('prompt-title').textContent = 'Verify Grade';
-    document.getElementById('prompt-msg').textContent = 'Confirm or update the grade. Price will be looked up from PPT — override if needed.';
+    document.getElementById('prompt-msg').textContent = 'Confirm or update the grade. Price will be looked up from Scrydex — override if needed.';
     const area = document.getElementById('prompt-input-area');
     area.innerHTML = `
         <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
@@ -1264,10 +1264,10 @@ async function verifyGradedSlab(itemId, sessionId, currentCompany, currentGrade)
         </div>
         <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
             <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
-            <input id="grade-price-input" type="number" step="0.01" min="0" placeholder="leave blank for PPT lookup" style="flex:1; font-size:0.9rem; padding:6px;">
+            <input id="grade-price-input" type="number" step="0.01" min="0" placeholder="leave blank for auto lookup" style="flex:1; font-size:0.9rem; padding:6px;">
         </div>`;
     overlay.style.display = 'flex';
-    setTimeout(() => document.getElementById('grade-value-input').focus(), 50);
+    setTimeout(() => { const el = document.getElementById('grade-value-input'); el.focus(); el.select(); }, 50);
 
     const result = await new Promise(resolve => {
         const ok = () => {
@@ -1304,7 +1304,7 @@ async function convertToGraded(itemId, sessionId) {
     // Flip a raw card over to graded — e.g. JP card miscategorized as NM
     const overlay = document.getElementById('prompt-overlay');
     document.getElementById('prompt-title').textContent = 'Convert to Graded Slab';
-    document.getElementById('prompt-msg').textContent = 'This card is actually graded. Pick company + grade. Price will be looked up from PPT — override if needed.';
+    document.getElementById('prompt-msg').textContent = 'This card is actually graded. Pick company + grade. Price will be looked up from Scrydex — override if needed.';
     const area = document.getElementById('prompt-input-area');
     area.innerHTML = `
         <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
@@ -1319,10 +1319,10 @@ async function convertToGraded(itemId, sessionId) {
         </div>
         <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
             <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
-            <input id="grade-price-input" type="number" step="0.01" min="0" placeholder="leave blank for PPT lookup" style="flex:1; font-size:0.9rem; padding:6px;">
+            <input id="grade-price-input" type="number" step="0.01" min="0" placeholder="leave blank for auto lookup" style="flex:1; font-size:0.9rem; padding:6px;">
         </div>`;
     overlay.style.display = 'flex';
-    setTimeout(() => document.getElementById('grade-value-input').focus(), 50);
+    setTimeout(() => { const el = document.getElementById('grade-value-input'); el.focus(); el.select(); }, 50);
 
     const result = await new Promise(resolve => {
         const ok = () => {

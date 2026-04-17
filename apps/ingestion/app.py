@@ -521,7 +521,8 @@ def verify_item(item_id):
                     grade_company=grade_company,
                     grade_value=grade_value,
                     ppt_client=ppt,
-                    price_override=float(price_override) if price_override is not None else None)
+                    price_override=float(price_override) if price_override is not None else None,
+                    db_module=db)
             elif price_override is not None:
                 # Pure price override without condition/grade change
                 result = ingest.override_item_price(item_id, float(price_override))
@@ -578,6 +579,7 @@ def convert_item_type_route(item_id):
             grade_value=data.get("grade_value"),
             ppt_client=ppt,
             price_override=float(price_override) if price_override is not None else None,
+            db_module=db,
         )
         return jsonify({"success": True, "item": _serialize(result)})
     except ValueError as e:
