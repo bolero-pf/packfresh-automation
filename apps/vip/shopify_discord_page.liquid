@@ -1,10 +1,8 @@
 {% comment %}
   Discord VIP Connection Page
-  Create as a new page in Shopify Admin > Online Store > Pages
-  Set the template to "page.discord" (or paste into a custom Liquid page)
+  Create as a page template in your Shopify theme.
 
-  To use as a custom template:
-  1. In your Shopify theme, create templates/page.discord.liquid
+  1. In your theme, create templates/page.discord.liquid
   2. Paste this content
   3. Create a new Page in Shopify admin, select "discord" as the template
 {% endcomment %}
@@ -12,84 +10,150 @@
 <div class="discord-connect-page">
   <style>
     .discord-connect-page {
-      max-width: 600px;
-      margin: 40px auto;
-      padding: 0 20px;
+      max-width: 720px;
+      margin: 60px auto;
+      padding: 0 24px;
       font-family: inherit;
       text-align: center;
     }
     .discord-card {
       background: #1a1b23;
       border: 1px solid #2a2b35;
-      border-radius: 16px;
-      padding: 40px;
+      border-radius: 20px;
+      padding: 56px 48px;
       margin-top: 24px;
     }
     .discord-logo {
-      width: 64px;
-      height: 64px;
-      margin-bottom: 20px;
+      width: 88px;
+      height: 88px;
+      margin-bottom: 28px;
     }
     .discord-card h2 {
       color: #e4e4e7;
-      font-size: 1.5rem;
-      margin: 0 0 12px;
+      font-size: 2.2rem;
+      font-weight: 700;
+      margin: 0 0 16px;
     }
-    .discord-card p {
+    .discord-card p.discord-desc {
       color: #a1a1aa;
-      line-height: 1.7;
-      margin: 0 0 24px;
-      font-size: 0.95rem;
+      line-height: 1.8;
+      margin: 0 auto 32px;
+      font-size: 1.15rem;
+      max-width: 520px;
     }
     .discord-btn {
       display: inline-block;
       background: #5865F2;
       color: #fff;
-      font-size: 1rem;
+      font-size: 1.2rem;
       font-weight: 600;
-      padding: 14px 32px;
-      border-radius: 10px;
+      padding: 18px 48px;
+      border-radius: 12px;
       text-decoration: none;
-      transition: background 0.15s;
+      transition: background 0.15s, transform 0.1s;
     }
     .discord-btn:hover {
       background: #4752c4;
       color: #fff;
+      transform: translateY(-1px);
+    }
+    .discord-btn-outline {
+      display: inline-block;
+      background: transparent;
+      color: #a1a1aa;
+      font-size: 1rem;
+      font-weight: 500;
+      padding: 14px 36px;
+      border-radius: 12px;
+      border: 1px solid #2a2b35;
+      text-decoration: none;
+      transition: border-color 0.15s, color 0.15s;
+      margin-top: 12px;
+    }
+    .discord-btn-outline:hover {
+      border-color: #5865F2;
+      color: #e4e4e7;
     }
     .discord-login-msg {
       color: #a1a1aa;
-      font-size: 0.95rem;
-      margin-top: 16px;
+      font-size: 1.15rem;
+      margin-top: 20px;
     }
     .discord-login-msg a {
       color: #5865F2;
+      font-weight: 600;
     }
     .discord-tiers {
       display: flex;
-      gap: 12px;
+      gap: 16px;
       justify-content: center;
-      margin: 24px 0 8px;
+      margin: 32px 0 12px;
       flex-wrap: wrap;
     }
     .discord-tier {
       background: #22232d;
       border: 1px solid #2a2b35;
-      border-radius: 10px;
-      padding: 14px 20px;
-      min-width: 140px;
+      border-radius: 12px;
+      padding: 20px 28px;
+      min-width: 160px;
+      flex: 1;
     }
     .discord-tier .name {
-      font-weight: 600;
-      font-size: 0.9rem;
-      margin-bottom: 4px;
+      font-weight: 700;
+      font-size: 1.1rem;
+      margin-bottom: 6px;
     }
     .discord-tier .req {
       color: #a1a1aa;
-      font-size: 0.78rem;
+      font-size: 0.95rem;
     }
     .tier-vip1 .name { color: #e8c547; }
     .tier-vip2 .name { color: #a78bfa; }
     .tier-vip3 .name { color: #f59e0b; }
+    .discord-logged-in {
+      color: #6b7280;
+      font-size: 0.95rem;
+      margin-top: 16px;
+    }
+
+    /* Status banner */
+    .discord-status {
+      border-radius: 12px;
+      padding: 24px 28px;
+      margin-bottom: 28px;
+      font-size: 1.1rem;
+      line-height: 1.6;
+    }
+    .discord-status.success {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      color: #22c55e;
+    }
+    .discord-status.error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #ef4444;
+    }
+    .discord-status .status-title {
+      font-weight: 700;
+      font-size: 1.3rem;
+      margin-bottom: 6px;
+    }
+    .discord-status .status-detail {
+      font-size: 1rem;
+      opacity: 0.85;
+    }
+
+    @media (max-width: 600px) {
+      .discord-connect-page { margin: 32px auto; padding: 0 16px; }
+      .discord-card { padding: 36px 24px; }
+      .discord-card h2 { font-size: 1.7rem; }
+      .discord-card p.discord-desc { font-size: 1.05rem; }
+      .discord-tiers { flex-direction: column; gap: 12px; }
+      .discord-tier { min-width: unset; }
+      .discord-btn { font-size: 1.1rem; padding: 16px 36px; width: 100%; box-sizing: border-box; }
+      .discord-btn-outline { width: 100%; box-sizing: border-box; }
+    }
   </style>
 
   <div class="discord-card">
@@ -98,8 +162,11 @@
       <path d="M197.308 64.797C184.669 59.042 171.22 54.782 157.2 52.2C155.435 55.393 153.373 59.607 151.932 62.943C137.032 60.543 122.268 60.543 107.638 62.943C106.197 59.607 104.088 55.393 102.308 52.2C88.273 54.782 74.81 59.057 62.171 64.827C36.534 103.367 29.694 140.932 33.114 177.972C49.814 190.572 66.004 198.422 81.914 203.572C85.884 198.207 89.434 192.527 92.504 186.567C86.774 184.447 81.284 181.837 76.084 178.817C77.524 177.747 78.934 176.627 80.294 175.477C112.874 190.547 148.054 190.547 180.244 175.477C181.619 176.627 183.029 177.747 184.454 178.817C179.239 181.852 173.734 184.462 168.004 186.582C171.074 192.527 174.609 198.222 178.594 203.587C194.519 198.437 210.724 190.587 227.424 177.972C231.434 135.672 220.884 98.422 197.308 64.797ZM101.318 153.867C92.098 153.867 84.548 145.347 84.548 134.937C84.548 124.527 91.928 116.007 101.318 116.007C110.708 116.007 118.258 124.527 118.088 134.937C118.103 145.347 110.708 153.867 101.318 153.867ZM155.22 153.867C146 153.867 138.45 145.347 138.45 134.937C138.45 124.527 145.83 116.007 155.22 116.007C164.61 116.007 172.16 124.527 171.99 134.937C171.99 145.347 164.61 153.867 155.22 153.867Z" fill="white"/>
     </svg>
 
-    <h2>Connect Your Discord</h2>
-    <p>Link your account to automatically unlock your VIP role on our Discord server. Your role updates automatically when your tier changes.</p>
+    <!-- Status messages (shown after redirect from OAuth callback) -->
+    <div id="discord-status-banner" style="display:none;"></div>
+
+    <h2 id="discord-heading">Connect Your Discord</h2>
+    <p class="discord-desc" id="discord-desc">Link your account to automatically unlock your VIP role on our Discord server. Your role updates automatically when your tier changes.</p>
 
     <div class="discord-tiers">
       <div class="discord-tier tier-vip1">
@@ -116,23 +183,81 @@
       </div>
     </div>
 
-    {% if customer %}
-      <div style="margin-top: 28px;">
+    <div id="discord-actions" style="margin-top: 36px;">
+      {% if customer %}
         <a href="https://vip.pack-fresh.com/discord/link?customer_id=gid://shopify/Customer/{{ customer.id }}"
-           class="discord-btn">
+           class="discord-btn" id="discord-connect-btn">
           Connect Discord
         </a>
-        <div style="color: #6b7280; font-size: 0.8rem; margin-top: 12px;">
+        <div class="discord-logged-in">
           Logged in as {{ customer.email }}
         </div>
-      </div>
-    {% else %}
-      <div style="margin-top: 28px;">
+      {% else %}
         <p class="discord-login-msg">
           <a href="/account/login?return_url=/pages/discord">Log in to your account</a>
           to connect your Discord.
         </p>
-      </div>
-    {% endif %}
+      {% endif %}
+    </div>
   </div>
 </div>
+
+<script>
+(function() {
+  var params = new URLSearchParams(window.location.search);
+  var status = params.get('status');
+  if (!status) return;
+
+  var banner = document.getElementById('discord-status-banner');
+  var heading = document.getElementById('discord-heading');
+  var desc = document.getElementById('discord-desc');
+  var actions = document.getElementById('discord-actions');
+  var tierNames = { VIP1: 'Adventurer', VIP2: 'Guardian', VIP3: 'Champion' };
+
+  if (status === 'linked') {
+    var user = params.get('user') || 'your account';
+    var tier = params.get('tier') || '';
+    var tierName = tierNames[tier];
+    var roleMsg = tierName
+      ? 'Your <strong>' + tierName + '</strong> role has been assigned.'
+      : 'When you reach VIP status, your role will be assigned automatically.';
+
+    banner.className = 'discord-status success';
+    banner.innerHTML = '<div class="status-title">Discord Connected!</div>'
+      + '<div class="status-detail">Welcome, <strong>' + user + '</strong>! ' + roleMsg
+      + ' It will update automatically when your tier changes.</div>';
+    banner.style.display = 'block';
+
+    heading.textContent = 'You\'re All Set';
+    desc.textContent = 'Your Discord account is linked. You can close this page or continue shopping.';
+
+    actions.innerHTML = '<a href="/" class="discord-btn" style="background:#22c55e;">Continue Shopping</a>'
+      + '<br><a href="https://discord.gg/YOUR_INVITE_CODE" class="discord-btn-outline">Open Discord Server</a>';
+  }
+  else if (status === 'cancelled') {
+    banner.className = 'discord-status error';
+    banner.innerHTML = '<div class="status-title">Authorization Cancelled</div>'
+      + '<div class="status-detail">No changes were made. Click the button below to try again.</div>';
+    banner.style.display = 'block';
+  }
+  else if (status === 'error') {
+    var reason = params.get('reason') || 'unknown';
+    var messages = {
+      expired: 'This link has expired. Please try connecting again.',
+      missing_params: 'Something went wrong. Please try connecting again.',
+      discord_down: 'Could not reach Discord. Please try again in a moment.',
+      auth_failed: 'Discord authorization failed. Please try again.',
+      profile_error: 'Could not read your Discord profile. Please try again.'
+    };
+    banner.className = 'discord-status error';
+    banner.innerHTML = '<div class="status-title">Something Went Wrong</div>'
+      + '<div class="status-detail">' + (messages[reason] || messages.missing_params) + '</div>';
+    banner.style.display = 'block';
+  }
+
+  // Clean the URL so they don't bookmark it with status params
+  if (window.history.replaceState) {
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+})();
+</script>

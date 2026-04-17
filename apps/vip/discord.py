@@ -19,7 +19,7 @@ from urllib.parse import urlencode
 
 import jwt
 import requests as http_requests
-from flask import Blueprint, request, redirect, jsonify, render_template_string
+from flask import Blueprint, request, redirect, jsonify
 
 from db import query_one, execute
 
@@ -41,6 +41,8 @@ JWT_SECRET = os.getenv("ADMIN_JWT_SECRET")
 DISCORD_API = "https://discord.com/api/v10"
 REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI",
                          "https://vip.pack-fresh.com/discord/callback")
+STORE_DISCORD_PAGE = os.getenv("DISCORD_STORE_PAGE",
+                               "https://pack-fresh.com/pages/discord")
 
 bp = Blueprint("discord", __name__, url_prefix="/discord")
 
@@ -83,16 +85,11 @@ def discord_link():
         token = _generate_link_token(customer_gid)
 
     if not token:
-        return _render_result("Missing Link",
-                              "This link is missing required parameters. "
-                              "Please use the link from your email or contact support.",
-                              success=False)
+        return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=missing_params")
 
     gid = _decode_link_token(token)
     if not gid:
-        return _render_result("Link Expired",
-                              "This link has expired. Please request a new one.",
-                              success=False)
+        return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=expired")
 
     params = urlencode({
         "client_id": DISCORD_CLIENT_ID,
@@ -115,21 +112,15 @@ def discord_callback():
     error = request.args.get("error")
 
     if error:
-        return _render_result("Authorization Cancelled",
-                              "You cancelled the Discord authorization. "
-                              "No changes were made.", success=False)
+        return redirect(f"{STORE_DISCORD_PAGE}?status=cancelled")
 
     if not code or not state:
-        return _render_result("Missing Parameters",
-                              "Something went wrong with the Discord redirect.",
-                              success=False)
+        return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=missing_params")
 
     # Decode customer GID from state
     customer_gid = _decode_link_token(state)
     if not customer_gid:
-        return _render_result("Link Expired",
-                              "This link has expired. Please request a new one.",
-                              success=False)
+        return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=expired")
 
     # Exchange code for access token
     try:
@@ -144,16 +135,12 @@ def discord_callback():
         token_data = token_resp.json()
     except Exception as e:
         logger.error(f"Discord token exchange failed: {e}")
-        return _render_result("Connection Error",
-                              "Could not reach Discord. Please try again.",
-                              success=False)
+        return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=discord_down")
 
     access_token = token_data.get("access_token")
     if not access_token:
         logger.error(f"Discord token exchange error: {token_data}")
-        return _render_result("Authorization Failed",
-                              "Could not complete Discord authorization.",
-                              success=False)
+        return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=auth_failed")
 
     # Get Discord user info
     try:
@@ -163,9 +150,7 @@ def discord_callback():
         user_data = user_resp.json()
     except Exception as e:
         logger.error(f"Discord user fetch failed: {e}")
-        return _render_result("Connection Error",
-                              "Could not retrieve your Discord profile.",
-                              success=False)
+        return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=discord_down")
 
     discord_user_id = user_data.get("id")
     discord_username = user_data.get("username", "")
@@ -173,9 +158,7 @@ def discord_callback():
 
     if not discord_user_id:
         logger.error(f"Discord user data missing id: {user_data}")
-        return _render_result("Profile Error",
-                              "Could not read your Discord profile.",
-                              success=False)
+        return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=profile_error")
 
     # Store the link (upsert — one customer = one Discord account)
     execute("""
@@ -194,20 +177,10 @@ def discord_callback():
     state_data = get_customer_state(customer_gid)
     tier = normalize_tier(state_data.get("tier", "VIP0"))
 
-    role_ok = sync_discord_role(customer_gid, tier, discord_user_id=discord_user_id)
+    sync_discord_role(customer_gid, tier, discord_user_id=discord_user_id)
 
-    tier_names = {"VIP1": "Adventurer", "VIP2": "Guardian", "VIP3": "Champion"}
     display = discord_global_name or discord_username
-
-    if tier in tier_names:
-        msg = (f"Welcome, {display}! Your Discord account is now linked "
-               f"and your <strong>{tier_names[tier]}</strong> role has been assigned. "
-               f"Your role will update automatically as your VIP status changes.")
-    else:
-        msg = (f"Welcome, {display}! Your Discord account is now linked. "
-               f"When you reach VIP status, your role will be assigned automatically.")
-
-    return _render_result("Discord Linked!", msg, success=True)
+    return redirect(f"{STORE_DISCORD_PAGE}?status=linked&user={display}&tier={tier}")
 
 
 # ---- ROLE SYNC ----
@@ -316,31 +289,3 @@ def api_link_status():
     return jsonify({"linked": False})
 
 
-# ---- RESULT PAGE ----
-
-def _render_result(title: str, message: str, success: bool = True) -> str:
-    return render_template_string(RESULT_HTML, title=title, message=message,
-                                  color="#22c55e" if success else "#ef4444",
-                                  icon="&#10003;" if success else "&#10007;")
-
-
-RESULT_HTML = """<!DOCTYPE html>
-<html><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ title }} — Pack Fresh</title>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-body { font-family:'DM Sans',system-ui,sans-serif; background:#0f1117; color:#e4e4e7;
-       display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
-.box { background:#1a1b23; border:1px solid #2a2b35; border-radius:16px;
-       padding:40px; max-width:440px; text-align:center; }
-.icon { font-size:3rem; margin-bottom:16px; color:{{ color }}; }
-h1 { font-size:1.4rem; margin:0 0 12px; }
-p { color:#a1a1aa; line-height:1.6; margin:0; }
-p strong { color:#e4e4e7; }
-</style></head>
-<body><div class="box">
-<div class="icon">{{ icon }}</div>
-<h1>{{ title }}</h1>
-<p>{{ message }}</p>
-</div></body></html>"""
