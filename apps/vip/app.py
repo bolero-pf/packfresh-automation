@@ -28,7 +28,7 @@ if os.getenv("DATABASE_URL"):
 
 from auth import register_auth_hooks
 register_auth_hooks(app, roles=["owner", "manager"],
-                    public_prefixes=('/vip/', '/discord/link', '/discord/callback'))
+                    public_prefixes=('/vip/', '/discord/'))
 
 
 @app.route("/")

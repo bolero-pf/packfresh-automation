@@ -275,17 +275,22 @@ def api_generate_link():
 
 @bp.get("/api/status")
 def api_link_status():
-    """Check if a customer has linked Discord."""
+    """Check if a customer has linked Discord. Public (called from storefront JS)."""
     customer_gid = request.args.get("customer_id")
     if not customer_gid:
-        return jsonify({"error": "customer_id required"}), 400
+        resp = jsonify({"error": "customer_id required"})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp, 400
     link = get_discord_link(customer_gid)
     if link:
-        return jsonify({
+        resp = jsonify({
             "linked": True,
             "discord_username": link["discord_username"],
             "linked_at": link["linked_at"].isoformat() if link["linked_at"] else None,
         })
-    return jsonify({"linked": False})
+    else:
+        resp = jsonify({"linked": False})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 

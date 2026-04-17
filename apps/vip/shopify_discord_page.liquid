@@ -9,194 +9,227 @@
 
 <div class="discord-connect-page">
   <style>
+    /* Use !important throughout to override theme defaults */
     .discord-connect-page {
-      max-width: 720px;
-      margin: 60px auto;
-      padding: 0 24px;
-      font-family: inherit;
-      text-align: center;
+      max-width: 720px !important;
+      margin: 60px auto !important;
+      padding: 0 24px !important;
+      text-align: center !important;
+    }
+    .discord-connect-page * {
+      box-sizing: border-box;
     }
     .discord-card {
-      background: #1a1b23;
-      border: 1px solid #2a2b35;
-      border-radius: 20px;
-      padding: 56px 48px;
-      margin-top: 24px;
+      background: #1a1b23 !important;
+      border: 1px solid #2a2b35 !important;
+      border-radius: 20px !important;
+      padding: 56px 48px !important;
+      margin-top: 24px !important;
     }
-    .discord-logo {
-      width: 88px;
-      height: 88px;
-      margin-bottom: 28px;
+    .discord-card .dc-logo {
+      width: 88px !important;
+      height: 88px !important;
+      margin: 0 auto 28px !important;
+      display: block !important;
     }
-    .discord-card h2 {
-      color: #e4e4e7;
-      font-size: 2.2rem;
-      font-weight: 700;
-      margin: 0 0 16px;
+    .discord-card .dc-heading {
+      color: #e4e4e7 !important;
+      font-size: 36px !important;
+      font-weight: 700 !important;
+      margin: 0 0 16px !important;
+      line-height: 1.2 !important;
+      letter-spacing: -0.01em !important;
     }
-    .discord-card p.discord-desc {
-      color: #a1a1aa;
-      line-height: 1.8;
-      margin: 0 auto 32px;
-      font-size: 1.15rem;
-      max-width: 520px;
+    .discord-card .dc-desc {
+      color: #a1a1aa !important;
+      line-height: 1.8 !important;
+      margin: 0 auto 32px !important;
+      font-size: 18px !important;
+      max-width: 520px !important;
     }
-    .discord-btn {
-      display: inline-block;
-      background: #5865F2;
-      color: #fff;
-      font-size: 1.2rem;
-      font-weight: 600;
-      padding: 18px 48px;
-      border-radius: 12px;
-      text-decoration: none;
-      transition: background 0.15s, transform 0.1s;
+    .discord-card .dc-btn {
+      display: inline-block !important;
+      background: #5865F2 !important;
+      color: #fff !important;
+      font-size: 20px !important;
+      font-weight: 600 !important;
+      padding: 18px 48px !important;
+      border-radius: 12px !important;
+      text-decoration: none !important;
+      transition: background 0.15s, transform 0.1s !important;
+      border: none !important;
+      cursor: pointer !important;
     }
-    .discord-btn:hover {
-      background: #4752c4;
-      color: #fff;
-      transform: translateY(-1px);
+    .discord-card .dc-btn:hover {
+      background: #4752c4 !important;
+      color: #fff !important;
+      transform: translateY(-1px) !important;
     }
-    .discord-btn-outline {
-      display: inline-block;
-      background: transparent;
-      color: #a1a1aa;
-      font-size: 1rem;
-      font-weight: 500;
-      padding: 14px 36px;
-      border-radius: 12px;
-      border: 1px solid #2a2b35;
-      text-decoration: none;
-      transition: border-color 0.15s, color 0.15s;
-      margin-top: 12px;
+    .discord-card .dc-btn-green {
+      background: #22c55e !important;
     }
-    .discord-btn-outline:hover {
-      border-color: #5865F2;
-      color: #e4e4e7;
+    .discord-card .dc-btn-green:hover {
+      background: #16a34a !important;
     }
-    .discord-login-msg {
-      color: #a1a1aa;
-      font-size: 1.15rem;
-      margin-top: 20px;
+    .discord-card .dc-btn-outline {
+      display: inline-block !important;
+      background: transparent !important;
+      color: #a1a1aa !important;
+      font-size: 16px !important;
+      font-weight: 500 !important;
+      padding: 14px 36px !important;
+      border-radius: 12px !important;
+      border: 1px solid #2a2b35 !important;
+      text-decoration: none !important;
+      transition: border-color 0.15s, color 0.15s !important;
+      margin-top: 12px !important;
+      cursor: pointer !important;
     }
-    .discord-login-msg a {
-      color: #5865F2;
-      font-weight: 600;
+    .discord-card .dc-btn-outline:hover {
+      border-color: #5865F2 !important;
+      color: #e4e4e7 !important;
     }
-    .discord-tiers {
-      display: flex;
-      gap: 16px;
-      justify-content: center;
-      margin: 32px 0 12px;
-      flex-wrap: wrap;
+    .discord-card .dc-login-msg {
+      color: #a1a1aa !important;
+      font-size: 18px !important;
+      margin-top: 20px !important;
     }
-    .discord-tier {
-      background: #22232d;
-      border: 1px solid #2a2b35;
-      border-radius: 12px;
-      padding: 20px 28px;
-      min-width: 160px;
-      flex: 1;
+    .discord-card .dc-login-msg a {
+      color: #5865F2 !important;
+      font-weight: 600 !important;
     }
-    .discord-tier .name {
-      font-weight: 700;
-      font-size: 1.1rem;
-      margin-bottom: 6px;
+    .discord-card .dc-tiers {
+      display: flex !important;
+      gap: 16px !important;
+      justify-content: center !important;
+      margin: 32px 0 12px !important;
+      flex-wrap: wrap !important;
     }
-    .discord-tier .req {
-      color: #a1a1aa;
-      font-size: 0.95rem;
+    .discord-card .dc-tier {
+      background: #22232d !important;
+      border: 1px solid #2a2b35 !important;
+      border-radius: 12px !important;
+      padding: 20px 28px !important;
+      min-width: 160px !important;
+      flex: 1 !important;
     }
-    .tier-vip1 .name { color: #e8c547; }
-    .tier-vip2 .name { color: #a78bfa; }
-    .tier-vip3 .name { color: #f59e0b; }
-    .discord-logged-in {
-      color: #6b7280;
-      font-size: 0.95rem;
-      margin-top: 16px;
+    .discord-card .dc-tier-name {
+      font-weight: 700 !important;
+      font-size: 18px !important;
+      margin-bottom: 6px !important;
+    }
+    .discord-card .dc-tier-req {
+      color: #a1a1aa !important;
+      font-size: 15px !important;
+    }
+    .discord-card .dc-tier-name.vip1 { color: #e8c547 !important; }
+    .discord-card .dc-tier-name.vip2 { color: #a78bfa !important; }
+    .discord-card .dc-tier-name.vip3 { color: #f59e0b !important; }
+    .discord-card .dc-logged-in {
+      color: #6b7280 !important;
+      font-size: 15px !important;
+      margin-top: 16px !important;
+    }
+
+    /* Already linked state */
+    .discord-card .dc-linked-info {
+      background: rgba(88, 101, 242, 0.1) !important;
+      border: 1px solid rgba(88, 101, 242, 0.25) !important;
+      border-radius: 12px !important;
+      padding: 20px 24px !important;
+      margin-bottom: 20px !important;
+      font-size: 16px !important;
+      color: #a1a1aa !important;
+    }
+    .discord-card .dc-linked-info strong {
+      color: #e4e4e7 !important;
     }
 
     /* Status banner */
-    .discord-status {
-      border-radius: 12px;
-      padding: 24px 28px;
-      margin-bottom: 28px;
-      font-size: 1.1rem;
-      line-height: 1.6;
+    .discord-card .dc-status {
+      border-radius: 12px !important;
+      padding: 24px 28px !important;
+      margin-bottom: 28px !important;
+      font-size: 18px !important;
+      line-height: 1.6 !important;
     }
-    .discord-status.success {
-      background: rgba(34, 197, 94, 0.1);
-      border: 1px solid rgba(34, 197, 94, 0.3);
-      color: #22c55e;
+    .discord-card .dc-status.success {
+      background: rgba(34, 197, 94, 0.1) !important;
+      border: 1px solid rgba(34, 197, 94, 0.3) !important;
+      color: #22c55e !important;
     }
-    .discord-status.error {
-      background: rgba(239, 68, 68, 0.1);
-      border: 1px solid rgba(239, 68, 68, 0.3);
-      color: #ef4444;
+    .discord-card .dc-status.error {
+      background: rgba(239, 68, 68, 0.1) !important;
+      border: 1px solid rgba(239, 68, 68, 0.3) !important;
+      color: #ef4444 !important;
     }
-    .discord-status .status-title {
-      font-weight: 700;
-      font-size: 1.3rem;
-      margin-bottom: 6px;
+    .discord-card .dc-status-title {
+      font-weight: 700 !important;
+      font-size: 22px !important;
+      margin-bottom: 6px !important;
     }
-    .discord-status .status-detail {
-      font-size: 1rem;
-      opacity: 0.85;
+    .discord-card .dc-status-detail {
+      font-size: 16px !important;
+      opacity: 0.85 !important;
     }
 
     @media (max-width: 600px) {
-      .discord-connect-page { margin: 32px auto; padding: 0 16px; }
-      .discord-card { padding: 36px 24px; }
-      .discord-card h2 { font-size: 1.7rem; }
-      .discord-card p.discord-desc { font-size: 1.05rem; }
-      .discord-tiers { flex-direction: column; gap: 12px; }
-      .discord-tier { min-width: unset; }
-      .discord-btn { font-size: 1.1rem; padding: 16px 36px; width: 100%; box-sizing: border-box; }
-      .discord-btn-outline { width: 100%; box-sizing: border-box; }
+      .discord-connect-page { margin: 32px auto !important; padding: 0 16px !important; }
+      .discord-card { padding: 36px 24px !important; }
+      .discord-card .dc-heading { font-size: 28px !important; }
+      .discord-card .dc-desc { font-size: 16px !important; }
+      .discord-card .dc-tiers { flex-direction: column !important; gap: 12px !important; }
+      .discord-card .dc-tier { min-width: unset !important; }
+      .discord-card .dc-btn { font-size: 18px !important; padding: 16px 36px !important; width: 100% !important; }
+      .discord-card .dc-btn-outline { width: 100% !important; }
+      .discord-card .dc-status-title { font-size: 20px !important; }
     }
   </style>
 
   <div class="discord-card">
-    <svg class="discord-logo" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <svg class="dc-logo" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
       <rect width="256" height="256" rx="40" fill="#5865F2"/>
       <path d="M197.308 64.797C184.669 59.042 171.22 54.782 157.2 52.2C155.435 55.393 153.373 59.607 151.932 62.943C137.032 60.543 122.268 60.543 107.638 62.943C106.197 59.607 104.088 55.393 102.308 52.2C88.273 54.782 74.81 59.057 62.171 64.827C36.534 103.367 29.694 140.932 33.114 177.972C49.814 190.572 66.004 198.422 81.914 203.572C85.884 198.207 89.434 192.527 92.504 186.567C86.774 184.447 81.284 181.837 76.084 178.817C77.524 177.747 78.934 176.627 80.294 175.477C112.874 190.547 148.054 190.547 180.244 175.477C181.619 176.627 183.029 177.747 184.454 178.817C179.239 181.852 173.734 184.462 168.004 186.582C171.074 192.527 174.609 198.222 178.594 203.587C194.519 198.437 210.724 190.587 227.424 177.972C231.434 135.672 220.884 98.422 197.308 64.797ZM101.318 153.867C92.098 153.867 84.548 145.347 84.548 134.937C84.548 124.527 91.928 116.007 101.318 116.007C110.708 116.007 118.258 124.527 118.088 134.937C118.103 145.347 110.708 153.867 101.318 153.867ZM155.22 153.867C146 153.867 138.45 145.347 138.45 134.937C138.45 124.527 145.83 116.007 155.22 116.007C164.61 116.007 172.16 124.527 171.99 134.937C171.99 145.347 164.61 153.867 155.22 153.867Z" fill="white"/>
     </svg>
 
-    <!-- Status messages (shown after redirect from OAuth callback) -->
-    <div id="discord-status-banner" style="display:none;"></div>
+    <!-- Status banner (shown after redirect from OAuth callback) -->
+    <div id="dc-status-banner" style="display:none;"></div>
 
-    <h2 id="discord-heading">Connect Your Discord</h2>
-    <p class="discord-desc" id="discord-desc">Link your account to automatically unlock your VIP role on our Discord server. Your role updates automatically when your tier changes.</p>
+    <!-- Already-linked banner (populated by JS if customer is linked) -->
+    <div id="dc-linked-banner" style="display:none;"></div>
 
-    <div class="discord-tiers">
-      <div class="discord-tier tier-vip1">
-        <div class="name">Adventurer</div>
-        <div class="req">$500+ in 90 days</div>
+    <div class="dc-heading" id="dc-heading">Connect Your Discord</div>
+    <div class="dc-desc" id="dc-desc">Link your account to automatically unlock your VIP role on our Discord server. Your role updates automatically when your tier changes.</div>
+
+    <div class="dc-tiers">
+      <div class="dc-tier">
+        <div class="dc-tier-name vip1">Adventurer</div>
+        <div class="dc-tier-req">$500+ in 90 days</div>
       </div>
-      <div class="discord-tier tier-vip2">
-        <div class="name">Guardian</div>
-        <div class="req">$1,250+ in 90 days</div>
+      <div class="dc-tier">
+        <div class="dc-tier-name vip2">Guardian</div>
+        <div class="dc-tier-req">$1,250+ in 90 days</div>
       </div>
-      <div class="discord-tier tier-vip3">
-        <div class="name">Champion</div>
-        <div class="req">$2,500+ in 90 days</div>
+      <div class="dc-tier">
+        <div class="dc-tier-name vip3">Champion</div>
+        <div class="dc-tier-req">$2,500+ in 90 days</div>
       </div>
     </div>
 
-    <div id="discord-actions" style="margin-top: 36px;">
+    <div id="dc-actions" style="margin-top: 36px;">
       {% if customer %}
         <a href="https://vip.pack-fresh.com/discord/link?customer_id=gid://shopify/Customer/{{ customer.id }}"
-           class="discord-btn" id="discord-connect-btn">
+           class="dc-btn" id="dc-connect-btn">
           Connect Discord
         </a>
-        <div class="discord-logged-in">
+        <div class="dc-logged-in">
           Logged in as {{ customer.email }}
         </div>
       {% else %}
-        <p class="discord-login-msg">
+        <div class="dc-login-msg">
           <a href="/account/login?return_url=/pages/discord">Log in to your account</a>
           to connect your Discord.
-        </p>
+        </div>
       {% endif %}
     </div>
   </div>
@@ -206,14 +239,13 @@
 (function() {
   var params = new URLSearchParams(window.location.search);
   var status = params.get('status');
-  if (!status) return;
-
-  var banner = document.getElementById('discord-status-banner');
-  var heading = document.getElementById('discord-heading');
-  var desc = document.getElementById('discord-desc');
-  var actions = document.getElementById('discord-actions');
+  var banner = document.getElementById('dc-status-banner');
+  var heading = document.getElementById('dc-heading');
+  var desc = document.getElementById('dc-desc');
+  var actions = document.getElementById('dc-actions');
   var tierNames = { VIP1: 'Adventurer', VIP2: 'Guardian', VIP3: 'Champion' };
 
+  // Handle OAuth callback status
   if (status === 'linked') {
     var user = params.get('user') || 'your account';
     var tier = params.get('tier') || '';
@@ -222,22 +254,27 @@
       ? 'Your <strong>' + tierName + '</strong> role has been assigned.'
       : 'When you reach VIP status, your role will be assigned automatically.';
 
-    banner.className = 'discord-status success';
-    banner.innerHTML = '<div class="status-title">Discord Connected!</div>'
-      + '<div class="status-detail">Welcome, <strong>' + user + '</strong>! ' + roleMsg
+    banner.className = 'dc-status success';
+    banner.innerHTML = '<div class="dc-status-title">Discord Connected!</div>'
+      + '<div class="dc-status-detail">Welcome, <strong>' + user + '</strong>! ' + roleMsg
       + ' It will update automatically when your tier changes.</div>';
     banner.style.display = 'block';
 
-    heading.textContent = 'You\'re All Set';
+    heading.textContent = "You're All Set";
     desc.textContent = 'Your Discord account is linked. You can close this page or continue shopping.';
 
-    actions.innerHTML = '<a href="/" class="discord-btn" style="background:#22c55e;">Continue Shopping</a>'
-      + '<br><a href="https://discord.gg/YOUR_INVITE_CODE" class="discord-btn-outline">Open Discord Server</a>';
+    actions.innerHTML = '<a href="/" class="dc-btn dc-btn-green">Continue Shopping</a>'
+      + '<br><a href="https://discord.gg/EvhntYSM" class="dc-btn-outline">Open Discord Server</a>';
+
+    if (window.history.replaceState) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+    return; // Don't check linked status — we just linked
   }
   else if (status === 'cancelled') {
-    banner.className = 'discord-status error';
-    banner.innerHTML = '<div class="status-title">Authorization Cancelled</div>'
-      + '<div class="status-detail">No changes were made. Click the button below to try again.</div>';
+    banner.className = 'dc-status error';
+    banner.innerHTML = '<div class="dc-status-title">Authorization Cancelled</div>'
+      + '<div class="dc-status-detail">No changes were made. Click the button below to try again.</div>';
     banner.style.display = 'block';
   }
   else if (status === 'error') {
@@ -249,15 +286,43 @@
       auth_failed: 'Discord authorization failed. Please try again.',
       profile_error: 'Could not read your Discord profile. Please try again.'
     };
-    banner.className = 'discord-status error';
-    banner.innerHTML = '<div class="status-title">Something Went Wrong</div>'
-      + '<div class="status-detail">' + (messages[reason] || messages.missing_params) + '</div>';
+    banner.className = 'dc-status error';
+    banner.innerHTML = '<div class="dc-status-title">Something Went Wrong</div>'
+      + '<div class="dc-status-detail">' + (messages[reason] || messages.missing_params) + '</div>';
     banner.style.display = 'block';
   }
 
-  // Clean the URL so they don't bookmark it with status params
-  if (window.history.replaceState) {
-    window.history.replaceState({}, '', window.location.pathname);
+  if (status) {
+    if (window.history.replaceState) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
   }
+
+  // Check if already linked (only for logged-in customers)
+  {% if customer %}
+  fetch('https://vip.pack-fresh.com/discord/api/status?customer_id=gid://shopify/Customer/{{ customer.id }}')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.linked) return;
+
+      var linkedBanner = document.getElementById('dc-linked-banner');
+      linkedBanner.className = 'dc-linked-info';
+      linkedBanner.innerHTML = 'Your Discord is linked as <strong>' + d.discord_username + '</strong>';
+      linkedBanner.style.display = 'block';
+
+      // Change button to re-link option
+      var btn = document.getElementById('dc-connect-btn');
+      if (btn) {
+        btn.textContent = 'Re-link Discord Account';
+        btn.style.background = '#3b3d4a';
+        btn.style.fontSize = '16px';
+        btn.style.padding = '14px 36px';
+      }
+
+      heading.textContent = "You're Connected";
+      desc.textContent = 'Your Discord role updates automatically when your VIP tier changes. You can re-link to a different Discord account if needed.';
+    })
+    .catch(function() { /* silently fail — just show default connect state */ });
+  {% endif %}
 })();
 </script>
