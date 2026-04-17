@@ -869,6 +869,7 @@ def _enrich_route_worker(job_id, session_id, items):
                     int(tcg_id_str), db,
                     card_name=item.get("product_name"),
                     set_name=item.get("set_name"),
+                    card_number=item.get("card_number"),
                 )
                 if not graded_prices:
                     graded_prices = PriceProvider.extract_graded_prices(card_data)
@@ -1771,6 +1772,7 @@ def preview_graded_item(item_id):
             int(tcg_id) if tcg_id else None, company, grade, db,
             card_name=item.get("product_name"),
             set_name=item.get("set_name"),
+            card_number=item.get("card_number"),
         )
 
     return jsonify(_serialize(result))

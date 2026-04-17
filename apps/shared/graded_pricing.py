@@ -105,10 +105,14 @@ def _compute_smart_market(sales: list[dict], now: datetime) -> tuple[float, int,
 
 
 def _resolve_scrydex_id(tcgplayer_id: int | None, db, *,
-                        card_name: str = None, set_name: str = None) -> str | None:
+                        card_name: str = None, set_name: str = None,
+                        card_number: str = None) -> str | None:
     """
-    Resolve a scrydex_id, trying tcgplayer_id first, then name+set search.
-    JP cards often have no TCG ID but exist in the cache by name.
+    Resolve a scrydex_id via multiple strategies:
+      1. tcgplayer_id direct lookup (fastest, most reliable)
+      2. card_number + set_name (handles JP cards where name is in Japanese)
+      3. card_name + set_name (English name search)
+      4. card_name alone (broadest, least specific)
     """
     if tcgplayer_id:
         row = db.query_one("""
@@ -119,20 +123,46 @@ def _resolve_scrydex_id(tcgplayer_id: int | None, db, *,
         if row:
             return row["scrydex_id"]
 
-    # Fallback: name + set search (handles JP cards without TCG IDs)
-    if card_name:
-        where = ["product_type = 'card'", "product_name ILIKE %s"]
-        params: list = [f"%{card_name.strip()}%"]
-        if set_name:
-            where.append("expansion_name ILIKE %s")
-            params.append(f"%{set_name.strip()}%")
-        row = db.query_one(f"""
+    # Normalize card number: "052/173" → "52", "004" → "4"
+    clean_num = None
+    if card_number:
+        clean_num = card_number.split("/")[0].lstrip("0") or "0"
+
+    # Strategy 2: card_number + set (JP cards have Japanese names but same numbers)
+    if clean_num and set_name:
+        row = db.query_one("""
             SELECT scrydex_id FROM scrydex_price_cache
-            WHERE {' AND '.join(where)}
+            WHERE product_type = 'card'
+              AND card_number = %s
+              AND expansion_name ILIKE %s
             ORDER BY fetched_at DESC LIMIT 1
-        """, tuple(params))
+        """, (clean_num, f"%{set_name.strip()}%"))
         if row:
-            logger.info(f"Resolved scrydex_id by name: '{card_name}' / '{set_name}' -> {row['scrydex_id']}")
+            logger.info(f"Resolved scrydex_id by card# + set: #{clean_num} / '{set_name}' -> {row['scrydex_id']}")
+            return row["scrydex_id"]
+
+    # Strategy 3: name + set (English names)
+    if card_name and set_name:
+        row = db.query_one("""
+            SELECT scrydex_id FROM scrydex_price_cache
+            WHERE product_type = 'card'
+              AND product_name ILIKE %s
+              AND expansion_name ILIKE %s
+            ORDER BY fetched_at DESC LIMIT 1
+        """, (f"%{card_name.strip()}%", f"%{set_name.strip()}%"))
+        if row:
+            logger.info(f"Resolved scrydex_id by name + set: '{card_name}' / '{set_name}' -> {row['scrydex_id']}")
+            return row["scrydex_id"]
+
+    # Strategy 4: name alone (broadest — may match wrong variant)
+    if card_name:
+        row = db.query_one("""
+            SELECT scrydex_id FROM scrydex_price_cache
+            WHERE product_type = 'card' AND product_name ILIKE %s
+            ORDER BY fetched_at DESC LIMIT 1
+        """, (f"%{card_name.strip()}%",))
+        if row:
+            logger.info(f"Resolved scrydex_id by name only: '{card_name}' -> {row['scrydex_id']}")
             return row["scrydex_id"]
 
     return None
@@ -147,6 +177,7 @@ def get_live_graded_comps(
     days: int = 90,
     card_name: str = None,
     set_name: str = None,
+    card_number: str = None,
 ) -> Optional[dict]:
     """
     Fetch real eBay sold comps for a specific graded card from Scrydex listings API.
@@ -163,10 +194,11 @@ def get_live_graded_comps(
     company = grade_company.upper().strip()
     grade   = str(grade_value).strip()
 
-    scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name, set_name=set_name)
+    scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name,
+                                     set_name=set_name, card_number=card_number)
 
     if not scrydex_id:
-        logger.debug(f"No scrydex_id for TCG#{tcgplayer_id} / '{card_name}' — falling back to cache")
+        logger.debug(f"No scrydex_id for TCG#{tcgplayer_id} / '{card_name}' #{card_number} — falling back to cache")
         if tcgplayer_id:
             return _fallback_from_cache(tcgplayer_id, company, grade, db)
         return None
@@ -298,7 +330,8 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
 
 
 def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
-                         card_name: str = None, set_name: str = None) -> dict:
+                         card_name: str = None, set_name: str = None,
+                         card_number: str = None) -> dict:
     """
     Fetch live eBay comps for ALL grades of a card in a single API call.
 
@@ -312,7 +345,8 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
     """
     company_map = {}
 
-    scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name, set_name=set_name)
+    scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name,
+                                     set_name=set_name, card_number=card_number)
     if not scrydex_id:
         return {}
 
