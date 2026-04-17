@@ -160,7 +160,11 @@ def discord_callback():
         logger.error(f"Discord user data missing id: {user_data}")
         return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=profile_error")
 
-    # Store the link (upsert — one customer = one Discord account)
+    # Store the link (one Discord user = one Shopify customer)
+    # Remove any existing link for this Discord user first (they may be re-linking
+    # to a different Shopify account), then upsert by Shopify customer.
+    execute("DELETE FROM discord_links WHERE discord_user_id = %s AND shopify_customer_gid != %s",
+            (discord_user_id, customer_gid))
     execute("""
         INSERT INTO discord_links
             (shopify_customer_gid, discord_user_id, discord_username, linked_at)
