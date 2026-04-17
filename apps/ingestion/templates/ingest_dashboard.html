@@ -4279,8 +4279,9 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
           <div style="flex:1;min-width:240px;">
             <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">📊 Scrydex <span style="color:${sd.source === 'live_listings' ? 'var(--green)' : 'var(--text-dim)'};font-weight:400;">· ${sd.source === 'live_listings' ? 'live eBay' : 'cached'} ${ageStr}${sd.undated_count ? ` · <span style="color:var(--red);">${sd.undated_count} undated</span>` : ''}</span></div>
             <table style="font-size:0.78rem;width:100%;">
-              <tr><td style="color:var(--text-dim);padding-right:8px;">Market</td><td><span style="${marketStyle}">${fmt$(sd.market)}</span>${qualityBadge}</td></tr>
-              <tr><td style="color:var(--text-dim);padding-right:8px;">Range</td><td>${fmt$(sd.low)} / ${fmt$(sd.mid)} / ${fmt$(sd.high)}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">7d avg</td><td><strong style="${marketStyle}">${sd.avg_7d != null ? fmt$(sd.avg_7d) : '—'}</strong>${sd.comps_7d ? ` <small style="color:var(--text-dim);">(${sd.comps_7d} sales)</small>` : ''}${qualityBadge}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">30d avg</td><td>${sd.avg_30d != null ? fmt$(sd.avg_30d) : '—'}${sd.comps_30d ? ` <small style="color:var(--text-dim);">(${sd.comps_30d} sales)</small>` : ''}</td></tr>
+              <tr><td style="color:var(--text-dim);padding-right:8px;">Range</td><td>${fmt$(sd.low)} – ${fmt$(sd.high)}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Trend 7d</td><td>${fmtPct(sd.trend_7d_pct)}${sd.comps_7d ? ` <small style="color:var(--text-dim);">(${sd.comps_7d} sales)</small>` : ''}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Trend 30d</td><td>${fmtPct(sd.trend_30d_pct)}${sd.comps_30d ? ` <small style="color:var(--text-dim);">(${sd.comps_30d} sales)</small>` : ''}</td></tr>
             </table>

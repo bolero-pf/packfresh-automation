@@ -115,13 +115,13 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
         logger.warning(f"  {undated_count}/{len(sales)} listings have no parseable date — "
                        f"trends may be inaccurate")
 
-    # Market price: use 30-day average (current market), not 90-day average
-    # which gets dragged down by older sales on appreciating cards. Fall back
-    # to all-time average only if no dated 30d window.
-    if prices_30d:
-        market = round(sum(prices_30d) / len(prices_30d), 2)
-    else:
-        market = round(sum(prices_all) / len(prices_all), 2)
+    # Market price: use the freshest reliable window.
+    # 7d avg is the actual current market for pricing decisions.
+    # 30d avg is useful context but lags on fast-moving cards.
+    avg_7d  = round(sum(prices_7d) / len(prices_7d), 2) if prices_7d else None
+    avg_30d = round(sum(prices_30d) / len(prices_30d), 2) if prices_30d else None
+    avg_all = round(sum(prices_all) / len(prices_all), 2)
+    market  = avg_7d or avg_30d or avg_all
 
     # Trend: compare recent average to older average
     trend_7d = _compute_trend(prices_7d, prices_older)
@@ -137,7 +137,10 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
                 f"${prices_all[0]:.2f}-${prices_all[-1]:.2f}, "
                 f"30d avg ${market:.2f}, all-time median ${med_all:.2f}")
     return {
-        "market":        market,
+        "market":        market,      # 7d avg > 30d avg > all-time avg
+        "avg_7d":        avg_7d,
+        "avg_30d":       avg_30d,
+        "avg_all":       avg_all,
         "low":           prices_all[0],
         "mid":           med_all,
         "high":          prices_all[-1],
