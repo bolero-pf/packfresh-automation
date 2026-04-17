@@ -17,4 +17,8 @@ ENV PYTHONPATH=/app/shared:/app
 
 EXPOSE 8080
 
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "120"]
+# Single worker + threads so the in-process enrichment cache (_enrich_cache /
+# _enrich_jobs) is shared across all requests. With 2 workers, the job-status
+# poll would land on the wrong worker and never see 'complete', leaving the
+# route session's spinner stuck indefinitely.
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "120"]

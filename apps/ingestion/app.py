@@ -874,10 +874,13 @@ def _calc_grading_economics(graded_prices: dict, raw_price: float, condition: st
 
 
 def _enrich_route_worker(job_id, session_id, items):
-    """Background worker: fetch PPT data for each unique tcgplayer_id."""
-    import time as _time
+    """Background worker: fetch PPT + Scrydex data for each unique tcgplayer_id
+    in parallel. Writes partial results to _enrich_cache as each card finishes
+    so the frontend sees data stream in rather than waiting for a full batch."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from graded_pricing import get_all_graded_comps
+
     job = _enrich_jobs[job_id]
-    cache = {}
 
     # Deduplicate by tcgplayer_id — keep first item per tcg_id for condition/price
     unique = {}
@@ -887,50 +890,59 @@ def _enrich_route_worker(job_id, session_id, items):
             unique[str(tcg_id)] = item
 
     job["total"] = len(unique)
-    errors = 0
 
-    from graded_pricing import get_all_graded_comps
+    # Seed the session cache early so /route-enriched can read partial results
+    # as each card finishes rather than flipping all-at-once at the end.
+    cache = _enrich_cache.setdefault(session_id, {})
 
-    for i, (tcg_id_str, item) in enumerate(unique.items()):
+    def _enrich_one(tcg_id_str, item):
         try:
             card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id_str))
-            if card_data:
-                image_url = (card_data.get("imageCdnUrl800")
-                             or card_data.get("imageCdnUrl")
-                             or card_data.get("imageCdnUrl400"))
+            if not card_data:
+                return tcg_id_str, {"error": "not_found"}
 
-                # Live eBay comps for graded prices — one API call per card
-                # returns all grades. Falls back to cache aggregate if API unavailable.
-                graded_prices = get_all_graded_comps(
-                    int(tcg_id_str), db,
-                    card_name=item.get("product_name"),
-                    set_name=item.get("set_name"),
-                    card_number=item.get("card_number"),
-                )
-                if not graded_prices:
-                    graded_prices = PriceProvider.extract_graded_prices(card_data)
+            image_url = (card_data.get("imageCdnUrl800")
+                         or card_data.get("imageCdnUrl")
+                         or card_data.get("imageCdnUrl400"))
 
-                raw_price = float(item.get("market_price") or 0)
-                condition = item.get("condition") or "NM"
-                economics = _calc_grading_economics(graded_prices, raw_price, condition)
+            graded_prices = get_all_graded_comps(
+                int(tcg_id_str), db,
+                card_name=item.get("product_name"),
+                set_name=item.get("set_name"),
+                card_number=item.get("card_number"),
+            )
+            if not graded_prices:
+                graded_prices = PriceProvider.extract_graded_prices(card_data)
 
-                cache[tcg_id_str] = {
-                    "image_url": image_url,
-                    "graded_prices": graded_prices,
-                    "grading_economics": economics,
-                }
-            else:
-                cache[tcg_id_str] = {"error": "not_found"}
-                errors += 1
+            raw_price = float(item.get("market_price") or 0)
+            condition = item.get("condition") or "NM"
+            economics = _calc_grading_economics(graded_prices, raw_price, condition)
+
+            return tcg_id_str, {
+                "image_url": image_url,
+                "graded_prices": graded_prices,
+                "grading_economics": economics,
+            }
         except Exception as e:
-            logger.warning(f"PPT enrich failed for TCG#{tcg_id_str}: {e}")
-            cache[tcg_id_str] = {"error": str(e)}
-            errors += 1
+            logger.warning(f"Enrich failed for TCG#{tcg_id_str}: {e}")
+            return tcg_id_str, {"error": str(e)}
 
-        job["progress"] = i + 1
-        job["errors"] = errors
+    errors = 0
+    done = 0
+    # 8 concurrent — well under Scrydex's 100 req/sec ceiling and respects the
+    # client's internal throttle. PPT is generous enough to handle it.
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(_enrich_one, tcg_id_str, item)
+                   for tcg_id_str, item in unique.items()]
+        for fut in as_completed(futures):
+            tcg_id_str, result = fut.result()
+            cache[tcg_id_str] = result
+            if "error" in result:
+                errors += 1
+            done += 1
+            job["progress"] = done
+            job["errors"] = errors
 
-    _enrich_cache[session_id] = cache
     job["status"] = "complete"
 
 
