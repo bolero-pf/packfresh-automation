@@ -428,7 +428,7 @@
 
 <!-- Confirm dialog now provided by shared pf_ui.js (themedConfirm) -->
 
-<div id="prompt-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9000; align-items:center; justify-content:center;">
+<div id="prompt-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:11000; align-items:center; justify-content:center;">
     <div class="confirm-box" style="min-width:280px;">
         <h3 id="prompt-title"></h3>
         <p id="prompt-msg" style="color:var(--text-dim); font-size:0.9rem; margin-bottom:12px;"></p>
@@ -2300,7 +2300,7 @@ async function _rsChangeCondition() {
     if (!item) return;
     const current = item.condition || 'NM';
     const choice = await themedPrompt('Change Condition',
-        `Current: ${current}. Enter NM / LP / MP / HP / DMG:`, current);
+        `Current: ${current}. Enter NM / LP / MP / HP / DMG:`, current, 'text');
     if (choice === null) return;
     const newCond = String(choice).trim().toUpperCase();
     if (!['NM','LP','MP','HP','DMG'].includes(newCond)) {
