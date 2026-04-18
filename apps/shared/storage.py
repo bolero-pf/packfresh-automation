@@ -47,14 +47,20 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
 
     ctype = _canonical_card_type(card_type)
 
-    # Fetch all bins for this card_type ordered by partition ASC (earliest first)
+    # Fetch all bins for this card_type ordered (row_label, partition_num).
+    # Ordering by partition_num alone ties A-1, B-1, C-1, D-1 (all
+    # partition_num=1) and fills them in arbitrary order, which is what
+    # caused a single batch to land in A-1 + C-1 instead of A-1 → A-2.
+    # The join + composite sort guarantees we exhaust A-1..A-50 before
+    # any of row B's bins get touched.
     bins = db.query("""
-        SELECT id, bin_label, capacity, current_count,
-               (capacity - current_count) AS available
-        FROM storage_locations
-        WHERE card_type = %s
-          AND current_count < capacity
-        ORDER BY partition_num ASC
+        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
+               (sl.capacity - sl.current_count) AS available
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.card_type = %s
+          AND sl.current_count < sl.capacity
+        ORDER BY sr.row_label ASC, sl.partition_num ASC
     """, (ctype,))
 
     if not bins:
