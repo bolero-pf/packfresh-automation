@@ -13,6 +13,7 @@ Flow:
 """
 
 import os
+import time
 import logging
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlencode
@@ -195,15 +196,80 @@ def discord_callback():
 
 # ---- ROLE SYNC ----
 
+def _discord_request(method: str, url: str, *, max_retries: int = 3):
+    """
+    Discord API call with 429 backoff. Honors the JSON body's `retry_after`
+    (seconds, float) first, then the `Retry-After` header. Returns the final
+    Response (which may still be 429 if we ran out of retries) or None on a
+    transport-level error.
+    """
+    headers = {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    r = None
+    for attempt in range(max_retries):
+        try:
+            r = http_requests.request(method, url, headers=headers, timeout=10)
+        except Exception as e:
+            print(f"[discord] {method} {url} transport error: {e}", flush=True)
+            return None
+        if r.status_code != 429:
+            return r
+        retry_after = 0.0
+        try:
+            retry_after = float((r.json() or {}).get("retry_after", 0))
+        except Exception:
+            pass
+        if not retry_after:
+            try:
+                retry_after = float(r.headers.get("Retry-After", "1"))
+            except (TypeError, ValueError):
+                retry_after = 1.0
+        wait = min(max(retry_after, 0.1), 10.0)
+        print(f"[discord] 429 on {method} {url} — sleeping {wait:.2f}s "
+              f"(attempt {attempt + 1}/{max_retries})", flush=True)
+        time.sleep(wait)
+    print(f"[discord] giving up after {max_retries} 429s on {method} {url}", flush=True)
+    return r
+
+
+def _get_member_roles(discord_user_id: str):
+    """
+    Fetch the member's current role IDs in the guild.
+    Returns the list of role IDs, or None if the user isn't in the guild
+    or the fetch failed (caller should treat None as 'unknown').
+    """
+    url = f"{DISCORD_API}/guilds/{DISCORD_GUILD_ID}/members/{discord_user_id}"
+    r = _discord_request("GET", url)
+    if r is None or r.status_code == 404:
+        return None
+    if r.status_code != 200:
+        print(f"[discord] GET member {discord_user_id} → {r.status_code}: {r.text[:200]}",
+              flush=True)
+        return None
+    try:
+        return r.json().get("roles", []) or []
+    except Exception:
+        return None
+
+
 def sync_discord_role(customer_gid: str, tier: str, *, discord_user_id: str = None) -> bool:
     """
     Sync a customer's VIP tier to their Discord role.
-    Removes old VIP roles, adds the correct one.
-    Called from write_state() on every tier change.
-    Returns True if sync succeeded (or was skipped), False on error.
+
+    Diff-based: reads the member's current roles once, then only PUT/DELETEs
+    roles that actually need to change. For a VIP3→VIP3 renewal where the
+    member already has VIP3 and not VIP1/VIP2, this is one GET and zero writes
+    (vs. the old code's three writes per call). Cuts Discord API traffic
+    proportionally and avoids burning the per-route rate limit on no-ops.
+
+    Called from write_state() on every tier change. Returns True if the end
+    state matches the desired tier (or the sync was skipped because Discord
+    isn't configured / customer hasn't linked).
     """
     if not DISCORD_BOT_TOKEN or not DISCORD_GUILD_ID:
-        return True  # Discord not configured — not an error
+        return True
 
     if not discord_user_id:
         try:
@@ -212,44 +278,63 @@ def sync_discord_role(customer_gid: str, tier: str, *, discord_user_id: str = No
                 (customer_gid,)
             )
         except Exception:
-            return True  # DB not available — skip silently
+            return True
         if not row:
-            return True  # Customer hasn't linked Discord
+            return True
         discord_user_id = row["discord_user_id"]
-
-    headers = {
-        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-        "Content-Type": "application/json",
-    }
 
     print(f"[discord] sync_discord_role customer={customer_gid} tier={tier} "
           f"discord_user={discord_user_id} guild={DISCORD_GUILD_ID}", flush=True)
 
+    managed = {t: rid for t, rid in DISCORD_ROLE_MAP.items() if rid}
+    desired_role_id = managed.get(tier)  # None for VIP0 / unmapped tier
+
+    current_roles = _get_member_roles(discord_user_id)
+    if current_roles is None:
+        # Member not in guild or fetch failed. We can still try to ADD the
+        # target role (Discord will 404 if they're truly not in the guild) —
+        # but we can't safely DELETE without knowing what they have, so skip
+        # removals entirely in this branch.
+        if not desired_role_id:
+            return True
+        url = (f"{DISCORD_API}/guilds/{DISCORD_GUILD_ID}/members/"
+               f"{discord_user_id}/roles/{desired_role_id}")
+        r = _discord_request("PUT", url)
+        status = r.status_code if r is not None else "no_resp"
+        print(f"[discord] ADD {tier} role={desired_role_id} (blind) → {status}", flush=True)
+        return r is not None and r.status_code in (200, 204)
+
+    current_set = set(current_roles)
+    to_add, to_remove = [], []
+    for role_tier, role_id in managed.items():
+        if role_tier == tier:
+            if role_id not in current_set:
+                to_add.append((role_tier, role_id))
+        elif role_id in current_set:
+            to_remove.append((role_tier, role_id))
+
+    if not to_add and not to_remove:
+        print(f"[discord] no role changes needed (tier={tier})", flush=True)
+        return True
+
     ok = True
-    for role_tier, role_id in DISCORD_ROLE_MAP.items():
-        if not role_id:
-            continue
-        try:
-            if role_tier == tier:
-                r = http_requests.put(
-                    f"{DISCORD_API}/guilds/{DISCORD_GUILD_ID}/members/"
-                    f"{discord_user_id}/roles/{role_id}",
-                    headers=headers, timeout=10,
-                )
-                print(f"[discord] ADD {role_tier} role={role_id} → {r.status_code} "
-                      f"{r.text[:200] if r.status_code not in (200,204) else 'ok'}", flush=True)
-                if r.status_code not in (200, 204):
-                    ok = False
-            else:
-                r = http_requests.delete(
-                    f"{DISCORD_API}/guilds/{DISCORD_GUILD_ID}/members/"
-                    f"{discord_user_id}/roles/{role_id}",
-                    headers=headers, timeout=10,
-                )
-                print(f"[discord] REMOVE {role_tier} role={role_id} → {r.status_code}", flush=True)
-                # 204=removed, 404=didn't have it — both fine
-        except Exception as e:
-            print(f"[discord] ERROR {role_tier}: {e}", flush=True)
+    for role_tier, role_id in to_remove:
+        url = (f"{DISCORD_API}/guilds/{DISCORD_GUILD_ID}/members/"
+               f"{discord_user_id}/roles/{role_id}")
+        r = _discord_request("DELETE", url)
+        status = r.status_code if r is not None else "no_resp"
+        print(f"[discord] REMOVE {role_tier} role={role_id} → {status}", flush=True)
+        # 204 = removed, 404 = didn't have it (race) — both fine
+        if r is None or r.status_code not in (200, 204, 404):
+            ok = False
+
+    for role_tier, role_id in to_add:
+        url = (f"{DISCORD_API}/guilds/{DISCORD_GUILD_ID}/members/"
+               f"{discord_user_id}/roles/{role_id}")
+        r = _discord_request("PUT", url)
+        status = r.status_code if r is not None else "no_resp"
+        print(f"[discord] ADD {role_tier} role={role_id} → {status}", flush=True)
+        if r is None or r.status_code not in (200, 204):
             ok = False
 
     return ok
