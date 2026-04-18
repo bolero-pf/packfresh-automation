@@ -393,29 +393,52 @@ def mark_good(item_id):
 @app.route("/api/ingest/search-cards", methods=["POST"])
 def search_cards_for_relink():
     """
-    Cache-first card search for the re-link flow (preview panel uses this when
-    PSA and Scrydex set names disagree). Reads scrydex_price_cache directly so
-    zero API credits are consumed.
+    Cache-first card search for the re-link flow. Reads scrydex_price_cache
+    directly so zero API credits are consumed.
 
-    POST body: { "query": "alakazam", "set_name": "base set 2", "limit": 20 }
+    POST body: { "query": "umbreon 32 neo discovery", "set_name": "...",
+                 "tcgplayer_id": 123, "limit": 20 }
+
+    Query is tokenized on whitespace. Each token must match at least one of:
+    product_name, product_name_en, expansion_name, expansion_name_en,
+    card_number. Leading '#' on tokens is stripped ("#32" → "32"). This way
+    "umbreon 32" pulls the card named Umbreon with card_number 32, and
+    "umbreon neo discovery" matches the name plus set name.
     """
     data    = request.get_json(silent=True) or {}
     query   = (data.get("query") or "").strip()
     set_nm  = (data.get("set_name") or "").strip()
+    tcg_id  = data.get("tcgplayer_id")
     limit   = min(int(data.get("limit") or 20), 50)
 
-    if not query and not set_nm:
-        return jsonify({"error": "query or set_name required"}), 400
+    if not query and not set_nm and not tcg_id:
+        return jsonify({"error": "query, set_name, or tcgplayer_id required"}), 400
 
     where = ["product_type = 'card'"]
     params = []
+
+    if tcg_id:
+        try:
+            where.append("tcgplayer_id = %s")
+            params.append(int(tcg_id))
+        except (ValueError, TypeError):
+            return jsonify({"error": "tcgplayer_id must be numeric"}), 400
+
     if query:
-        # Match either the native product_name (e.g. カスミのギャラドス for JP cards)
-        # OR the English translation (Misty's Gyarados), so users can search
-        # English names and still find Japanese cards.
-        where.append("(product_name ILIKE %s OR product_name_en ILIKE %s)")
-        params.append(f"%{query}%")
-        params.append(f"%{query}%")
+        tokens = [t.lstrip("#").strip() for t in query.split() if t.strip().lstrip("#")]
+        for tok in tokens:
+            like = f"%{tok}%"
+            # Each token must hit one of these columns. Using parameterized
+            # ILIKEs keeps the query injection-safe and leaves matching to
+            # Postgres' default indexes (product_name_en is indexed).
+            where.append("""(
+                product_name      ILIKE %s
+                OR product_name_en   ILIKE %s
+                OR expansion_name    ILIKE %s
+                OR expansion_name_en ILIKE %s
+                OR card_number       ILIKE %s
+            )""")
+            params.extend([like, like, like, like, like])
     if set_nm:
         where.append("(expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
         params.append(f"%{set_nm}%")

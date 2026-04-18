@@ -2956,29 +2956,13 @@ function closeRelink() {
     _relinkSessionId = null;
 }
 
-async function relinkSearch() {
-    const query = document.getElementById('relink-search').value.trim();
+function _renderRelinkResults(results) {
     const resultsDiv = document.getElementById('relink-search-results');
-    if (!query) { resultsDiv.innerHTML = '<p style="color:var(--text-dim);">Enter a search term</p>'; return; }
-
-    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
-    try {
-        // Cache-first card search — hits scrydex_price_cache directly (0 API
-        // credits) and returns raw cards, including Japanese sets.
-        const sr = await fetch('/api/ingest/search-cards', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ query, limit: 25 }),
-        });
-        const sd = await sr.json();
-        if (!sr.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${sd.error}</div>`; return; }
-        const results = sd.results || [];
-        if (!results.length) {
-            resultsDiv.innerHTML = '<div class="alert alert-warning">No card matches in Scrydex cache. Try a partial name or the card number (e.g. "Alakazam" or "215").</div>';
-            return;
-        }
-
-        resultsDiv.innerHTML = '<div style="max-height:350px; overflow-y:auto;">' + results.slice(0, 25).map(p => {
+    if (!results || !results.length) {
+        resultsDiv.innerHTML = '<div class="alert alert-warning">No card matches in Scrydex cache. Try a partial name, the card number ("32" or "#32"), or add the set (e.g. "umbreon neo discovery").</div>';
+        return;
+    }
+    resultsDiv.innerHTML = '<div style="max-height:350px; overflow-y:auto;">' + results.slice(0, 25).map(p => {
             const native  = p.product_name || '';
             const english = p.product_name_en || '';
             const tcgId   = p.tcgplayer_id;
@@ -3027,7 +3011,26 @@ async function relinkSearch() {
                 ${secondaryName ? `<div style="font-size:0.75rem; color:var(--text-dim);">${secondaryName}</div>` : ''}
                 <div style="font-size:0.8rem; color:var(--text-dim);">${setDisplay} · ${idHint}</div>
             </div>`;
-        }).join('') + '</div>';
+    }).join('') + '</div>';
+}
+
+async function relinkSearch() {
+    const query = document.getElementById('relink-search').value.trim();
+    const resultsDiv = document.getElementById('relink-search-results');
+    if (!query) { resultsDiv.innerHTML = '<p style="color:var(--text-dim);">Enter a search term</p>'; return; }
+
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+    try {
+        // Cache-first card search — hits scrydex_price_cache directly (0 API
+        // credits) and returns raw cards, including Japanese sets.
+        const sr = await fetch('/api/ingest/search-cards', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query, limit: 25 }),
+        });
+        const sd = await sr.json();
+        if (!sr.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${sd.error}</div>`; return; }
+        _renderRelinkResults(sd.results || []);
     } catch(err) {
         resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
@@ -3080,12 +3083,48 @@ async function relinkSelect(tcgId, name, price, setName, scrydexId, variant) {
 async function relinkManual() {
     const tcgId = document.getElementById('relink-manual-tcgid').value.trim();
     if (!tcgId) { alert('Enter a TCGPlayer ID'); return; }
+    const tcgIdNum = parseInt(tcgId, 10);
+    if (!tcgIdNum) { alert('TCGplayer ID must be numeric'); return; }
 
+    // Look up all variants for this TCG ID in the Scrydex cache first —
+    // a single TCG product can map to multiple printings (1st Ed vs
+    // Unlimited) and silently linking without a variant gets graded comps
+    // wrong. If there's exactly one variant, auto-link. If multiple,
+    // render them into the search results so the user picks. If none (TCG
+    // ID not in our cache), fall back to the legacy blind link.
+    const resultsDiv = document.getElementById('relink-search-results');
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up variants...</div>';
+    try {
+        const sr = await fetch('/api/ingest/search-cards', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tcgplayer_id: tcgIdNum }),
+        });
+        const sd = await sr.json();
+        if (sr.ok && sd.results && sd.results.length === 1) {
+            const p = sd.results[0];
+            return relinkSelect(p.tcgplayer_id, p.product_name_en || p.product_name,
+                                p.market_price || 0, p.set_name_en || p.set_name || '',
+                                p.scrydex_id, p.variant || '');
+        }
+        if (sr.ok && sd.results && sd.results.length > 1) {
+            // Re-render via the same search result path so the user sees
+            // each variant as a selectable row. Easiest way: stuff the
+            // results into the search box flow.
+            document.getElementById('relink-search').value = `TCG#${tcgIdNum}`;
+            _renderRelinkResults(sd.results);
+            return;
+        }
+    } catch(e) {
+        // Fall through to legacy blind link
+    }
+
+    // No Scrydex cache hit — link by TCG ID alone (legacy).
     try {
         const r = await fetch(`/api/ingest/item/${_relinkItemId}/relink`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+            body: JSON.stringify({ tcgplayer_id: tcgIdNum }),
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
