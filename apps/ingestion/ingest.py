@@ -388,13 +388,29 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
         # No change needed
         return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
-    new_offer = (new_market * offer_pct * qty).quantize(Decimal("0.01"))
+    # Once the item is stamped verified_at, COGS is locked — the offer was
+    # already finalized during verify and payment logically flowed on that.
+    # Later stages (breakdown, routing) may spot damage we missed, but we've
+    # already paid, so the cost of acquisition shouldn't move. Only condition
+    # and market_price change; offer_price / unit_cost_basis stay put. The
+    # per-item margin will look worse, and that's the correct signal — it
+    # flags the missed damage without hiding the evidence.
+    cogs_locked = bool(item.get("verified_at"))
 
-    execute("""
-        UPDATE intake_items SET condition = %s, market_price = %s, offer_price = %s WHERE id = %s
-    """, (condition, new_market, new_offer, item_id))
+    if cogs_locked:
+        execute("""
+            UPDATE intake_items SET condition = %s, market_price = %s WHERE id = %s
+        """, (condition, new_market, item_id))
+        # Don't recalc session totals — offer_price didn't change.
+    else:
+        # Pre-verify: we're still in the offer-adjustment window, so a condition
+        # change moves offer_price too.
+        new_offer = (new_market * offer_pct * qty).quantize(Decimal("0.01"))
+        execute("""
+            UPDATE intake_items SET condition = %s, market_price = %s, offer_price = %s WHERE id = %s
+        """, (condition, new_market, new_offer, item_id))
+        _recalculate_session_totals(item["session_id"])
 
-    _recalculate_session_totals(item["session_id"])
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
 
