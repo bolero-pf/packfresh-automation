@@ -623,6 +623,29 @@ def convert_item_type_route(item_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/ingest/item/<item_id>/update-condition", methods=["POST"])
+def update_condition_route(item_id):
+    """Change a raw card's condition (e.g. during routing when closer
+    inspection reveals damage). Recalculates market price from PPT for the
+    new condition; honors explicit price_override if supplied. Does not
+    touch verified_at or routing_reviewed_at."""
+    data = request.get_json(silent=True) or {}
+    condition = (data.get("condition") or "").upper()
+    if condition not in ("NM", "LP", "MP", "HP", "DMG"):
+        return jsonify({"error": "condition must be one of NM/LP/MP/HP/DMG"}), 400
+    price_override = data.get("price_override")
+    try:
+        result = ingest.update_item_condition(
+            item_id, condition, ppt_client=ppt,
+            price_override=float(price_override) if price_override not in (None, "") else None)
+        return jsonify({"success": True, "item": _serialize(result)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"update-condition failed for item {item_id}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ingest/item/<item_id>/undo-verify", methods=["POST"])
 def undo_verify(item_id):
     """Reset an item back to unverified good status."""
@@ -1990,7 +2013,7 @@ def auto_route_session(session_id):
           AND is_mapped = TRUE
           AND pushed_at IS NULL
           AND routing_reviewed_at IS NULL
-        ORDER BY COALESCE(market_price, 0) ASC
+        ORDER BY created_at ASC
     """, (session_id,))
 
     if not items:
@@ -2139,7 +2162,9 @@ def split_route(session_id):
         UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s
     """, (remaining_qty, remaining_offer, item_id))
 
-    # Create split item — copies all card fields, new qty + destination
+    # Create split item — copies all card fields, new qty + destination.
+    # Stamp created_at as parent + 1 microsecond so the split row lands right
+    # after the parent in entered-order sort (route stage default).
     import uuid as _uuid
     split_id = str(_uuid.uuid4())
     split_offer = round(market_price * offer_pct * split_qty, 2)
@@ -2150,13 +2175,15 @@ def split_route(session_id):
             condition, rarity, variant, language, variance,
             quantity, market_price, offer_price, unit_cost_basis,
             product_type, is_mapped, item_status, is_graded, grade_company, grade_value,
-            routing_destination, verified_at, listing_condition
+            routing_destination, verified_at, listing_condition,
+            created_at
         ) VALUES (
             %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s,
-            %s, %s, %s
+            %s, %s, %s,
+            (SELECT created_at + INTERVAL '1 microsecond' FROM intake_items WHERE id = %s)
         )
     """, (
         split_id, session_id, item.get("product_name"), item.get("set_name"),
@@ -2168,6 +2195,7 @@ def split_route(session_id):
         item.get("item_status", "good"), item.get("is_graded", False),
         item.get("grade_company"), item.get("grade_value"),
         destination, item.get("verified_at"), item.get("listing_condition"),
+        item_id,
     ))
 
     return jsonify({
@@ -2208,9 +2236,11 @@ def split_singles(session_id):
     db.execute("UPDATE intake_items SET quantity = 1, offer_price = %s WHERE id = %s",
                (unit_offer, item_id))
 
-    # Create (total_qty - 1) new rows
+    # Create (total_qty - 1) new rows with staggered created_at timestamps
+    # relative to the parent so all siblings stay adjacent in entered-order
+    # sort (parent stays at its original created_at; clones are +i microseconds).
     new_ids = []
-    for _ in range(total_qty - 1):
+    for i in range(total_qty - 1):
         new_id = str(_uuid.uuid4())
         new_ids.append(new_id)
         db.execute("""
@@ -2219,13 +2249,15 @@ def split_singles(session_id):
                 condition, rarity, variant, language, variance,
                 quantity, market_price, offer_price, unit_cost_basis,
                 product_type, is_mapped, item_status, is_graded, grade_company, grade_value,
-                routing_destination, verified_at, listing_condition
+                routing_destination, verified_at, listing_condition,
+                created_at
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
                 1, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s,
-                %s, %s, %s
+                %s, %s, %s,
+                (SELECT created_at + (%s * INTERVAL '1 microsecond') FROM intake_items WHERE id = %s)
             )
         """, (
             new_id, session_id, item.get("product_name"), item.get("set_name"),
@@ -2237,6 +2269,7 @@ def split_singles(session_id):
             item.get("item_status", "good"), item.get("is_graded", False),
             item.get("grade_company"), item.get("grade_value"),
             dest, item.get("verified_at"), item.get("listing_condition"),
+            i + 1, item_id,
         ))
 
     return jsonify({
@@ -2261,7 +2294,7 @@ def route_summary(session_id):
           AND item_status IN ('good', 'damaged')
           AND is_mapped = TRUE
           AND pushed_at IS NULL
-        ORDER BY COALESCE(market_price, 0) ASC
+        ORDER BY created_at ASC
     """, (session_id,))
 
     by_dest = {"storage": 0, "display": 0, "grade": 0, "bulk": 0}
@@ -2320,7 +2353,7 @@ def enrich_route(session_id):
           AND item_status IN ('good', 'damaged')
           AND is_mapped = TRUE
           AND pushed_at IS NULL
-        ORDER BY COALESCE(market_price, 0) ASC
+        ORDER BY created_at ASC
     """, (session_id,))
 
     if not items:
@@ -2373,7 +2406,7 @@ def route_enriched(session_id):
           AND item_status IN ('good', 'damaged')
           AND is_mapped = TRUE
           AND pushed_at IS NULL
-        ORDER BY COALESCE(market_price, 0) ASC
+        ORDER BY created_at ASC
     """, (session_id,))
 
     cache = _enrich_cache.get(session_id, {})

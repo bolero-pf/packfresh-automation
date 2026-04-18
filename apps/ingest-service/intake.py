@@ -153,11 +153,13 @@ def get_session(session_id: str) -> Optional[dict]:
 
 
 def get_session_items(session_id: str) -> list[dict]:
-    """Get all items in a session, unmapped items first."""
+    """Get all items in a session, unmapped items first, then in entry order.
+    Preserving entry order matters for manual stack intake — the physical
+    stack order needs to survive intake → ingest → routing."""
     return query("""
         SELECT * FROM intake_items
         WHERE session_id = %s
-        ORDER BY is_mapped ASC, product_name
+        ORDER BY is_mapped ASC, created_at ASC
     """, (session_id,))
 
 
@@ -250,24 +252,40 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
                          grade_value: str = "") -> dict:
     """
     Add a single raw card item to a session (manual entry flow).
-    Calculates offer_price and unit_cost_basis from the given offer_percentage.
-    Returns the created intake_item row.
-    """
-    offer_price, unit_cost_basis = calc_offer_price(
-        market_price, quantity, offer_percentage, product_type="raw")
 
-    return execute_returning("""
-        INSERT INTO intake_items
-            (session_id, product_name, tcgplayer_id, product_type,
-             set_name, card_number, condition, rarity,
-             quantity, market_price, offer_price, unit_cost_basis, is_mapped,
-             is_graded, grade_company, grade_value)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s, %s)
-        RETURNING *
-    """, (session_id, product_name, tcgplayer_id, "raw",
-          set_name, card_number, condition, rarity,
-          quantity, market_price, offer_price, unit_cost_basis,
-          is_graded, grade_company or None, grade_value or None))
+    If quantity > 1, explode into N separate qty=1 rows with staggered
+    created_at timestamps. This preserves the physical stack order through
+    ingest → routing (where each copy needs its own routing decision) and
+    keeps siblings adjacent in the default 'entered order' sort.
+
+    Calculates offer_price and unit_cost_basis from the given offer_percentage.
+    Returns the first created intake_item row.
+    """
+    # Per-unit offer so each qty=1 split row is priced identically to the
+    # N=quantity parent would have been.
+    unit_offer, unit_cost = calc_offer_price(
+        market_price, 1, offer_percentage, product_type="raw")
+
+    first_row = None
+    for i in range(max(1, quantity)):
+        row = execute_returning("""
+            INSERT INTO intake_items
+                (session_id, product_name, tcgplayer_id, product_type,
+                 set_name, card_number, condition, rarity,
+                 quantity, market_price, offer_price, unit_cost_basis, is_mapped,
+                 is_graded, grade_company, grade_value,
+                 created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s, %s,
+                    CURRENT_TIMESTAMP + (%s * INTERVAL '1 microsecond'))
+            RETURNING *
+        """, (session_id, product_name, tcgplayer_id, "raw",
+              set_name, card_number, condition, rarity,
+              1, market_price, unit_offer, unit_cost,
+              is_graded, grade_company or None, grade_value or None,
+              i))
+        if first_row is None:
+            first_row = row
+    return first_row
 
 
 # ==========================================
