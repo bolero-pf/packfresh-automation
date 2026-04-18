@@ -2344,7 +2344,7 @@ async function _rsRelink() {
             _renderSessionCard();
         }
     };
-    relinkItem(item.id, _rsSessionId);
+    relinkItem(item.id, _rsSessionId, item.product_name || '');
 }
 
 async function _rsChangeCondition() {
@@ -2788,7 +2788,7 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
                 <div class="action-dropdown-container" style="position:relative;display:inline-block;">
                     <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.78rem;padding:3px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
                     <div class="action-dropdown">
-                        <button onclick="relinkItem('${item.id}', '${sessionId}')">🔗 Relink</button>
+                        <button onclick="relinkItem('${item.id}', '${sessionId}', '${escName}')">🔗 Relink</button>
                         <button onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Edit Qty</button>
                         ${damageToggle}
                         <hr>
@@ -2909,16 +2909,18 @@ let _relinkSessionId = null;
 // doesn't kick the user out of the card-by-card flow.
 let _relinkOnSuccess = null;
 
-function relinkItem(itemId, sessionId) {
+function relinkItem(itemId, sessionId, initialQuery = '') {
     _relinkItemId = itemId;
     _relinkSessionId = sessionId;
 
+    const prefill = (initialQuery || '').replace(/"/g, '&quot;');
     document.getElementById('relink-body').innerHTML = `
         <h3 style="margin-bottom:12px;">🔗 Relink Item</h3>
         <div style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px;">
             <div style="flex:1;">
                 <label style="font-size:0.85rem; color:var(--text-dim);">Search card prices (Scrydex cache — includes Japanese)</label>
                 <input type="text" id="relink-search" placeholder="e.g. Alakazam ex / 215"
+                       value="${prefill}"
                        style="width:100%; margin-top:4px;"
                        onkeydown="if(event.key==='Enter') relinkSearch()">
             </div>
@@ -2936,7 +2938,16 @@ function relinkItem(itemId, sessionId) {
         </div>
     `;
     document.getElementById('relink-modal').classList.add('active');
-    setTimeout(() => document.getElementById('relink-search').focus(), 100);
+    setTimeout(() => {
+        const input = document.getElementById('relink-search');
+        input.focus();
+        input.select();
+    }, 100);
+    // If we pre-filled a query, fire the search immediately so results are
+    // already on screen by the time the modal finishes animating in.
+    if (initialQuery) {
+        setTimeout(() => relinkSearch(), 120);
+    }
 }
 
 function closeRelink() {
