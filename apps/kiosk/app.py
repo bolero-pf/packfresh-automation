@@ -248,11 +248,12 @@ def browse():
     }
     order_by = sort_map.get(sort, "card_name ASC")
 
-    # Group key includes variant so 1st Ed and Unlimited printings of the
-    # same card become separate listings with independent prices. Default
-    # variants (normal, holofoil) and NULLs fold into '' so they don't
-    # fragment listings for the common case of single-variant cards.
-    group_key = "card_name, set_name, tcgplayer_id, COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '')"
+    # Group key folds NULL/normal/holofoil to one bucket so single-variant
+    # cards don't fragment. Distinguishing variants (1st Ed vs Unlimited,
+    # reverseHolofoil, etc.) get their own tile.
+    group_key = ("card_name, set_name, tcgplayer_id, "
+                 "CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') "
+                 "THEN '' ELSE variant END")
 
     count_row = db.query_one(f"""
         SELECT COUNT(DISTINCT ({group_key})) AS total
@@ -263,9 +264,9 @@ def browse():
     total = count_row["total"] if count_row else 0
 
     # Aggregated cards with per-condition breakdown.
-    # Group key intentionally excludes scrydex_id and the raw variant string
-    # — we just MAX() those so old (NULL scrydex_id) and newly-relinked
-    # rows of the same card collapse into one tile in browse.
+    # variant_key is the *bucket* value: NULL/normal/holofoil all fold to ''
+    # so single-variant cards stay in one tile. variant_raw is preserved for
+    # display when a card has multiple printings in Scrydex.
     rows = db.query(f"""
         SELECT
             card_name,
@@ -273,7 +274,7 @@ def browse():
             tcgplayer_id,
             MAX(scrydex_id) AS scrydex_id,
             MAX(variant_raw) AS variant_raw,
-            variant_key AS variant,
+            variant_key,
             MAX(image_url) AS image_url,
             SUM(cond_qty) AS total_qty,
             MIN(min_price) AS min_price,
@@ -283,7 +284,10 @@ def browse():
         FROM (
             SELECT card_name, set_name, tcgplayer_id, scrydex_id,
                    variant AS variant_raw,
-                   COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '') AS variant_key,
+                   CASE WHEN variant IS NULL OR variant IN ('normal', 'holofoil')
+                        THEN ''
+                        ELSE variant
+                   END AS variant_key,
                    image_url,
                    condition,
                    COUNT(*) AS cond_qty,
@@ -341,26 +345,29 @@ def browse():
                 if sx.get("n"):
                     n_variants = int(sx["n"])
 
-        # Variant badge label: prefer the explicit raw_cards.variant, even
-        # if it's 'normal' or 'holofoil', when the card has multiple variants
-        # in Scrydex (so customer sees "this is the holofoil, not the 1st ed").
+        # variant_key is the bucket value used for filtering & cart matching
+        # (NULL/normal/holofoil all fold to ''). variant_label is the badge
+        # shown on the tile — only present when the card has more than one
+        # printing in Scrydex, so customers know to verify which they're
+        # picking.
         variant_raw = r.get("variant_raw") or ""
+        variant_key = r.get("variant_key") or ""
         if n_variants > 1:
             variant_label = variant_raw or "(unspecified)"
         else:
-            # Single-variant card → no badge (default behavior).
             variant_label = None
 
         cards.append({
-            "card_name":    r["card_name"],
-            "set_name":     r["set_name"],
-            "tcgplayer_id": r["tcgplayer_id"],
-            "variant":      variant_label,
-            "image_url":    image_url,
-            "total_qty":    r["total_qty"],
-            "min_price":    float(r["min_price"]) if r["min_price"] else None,
-            "max_price":    float(r["max_price"]) if r["max_price"] else None,
-            "conditions":   r["conditions"] or {},
+            "card_name":     r["card_name"],
+            "set_name":      r["set_name"],
+            "tcgplayer_id":  r["tcgplayer_id"],
+            "variant_key":   variant_key,
+            "variant_label": variant_label,
+            "image_url":     image_url,
+            "total_qty":     r["total_qty"],
+            "min_price":     float(r["min_price"]) if r["min_price"] else None,
+            "max_price":     float(r["max_price"]) if r["max_price"] else None,
+            "conditions":    r["conditions"] or {},
         })
 
     return jsonify({
@@ -416,7 +423,7 @@ def card_detail():
     variant   = (request.args.get("variant") or "").strip()
 
     # Match the grouping rule from /api/browse: default variants fold to ''.
-    variant_filter = "AND COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '') = %s"
+    variant_filter = "AND CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') THEN '' ELSE variant END = %s"
 
     copies = db.query(f"""
         SELECT id, barcode, card_name, set_name, card_number,
@@ -524,7 +531,7 @@ def create_hold():
             WHERE card_name = %s AND set_name = %s
               AND condition = %s AND state = 'STORED'
               AND current_hold_id IS NULL
-              AND COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '') = %s
+              AND CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') THEN '' ELSE variant END = %s
             ORDER BY created_at ASC
             LIMIT %s
         """, (card_name, set_name, condition, variant, qty))
@@ -811,7 +818,7 @@ def champion_checkout():
             WHERE card_name = %s AND set_name = %s
               AND condition = %s AND state = 'STORED'
               AND current_hold_id IS NULL
-              AND COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '') = %s
+              AND CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') THEN '' ELSE variant END = %s
             ORDER BY created_at ASC
             LIMIT %s
         """, (card_name, set_name, condition, variant, qty))
