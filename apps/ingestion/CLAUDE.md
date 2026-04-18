@@ -41,3 +41,18 @@ All 3 stages support:
 - Uses `shared/ppt_client.py`, `shared/breakdown_helpers.py`
 - Breakdown recipes shared with intake and inventory via same DB tables
 - All state persisted to DB — no client-side session state (replaces old _approvedItems JS Set)
+
+## Pricing: ALWAYS Scrydex-first, PPT fallback
+PPT is unreliable (graded data often 3× off). Scrydex has holes (Japanese, Scrydex-only),
+so PPT stays as a fallback — **never** as the primary source.
+
+- **Raw per-condition price:** `PriceCache.get_card_by_tcgplayer_id(tcg_id)` →
+  `ScrydexClient.extract_condition_price(card_data, condition, variant=...)`. On
+  miss, fall back to `ppt.get_card_by_tcgplayer_id()` + `PriceProvider.extract_condition_price()`.
+- **Graded per-grade price:** `get_live_graded_comps(tcg_id, company, grade, db, ...)` from
+  `shared/graded_pricing.py` (live eBay comps → cache inside). On miss, `PriceProvider.get_graded_price(card_data, company, grade)` from PPT.
+- Existing examples to copy from: `update_item_grade` (graded), `update_item_condition`
+  (raw) in `ingest.py`.
+- **Self-check:** grep any pricing diff for `ppt_client.get_card_by_tcgplayer_id` —
+  if it's not preceded by a `PriceCache` / `get_live_graded_comps` call in the same
+  function, the change is wrong. Rewrite before committing.

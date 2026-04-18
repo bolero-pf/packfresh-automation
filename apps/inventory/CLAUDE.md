@@ -38,3 +38,19 @@ The breakdown system spans 3 services (inventory, ingest-service, ingestion) sha
 - Inventory service proxies to ingest-service via `INGEST_INTERNAL_URL` for some operations
 - Auth via `requires_auth` decorator (checks ADMIN_KEY)
 - CacheManager handles Shopify product cache staleness detection and background refresh
+
+## Pricing: ALWAYS Scrydex-first, PPT fallback
+PPT graded data is unreliable (often 3× off from market). Scrydex has holes (Japanese,
+Scrydex-only cards) so PPT stays as a fallback — **never** as the primary source.
+
+- **Raw per-condition:** `PriceCache.get_card_by_tcgplayer_id(tcg_id)` →
+  `ScrydexClient.extract_condition_price(card_data, condition, variant=...)`. PPT fallback
+  only on cache miss.
+- **Graded per-grade:** `get_live_graded_comps(tcg_id, company, grade, db, ...)` from
+  `shared/graded_pricing.py`. PPT fallback via `PriceProvider.get_graded_price()` only on miss.
+- For sealed-breakdown component pricing, `refresh_stale_component_prices()` in
+  `shared/breakdown_helpers.py` already routes through the correct hierarchy — use it,
+  don't hand-roll a PPT call.
+- **Self-check:** grep any pricing diff for `ppt_client.get_card_by_tcgplayer_id` —
+  if it's not preceded by a `PriceCache` / `get_live_graded_comps` call in the same
+  function, the change is wrong. Rewrite before committing.

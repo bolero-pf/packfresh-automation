@@ -30,3 +30,21 @@ in_progress → cancelled
 - Status badge colors are defined in a `statusColors` JS object in the dashboard template
 - `intake.py` has guard clauses that block modifications (offer %, adding items) based on session status
 - `list_sessions()` accepts comma-separated status strings for flexible filtering
+
+## Pricing: ALWAYS Scrydex-first, PPT fallback
+PPT graded data is unreliable (often 3× off from market). Scrydex has holes (Japanese,
+Scrydex-only cards) so PPT stays as a fallback — **never** as the primary source.
+
+- **Raw per-condition:** `PriceCache.get_card_by_tcgplayer_id(tcg_id)` →
+  `ScrydexClient.extract_condition_price(card_data, condition, variant=...)`. PPT fallback
+  only on cache miss.
+- **Graded per-grade:** `get_live_graded_comps(tcg_id, company, grade, db, ...)` from
+  `shared/graded_pricing.py`. PPT fallback via `PriceProvider.get_graded_price()` only on miss.
+- **Sort/entry note:** `add_single_raw_item` explodes qty>1 into N qty=1 rows with
+  staggered `created_at` so a manually-entered stack keeps its physical order through
+  intake → ingest → routing. `get_session_items` sorts by `is_mapped ASC, created_at ASC`
+  (unmapped floats up, then entry order). **Do not** re-add alphabetical/price sort to
+  the backend default — those are frontend opt-ins.
+- **Self-check:** grep any pricing diff for `ppt_client.get_card_by_tcgplayer_id` —
+  if it's not preceded by a `PriceCache` / `get_live_graded_comps` call in the same
+  function, the change is wrong. Rewrite before committing.
