@@ -429,6 +429,10 @@ def search_cards_for_relink():
     params.append(limit)
     rows = db.query(sql, tuple(params))
 
+    # Include Scrydex-only rows (tcgplayer_id is NULL) so the relink UI can
+    # show them — the frontend renders those as "Scrydex-only (can't link yet)"
+    # instead of hiding them, which matters for Japanese cards that Scrydex
+    # tracks but that have no TCGplayer mapping.
     results = [{
         "scrydex_id":    r.get("scrydex_id"),
         "tcgplayer_id":  r.get("tcgplayer_id"),
@@ -439,7 +443,7 @@ def search_cards_for_relink():
         "variant":       r.get("variant"),
         "image":         r.get("image_small") or r.get("image_medium"),
         "market_price":  float(r["market_price"]) if r.get("market_price") else None,
-    } for r in rows if r.get("tcgplayer_id")]  # must have a TCG ID to be usable
+    } for r in rows]
 
     return jsonify({"results": results, "total": len(results)})
 

@@ -2917,8 +2917,8 @@ function relinkItem(itemId, sessionId) {
         <h3 style="margin-bottom:12px;">🔗 Relink Item</h3>
         <div style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px;">
             <div style="flex:1;">
-                <label style="font-size:0.85rem; color:var(--text-dim);">Search Prices</label>
-                <input type="text" id="relink-search" placeholder="e.g. Celebrations ETB"
+                <label style="font-size:0.85rem; color:var(--text-dim);">Search card prices (Scrydex cache — includes Japanese)</label>
+                <input type="text" id="relink-search" placeholder="e.g. Alakazam ex / 215"
                        style="width:100%; margin-top:4px;"
                        onkeydown="if(event.key==='Enter') relinkSearch()">
             </div>
@@ -2952,26 +2952,45 @@ async function relinkSearch() {
 
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
     try {
-        const sr = await fetch('/api/ppt/search-sealed', {
+        // Cache-first card search — hits scrydex_price_cache directly (0 API
+        // credits) and returns raw cards, including Japanese sets.
+        const sr = await fetch('/api/ingest/search-cards', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ query }),
+            body: JSON.stringify({ query, limit: 25 }),
         });
         const sd = await sr.json();
         if (!sr.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${sd.error}</div>`; return; }
         const results = sd.results || [];
-        if (!results.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No results found</div>'; return; }
+        if (!results.length) {
+            resultsDiv.innerHTML = '<div class="alert alert-warning">No card matches in Scrydex cache. Try a partial name or the card number (e.g. "Alakazam" or "215").</div>';
+            return;
+        }
 
-        resultsDiv.innerHTML = '<div style="max-height:350px; overflow-y:auto;">' + results.slice(0, 10).map(p => {
-            const name = p.name || p.productName || '';
-            const tcgId = p.tcgplayer_id || p.tcgplayerId || p.tcgPlayerId || 0;
-            const price = p.unopenedPrice || p.marketPrice || 0;
-            const setName = p.setName || p.set_name || '';
+        resultsDiv.innerHTML = '<div style="max-height:350px; overflow-y:auto;">' + results.slice(0, 25).map(p => {
+            const name    = p.product_name || '';
+            const tcgId   = p.tcgplayer_id;
+            const price   = p.market_price || 0;
+            const setName = p.set_name || '';
+            const cardNum = p.card_number ? `#${p.card_number}` : '';
+            const variant = p.variant && p.variant !== 'normal' ? ` · ${p.variant}` : '';
+            // Scrydex-only cards (no TCG ID) can't be linked with the current
+            // relink backend — skip them with a hint rather than showing a
+            // broken row. Known gap for truly JP-only cards; English JP-sets
+            // that Scrydex has mapped to TCG still come through fine.
+            if (!tcgId) {
+                return `<div style="padding:8px 12px; border:1px dashed var(--border); border-radius:6px; margin-bottom:6px; opacity:0.55;">
+                    <div style="font-weight:600;">${name} ${cardNum}</div>
+                    <div style="font-size:0.78rem; color:var(--text-dim);">${setName}${variant} · Scrydex-only (no TCG ID — can't link yet)</div>
+                </div>`;
+            }
+            const nameEsc = name.replace(/'/g, "\\'");
+            const setEsc  = setName.replace(/'/g, "\\'");
             return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
-                         onclick="relinkSelect(${tcgId}, '${name.replace(/'/g,"\\'")}', ${price}, '${setName.replace(/'/g,"\\'")}')">
-                <div style="font-weight:600;">${name}</div>
-                <div style="font-size:0.8rem; color:var(--text-dim);">${setName} · TCG#${tcgId} · $${Number(price).toFixed(2)}${p._price_source ? ' <small style="opacity:0.7;">' + ({cache:'⚡cache',ppt:'PPT',scrydex:'SDX'}[p._price_source]||p._price_source) + '</small>' : ''}</div>
+                         onclick="relinkSelect(${tcgId}, '${nameEsc}', ${price}, '${setEsc}')">
+                <div style="font-weight:600;">${name} ${cardNum}</div>
+                <div style="font-size:0.8rem; color:var(--text-dim);">${setName}${variant} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
             </div>`;
         }).join('') + '</div>';
     } catch(err) {
