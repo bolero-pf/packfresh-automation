@@ -2242,6 +2242,7 @@ def split_singles(session_id):
     return jsonify({
         "success": True,
         "original_id": item_id,
+        "new_ids": new_ids,
         "created": len(new_ids),
         "total": total_qty,
     })

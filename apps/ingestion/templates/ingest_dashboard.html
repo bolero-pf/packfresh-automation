@@ -2314,13 +2314,17 @@ async function _rsSplitSingles() {
         // Update counts (was counted as oldQty, now it's 1 for this item + (oldQty-1) new items = same total)
         // No count change needed since total qty stays the same
 
-        // Insert (oldQty - 1) clones after current position
+        // Insert (oldQty - 1) clones after current position — use the real
+        // UUIDs returned by the backend so subsequent /route-card saves don't
+        // POST a fake "<orig>_split_<i>" id (Postgres rejects as invalid UUID).
+        const newIds = d.new_ids || [];
         const newItems = [];
         for (let i = 0; i < oldQty - 1; i++) {
             newItems.push({
                 ...item,
-                id: d.original_id + '_split_' + i,  // temp ID until reload
+                id: newIds[i],
                 quantity: 1,
+                routing_reviewed_at: null,  // each new copy must be re-reviewed
                 _enrichLoading: item._enrichLoading,
             });
         }
