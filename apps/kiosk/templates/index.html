@@ -123,6 +123,13 @@ header {
 .cond-HP  { background: rgba(248,113,113,0.15); color: var(--red); }
 .cond-DMG { background: rgba(248,113,113,0.25); color: var(--red); }
 
+.variant-badge {
+  display: inline-block; font-size: 0.6rem; font-weight: 700;
+  padding: 1px 6px; border-radius: 4px; margin-left: 6px;
+  background: rgba(192,132,252,0.18); color: #c084fc;
+  letter-spacing: 0.02em; vertical-align: middle;
+}
+
 .card-price { font-family: var(--mono); font-size: 0.88rem; color: var(--accent); margin-top: auto; padding-top: 6px; }
 
 /* ── Pagination ── */
@@ -715,10 +722,16 @@ function renderGrid(cards) {
         ? `$${c.min_price.toFixed(2)}`
         : `$${c.min_price.toFixed(2)} – $${c.max_price.toFixed(2)}`
       : '';
+    // Variant label only appears when it's meaningful (1st Ed, Unlimited,
+    // reverseHolofoil, pokemonCenter, etc.) — default variants (normal,
+    // holofoil, NULL) collapse to '' server-side and render nothing.
+    const variantBadge = c.variant
+      ? `<span class="variant-badge">${esc(c.variant)}</span>`
+      : '';
     return `<div class="card" onclick="openDetail(window._cardCache[${idx}])">
       <div class="card-img">${img}</div>
       <div class="card-body">
-        <div class="card-name">${esc(c.card_name)}</div>
+        <div class="card-name">${esc(c.card_name)}${variantBadge}</div>
         <div class="card-set">${esc(c.set_name||'')}</div>
         <div class="cond-pills">${pills}</div>
         ${price ? `<div class="card-price">${price}</div>` : ''}
@@ -751,7 +764,7 @@ async function openDetail(card) {
   overlay.classList.add('active');
 
   try {
-    const d = await get(`/api/card?name=${encodeURIComponent(card.card_name)}&set=${encodeURIComponent(card.set_name||'')}`);
+    const d = await get(`/api/card?name=${encodeURIComponent(card.card_name)}&set=${encodeURIComponent(card.set_name||'')}&variant=${encodeURIComponent(card.variant||'')}`);
     renderDetail(card, d.copies || []);
   } catch(e) {
     panel.innerHTML = `<div class="empty"><p>${e.message}</p></div>`;
@@ -763,6 +776,9 @@ function renderDetail(card, copies) {
   const img = card.image_url
     ? `<img src="${esc(card.image_url)}" alt="${esc(card.card_name)}">`
     : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:3rem;opacity:.2">🃏</div>';
+  const variantNote = card.variant
+    ? `<span class="variant-badge" style="vertical-align:middle;margin-left:8px;">${esc(card.variant)}</span>`
+    : '';
 
   // Group copies by condition for qty selection
   const byCondition = {};
@@ -772,11 +788,12 @@ function renderDetail(card, copies) {
   });
 
   const condOrder = ['NM','LP','MP','HP','DMG'];
+  const cardVariant = card.variant || '';
   const condRows = Object.entries(byCondition)
     .sort(([a],[b]) => condOrder.indexOf(a) - condOrder.indexOf(b))
     .map(([cond, copies]) => {
       const avgPrice = copies.reduce((s,c) => s + (parseFloat(c.current_price)||0), 0) / copies.length;
-      const inCart = _cart.filter(ci => ci.card_name === card.card_name && ci.set_name === card.set_name && ci.condition === cond);
+      const inCart = _cart.filter(ci => ci.card_name === card.card_name && ci.set_name === card.set_name && ci.condition === cond && (ci.variant||'') === cardVariant);
       const cartQty = inCart.reduce((s,ci) => s + ci.qty, 0);
       const actionHtml = cartQty > 0
         ? `<div class="copy-action"><div class="copy-qty-bar">
@@ -785,7 +802,7 @@ function renderDetail(card, copies) {
             <button class="qty-btn" data-delta="1">+</button>
           </div></div>`
         : `<div class="copy-action"><button class="copy-add-btn">+ Add to Picks</button></div>`;
-      return `<div class="copy-row${cartQty>0?' selected':''}" data-cond="${cond}" data-avail="${copies.length}" data-price="${avgPrice.toFixed(2)}" data-card-name="${esc(card.card_name)}" data-set-name="${esc(card.set_name||'')}" data-image-url="${esc(card.image_url||'')}">
+      return `<div class="copy-row${cartQty>0?' selected':''}" data-cond="${cond}" data-variant="${esc(cardVariant)}" data-avail="${copies.length}" data-price="${avgPrice.toFixed(2)}" data-card-name="${esc(card.card_name)}" data-set-name="${esc(card.set_name||'')}" data-image-url="${esc(card.image_url||'')}">
         <div class="copy-info">
           <div class="copy-cond"><span class="cond-pill cond-${cond}">${cond}</span></div>
           <div class="copy-num">${copies.length} available${copies[0]?.card_number ? ' · #'+copies[0].card_number : ''}</div>
@@ -799,7 +816,7 @@ function renderDetail(card, copies) {
   panel.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
       <div>
-        <div class="panel-title">${esc(card.card_name)}</div>
+        <div class="panel-title">${esc(card.card_name)}${variantNote}</div>
         <div class="panel-sub">${esc(card.set_name||'')}</div>
       </div>
       <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeDetailPanel()">✕</button>
@@ -846,7 +863,7 @@ document.addEventListener('click', function(e) {
   if (cartCount() >= MAX) return;
   addToCart(row.dataset.cardName, row.dataset.setName, row.dataset.cond, 1,
             parseFloat(row.dataset.price) || 0, row.dataset.imageUrl,
-            parseInt(row.dataset.avail) || 1);
+            parseInt(row.dataset.avail) || 1, row.dataset.variant || '');
   // Swap add button to qty bar in place
   row.classList.add('selected');
   row.querySelector('.copy-action').innerHTML = `<div class="copy-qty-bar">
@@ -867,14 +884,15 @@ document.addEventListener('click', function(e) {
   const cardName = row.dataset.cardName;
   const setName = row.dataset.setName;
   const cond = row.dataset.cond;
+  const variant = row.dataset.variant || '';
   const avail = parseInt(row.dataset.avail);
   const delta = parseInt(btn.dataset.delta);
-  const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
+  const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond && (c.variant||'') === variant);
   if (!item) return;
   const newQty = item.qty + delta;
   if (newQty < 1) {
     // Remove from cart — swap qty bar back to add button
-    removeFromCart(cardName, setName, cond);
+    removeFromCart(cardName, setName, cond, variant);
     row.classList.remove('selected');
     row.querySelector('.copy-action').innerHTML = '<button class="copy-add-btn">+ Add to Picks</button>';
     _updateDetailPicksBtn();
@@ -901,13 +919,14 @@ document.addEventListener('click', function(e) {
   const cardName = row.dataset.cardName;
   const setName = row.dataset.setName;
   const cond = row.dataset.condition;
+  const variant = row.dataset.variant || '';
   const delta = parseInt(btn.dataset.delta);
   const avail = parseInt(row.dataset.avail) || 999;
-  const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
+  const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond && (c.variant||'') === variant);
   if (!item) return;
   const newQty = item.qty + delta;
   if (newQty < 1) {
-    removeFromCart(cardName, setName, cond);
+    removeFromCart(cardName, setName, cond, variant);
     renderCart(document.getElementById('cart-panel'));
     return;
   }
@@ -937,20 +956,22 @@ document.addEventListener('click', function(e) {
 });
 
 
-function addToCart(cardName, setName, cond, qty, price, imageUrl, avail) {
-  const existing = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond);
+function addToCart(cardName, setName, cond, qty, price, imageUrl, avail, variant) {
+  variant = variant || '';
+  const existing = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond && (c.variant||'') === variant);
   if (existing) {
     existing.qty = Math.min(existing.qty + qty, MAX);
     if (avail) existing.avail = avail;
   } else {
-    _cart.push({ card_name: cardName, set_name: setName, condition: cond, qty, price, image_url: imageUrl, avail: avail || qty });
+    _cart.push({ card_name: cardName, set_name: setName, condition: cond, variant, qty, price, image_url: imageUrl, avail: avail || qty });
   }
   updateCartBadge();
   _saveCart();
 }
 
-function removeFromCart(cardName, setName, cond) {
-  _cart = _cart.filter(c => !(c.card_name === cardName && c.set_name === setName && c.condition === cond));
+function removeFromCart(cardName, setName, cond, variant) {
+  variant = variant || '';
+  _cart = _cart.filter(c => !(c.card_name === cardName && c.set_name === setName && c.condition === cond && (c.variant||'') === variant));
   updateCartBadge();
   _saveCart();
 }
@@ -1007,11 +1028,13 @@ function renderCart(panel) {
     return;
   }
 
-  const items = _cart.map(c => `
-    <div class="cart-item" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}" data-avail="${c.avail || c.qty}">
+  const items = _cart.map(c => {
+    const vBadge = c.variant ? `<span class="variant-badge" style="margin-left:6px;">${esc(c.variant)}</span>` : '';
+    return `
+    <div class="cart-item" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}" data-variant="${esc(c.variant||'')}" data-avail="${c.avail || c.qty}">
       ${c.image_url ? `<img src="${esc(c.image_url)}" style="aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
       <div class="cart-item-info">
-        <div class="cart-item-name">${esc(c.card_name)}</div>
+        <div class="cart-item-name">${esc(c.card_name)}${vBadge}</div>
         <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> · $${(parseFloat(c.price)||0).toFixed(2)} ea · <strong style="color:var(--accent);">$${((parseFloat(c.price)||0) * c.qty).toFixed(2)}</strong></div>
       </div>
       <div class="copy-qty-bar" style="flex-shrink:0;">
@@ -1020,7 +1043,8 @@ function renderCart(panel) {
         <button class="qty-btn cart-qty-btn" data-delta="1">+</button>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   panel.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
@@ -1106,6 +1130,7 @@ async function submitHold() {
     card_name: c.card_name,
     set_name:  c.set_name,
     condition: c.condition,
+    variant:   c.variant || '',
     qty:       c.qty,
   }));
 
@@ -1200,6 +1225,7 @@ async function submitChampionCheckout() {
     card_name: c.card_name,
     set_name:  c.set_name,
     condition: c.condition,
+    variant:   c.variant || '',
     qty:       c.qty,
   }));
 

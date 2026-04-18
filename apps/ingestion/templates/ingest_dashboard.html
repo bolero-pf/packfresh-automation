@@ -3012,8 +3012,13 @@ async function relinkSearch() {
             // 1st Edition vs Unlimited (and reverseHolofoil, etc.) are stored
             // as separate variants but share a TCG product ID — the user must
             // pick the right one so graded comps come back accurate.
-            const variantBadge = (p.variant && p.variant !== 'normal')
-                ? `<span style="font-size:0.62rem; padding:1px 5px; border-radius:3px; margin-left:4px; background:rgba(192,132,252,0.18); color:var(--accent2,#c084fc);">${p.variant}</span>`
+            // Only show variant when it's a distinguishing printing — default
+            // variants (normal, holofoil) add noise without info for cards
+            // that only have one printing.
+            const variantLabel = p.variant || '';
+            const isDefaultVariant = !variantLabel || variantLabel === 'normal' || variantLabel === 'holofoil';
+            const variantBadge = !isDefaultVariant
+                ? `<span style="font-size:0.62rem; padding:1px 5px; border-radius:3px; margin-left:4px; background:rgba(192,132,252,0.18); color:var(--accent2,#c084fc);">${variantLabel}</span>`
                 : '';
             return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"

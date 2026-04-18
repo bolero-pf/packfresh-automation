@@ -217,9 +217,14 @@ def browse():
     }
     order_by = sort_map.get(sort, "card_name ASC")
 
-    # Count distinct cards (not individual copies)
+    # Group key includes variant so 1st Ed and Unlimited printings of the
+    # same card become separate listings with independent prices. Default
+    # variants (normal, holofoil) and NULLs fold into '' so they don't
+    # fragment listings for the common case of single-variant cards.
+    group_key = "card_name, set_name, tcgplayer_id, COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '')"
+
     count_row = db.query_one(f"""
-        SELECT COUNT(DISTINCT (card_name, set_name, tcgplayer_id)) AS total
+        SELECT COUNT(DISTINCT ({group_key})) AS total
         FROM raw_cards
         WHERE {where}
           AND current_hold_id IS NULL
@@ -232,32 +237,40 @@ def browse():
             card_name,
             set_name,
             tcgplayer_id,
+            variant_key AS variant,
             MAX(image_url) AS image_url,
-            COUNT(*) AS total_qty,
-            MIN(current_price) AS min_price,
-            MAX(current_price) AS max_price,
+            SUM(cond_qty) AS total_qty,
+            MIN(min_price) AS min_price,
+            MAX(max_price) AS max_price,
             MAX(created_at) AS created_at,
             jsonb_object_agg(condition, cond_qty) AS conditions
         FROM (
-            SELECT card_name, set_name, tcgplayer_id, image_url,
-                   condition, COUNT(*) AS cond_qty, MIN(current_price) AS current_price,
+            SELECT card_name, set_name, tcgplayer_id,
+                   COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '') AS variant_key,
+                   image_url,
+                   condition,
+                   COUNT(*) AS cond_qty,
+                   MIN(current_price) AS min_price,
+                   MAX(current_price) AS max_price,
                    MAX(created_at) AS created_at
             FROM raw_cards
             WHERE {where}
               AND state = 'STORED'
-            GROUP BY card_name, set_name, tcgplayer_id, image_url, condition
+            GROUP BY card_name, set_name, tcgplayer_id, variant_key, image_url, condition
         ) sub
-        GROUP BY card_name, set_name, tcgplayer_id
+        GROUP BY card_name, set_name, tcgplayer_id, variant_key
         ORDER BY {order_by}
         LIMIT 24 OFFSET %s
     """, tuple(params) + (offset,))
 
     cards = []
     for r in rows:
+        variant = r["variant"] or ""
         cards.append({
             "card_name":    r["card_name"],
             "set_name":     r["set_name"],
             "tcgplayer_id": r["tcgplayer_id"],
+            "variant":      variant or None,  # None signals 'nothing to show'
             "image_url":    r["image_url"],
             "total_qty":    r["total_qty"],
             "min_price":    float(r["min_price"]) if r["min_price"] else None,
@@ -308,22 +321,32 @@ def card_detail():
     """
     Individual copies of a specific card for the detail view.
     Returns each copy with condition, price, card_number.
+
+    Variant is part of the key so 1st Ed and Unlimited printings of the
+    same card are fetched as distinct detail views. '' or omitted treats
+    the default (normal/holofoil) bucket.
     """
     card_name = request.args.get("name", "")
     set_name  = request.args.get("set", "")
+    variant   = (request.args.get("variant") or "").strip()
 
-    copies = db.query("""
+    # Match the grouping rule from /api/browse: default variants fold to ''.
+    variant_filter = "AND COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '') = %s"
+
+    copies = db.query(f"""
         SELECT id, barcode, card_name, set_name, card_number,
-               condition, current_price, image_url
+               condition, current_price, image_url, variant
         FROM raw_cards
-        WHERE card_name = %s AND set_name = %s AND state = 'STORED' AND current_hold_id IS NULL
+        WHERE card_name = %s AND set_name = %s
+          AND state = 'STORED' AND current_hold_id IS NULL
+          {variant_filter}
         ORDER BY
             CASE condition
                 WHEN 'NM'  THEN 1 WHEN 'LP'  THEN 2 WHEN 'MP' THEN 3
                 WHEN 'HP'  THEN 4 WHEN 'DMG' THEN 5 ELSE 9
             END,
             current_price DESC
-    """, (card_name, set_name))
+    """, (card_name, set_name, variant))
 
     return jsonify({"copies": [dict(c) for c in copies]})
 
@@ -373,12 +396,17 @@ def create_hold():
     assigned = []
     errors   = []
 
-    # Resolve which cards to hold before opening transaction
+    # Resolve which cards to hold before opening transaction.
+    # Variant is part of the matching key — same (name,set,cond) can hold both
+    # 1st Ed and Unlimited copies, and a cart line for one must not steal from
+    # the other. Default variants (normal/holofoil/null) fold into '' to match
+    # how /api/browse groups.
     lines_resolved = []
     for line in items:
         card_name = line.get("card_name", "")
         set_name  = line.get("set_name", "")
         condition = line.get("condition", "NM")
+        variant   = (line.get("variant") or "").strip()
         qty       = max(1, int(line.get("qty", 1)))
 
         available = db.query("""
@@ -386,9 +414,10 @@ def create_hold():
             WHERE card_name = %s AND set_name = %s
               AND condition = %s AND state = 'STORED'
               AND current_hold_id IS NULL
+              AND COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '') = %s
             ORDER BY created_at ASC
             LIMIT %s
-        """, (card_name, set_name, condition, qty))
+        """, (card_name, set_name, condition, variant, qty))
 
         if not available:
             errors.append(f"No {condition} copies available for {card_name}")
@@ -399,7 +428,7 @@ def create_hold():
         for card in available:
             lines_resolved.append({
                 "card_name": card_name, "set_name": set_name,
-                "condition": condition,
+                "condition": condition, "variant": variant,
                 "card_id": str(card["id"]), "barcode": card["barcode"],
             })
 
@@ -662,6 +691,7 @@ def champion_checkout():
         card_name = line.get("card_name", "")
         set_name = line.get("set_name", "")
         condition = line.get("condition", "NM")
+        variant = (line.get("variant") or "").strip()
         qty = max(1, int(line.get("qty", 1)))
 
         available = db.query("""
@@ -671,9 +701,10 @@ def champion_checkout():
             WHERE card_name = %s AND set_name = %s
               AND condition = %s AND state = 'STORED'
               AND current_hold_id IS NULL
+              AND COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '') = %s
             ORDER BY created_at ASC
             LIMIT %s
-        """, (card_name, set_name, condition, qty))
+        """, (card_name, set_name, condition, variant, qty))
 
         if not available:
             errors.append(f"No {condition} copies available for {card_name}")
