@@ -55,15 +55,24 @@ KIOSK_CHECKOUT_ENABLED = os.environ.get("KIOSK_CHECKOUT_ENABLED", "false").lower
 # Access key — required to use kiosk (set once on in-store tablets via URL param ?key=...)
 KIOSK_ACCESS_KEY = os.environ.get("KIOSK_ACCESS_KEY", "")
 
-# Era mapping — groups set names by TCG era for browsing filters
-# Sets are matched by prefix/keyword. If a set doesn't match any era, it goes to "Vintage".
-ERA_KEYWORDS = {
+# Era mapping — list of canonical set-name PREFIXES per era. A set_name is
+# classified to an era when one of its prefixes matches case-insensitively.
+# Prefix matching avoids the substring trap (e.g. 'Prismatic Evolutions'
+# matching the literal keyword 'Evolutions' from the XY era), since "Mega
+# Evolution Black Star Promos" still starts with "Mega Evolution" → Mega
+# Evolution era. Order within each era doesn't matter; eras are tried in
+# the order most-recent-first so newer sets always win when prefixes nest.
+ERA_PREFIXES = {
     "Mega Evolution": [
-        "Mega Evolution", "Chaos Rising", "Perfect Order",
-        "Ascended Heroes", "Phantasmal Flames",
+        "Mega Evolution",   # base set + Mega Evolution Black Star Promos
+        "Chaos Rising", "Perfect Order", "Ascended Heroes",
+        "Phantasmal Flames",
     ],
     "Scarlet & Violet": [
-        "Scarlet & Violet", "Paldea Evolved", "Obsidian Flames", "151",
+        "Scarlet & Violet",  # base + Scarlet & Violet Black Star Promos
+        "SV: ",              # SV: Prismatic Evolutions, SV: Scarlet & Violet 151
+        "Paldea Evolved", "Obsidian Flames",
+        "151",               # SV-era 151 set
         "Paradox Rift", "Paldean Fates", "Temporal Forces",
         "Twilight Masquerade", "Twilight Masque",
         "Shrouded Fable", "Stellar Crown", "Surging Sparks",
@@ -71,46 +80,61 @@ ERA_KEYWORDS = {
         "White Flare", "Black Bolt",
     ],
     "Sword & Shield": [
-        "Sword & Shield", "Rebel Clash", "Darkness Ablaze", "Vivid Voltage",
+        "Sword & Shield",   # base + SWSH Black Star Promos
+        "SWSH ",            # SWSH Black Star Promos, SWSH Promos
+        "Rebel Clash", "Darkness Ablaze", "Vivid Voltage",
         "Battle Styles", "Chilling Reign", "Evolving Skies", "Fusion Strike",
         "Brilliant Stars", "Astral Radiance", "Lost Origin", "Silver Tempest",
         "Crown Zenith", "Shining Fates", "Champion's Path",
-        "Celebrations", "Pokemon GO", "Pokemon Go",
+        "Celebrations",
+        "Pokemon GO", "Pokemon Go", "Pokémon GO", "Pokémon Go",
     ],
     "Sun & Moon": [
-        "Sun & Moon", "Guardians Rising", "Burning Shadows", "Crimson Invasion",
+        "Sun & Moon",       # base + Sun & Moon Promos
+        "SM ",              # SM Black Star Promos
+        "Guardians Rising", "Burning Shadows", "Crimson Invasion",
         "Ultra Prism", "Forbidden Light", "Celestial Storm", "Lost Thunder",
         "Team Up", "Unbroken Bonds", "Unified Minds", "Cosmic Eclipse",
         "Detective Pikachu", "Hidden Fates", "Shining Legends", "Dragon Majesty",
     ],
     "XY": [
-        "XY", "Flashfire", "Furious Fists", "Phantom Forces", "Primal Clash",
+        "XY",
+        "Flashfire", "Furious Fists", "Phantom Forces", "Primal Clash",
         "Roaring Skies", "Ancient Origins", "BREAKthrough", "BREAKpoint",
-        "Fates Collide", "Steam Siege", "Evolutions", "Generations", "Double Crisis",
+        "Fates Collide", "Steam Siege",
+        "Evolutions",        # exact-prefix only; 'Prismatic Evolutions'
+                             # won't match because we check startswith
+        "Generations", "Double Crisis",
         "Kalos Starter",
     ],
     "Black & White": [
-        "Black & White", "Emerging Powers", "Noble Victories", "Next Destinies",
+        "Black & White",
+        "Emerging Powers", "Noble Victories", "Next Destinies",
         "Dark Explorers", "Dragons Exalted", "Dragon Vault",
         "Boundaries Crossed", "Plasma Storm", "Plasma Freeze",
         "Plasma Blast", "Legendary Treasures", "Radiant Collection",
     ],
     "Promos & Misc": [
+        "Wizards Black Star Promos", "Wizards of the Coast Promos",
+        "WoTC", "Nintendo",
         "Miscellaneous Cards & Products", "Miscellaneous",
         "McDonald's", "Trick or Trade", "Holiday Calendar",
-        "Best of Game", "Wizards of the Coast Promos",
-        "Nintendo Promos", "POP Series",
-        "Futsal", "Rumble",
+        "Best of Game", "POP Series", "Futsal", "Rumble",
     ],
 }
 
+
 def _classify_era(set_name: str) -> str:
+    """Map a set_name to an era using case-insensitive prefix match.
+    Anything unmatched (Base Set, Jungle, Fossil, Team Rocket, Gym, Neo,
+    e-Card, EX series, Diamond & Pearl, Platinum, HGSS, Call of Legends,
+    JP-only sets, etc.) falls into 'Vintage'."""
     if not set_name:
         return "Vintage"
-    sn = set_name.strip()
-    for era, keywords in ERA_KEYWORDS.items():
-        for kw in keywords:
-            if sn.lower().startswith(kw.lower()) or kw.lower() in sn.lower():
+    sn = set_name.strip().lower()
+    for era, prefixes in ERA_PREFIXES.items():
+        for p in prefixes:
+            if sn.startswith(p.lower()):
                 return era
     return "Vintage"
 
@@ -178,8 +202,10 @@ def browse():
         filters.append("(card_name ILIKE %s OR set_name ILIKE %s OR card_number ILIKE %s)")
         params += [f"%{q}%", f"%{q}%", f"%{q}%"]
     if set_name:
-        filters.append("set_name ILIKE %s")
-        params.append(f"%{set_name}%")
+        # Exact-match the picked set so 'Mega Evolution' doesn't pull in
+        # 'Mega Evolution Black Star Promos' as a substring.
+        filters.append("set_name = %s")
+        params.append(set_name)
     if conditions:
         valid = [c for c in conditions if c in ("NM", "LP", "MP", "HP", "DMG")]
         if valid:
@@ -193,18 +219,23 @@ def browse():
         filters.append("current_price <= %s")
         params.append(max_price)
     if era:
-        if era == "Vintage":
-            # Classic = doesn't match any known era keywords
-            all_kws = [kw for kws in ERA_KEYWORDS.values() for kw in kws]
-            exclude_clauses = " AND ".join(["set_name NOT ILIKE %s"] * len(all_kws))
-            filters.append(f"({exclude_clauses})")
-            params += [f"%{kw}%" for kw in all_kws]
+        # Resolve era to the actual list of distinct set_names that classify
+        # to it. Filtering by membership avoids the loose-LIKE bugs (e.g. XY
+        # filter previously matched 'Prismatic Evolutions' via the literal
+        # keyword 'Evolutions'). Computed against the live DB so new sets
+        # show up automatically.
+        all_sets = db.query(
+            "SELECT DISTINCT set_name FROM raw_cards "
+            "WHERE state='STORED' AND set_name IS NOT NULL"
+        )
+        era_sets = [r["set_name"] for r in all_sets if _classify_era(r["set_name"]) == era]
+        if era_sets:
+            ph = ",".join(["%s"] * len(era_sets))
+            filters.append(f"set_name IN ({ph})")
+            params += era_sets
         else:
-            era_kws = ERA_KEYWORDS.get(era)
-            if era_kws:
-                era_clauses = " OR ".join(["set_name ILIKE %s"] * len(era_kws))
-                filters.append(f"({era_clauses})")
-                params += [f"%{kw}%" for kw in era_kws]
+            # Era selected but no in-stock sets for it — force empty result.
+            filters.append("FALSE")
 
     where = " AND ".join(filters)
 
@@ -231,12 +262,17 @@ def browse():
     """, tuple(params))
     total = count_row["total"] if count_row else 0
 
-    # Aggregated cards with per-condition breakdown
+    # Aggregated cards with per-condition breakdown.
+    # Group key intentionally excludes scrydex_id and the raw variant string
+    # — we just MAX() those so old (NULL scrydex_id) and newly-relinked
+    # rows of the same card collapse into one tile in browse.
     rows = db.query(f"""
         SELECT
             card_name,
             set_name,
             tcgplayer_id,
+            MAX(scrydex_id) AS scrydex_id,
+            MAX(variant_raw) AS variant_raw,
             variant_key AS variant,
             MAX(image_url) AS image_url,
             SUM(cond_qty) AS total_qty,
@@ -245,7 +281,8 @@ def browse():
             MAX(created_at) AS created_at,
             jsonb_object_agg(condition, cond_qty) AS conditions
         FROM (
-            SELECT card_name, set_name, tcgplayer_id,
+            SELECT card_name, set_name, tcgplayer_id, scrydex_id,
+                   variant AS variant_raw,
                    COALESCE(NULLIF(variant, 'normal'), NULLIF(variant, 'holofoil'), '') AS variant_key,
                    image_url,
                    condition,
@@ -256,22 +293,70 @@ def browse():
             FROM raw_cards
             WHERE {where}
               AND state = 'STORED'
-            GROUP BY card_name, set_name, tcgplayer_id, variant_key, image_url, condition
+            GROUP BY card_name, set_name, tcgplayer_id, scrydex_id,
+                     variant_raw, variant_key, image_url, condition
         ) sub
         GROUP BY card_name, set_name, tcgplayer_id, variant_key
         ORDER BY {order_by}
         LIMIT 24 OFFSET %s
     """, tuple(params) + (offset,))
 
+    # Enrich each row with two things from scrydex_price_cache:
+    #   1. Image fallback when raw_cards.image_url is missing (esp. JP cards
+    #      that intaked without a TCGplayer image URL).
+    #   2. n_variants: how many distinct variants exist for this card across
+    #      Scrydex's catalog. Frontend uses this to decide whether to show
+    #      a variant badge — single-variant cards stay uncluttered, but a
+    #      multi-variant card always gets the badge so the customer knows
+    #      to check 1st Ed vs Unlimited.
     cards = []
     for r in rows:
-        variant = r["variant"] or ""
+        sid = r["scrydex_id"]
+        tcg = r["tcgplayer_id"]
+        image_url = r["image_url"]
+        n_variants = 1
+        if sid or tcg:
+            sx = None
+            if sid:
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
+                           MAX(image_small) AS img_s,
+                           COUNT(DISTINCT variant) AS n
+                    FROM scrydex_price_cache
+                    WHERE scrydex_id = %s
+                """, (sid,))
+            elif tcg:
+                # Multiple scrydex products can share a tcgplayer_id (reprints,
+                # cross-set promos). For image purposes any of them is fine.
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
+                           MAX(image_small) AS img_s,
+                           COUNT(DISTINCT variant) AS n
+                    FROM scrydex_price_cache
+                    WHERE tcgplayer_id = %s
+                """, (tcg,))
+            if sx:
+                if not image_url:
+                    image_url = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
+                if sx.get("n"):
+                    n_variants = int(sx["n"])
+
+        # Variant badge label: prefer the explicit raw_cards.variant, even
+        # if it's 'normal' or 'holofoil', when the card has multiple variants
+        # in Scrydex (so customer sees "this is the holofoil, not the 1st ed").
+        variant_raw = r.get("variant_raw") or ""
+        if n_variants > 1:
+            variant_label = variant_raw or "(unspecified)"
+        else:
+            # Single-variant card → no badge (default behavior).
+            variant_label = None
+
         cards.append({
             "card_name":    r["card_name"],
             "set_name":     r["set_name"],
             "tcgplayer_id": r["tcgplayer_id"],
-            "variant":      variant or None,  # None signals 'nothing to show'
-            "image_url":    r["image_url"],
+            "variant":      variant_label,
+            "image_url":    image_url,
             "total_qty":    r["total_qty"],
             "min_price":    float(r["min_price"]) if r["min_price"] else None,
             "max_price":    float(r["max_price"]) if r["max_price"] else None,
@@ -335,7 +420,8 @@ def card_detail():
 
     copies = db.query(f"""
         SELECT id, barcode, card_name, set_name, card_number,
-               condition, current_price, image_url, variant
+               condition, current_price, image_url, variant,
+               tcgplayer_id, scrydex_id
         FROM raw_cards
         WHERE card_name = %s AND set_name = %s
           AND state = 'STORED' AND current_hold_id IS NULL
@@ -348,7 +434,31 @@ def card_detail():
             current_price DESC
     """, (card_name, set_name, variant))
 
-    return jsonify({"copies": [dict(c) for c in copies]})
+    # Image fallback to Scrydex cache when raw_cards.image_url is missing
+    # (e.g. JP cards entered before TCGplayer images were available, or
+    # Scrydex-only cards that never had a PPT image to begin with).
+    out = []
+    for c in copies:
+        d = dict(c)
+        if not d.get("image_url") and (d.get("scrydex_id") or d.get("tcgplayer_id")):
+            sx = None
+            if d.get("scrydex_id"):
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
+                           MAX(image_small) AS img_s
+                    FROM scrydex_price_cache WHERE scrydex_id = %s
+                """, (d["scrydex_id"],))
+            else:
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
+                           MAX(image_small) AS img_s
+                    FROM scrydex_price_cache WHERE tcgplayer_id = %s
+                """, (d["tcgplayer_id"],))
+            if sx:
+                d["image_url"] = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
+        out.append(d)
+
+    return jsonify({"copies": out})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
