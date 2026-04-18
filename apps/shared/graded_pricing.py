@@ -345,7 +345,8 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
 def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
                          card_name: str = None, set_name: str = None,
                          card_number: str = None,
-                         scrydex_id: str = None) -> dict:
+                         scrydex_id: str = None,
+                         variant: str = None) -> dict:
     """
     Fetch live eBay comps for ALL grades of a card in a single API call.
 
@@ -357,6 +358,11 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
 
     scrydex_id: pass directly to skip the tcgplayer_id → scrydex_id resolution
     step. Required for Scrydex-only cards that have no TCG marketplace mapping.
+    variant: when set (e.g. 'firstEditionHolofoil' vs 'unlimitedHolofoil'),
+    drop listings that don't match. Critical for cards where the 1st edition
+    and unlimited printings share a TCG product ID but trade at wildly
+    different prices (Sabrina's Alakazam 1st Ed PSA 10 is ~$4k, unlimited
+    is a fraction of that).
     """
     company_map = {}
 
@@ -383,6 +389,17 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
         return {}
 
     now = datetime.now(timezone.utc)
+
+    # Filter by variant if requested — listings on Scrydex carry a 'variant'
+    # field (firstEditionHolofoil, unlimitedHolofoil, reverseHolofoil, etc.)
+    # and 1st Ed vs Unlimited for the same TCG product can trade at 10x apart.
+    if variant:
+        before = len(raw_listings)
+        raw_listings = [l for l in raw_listings if (l.get("variant") or "") == variant]
+        logger.info(f"Filtered {scrydex_id} listings to variant='{variant}': "
+                    f"{len(raw_listings)}/{before} remain")
+        if not raw_listings:
+            return {}
 
     # Group all listings by company + grade
     from collections import defaultdict

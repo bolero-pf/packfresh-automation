@@ -992,6 +992,9 @@ def relink_item(item_id: str, data: dict) -> dict:
     market_price = Decimal(str(data.get("market_price", item.get("market_price", 0))))
     set_name = data.get("set_name", item.get("set_name"))
     scrydex_id = data.get("scrydex_id")
+    # variant distinguishes printings that share a TCG product (1st Ed vs
+    # Unlimited, etc.) — load-bearing for correct graded price lookups.
+    variant = data.get("variant", item.get("variant"))
 
     if not tcgplayer_id and not scrydex_id:
         raise ValueError("Relink requires tcgplayer_id or scrydex_id")
@@ -1015,11 +1018,12 @@ def relink_item(item_id: str, data: dict) -> dict:
 
     execute("""
         UPDATE intake_items
-        SET product_name = %s, tcgplayer_id = %s, scrydex_id = %s,
+        SET product_name = %s, tcgplayer_id = %s, scrydex_id = %s, variant = %s,
             market_price = %s, set_name = %s, offer_price = %s,
             is_mapped = %s
         WHERE id = %s
-    """, (product_name, tcgplayer_id, scrydex_id, market_price, set_name, new_offer,
+    """, (product_name, tcgplayer_id, scrydex_id, variant,
+          market_price, set_name, new_offer,
           is_mapped, item_id))
 
     if tcgplayer_id:

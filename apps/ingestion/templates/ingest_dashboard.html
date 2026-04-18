@@ -3004,20 +3004,23 @@ async function relinkSearch() {
             const nameEsc = primaryName.replace(/'/g, "\\'");
             const setEsc  = setDisplay.replace(/'/g, "\\'");
             const sidEsc  = (p.scrydex_id || '').replace(/'/g, "\\'");
+            const varEsc  = (p.variant || '').replace(/'/g, "\\'");
             const tcgArg  = tcgId ? tcgId : 'null';
-            // scrydex_id is the primary key for price lookups; tcgplayer_id is
-            // just one of several marketplace mappings. Scrydex-only cards
-            // (e.g. old JP sets Scrydex never mapped to TCG) still click to
-            // link — we pass scrydex_id and let the backend wire up pricing.
             const idHint = tcgId
                 ? `TCG#${tcgId} · $${Number(price).toFixed(2)}`
                 : `SDX ${p.scrydex_id} · $${Number(price).toFixed(2)} · <span style="color:var(--accent);">Scrydex-only</span>`;
+            // 1st Edition vs Unlimited (and reverseHolofoil, etc.) are stored
+            // as separate variants but share a TCG product ID — the user must
+            // pick the right one so graded comps come back accurate.
+            const variantBadge = (p.variant && p.variant !== 'normal')
+                ? `<span style="font-size:0.62rem; padding:1px 5px; border-radius:3px; margin-left:4px; background:rgba(192,132,252,0.18); color:var(--accent2,#c084fc);">${p.variant}</span>`
+                : '';
             return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
-                         onclick="relinkSelect(${tcgArg}, '${nameEsc}', ${price}, '${setEsc}', '${sidEsc}')">
-                <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}</div>
+                         onclick="relinkSelect(${tcgArg}, '${nameEsc}', ${price}, '${setEsc}', '${sidEsc}', '${varEsc}')">
+                <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}${variantBadge}</div>
                 ${secondaryName ? `<div style="font-size:0.75rem; color:var(--text-dim);">${secondaryName}</div>` : ''}
-                <div style="font-size:0.8rem; color:var(--text-dim);">${setDisplay}${variant} · ${idHint}</div>
+                <div style="font-size:0.8rem; color:var(--text-dim);">${setDisplay} · ${idHint}</div>
             </div>`;
         }).join('') + '</div>';
     } catch(err) {
@@ -3040,7 +3043,7 @@ async function relinkPromptTcg(scrydexId, name, price, setName) {
     return relinkSelect(tcgId, name, price, setName, scrydexId);
 }
 
-async function relinkSelect(tcgId, name, price, setName, scrydexId) {
+async function relinkSelect(tcgId, name, price, setName, scrydexId, variant) {
     try {
         const r = await fetch(`/api/ingest/item/${_relinkItemId}/relink`, {
             method: 'POST',
@@ -3051,6 +3054,7 @@ async function relinkSelect(tcgId, name, price, setName, scrydexId) {
                 market_price: price,
                 set_name: setName || null,
                 scrydex_id: scrydexId || null,
+                variant: variant || null,
             }),
         });
         const d = await r.json();

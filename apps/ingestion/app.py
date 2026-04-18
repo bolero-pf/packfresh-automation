@@ -421,15 +421,17 @@ def search_cards_for_relink():
         params.append(f"%{set_nm}%")
         params.append(f"%{set_nm}%")
 
-    # One row per scrydex_id — NM raw variant first (most representative)
+    # One row per (scrydex_id, variant) — cards with 1st Ed + Unlimited
+    # share a scrydex_id but trade at very different prices, so the user
+    # needs to pick the specific printing they're holding.
     sql = f"""
-        SELECT DISTINCT ON (scrydex_id)
+        SELECT DISTINCT ON (scrydex_id, variant)
                scrydex_id, tcgplayer_id, product_name, product_name_en,
                expansion_name, expansion_name_en, language_code,
                card_number, rarity, variant, image_small, image_medium, market_price
         FROM scrydex_price_cache
         WHERE {' AND '.join(where)}
-        ORDER BY scrydex_id, price_type ASC, condition ASC
+        ORDER BY scrydex_id, variant, price_type ASC, condition ASC
         LIMIT %s
     """
     params.append(limit)
@@ -923,6 +925,7 @@ def _enrich_one_item(key, item):
     try:
         tcg_id = item.get("tcgplayer_id")
         sid = item.get("scrydex_id")
+        variant = item.get("variant") or None
 
         image_url = None
         graded_prices = None
@@ -939,6 +942,7 @@ def _enrich_one_item(key, item):
                 card_name=item.get("product_name"),
                 set_name=item.get("set_name"),
                 card_number=item.get("card_number"),
+                variant=variant,
             )
             if not graded_prices and card_data:
                 graded_prices = PriceProvider.extract_graded_prices(card_data)
@@ -954,7 +958,7 @@ def _enrich_one_item(key, item):
             """, (sid,))
             if row:
                 image_url = row.get("image_large") or row.get("image_medium") or row.get("image_small")
-            graded_prices = get_all_graded_comps(None, db, scrydex_id=sid)
+            graded_prices = get_all_graded_comps(None, db, scrydex_id=sid, variant=variant)
         else:
             return key, {"error": "no identifier"}
 
@@ -980,15 +984,20 @@ def _enrich_route_worker(job_id, session_id, items):
 
     job = _enrich_jobs[job_id]
 
-    # Deduplicate by cache key: tcgplayer_id when available, else scrydex_id.
-    # Scrydex-only cards (no TCG mapping in Scrydex's data, e.g. old JP sets)
-    # are keyed on their scrydex_id so they still get enriched.
+    # Deduplicate by cache key: (tcgplayer_id|scrydex_id) + variant. Variant
+    # is part of the key because 1st Edition and Unlimited printings of the
+    # same card share tcgplayer_id/scrydex_id but trade at very different
+    # prices — their graded comps must be fetched separately.
     unique = {}
     for item in items:
         tcg_id = item.get("tcgplayer_id")
         sid = item.get("scrydex_id")
-        key = str(tcg_id) if tcg_id else (sid if sid else None)
-        if key and key not in unique:
+        variant = item.get("variant") or ""
+        base = str(tcg_id) if tcg_id else (sid if sid else None)
+        if not base:
+            continue
+        key = f"{base}|{variant}" if variant else base
+        if key not in unique:
             unique[key] = item
 
     job["total"] = len(unique)
@@ -2465,7 +2474,9 @@ def enrich_one(session_id):
     if not tcg_id and not sid:
         return jsonify({"error": "Item has no tcgplayer_id or scrydex_id — still unmapped"}), 400
 
-    key = str(tcg_id) if tcg_id else sid
+    variant = item.get("variant") or ""
+    base = str(tcg_id) if tcg_id else sid
+    key = f"{base}|{variant}" if variant else base
     key, result = _enrich_one_item(key, dict(item))
     cache = _enrich_cache.setdefault(session_id, {})
     cache[key] = result
@@ -2498,10 +2509,12 @@ def route_enriched(session_id):
     enriched = []
     for item in items:
         d = dict(item)
-        # Cache key mirrors the worker: tcgplayer_id when present, else scrydex_id.
+        # Cache key mirrors the worker: (tcg_id|scrydex_id) + variant.
         tcg_id = d.get("tcgplayer_id")
         sid = d.get("scrydex_id")
-        key = str(tcg_id) if tcg_id else (sid or "")
+        variant = d.get("variant") or ""
+        base = str(tcg_id) if tcg_id else (sid or "")
+        key = f"{base}|{variant}" if variant else base
         cached = cache.get(key)  # None if not yet fetched
         if cached is not None and "error" not in cached:
             d["_enriched"] = True
