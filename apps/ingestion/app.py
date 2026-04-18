@@ -2597,6 +2597,10 @@ def push_raw_items(session_id):
           AND item_status IN ('good', 'damaged')
           AND is_mapped = TRUE
           AND pushed_at IS NULL
+        ORDER BY LOWER(product_name) ASC,
+                 LOWER(COALESCE(set_name, '')) ASC,
+                 card_number ASC NULLS LAST,
+                 created_at ASC
     """, (session_id,))
 
     if requested_ids:
@@ -2604,6 +2608,12 @@ def push_raw_items(session_id):
 
     if not items:
         return jsonify({"error": "No unmapped raw items to push"}), 400
+
+    # Push order = alphabetical → cards land in bins in alphabetical order
+    # (A-1 holds the first 100 alphabetically, A-2 the next 100, etc.).
+    # Combined with the storage.assign_bins composite (row, partition) sort,
+    # this gives Sean A-1 → A-2 → ... contiguous, matching how he physically
+    # files the cards.
 
     results = []
     errors  = []
