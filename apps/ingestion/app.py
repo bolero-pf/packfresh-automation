@@ -909,57 +909,87 @@ def _calc_grading_economics(graded_prices: dict, raw_price: float, condition: st
     return result
 
 
-def _enrich_one_tcg(tcg_id_str, item):
-    """Fetch PPT + Scrydex enrichment for a single tcgplayer_id. Shared between
-    the bulk background worker (parallel via ThreadPoolExecutor) and the
-    /enrich-one endpoint called after a relink changes a card's mapping."""
+def _enrich_one_item(key, item):
+    """Fetch image + Scrydex live graded comps for a single item. `key` is the
+    dedup/cache key (tcgplayer_id_str if the item has one, else scrydex_id).
+
+    Resolution:
+      - If tcgplayer_id present: PPT for card image/data + TCG-based graded comps.
+      - If scrydex_id present (Scrydex-only card, incl. old JP sets without a
+        TCG marketplace mapping): skip PPT, pull image from the Scrydex cache
+        row, and pass scrydex_id directly into get_all_graded_comps.
+    """
     from graded_pricing import get_all_graded_comps
     try:
-        card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id_str))
-        if not card_data:
-            return tcg_id_str, {"error": "not_found"}
+        tcg_id = item.get("tcgplayer_id")
+        sid = item.get("scrydex_id")
 
-        image_url = (card_data.get("imageCdnUrl800")
-                     or card_data.get("imageCdnUrl")
-                     or card_data.get("imageCdnUrl400"))
+        image_url = None
+        graded_prices = None
 
-        graded_prices = get_all_graded_comps(
-            int(tcg_id_str), db,
-            card_name=item.get("product_name"),
-            set_name=item.get("set_name"),
-            card_number=item.get("card_number"),
-        )
-        if not graded_prices:
-            graded_prices = PriceProvider.extract_graded_prices(card_data)
+        if tcg_id:
+            # TCG-mapped path: PPT for image + graded comps via TCG → Scrydex resolve
+            card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+            if card_data:
+                image_url = (card_data.get("imageCdnUrl800")
+                             or card_data.get("imageCdnUrl")
+                             or card_data.get("imageCdnUrl400"))
+            graded_prices = get_all_graded_comps(
+                int(tcg_id), db,
+                card_name=item.get("product_name"),
+                set_name=item.get("set_name"),
+                card_number=item.get("card_number"),
+            )
+            if not graded_prices and card_data:
+                graded_prices = PriceProvider.extract_graded_prices(card_data)
+
+        elif sid:
+            # Scrydex-only path: image from cache, graded comps via direct scrydex_id
+            row = db.query_one("""
+                SELECT image_small, image_medium, image_large
+                FROM scrydex_price_cache
+                WHERE scrydex_id = %s
+                ORDER BY fetched_at DESC
+                LIMIT 1
+            """, (sid,))
+            if row:
+                image_url = row.get("image_large") or row.get("image_medium") or row.get("image_small")
+            graded_prices = get_all_graded_comps(None, db, scrydex_id=sid)
+        else:
+            return key, {"error": "no identifier"}
 
         raw_price = float(item.get("market_price") or 0)
         condition = item.get("condition") or "NM"
-        economics = _calc_grading_economics(graded_prices, raw_price, condition)
+        economics = _calc_grading_economics(graded_prices or {}, raw_price, condition)
 
-        return tcg_id_str, {
+        return key, {
             "image_url": image_url,
-            "graded_prices": graded_prices,
+            "graded_prices": graded_prices or {},
             "grading_economics": economics,
         }
     except Exception as e:
-        logger.warning(f"Enrich failed for TCG#{tcg_id_str}: {e}")
-        return tcg_id_str, {"error": str(e)}
+        logger.warning(f"Enrich failed for {key}: {e}")
+        return key, {"error": str(e)}
 
 
 def _enrich_route_worker(job_id, session_id, items):
-    """Background worker: fetch PPT + Scrydex data for each unique tcgplayer_id
-    in parallel. Writes partial results to _enrich_cache as each card finishes
-    so the frontend sees data stream in rather than waiting for a full batch."""
+    """Background worker: fetch Scrydex/PPT data for each unique card in parallel.
+    Writes partial results to _enrich_cache as each card finishes so the frontend
+    sees data stream in rather than waiting for a full batch."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     job = _enrich_jobs[job_id]
 
-    # Deduplicate by tcgplayer_id — keep first item per tcg_id for condition/price
+    # Deduplicate by cache key: tcgplayer_id when available, else scrydex_id.
+    # Scrydex-only cards (no TCG mapping in Scrydex's data, e.g. old JP sets)
+    # are keyed on their scrydex_id so they still get enriched.
     unique = {}
     for item in items:
         tcg_id = item.get("tcgplayer_id")
-        if tcg_id and str(tcg_id) not in unique:
-            unique[str(tcg_id)] = item
+        sid = item.get("scrydex_id")
+        key = str(tcg_id) if tcg_id else (sid if sid else None)
+        if key and key not in unique:
+            unique[key] = item
 
     job["total"] = len(unique)
 
@@ -972,11 +1002,11 @@ def _enrich_route_worker(job_id, session_id, items):
     # 8 concurrent — well under Scrydex's 100 req/sec ceiling and respects the
     # client's internal throttle. PPT is generous enough to handle it.
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = [ex.submit(_enrich_one_tcg, tcg_id_str, item)
-                   for tcg_id_str, item in unique.items()]
+        futures = [ex.submit(_enrich_one_item, key, item)
+                   for key, item in unique.items()]
         for fut in as_completed(futures):
-            tcg_id_str, result = fut.result()
-            cache[tcg_id_str] = result
+            key, result = fut.result()
+            cache[key] = result
             if "error" in result:
                 errors += 1
             done += 1
@@ -2303,7 +2333,8 @@ def route_summary(session_id):
     """Get routing status for a session's raw items."""
     items = db.query("""
         SELECT id, product_name, set_name, condition, market_price, quantity,
-               routing_destination, routing_reviewed_at, tcgplayer_id, card_number, offer_price
+               routing_destination, routing_reviewed_at, tcgplayer_id, scrydex_id,
+               card_number, offer_price
         FROM intake_items
         WHERE session_id = %s
           AND product_type = 'raw'
@@ -2362,7 +2393,7 @@ def enrich_route(session_id):
 
     items = db.query("""
         SELECT id, product_name, set_name, condition, market_price, quantity,
-               routing_destination, tcgplayer_id, card_number, offer_price, variant
+               routing_destination, tcgplayer_id, scrydex_id, card_number, offer_price, variant
         FROM intake_items
         WHERE session_id = %s
           AND product_type = 'raw'
@@ -2422,21 +2453,25 @@ def enrich_one(session_id):
 
     item = db.query_one("""
         SELECT id, product_name, set_name, condition, market_price, quantity,
-               routing_destination, tcgplayer_id, card_number, offer_price, variant
+               routing_destination, tcgplayer_id, scrydex_id, card_number, offer_price, variant
         FROM intake_items
         WHERE id = %s AND session_id = %s
     """, (item_id, session_id))
     if not item:
         return jsonify({"error": "Item not found"}), 404
-    if not item.get("tcgplayer_id"):
-        return jsonify({"error": "Item has no tcgplayer_id — still unmapped"}), 400
 
-    tcg_id_str, result = _enrich_one_tcg(str(item["tcgplayer_id"]), dict(item))
+    tcg_id = item.get("tcgplayer_id")
+    sid = item.get("scrydex_id")
+    if not tcg_id and not sid:
+        return jsonify({"error": "Item has no tcgplayer_id or scrydex_id — still unmapped"}), 400
+
+    key = str(tcg_id) if tcg_id else sid
+    key, result = _enrich_one_item(key, dict(item))
     cache = _enrich_cache.setdefault(session_id, {})
-    cache[tcg_id_str] = result
+    cache[key] = result
     return jsonify({
         "success": True,
-        "tcg_id": tcg_id_str,
+        "key": key,
         "result": _serialize(result),
     })
 
@@ -2463,8 +2498,11 @@ def route_enriched(session_id):
     enriched = []
     for item in items:
         d = dict(item)
-        tcg_id = str(d.get("tcgplayer_id") or "")
-        cached = cache.get(tcg_id)  # None if not yet fetched
+        # Cache key mirrors the worker: tcgplayer_id when present, else scrydex_id.
+        tcg_id = d.get("tcgplayer_id")
+        sid = d.get("scrydex_id")
+        key = str(tcg_id) if tcg_id else (sid or "")
+        cached = cache.get(key)  # None if not yet fetched
         if cached is not None and "error" not in cached:
             d["_enriched"] = True
             d["image_url"] = cached.get("image_url")

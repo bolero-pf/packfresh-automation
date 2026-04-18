@@ -3001,29 +3001,23 @@ async function relinkSearch() {
                 ? `<span style="font-size:0.62rem; padding:1px 5px; border-radius:3px; margin-right:6px; background:${isJP?'rgba(255,170,0,0.18)':'rgba(124,147,245,0.15)'}; color:${isJP?'#e6a817':'var(--accent)'};">${lang}</span>`
                 : '';
 
-            const nameEsc   = primaryName.replace(/'/g, "\\'");
-            const setEsc    = setDisplay.replace(/'/g, "\\'");
-            const sidEsc    = (p.scrydex_id || '').replace(/'/g, "\\'");
-
-            // Scrydex-only (no TCG ID in Scrydex's marketplace data — common for
-            // older JP sets Scrydex hasn't mapped). Let the user click → paste a
-            // TCG product ID → we link AND persist the scrydex↔tcg map so next
-            // time this search lights up as linkable.
-            if (!tcgId) {
-                return `<div class="search-result" style="padding:10px 12px; border:1px dashed var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
-                             onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
-                             onclick="relinkPromptTcg('${sidEsc}', '${nameEsc}', ${price}, '${setEsc}')">
-                    <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}</div>
-                    ${secondaryName ? `<div style="font-size:0.75rem; color:var(--text-dim);">${secondaryName}</div>` : ''}
-                    <div style="font-size:0.78rem; color:var(--text-dim);">${setDisplay}${variant} · No Scrydex↔TCG mapping — <strong style="color:var(--accent);">click to paste a TCG product ID</strong></div>
-                </div>`;
-            }
+            const nameEsc = primaryName.replace(/'/g, "\\'");
+            const setEsc  = setDisplay.replace(/'/g, "\\'");
+            const sidEsc  = (p.scrydex_id || '').replace(/'/g, "\\'");
+            const tcgArg  = tcgId ? tcgId : 'null';
+            // scrydex_id is the primary key for price lookups; tcgplayer_id is
+            // just one of several marketplace mappings. Scrydex-only cards
+            // (e.g. old JP sets Scrydex never mapped to TCG) still click to
+            // link — we pass scrydex_id and let the backend wire up pricing.
+            const idHint = tcgId
+                ? `TCG#${tcgId} · $${Number(price).toFixed(2)}`
+                : `SDX ${p.scrydex_id} · $${Number(price).toFixed(2)} · <span style="color:var(--accent);">Scrydex-only</span>`;
             return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
-                         onclick="relinkSelect(${tcgId}, '${nameEsc}', ${price}, '${setEsc}', '${sidEsc}')">
+                         onclick="relinkSelect(${tcgArg}, '${nameEsc}', ${price}, '${setEsc}', '${sidEsc}')">
                 <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}</div>
                 ${secondaryName ? `<div style="font-size:0.75rem; color:var(--text-dim);">${secondaryName}</div>` : ''}
-                <div style="font-size:0.8rem; color:var(--text-dim);">${setDisplay}${variant} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
+                <div style="font-size:0.8rem; color:var(--text-dim);">${setDisplay}${variant} · ${idHint}</div>
             </div>`;
         }).join('') + '</div>';
     } catch(err) {

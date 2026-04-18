@@ -338,6 +338,7 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     qty = item.get("quantity", 1)
     tcg_id = item.get("tcgplayer_id")
+    sid = item.get("scrydex_id")  # preferred when set (Scrydex-only cards, incl. old JP)
     variant = item.get("variant")
 
     if price_override is not None:
@@ -345,21 +346,27 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
     elif condition_changed:
         condition_market = None
 
-        # 1. Scrydex cache (preferred) — per-condition prices already stored
-        if tcg_id:
-            try:
-                cache = PriceCache(db_module)
+        # 1. Scrydex cache — lookup by scrydex_id first if present (truly
+        # primary), else fall through to tcgplayer_id resolution.
+        try:
+            cache = PriceCache(db_module)
+            card_data = None
+            if sid:
+                card_data = cache.get_card_by_scrydex_id(sid)
+            elif tcg_id:
                 card_data = cache.get_card_by_tcgplayer_id(int(tcg_id))
-                if card_data:
-                    condition_market = ScrydexClient.extract_condition_price(
-                        card_data, condition, variant=variant)
-                    if condition_market is not None:
-                        logger.info(f"Condition update price from Scrydex cache: "
-                                    f"${condition_market} for {condition} TCG#{tcg_id}")
-            except Exception as e:
-                logger.warning(f"Scrydex cache condition lookup failed for TCG#{tcg_id}: {e}")
+            if card_data:
+                condition_market = ScrydexClient.extract_condition_price(
+                    card_data, condition, variant=variant)
+                if condition_market is not None:
+                    logger.info(f"Condition update price from Scrydex cache: "
+                                f"${condition_market} for {condition} "
+                                f"sid={sid} tcg={tcg_id}")
+        except Exception as e:
+            logger.warning(f"Scrydex cache condition lookup failed for sid={sid} tcg={tcg_id}: {e}")
 
-        # 2. PPT fallback — Scrydex has holes (Japanese, Scrydex-only cards)
+        # 2. PPT fallback — only makes sense when we have a TCG ID, since PPT
+        # is keyed on TCGplayer product IDs. Scrydex-only cards skip this.
         if condition_market is None and tcg_id and ppt_client:
             try:
                 card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
@@ -964,12 +971,17 @@ def complete_breakdown(session_id: str) -> dict:
 def relink_item(item_id: str, data: dict) -> dict:
     """
     Relink an item to a different product.
-    data: {product_name, tcgplayer_id, market_price, set_name?, scrydex_id?}
+    data: {product_name, tcgplayer_id?, market_price, set_name?, scrydex_id?}
 
-    If scrydex_id is supplied (from the Scrydex-cache-backed relink search),
-    also persist the Scrydex↔TCG mapping so future lookups and searches
-    find this card as linkable — some older JP sets have no marketplace
-    mapping in Scrydex's own data, and this closes that gap locally.
+    scrydex_id is the true primary key for price lookups — tcgplayer_id is
+    just one of several marketplace mappings Scrydex may or may not have.
+    If only scrydex_id is supplied (no TCG mapping in Scrydex's data), the
+    item is still considered mapped; the condition-change and route-enrich
+    paths resolve prices via scrydex_id when tcgplayer_id is absent.
+
+    When both IDs are supplied, the scrydex_tcg_map gets upserted and the
+    cache rows for that scrydex_id are backfilled with the TCG ID, so the
+    next relink search shows the card as directly linkable.
     """
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
@@ -981,35 +993,40 @@ def relink_item(item_id: str, data: dict) -> dict:
     set_name = data.get("set_name", item.get("set_name"))
     scrydex_id = data.get("scrydex_id")
 
+    if not tcgplayer_id and not scrydex_id:
+        raise ValueError("Relink requires tcgplayer_id or scrydex_id")
+
     # Recalculate offer proportionally — keep the same COGS ratio
     old_market = Decimal(str(item.get("market_price", 0)))
     old_offer = Decimal(str(item.get("offer_price", 0)))
     qty = item.get("quantity", 1)
 
     if old_market > 0 and qty > 0:
-        # Preserve the offer ratio (COGS per unit / market per unit)
         ratio = old_offer / (old_market * qty)
         new_offer = (market_price * qty * ratio).quantize(Decimal("0.01"))
     else:
-        # Fallback: use session offer percentage
         session = query_one("SELECT offer_percentage FROM intake_sessions WHERE id = %s", (item["session_id"],))
         pct = Decimal(str(session.get("offer_percentage", 65))) / 100
         new_offer = (market_price * qty * pct).quantize(Decimal("0.01"))
 
+    # is_mapped is true when we have either identifier — both resolve to
+    # price data via shared/price_cache.
+    is_mapped = tcgplayer_id is not None or scrydex_id is not None
+
     execute("""
         UPDATE intake_items
-        SET product_name = %s, tcgplayer_id = %s, market_price = %s,
-            set_name = %s, offer_price = %s, is_mapped = %s
+        SET product_name = %s, tcgplayer_id = %s, scrydex_id = %s,
+            market_price = %s, set_name = %s, offer_price = %s,
+            is_mapped = %s
         WHERE id = %s
-    """, (product_name, tcgplayer_id, market_price, set_name, new_offer,
-          tcgplayer_id is not None, item_id))
+    """, (product_name, tcgplayer_id, scrydex_id, market_price, set_name, new_offer,
+          is_mapped, item_id))
 
-    # Save mapping
     if tcgplayer_id:
         _save_mapping(product_name, int(tcgplayer_id), "sealed", set_name=set_name)
 
-        # Persist Scrydex↔TCG mapping + backfill the cache rows so the next
-        # search shows this card as linkable instead of dimmed Scrydex-only.
+        # If the user supplied a TCG ID for a Scrydex-only card, persist the
+        # mapping + backfill cache rows so next search shows it as mapped.
         if scrydex_id:
             try:
                 execute("""

@@ -344,7 +344,8 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
 
 def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
                          card_name: str = None, set_name: str = None,
-                         card_number: str = None) -> dict:
+                         card_number: str = None,
+                         scrydex_id: str = None) -> dict:
     """
     Fetch live eBay comps for ALL grades of a card in a single API call.
 
@@ -354,12 +355,14 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
     One Scrydex credit. Used by the grading economics calculator so the 60/40
     EV computation uses real market data instead of unreliable cache aggregates.
 
-    For JP cards without tcgplayer_id, pass card_name + set_name.
+    scrydex_id: pass directly to skip the tcgplayer_id → scrydex_id resolution
+    step. Required for Scrydex-only cards that have no TCG marketplace mapping.
     """
     company_map = {}
 
-    scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name,
-                                     set_name=set_name, card_number=card_number)
+    if not scrydex_id:
+        scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name,
+                                         set_name=set_name, card_number=card_number)
     if not scrydex_id:
         return {}
 
