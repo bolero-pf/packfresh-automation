@@ -3001,20 +3001,26 @@ async function relinkSearch() {
                 ? `<span style="font-size:0.62rem; padding:1px 5px; border-radius:3px; margin-right:6px; background:${isJP?'rgba(255,170,0,0.18)':'rgba(124,147,245,0.15)'}; color:${isJP?'#e6a817':'var(--accent)'};">${lang}</span>`
                 : '';
 
-            // Scrydex-only (no TCG ID) can't be linked with the current
-            // relink backend — surface with a dim/disabled row.
+            const nameEsc   = primaryName.replace(/'/g, "\\'");
+            const setEsc    = setDisplay.replace(/'/g, "\\'");
+            const sidEsc    = (p.scrydex_id || '').replace(/'/g, "\\'");
+
+            // Scrydex-only (no TCG ID in Scrydex's marketplace data — common for
+            // older JP sets Scrydex hasn't mapped). Let the user click → paste a
+            // TCG product ID → we link AND persist the scrydex↔tcg map so next
+            // time this search lights up as linkable.
             if (!tcgId) {
-                return `<div style="padding:8px 12px; border:1px dashed var(--border); border-radius:6px; margin-bottom:6px; opacity:0.55;">
+                return `<div class="search-result" style="padding:10px 12px; border:1px dashed var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
+                             onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
+                             onclick="relinkPromptTcg('${sidEsc}', '${nameEsc}', ${price}, '${setEsc}')">
                     <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}</div>
                     ${secondaryName ? `<div style="font-size:0.75rem; color:var(--text-dim);">${secondaryName}</div>` : ''}
-                    <div style="font-size:0.78rem; color:var(--text-dim);">${setDisplay}${variant} · Scrydex-only (no TCG ID — can't link yet)</div>
+                    <div style="font-size:0.78rem; color:var(--text-dim);">${setDisplay}${variant} · No Scrydex↔TCG mapping — <strong style="color:var(--accent);">click to paste a TCG product ID</strong></div>
                 </div>`;
             }
-            const nameEsc = primaryName.replace(/'/g, "\\'");
-            const setEsc  = setDisplay.replace(/'/g, "\\'");
             return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
-                         onclick="relinkSelect(${tcgId}, '${nameEsc}', ${price}, '${setEsc}')">
+                         onclick="relinkSelect(${tcgId}, '${nameEsc}', ${price}, '${setEsc}', '${sidEsc}')">
                 <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}</div>
                 ${secondaryName ? `<div style="font-size:0.75rem; color:var(--text-dim);">${secondaryName}</div>` : ''}
                 <div style="font-size:0.8rem; color:var(--text-dim);">${setDisplay}${variant} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
@@ -3025,7 +3031,22 @@ async function relinkSearch() {
     }
 }
 
-async function relinkSelect(tcgId, name, price, setName) {
+async function relinkPromptTcg(scrydexId, name, price, setName) {
+    // Scrydex-only row: prompt for a TCG product ID, then hand off to
+    // relinkSelect which persists the mapping server-side.
+    const input = await themedPrompt(
+        'TCGplayer Product ID',
+        `Scrydex doesn't have a TCG mapping for "${name}". Paste the TCGplayer product ID (find it in the tcgplayer.com URL).`,
+        '',
+        'number',
+    );
+    if (input === null) return;
+    const tcgId = parseInt(String(input).trim(), 10);
+    if (!tcgId || tcgId <= 0) { alert('Enter a valid numeric TCGplayer ID'); return; }
+    return relinkSelect(tcgId, name, price, setName, scrydexId);
+}
+
+async function relinkSelect(tcgId, name, price, setName, scrydexId) {
     try {
         const r = await fetch(`/api/ingest/item/${_relinkItemId}/relink`, {
             method: 'POST',
@@ -3035,6 +3056,7 @@ async function relinkSelect(tcgId, name, price, setName) {
                 tcgplayer_id: tcgId,
                 market_price: price,
                 set_name: setName || null,
+                scrydex_id: scrydexId || null,
             }),
         });
         const d = await r.json();

@@ -964,7 +964,12 @@ def complete_breakdown(session_id: str) -> dict:
 def relink_item(item_id: str, data: dict) -> dict:
     """
     Relink an item to a different product.
-    data: {product_name, tcgplayer_id, market_price, set_name?}
+    data: {product_name, tcgplayer_id, market_price, set_name?, scrydex_id?}
+
+    If scrydex_id is supplied (from the Scrydex-cache-backed relink search),
+    also persist the Scrydex↔TCG mapping so future lookups and searches
+    find this card as linkable — some older JP sets have no marketplace
+    mapping in Scrydex's own data, and this closes that gap locally.
     """
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
@@ -974,6 +979,7 @@ def relink_item(item_id: str, data: dict) -> dict:
     tcgplayer_id = data.get("tcgplayer_id")
     market_price = Decimal(str(data.get("market_price", item.get("market_price", 0))))
     set_name = data.get("set_name", item.get("set_name"))
+    scrydex_id = data.get("scrydex_id")
 
     # Recalculate offer proportionally — keep the same COGS ratio
     old_market = Decimal(str(item.get("market_price", 0)))
@@ -1001,6 +1007,25 @@ def relink_item(item_id: str, data: dict) -> dict:
     # Save mapping
     if tcgplayer_id:
         _save_mapping(product_name, int(tcgplayer_id), "sealed", set_name=set_name)
+
+        # Persist Scrydex↔TCG mapping + backfill the cache rows so the next
+        # search shows this card as linkable instead of dimmed Scrydex-only.
+        if scrydex_id:
+            try:
+                execute("""
+                    INSERT INTO scrydex_tcg_map (scrydex_id, tcgplayer_id, product_type, game, updated_at)
+                    VALUES (%s, %s, 'card', 'pokemon', NOW())
+                    ON CONFLICT (scrydex_id) DO UPDATE SET
+                        tcgplayer_id = EXCLUDED.tcgplayer_id,
+                        updated_at   = NOW()
+                """, (scrydex_id, int(tcgplayer_id)))
+                execute("""
+                    UPDATE scrydex_price_cache
+                    SET tcgplayer_id = %s
+                    WHERE scrydex_id = %s AND tcgplayer_id IS NULL
+                """, (int(tcgplayer_id), scrydex_id))
+            except Exception as e:
+                logger.warning(f"scrydex_tcg_map write failed for {scrydex_id}={tcgplayer_id}: {e}")
 
     _recalculate_session_totals(item["session_id"])
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
