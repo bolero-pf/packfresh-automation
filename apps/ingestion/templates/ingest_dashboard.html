@@ -51,7 +51,7 @@
         /* ─── MODAL ─── */
         .modal-overlay {
             display: none; position: fixed; inset: 0;
-            background: rgba(0,0,0,0.6); z-index: 1000;
+            background: rgba(0,0,0,0.6); z-index: 12000;
             align-items: flex-start; justify-content: center;
             backdrop-filter: blur(4px); padding: 40px 20px; overflow-y: auto;
         }
@@ -2022,6 +2022,10 @@ function _renderSessionCard() {
                     style="font-size:0.85rem; padding:4px 10px; border-radius:6px; font-weight:700; background:${condColor}22; color:${condColor}; border:1px solid ${condColor}44; cursor:pointer;">
                 ${cond} <span style="font-size:0.65rem; opacity:0.7;">✎</span>
             </button>
+            <button onclick="_rsRelink()" title="Relink to a different TCGplayer product (use for mis-mapped JP cards)"
+                    style="font-size:0.78rem; padding:4px 10px; border-radius:6px; font-weight:600; background:var(--surface-2); color:var(--text-dim); border:1px solid var(--border); cursor:pointer;">
+                🔗 Relink
+            </button>
             <div style="font-size:1.6rem; font-weight:800; color:var(--text);">$${price.toFixed(2)}</div>
             <div style="font-size:0.78rem; color:var(--text-dim);">raw market</div>
             ${(item.quantity || 1) > 1 ? `<div style="margin-left:auto; display:flex; align-items:center; gap:6px;">
@@ -2293,6 +2297,54 @@ async function _rsDoSplit() {
     } catch(e) {
         alert('Split failed: ' + e.message);
     }
+}
+
+async function _rsRelink() {
+    const item = _rsItems[_rsIndex];
+    if (!item) return;
+    // Hook the relink success so we update local state + re-enrich just this
+    // card instead of bouncing back to the session list view.
+    _relinkOnSuccess = async (d, ctx) => {
+        if (d && d.item) {
+            const it = d.item;
+            item.product_name = it.product_name ?? item.product_name;
+            item.set_name      = it.set_name ?? item.set_name;
+            item.card_number   = it.card_number ?? item.card_number;
+            item.tcgplayer_id  = it.tcgplayer_id ?? item.tcgplayer_id;
+            item.variant       = it.variant ?? item.variant;
+            item.market_price  = it.market_price ?? item.market_price;
+            item.condition     = it.condition ?? item.condition;
+        }
+        // Reset enrichment state so the UI shows a spinner for this card
+        // while we re-fetch PPT + Scrydex with the new mapping.
+        item.image_url = null;
+        item.graded_prices = {};
+        item.grading_economics = {};
+        item._enrichLoading = true;
+        _renderSessionCard();
+        try {
+            const er = await fetch(`/api/ingest/session/${ctx.sessionId}/enrich-one`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ item_id: ctx.itemId }),
+            });
+            const ed = await er.json();
+            if (er.ok && ed.result && !ed.result.error) {
+                item.image_url = ed.result.image_url || null;
+                item.graded_prices = ed.result.graded_prices || {};
+                item.grading_economics = ed.result.grading_economics || {};
+                item._enrichLoading = false;
+                _renderSessionCard();
+            } else {
+                item._enrichLoading = false;
+                _renderSessionCard();
+            }
+        } catch(e) {
+            item._enrichLoading = false;
+            _renderSessionCard();
+        }
+    };
+    relinkItem(item.id, _rsSessionId);
 }
 
 async function _rsChangeCondition() {
@@ -2852,6 +2904,10 @@ async function undoBreakdown(itemId, sessionId) {
 
 let _relinkItemId = null;
 let _relinkSessionId = null;
+// When set, relink success fires this callback instead of reloading the
+// whole session view. Route session sets this so a relink mid-session
+// doesn't kick the user out of the card-by-card flow.
+let _relinkOnSuccess = null;
 
 function relinkItem(itemId, sessionId) {
     _relinkItemId = itemId;
@@ -2938,8 +2994,15 @@ async function relinkSelect(tcgId, name, price, setName) {
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
         const sid = _relinkSessionId;
+        const itemId = _relinkItemId;
+        const cb = _relinkOnSuccess;
         closeRelink();
-        viewSession(sid, true);
+        if (cb) {
+            _relinkOnSuccess = null;
+            await cb(d, { itemId, sessionId: sid });
+        } else {
+            viewSession(sid, true);
+        }
     } catch(err) { alert(err.message); }
 }
 
@@ -2956,8 +3019,15 @@ async function relinkManual() {
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
         const sid = _relinkSessionId;
+        const itemId = _relinkItemId;
+        const cb = _relinkOnSuccess;
         closeRelink();
-        viewSession(sid, true);
+        if (cb) {
+            _relinkOnSuccess = null;
+            await cb(d, { itemId, sessionId: sid });
+        } else {
+            viewSession(sid, true);
+        }
     } catch(err) { alert(err.message); }
 }
 

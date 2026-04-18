@@ -896,12 +896,48 @@ def _calc_grading_economics(graded_prices: dict, raw_price: float, condition: st
     return result
 
 
+def _enrich_one_tcg(tcg_id_str, item):
+    """Fetch PPT + Scrydex enrichment for a single tcgplayer_id. Shared between
+    the bulk background worker (parallel via ThreadPoolExecutor) and the
+    /enrich-one endpoint called after a relink changes a card's mapping."""
+    from graded_pricing import get_all_graded_comps
+    try:
+        card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id_str))
+        if not card_data:
+            return tcg_id_str, {"error": "not_found"}
+
+        image_url = (card_data.get("imageCdnUrl800")
+                     or card_data.get("imageCdnUrl")
+                     or card_data.get("imageCdnUrl400"))
+
+        graded_prices = get_all_graded_comps(
+            int(tcg_id_str), db,
+            card_name=item.get("product_name"),
+            set_name=item.get("set_name"),
+            card_number=item.get("card_number"),
+        )
+        if not graded_prices:
+            graded_prices = PriceProvider.extract_graded_prices(card_data)
+
+        raw_price = float(item.get("market_price") or 0)
+        condition = item.get("condition") or "NM"
+        economics = _calc_grading_economics(graded_prices, raw_price, condition)
+
+        return tcg_id_str, {
+            "image_url": image_url,
+            "graded_prices": graded_prices,
+            "grading_economics": economics,
+        }
+    except Exception as e:
+        logger.warning(f"Enrich failed for TCG#{tcg_id_str}: {e}")
+        return tcg_id_str, {"error": str(e)}
+
+
 def _enrich_route_worker(job_id, session_id, items):
     """Background worker: fetch PPT + Scrydex data for each unique tcgplayer_id
     in parallel. Writes partial results to _enrich_cache as each card finishes
     so the frontend sees data stream in rather than waiting for a full batch."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from graded_pricing import get_all_graded_comps
 
     job = _enrich_jobs[job_id]
 
@@ -918,44 +954,12 @@ def _enrich_route_worker(job_id, session_id, items):
     # as each card finishes rather than flipping all-at-once at the end.
     cache = _enrich_cache.setdefault(session_id, {})
 
-    def _enrich_one(tcg_id_str, item):
-        try:
-            card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id_str))
-            if not card_data:
-                return tcg_id_str, {"error": "not_found"}
-
-            image_url = (card_data.get("imageCdnUrl800")
-                         or card_data.get("imageCdnUrl")
-                         or card_data.get("imageCdnUrl400"))
-
-            graded_prices = get_all_graded_comps(
-                int(tcg_id_str), db,
-                card_name=item.get("product_name"),
-                set_name=item.get("set_name"),
-                card_number=item.get("card_number"),
-            )
-            if not graded_prices:
-                graded_prices = PriceProvider.extract_graded_prices(card_data)
-
-            raw_price = float(item.get("market_price") or 0)
-            condition = item.get("condition") or "NM"
-            economics = _calc_grading_economics(graded_prices, raw_price, condition)
-
-            return tcg_id_str, {
-                "image_url": image_url,
-                "graded_prices": graded_prices,
-                "grading_economics": economics,
-            }
-        except Exception as e:
-            logger.warning(f"Enrich failed for TCG#{tcg_id_str}: {e}")
-            return tcg_id_str, {"error": str(e)}
-
     errors = 0
     done = 0
     # 8 concurrent — well under Scrydex's 100 req/sec ceiling and respects the
     # client's internal throttle. PPT is generous enough to handle it.
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = [ex.submit(_enrich_one, tcg_id_str, item)
+        futures = [ex.submit(_enrich_one_tcg, tcg_id_str, item)
                    for tcg_id_str, item in unique.items()]
         for fut in as_completed(futures):
             tcg_id_str, result = fut.result()
@@ -2390,6 +2394,38 @@ def get_enrich_job(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
+
+
+@app.route("/api/ingest/session/<session_id>/enrich-one", methods=["POST"])
+def enrich_one(session_id):
+    """Re-enrich a single item for the route session — used after a relink
+    changes a card's tcgplayer_id so the new mapping gets fresh PPT + Scrydex
+    data without nuking the whole session's cache.
+    Body: { item_id }"""
+    data = request.get_json(silent=True) or {}
+    item_id = data.get("item_id")
+    if not item_id:
+        return jsonify({"error": "item_id required"}), 400
+
+    item = db.query_one("""
+        SELECT id, product_name, set_name, condition, market_price, quantity,
+               routing_destination, tcgplayer_id, card_number, offer_price, variant
+        FROM intake_items
+        WHERE id = %s AND session_id = %s
+    """, (item_id, session_id))
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+    if not item.get("tcgplayer_id"):
+        return jsonify({"error": "Item has no tcgplayer_id — still unmapped"}), 400
+
+    tcg_id_str, result = _enrich_one_tcg(str(item["tcgplayer_id"]), dict(item))
+    cache = _enrich_cache.setdefault(session_id, {})
+    cache[tcg_id_str] = result
+    return jsonify({
+        "success": True,
+        "tcg_id": tcg_id_str,
+        "result": _serialize(result),
+    })
 
 
 @app.route("/api/ingest/session/<session_id>/route-enriched")
