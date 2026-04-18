@@ -307,9 +307,15 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
     """
     Update a raw card's condition and recalculate its offer price.
     Only adjusts price if condition actually changed or price_override is set.
-    Uses price_override > PPT condition pricing > fallback multipliers.
+
+    Price hierarchy (per root CLAUDE.md — always prefer Scrydex):
+        price_override > Scrydex cache per-condition > PPT per-condition
+        > condition-multiplier fallback from the existing deal market price.
     """
     from price_provider import PriceProvider, FALLBACK_MULTIPLIERS
+    from price_cache import PriceCache
+    from scrydex_client import ScrydexClient
+    import db as db_module
 
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
@@ -332,29 +338,47 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     qty = item.get("quantity", 1)
     tcg_id = item.get("tcgplayer_id")
+    variant = item.get("variant")
 
     if price_override is not None:
         new_market = Decimal(str(price_override)).quantize(Decimal("0.01"))
     elif condition_changed:
-        # Only look up new price when condition actually changed
         condition_market = None
-        if tcg_id and ppt_client:
+
+        # 1. Scrydex cache (preferred) — per-condition prices already stored
+        if tcg_id:
+            try:
+                cache = PriceCache(db_module)
+                card_data = cache.get_card_by_tcgplayer_id(int(tcg_id))
+                if card_data:
+                    condition_market = ScrydexClient.extract_condition_price(
+                        card_data, condition, variant=variant)
+                    if condition_market is not None:
+                        logger.info(f"Condition update price from Scrydex cache: "
+                                    f"${condition_market} for {condition} TCG#{tcg_id}")
+            except Exception as e:
+                logger.warning(f"Scrydex cache condition lookup failed for TCG#{tcg_id}: {e}")
+
+        # 2. PPT fallback — Scrydex has holes (Japanese, Scrydex-only cards)
+        if condition_market is None and tcg_id and ppt_client:
             try:
                 card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
                 if card_data:
                     condition_market = PriceProvider.extract_condition_price(
-                        card_data, condition, variant=item.get("variant"))
+                        card_data, condition, variant=variant)
+                    if condition_market is not None:
+                        logger.info(f"Condition update price from PPT fallback: "
+                                    f"${condition_market} for {condition} TCG#{tcg_id}")
             except Exception as e:
                 logger.warning(f"PPT condition lookup failed for TCG#{tcg_id}: {e}")
 
         if condition_market is not None:
             new_market = condition_market
         else:
-            # Fallback: adjust deal-time price proportionally
+            # 3. Multiplier fallback from deal-time price
             deal_market = Decimal(str(item.get("market_price", 0)))
             old_mult = FALLBACK_MULTIPLIERS.get(old_condition, Decimal("1.00"))
             new_mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
-            # Derive NM price from current market, then apply new condition
             if old_mult > 0:
                 nm_price = deal_market / old_mult
             else:
