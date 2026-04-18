@@ -2298,30 +2298,72 @@ async function _rsDoSplit() {
 async function _rsChangeCondition() {
     const item = _rsItems[_rsIndex];
     if (!item) return;
-    const current = item.condition || 'NM';
-    const choice = await themedPrompt('Change Condition',
-        `Current: ${current}. Enter NM / LP / MP / HP / DMG:`, current, 'text');
-    if (choice === null) return;
-    const newCond = String(choice).trim().toUpperCase();
-    if (!['NM','LP','MP','HP','DMG'].includes(newCond)) {
-        alert('Condition must be one of NM, LP, MP, HP, DMG'); return;
-    }
-    if (newCond === current) return;
+    const current = (item.condition || 'NM').toUpperCase();
+    const conditions = ['NM', 'LP', 'MP', 'HP', 'DMG'];
+
+    const overlay = document.getElementById('prompt-overlay');
+    document.getElementById('prompt-title').textContent = 'Change Condition';
+    document.getElementById('prompt-msg').textContent =
+        `Current: ${current}. Pick the new condition — price re-looks up from Scrydex.`;
+    const area = document.getElementById('prompt-input-area');
+    area.dataset.val = current;
+    area.innerHTML = `
+        <div style="margin-bottom:8px;">
+            ${conditions.map(c => `
+                <button class="btn btn-sm rs-cond-btn" data-cond="${c}"
+                        style="margin:4px; min-width:60px; padding:8px 16px; font-size:0.9rem; ${c === current ? 'background:var(--accent); color:#fff;' : ''}">
+                    ${c}
+                </button>`).join('')}
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+            <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
+            <input id="rs-cond-price-override" type="number" step="0.01" min="0" placeholder="leave blank for auto lookup" style="flex:1; font-size:0.9rem; padding:6px;">
+        </div>`;
+    area.querySelectorAll('.rs-cond-btn').forEach(btn => {
+        btn.onclick = () => {
+            area.dataset.val = btn.dataset.cond;
+            area.querySelectorAll('.rs-cond-btn').forEach(b => {
+                b.style.background = '';
+                b.style.color = '';
+            });
+            btn.style.background = 'var(--accent)';
+            btn.style.color = '#fff';
+        };
+    });
+    overlay.style.display = 'flex';
+
+    const result = await new Promise(resolve => {
+        document.getElementById('prompt-ok').onclick = () => {
+            overlay.style.display = 'none';
+            const priceVal = document.getElementById('rs-cond-price-override')?.value?.trim();
+            resolve({
+                condition: area.dataset.val || current,
+                price_override: priceVal ? parseFloat(priceVal) : null,
+            });
+        };
+        document.getElementById('prompt-cancel').onclick = () => {
+            overlay.style.display = 'none';
+            resolve(null);
+        };
+    });
+    if (result === null) return;
+    if (result.condition === current && result.price_override === null) return;
+
     try {
+        const body = { condition: result.condition };
+        if (result.price_override !== null) body.price_override = result.price_override;
         const r = await fetch(`/api/ingest/item/${item.id}/update-condition`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ condition: newCond }),
+            body: JSON.stringify(body),
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error || 'Condition update failed'); return; }
-        // Merge the fresh server state into the local route item so the card
-        // re-renders with the new condition + recalculated market price.
         if (d.item) {
-            item.condition = d.item.condition || newCond;
+            item.condition = d.item.condition || result.condition;
             if (d.item.market_price != null) item.market_price = d.item.market_price;
         } else {
-            item.condition = newCond;
+            item.condition = result.condition;
         }
         _renderSessionCard();
     } catch(e) {
