@@ -410,16 +410,22 @@ def search_cards_for_relink():
     where = ["product_type = 'card'"]
     params = []
     if query:
-        where.append("product_name ILIKE %s")
+        # Match either the native product_name (e.g. カスミのギャラドス for JP cards)
+        # OR the English translation (Misty's Gyarados), so users can search
+        # English names and still find Japanese cards.
+        where.append("(product_name ILIKE %s OR product_name_en ILIKE %s)")
+        params.append(f"%{query}%")
         params.append(f"%{query}%")
     if set_nm:
-        where.append("expansion_name ILIKE %s")
+        where.append("(expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
+        params.append(f"%{set_nm}%")
         params.append(f"%{set_nm}%")
 
     # One row per scrydex_id — NM raw variant first (most representative)
     sql = f"""
         SELECT DISTINCT ON (scrydex_id)
-               scrydex_id, tcgplayer_id, product_name, expansion_name,
+               scrydex_id, tcgplayer_id, product_name, product_name_en,
+               expansion_name, expansion_name_en, language_code,
                card_number, rarity, variant, image_small, image_medium, market_price
         FROM scrydex_price_cache
         WHERE {' AND '.join(where)}
@@ -434,15 +440,18 @@ def search_cards_for_relink():
     # instead of hiding them, which matters for Japanese cards that Scrydex
     # tracks but that have no TCGplayer mapping.
     results = [{
-        "scrydex_id":    r.get("scrydex_id"),
-        "tcgplayer_id":  r.get("tcgplayer_id"),
-        "product_name":  r.get("product_name"),
-        "set_name":      r.get("expansion_name"),
-        "card_number":   r.get("card_number"),
-        "rarity":        r.get("rarity"),
-        "variant":       r.get("variant"),
-        "image":         r.get("image_small") or r.get("image_medium"),
-        "market_price":  float(r["market_price"]) if r.get("market_price") else None,
+        "scrydex_id":        r.get("scrydex_id"),
+        "tcgplayer_id":      r.get("tcgplayer_id"),
+        "product_name":      r.get("product_name"),
+        "product_name_en":   r.get("product_name_en"),
+        "set_name":          r.get("expansion_name"),
+        "set_name_en":       r.get("expansion_name_en"),
+        "language_code":     r.get("language_code"),
+        "card_number":       r.get("card_number"),
+        "rarity":            r.get("rarity"),
+        "variant":           r.get("variant"),
+        "image":             r.get("image_small") or r.get("image_medium"),
+        "market_price":      float(r["market_price"]) if r.get("market_price") else None,
     } for r in rows]
 
     return jsonify({"results": results, "total": len(results)})

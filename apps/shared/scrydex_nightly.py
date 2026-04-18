@@ -31,28 +31,35 @@ UPSERT_SQL = """
         variant, condition, price_type, grade_company, grade_value,
         market_price, low_price, mid_price, high_price,
         trend_1d_pct, trend_7d_pct, trend_30d_pct,
-        image_small, image_medium, image_large, fetched_at
+        image_small, image_medium, image_large,
+        product_name_en, expansion_name_en, language_code,
+        fetched_at
     ) VALUES (
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s,
+        NOW()
     )
     ON CONFLICT (game, scrydex_id, variant, condition, price_type,
                  grade_company_key, grade_value_key)
     DO UPDATE SET
-        tcgplayer_id   = COALESCE(scrydex_price_cache.tcgplayer_id, EXCLUDED.tcgplayer_id),
-        expansion_name = EXCLUDED.expansion_name,
-        product_name   = EXCLUDED.product_name,
-        market_price   = EXCLUDED.market_price,
-        low_price      = EXCLUDED.low_price,
-        mid_price      = EXCLUDED.mid_price,
-        high_price     = EXCLUDED.high_price,
-        trend_1d_pct   = EXCLUDED.trend_1d_pct,
-        trend_7d_pct   = EXCLUDED.trend_7d_pct,
-        trend_30d_pct  = EXCLUDED.trend_30d_pct,
-        image_small    = EXCLUDED.image_small,
-        image_medium   = EXCLUDED.image_medium,
-        image_large    = EXCLUDED.image_large,
-        fetched_at     = NOW()
+        tcgplayer_id      = COALESCE(scrydex_price_cache.tcgplayer_id, EXCLUDED.tcgplayer_id),
+        expansion_name    = EXCLUDED.expansion_name,
+        product_name      = EXCLUDED.product_name,
+        product_name_en   = EXCLUDED.product_name_en,
+        expansion_name_en = EXCLUDED.expansion_name_en,
+        language_code     = EXCLUDED.language_code,
+        market_price      = EXCLUDED.market_price,
+        low_price         = EXCLUDED.low_price,
+        mid_price         = EXCLUDED.mid_price,
+        high_price        = EXCLUDED.high_price,
+        trend_1d_pct      = EXCLUDED.trend_1d_pct,
+        trend_7d_pct      = EXCLUDED.trend_7d_pct,
+        trend_30d_pct     = EXCLUDED.trend_30d_pct,
+        image_small       = EXCLUDED.image_small,
+        image_medium      = EXCLUDED.image_medium,
+        image_large       = EXCLUDED.image_large,
+        fetched_at        = NOW()
 """
 
 MAP_SQL = """
@@ -98,6 +105,19 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
     rarity = item.get("rarity")
     img_s, img_m, img_l = _extract_images(item)
 
+    # Language + English translation (JP sets ship translation.en.name in
+    # Scrydex responses). For English sets, there's no translation block —
+    # mirror the native name into *_en so English searches always have a
+    # column to hit without special-casing language.
+    language_code = item.get("language_code")  # 'JA', 'EN', etc.
+    translation_en = (item.get("translation") or {}).get("en") or {}
+    product_name_en = translation_en.get("name") or (name if language_code == "EN" else None)
+
+    expansion_obj = item.get("expansion") or {}
+    expansion_translation_en = (expansion_obj.get("translation") or {}).get("en") or {}
+    expansion_name_en = (expansion_translation_en.get("name")
+                         or (expansion_name if language_code == "EN" else None))
+
     rows = []
     variants = item.get("variants") or [{"name": "normal", "prices": []}]
     for v in variants:
@@ -114,6 +134,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
                 variant_name, default_cond, "raw", None, None,
                 None, None, None, None, None, None, None,
                 img_s, img_m, img_l,
+                product_name_en, expansion_name_en, language_code,
             ))
             continue
 
@@ -133,6 +154,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
                 variant_name, condition, price_type, grade_co, grade_val,
                 p.get("market"), p.get("low"), p.get("mid"), p.get("high"),
                 t1, t7, t30, img_s, img_m, img_l,
+                product_name_en, expansion_name_en, language_code,
             ))
     return rows
 

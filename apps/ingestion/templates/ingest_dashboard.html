@@ -2979,29 +2979,45 @@ async function relinkSearch() {
         }
 
         resultsDiv.innerHTML = '<div style="max-height:350px; overflow-y:auto;">' + results.slice(0, 25).map(p => {
-            const name    = p.product_name || '';
+            const native  = p.product_name || '';
+            const english = p.product_name_en || '';
             const tcgId   = p.tcgplayer_id;
             const price   = p.market_price || 0;
-            const setName = p.set_name || '';
+            const setNative = p.set_name || '';
+            const setEng    = p.set_name_en || '';
+            const lang    = (p.language_code || '').toUpperCase();
             const cardNum = p.card_number ? `#${p.card_number}` : '';
             const variant = p.variant && p.variant !== 'normal' ? ` · ${p.variant}` : '';
-            // Scrydex-only cards (no TCG ID) can't be linked with the current
-            // relink backend — skip them with a hint rather than showing a
-            // broken row. Known gap for truly JP-only cards; English JP-sets
-            // that Scrydex has mapped to TCG still come through fine.
+
+            // Show English primary when it differs from native (JP cards).
+            // For EN cards, english === native so only one line is shown.
+            const isJP = lang === 'JA' || (english && native && english !== native);
+            const primaryName = english || native;
+            const secondaryName = (native && english && native !== english) ? native : '';
+            const setDisplay = (setEng && setNative && setEng !== setNative)
+                ? `${setEng} (${setNative})`
+                : (setEng || setNative);
+            const langBadge = lang
+                ? `<span style="font-size:0.62rem; padding:1px 5px; border-radius:3px; margin-right:6px; background:${isJP?'rgba(255,170,0,0.18)':'rgba(124,147,245,0.15)'}; color:${isJP?'#e6a817':'var(--accent)'};">${lang}</span>`
+                : '';
+
+            // Scrydex-only (no TCG ID) can't be linked with the current
+            // relink backend — surface with a dim/disabled row.
             if (!tcgId) {
                 return `<div style="padding:8px 12px; border:1px dashed var(--border); border-radius:6px; margin-bottom:6px; opacity:0.55;">
-                    <div style="font-weight:600;">${name} ${cardNum}</div>
-                    <div style="font-size:0.78rem; color:var(--text-dim);">${setName}${variant} · Scrydex-only (no TCG ID — can't link yet)</div>
+                    <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}</div>
+                    ${secondaryName ? `<div style="font-size:0.75rem; color:var(--text-dim);">${secondaryName}</div>` : ''}
+                    <div style="font-size:0.78rem; color:var(--text-dim);">${setDisplay}${variant} · Scrydex-only (no TCG ID — can't link yet)</div>
                 </div>`;
             }
-            const nameEsc = name.replace(/'/g, "\\'");
-            const setEsc  = setName.replace(/'/g, "\\'");
+            const nameEsc = primaryName.replace(/'/g, "\\'");
+            const setEsc  = setDisplay.replace(/'/g, "\\'");
             return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
                          onclick="relinkSelect(${tcgId}, '${nameEsc}', ${price}, '${setEsc}')">
-                <div style="font-weight:600;">${name} ${cardNum}</div>
-                <div style="font-size:0.8rem; color:var(--text-dim);">${setName}${variant} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
+                <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}</div>
+                ${secondaryName ? `<div style="font-size:0.75rem; color:var(--text-dim);">${secondaryName}</div>` : ''}
+                <div style="font-size:0.8rem; color:var(--text-dim);">${setDisplay}${variant} · TCG#${tcgId} · $${Number(price).toFixed(2)}</div>
             </div>`;
         }).join('') + '</div>';
     } catch(err) {
