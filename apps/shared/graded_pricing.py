@@ -33,6 +33,24 @@ logger = logging.getLogger(__name__)
 # Half-life of 14 days: a sale today weighs ~16× more than one 8 weeks ago.
 
 _HALF_LIFE_DAYS = 14.0
+
+
+def _normalize_grade(g) -> str:
+    """Canonicalize a grade value so cache lookups don't miss on '10' vs '10.0'.
+    intake_items inconsistently stores both formats (the UI accepts '10.0' for
+    decimal grades like 9.5, but Scrydex cache + most callers use '10'). Strip
+    trailing .0 while preserving real fractional grades like '9.5'."""
+    if g is None:
+        return ""
+    s = str(g).strip()
+    if not s:
+        return ""
+    try:
+        f = float(s)
+        # %g formatting strips trailing zeros: 10.0 → '10', 9.5 → '9.5', 9 → '9'
+        return f"{f:g}"
+    except (TypeError, ValueError):
+        return s
 _DECAY = math.log(2) / _HALF_LIFE_DAYS
 
 
@@ -207,7 +225,9 @@ def get_live_graded_comps(
     Falls back to scrydex_price_cache (unreliable) if the live API call fails.
     """
     company = grade_company.upper().strip()
-    grade   = str(grade_value).strip()
+    # Cache stores grades as '10' / '9.5'; intake items inconsistently use
+    # '10' or '10.0'. Normalize so the WHERE clause matches.
+    grade   = _normalize_grade(grade_value)
 
     if not scrydex_id:
         scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name,
@@ -247,11 +267,12 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
 
     now = datetime.now(timezone.utc)
 
-    # Filter to exact company + grade, parse dates
+    # Filter to exact company + grade, parse dates. Normalize the listing's
+    # grade too so '10.0' from one source matches '10' from another.
     sales = []
     for l in raw_listings:
         if ((l.get("company") or "").upper() != company
-                or str(l.get("grade", "")) != grade
+                or _normalize_grade(l.get("grade", "")) != grade
                 or l.get("price") is None):
             continue
         price_val = float(l["price"])
@@ -405,12 +426,13 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
         if not raw_listings:
             return {}
 
-    # Group all listings by company + grade
+    # Group all listings by company + grade. Normalized grade keys so that
+    # '10' and '10.0' from different listings collapse into one bucket.
     from collections import defaultdict
     buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for l in raw_listings:
         co = (l.get("company") or "").upper()
-        gr = str(l.get("grade", "")).strip()
+        gr = _normalize_grade(l.get("grade", ""))
         if not co or not gr or l.get("price") is None:
             continue
         sale_date = _parse_date(l)
@@ -459,6 +481,7 @@ def _fallback_from_cache(tcgplayer_id, company: str, grade: str, db,
     """Read from scrydex_price_cache — unreliable for graded but better than nothing.
     Looks up by scrydex_id when supplied (preferred for JP cards that have no
     TCGplayer mapping), else by tcgplayer_id."""
+    grade = _normalize_grade(grade)
     if scrydex_id:
         row = db.query_one("""
             SELECT market_price, low_price, mid_price, high_price,
