@@ -281,6 +281,93 @@ def trigger_scrydex_sync():
     return jsonify({"ok": True, "started": True}), 200
 
 
+@app.route('/run-slab-updater', methods=["GET", "POST"])
+def trigger_slab_updater():
+    """Manually trigger the graded slab price updater. Always runs in apply
+    mode — it auto-adjusts overpriced in-stock slabs and persists every row
+    (adjusted, flagged, skipped) to slab_price_runs for review."""
+    from flask import jsonify
+    threading.Thread(target=run_slab_updater, daemon=True).start()
+    if request.method == "GET":
+        return redirect("/dashboard/slab-runs")
+    return jsonify({"ok": True, "started": True}), 200
+
+
+@app.route('/dashboard/slab-runs')
+def slab_runs_list():
+    """List recent slab_updater runs with summary counts per action."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+    rows = shared_db.query("""
+        SELECT run_id,
+               MIN(started_at)                                      AS started_at,
+               COUNT(*)                                             AS total,
+               COUNT(*) FILTER (WHERE action = 'adjusted')          AS adjusted,
+               COUNT(*) FILTER (WHERE action = 'flag_overpriced')   AS flag_over,
+               COUNT(*) FILTER (WHERE action = 'flag_underpriced')  AS flag_under,
+               COUNT(*) FILTER (WHERE action = 'ok')                AS ok,
+               COUNT(*) FILTER (WHERE action = 'skip')              AS skipped,
+               COUNT(*) FILTER (WHERE action = 'error')             AS errors
+        FROM slab_price_runs
+        GROUP BY run_id
+        ORDER BY started_at DESC
+        LIMIT 60
+    """)
+    return render_template("slab_runs.html", runs=rows)
+
+
+@app.route('/dashboard/slab-runs/<run_id>')
+def slab_run_detail(run_id):
+    """Show every row from one slab_updater run, filtered by action if requested."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+
+    action_filter = (request.args.get("action") or "").strip()
+    params = [run_id]
+    sql = """
+        SELECT title, sku, qty, company, grade, tcgplayer_id,
+               old_price, new_price, suggested_price, median, low_comp, high_comp,
+               comps_count, delta_pct, trend_7d, action, reason,
+               product_gid, variant_gid, started_at
+        FROM slab_price_runs
+        WHERE run_id = %s
+    """
+    if action_filter:
+        sql += " AND action = %s"
+        params.append(action_filter)
+    sql += """
+        ORDER BY
+            CASE action
+                WHEN 'error'            THEN 0
+                WHEN 'adjusted'         THEN 1
+                WHEN 'flag_underpriced' THEN 2
+                WHEN 'flag_overpriced'  THEN 3
+                WHEN 'skip'             THEN 4
+                WHEN 'ok'               THEN 5
+                ELSE 6
+            END,
+            ABS(COALESCE(delta_pct, 0)) DESC NULLS LAST,
+            title
+    """
+    rows = shared_db.query(sql, tuple(params))
+
+    summary = shared_db.query_one("""
+        SELECT MIN(started_at) AS started_at, COUNT(*) AS total
+        FROM slab_price_runs WHERE run_id = %s
+    """, (run_id,))
+
+    return render_template(
+        "slab_run_detail.html",
+        run_id=run_id,
+        rows=rows,
+        summary=summary,
+        action_filter=action_filter,
+        store_domain=os.environ.get("SHOPIFY_STORE", ""),
+    )
+
+
 @app.route('/run-dailyrunner', methods=["GET", "POST"])
 def run_dailyrunner():
     def launch_script():

@@ -16,9 +16,10 @@ import os
 import re
 import sys
 import csv
+import uuid
 import logging
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
@@ -141,6 +142,47 @@ def fetch_slab_products() -> list[dict]:
     return products
 
 
+_INSERT_RUN_SQL = """
+    INSERT INTO slab_price_runs (
+        run_id, started_at,
+        product_gid, variant_gid, sku, title, qty, cost_basis,
+        tcgplayer_id, company, grade,
+        old_price, new_price, suggested_price,
+        median, low_comp, high_comp, comps_count, delta_pct, trend_7d,
+        action, reason
+    ) VALUES (
+        %s, %s,
+        %s, %s, %s, %s, %s, %s,
+        %s, %s, %s,
+        %s, %s, %s,
+        %s, %s, %s, %s, %s, %s,
+        %s, %s
+    )
+"""
+
+
+def _record_run_row(db_module, run_id: str, started_at: datetime, entry: dict):
+    """Persist one slab_updater result row to slab_price_runs.
+
+    Best-effort — DB failures here must never crash the run, since the
+    Shopify mutation may have already gone through.
+    """
+    try:
+        db_module.execute(_INSERT_RUN_SQL, (
+            run_id, started_at,
+            entry.get("product_gid"), entry.get("variant_gid"),
+            entry.get("sku"), entry.get("title"),
+            entry.get("qty"), entry.get("cost_basis"),
+            entry.get("tcg_id"), entry.get("company"), entry.get("grade"),
+            entry.get("price"), entry.get("new_price"), entry.get("suggested_price"),
+            entry.get("median"), entry.get("low"), entry.get("high"),
+            entry.get("comps_count"), entry.get("delta_pct"), entry.get("trend_7d"),
+            entry.get("action"), entry.get("reason"),
+        ))
+    except Exception as e:
+        logger.warning(f"Failed to persist slab_price_runs row for {entry.get('sku')}: {e}")
+
+
 def update_variant_price(product_gid: str, variant_gid: str, new_price: float):
     """Update a single variant's price via GraphQL."""
     mutation = """
@@ -174,6 +216,7 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
     3. Fetch live eBay comps via shared/graded_pricing.py
     4. Compare current price to live median
     5. Flag or auto-adjust
+    6. Persist every row to slab_price_runs for the dashboard audit trail
 
     Returns list of result dicts.
     """
@@ -181,6 +224,10 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
     db_module.init_pool()
 
     from graded_pricing import get_live_graded_comps
+
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
+    logger.info(f"Slab updater run_id={run_id} started_at={started_at.isoformat()} apply={apply}")
 
     logger.info("Fetching slab products from Shopify...")
     slabs = fetch_slab_products()
@@ -194,20 +241,27 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
         title = slab["title"]
         grade_info = extract_grade_from_title(title)
         if not grade_info:
-            results.append({**slab, "action": "skip", "reason": "no grade in title"})
+            entry = {**slab, "action": "skip", "reason": "no grade in title"}
+            results.append(entry)
+            _record_run_row(db_module, run_id, started_at, entry)
             continue
 
         company, grade_val = grade_info
         tcg_id = slab.get("tcg_id")
         if not tcg_id:
-            results.append({**slab, "action": "skip", "reason": "no tcg_id"})
+            entry = {**slab, "company": company, "grade": grade_val,
+                     "action": "skip", "reason": "no tcg_id"}
+            results.append(entry)
+            _record_run_row(db_module, run_id, started_at, entry)
             continue
 
         # Fetch live comps
         comps = get_live_graded_comps(tcg_id, company, grade_val, db_module)
         if not comps or not comps.get("mid"):
-            results.append({**slab, "action": "skip", "reason": "no comp data",
-                            "company": company, "grade": grade_val})
+            entry = {**slab, "action": "skip", "reason": "no comp data",
+                     "company": company, "grade": grade_val}
+            results.append(entry)
+            _record_run_row(db_module, run_id, started_at, entry)
             continue
 
         current = slab["price"]
@@ -261,9 +315,10 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
             flagged += 1
 
         results.append(entry)
+        _record_run_row(db_module, run_id, started_at, entry)
         logger.info(f"  {title}: ${current:.2f} vs median ${median:.2f} ({comps_n} comps) → {entry['action']}")
 
-    logger.info(f"\nDone. {len(slabs)} slabs, {updated} adjusted, {flagged} flagged")
+    logger.info(f"\nDone. run_id={run_id}  {len(slabs)} slabs, {updated} adjusted, {flagged} flagged")
 
     # Write CSV if requested
     if csv_path and results:

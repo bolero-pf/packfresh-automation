@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Slab Run Detail</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
+    <style>
+        body { padding: 24px; max-width: 1700px; margin: 0 auto; }
+        h1 { font-size: 1.3rem; margin-bottom: 4px; }
+        .sub { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 16px; font-family: var(--font-mono); }
+        .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+        .filters a { padding: 4px 10px; border-radius: 14px; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text); text-decoration: none; }
+        .filters a.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; vertical-align: top; }
+        th { background: var(--surface); color: var(--text-dim); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; position: sticky; top: 0; }
+        tr:hover td { background: var(--surface-2); }
+        .pill { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 0.7rem; font-weight: 600; white-space: nowrap; }
+        .p-adj { background: rgba(34,197,94,0.18); color: #4ade80; }
+        .p-over { background: rgba(245,158,11,0.18); color: #fbbf24; }
+        .p-under { background: rgba(79,125,249,0.18); color: #7aadff; }
+        .p-skip { background: var(--surface-2); color: var(--text-dim); }
+        .p-err { background: rgba(239,68,68,0.18); color: #f87171; }
+        .p-ok { background: rgba(148,163,184,0.18); color: var(--text-dim); }
+        .num { font-family: var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .delta-pos { color: #fbbf24; }
+        .delta-neg { color: #7aadff; }
+        .delta-zero { color: var(--text-dim); }
+        .reason { color: var(--text-dim); font-size: 0.78rem; }
+        a.title-link { color: var(--text); }
+        a.title-link:hover { color: var(--accent); }
+    </style>
+</head>
+<body>
+    <a href="/dashboard/slab-runs" style="color:var(--text-dim);font-size:0.85rem;">← all runs</a>
+    <h1 style="margin-top:8px;">Slab Run · {{ summary.total }} slabs</h1>
+    <div class="sub">{{ summary.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }} · run_id={{ run_id }}</div>
+
+    <div class="filters">
+        {% set actions = [('', 'All'), ('adjusted', 'Adjusted'), ('flag_overpriced', 'Flag overpriced'), ('flag_underpriced', 'Flag underpriced'), ('skip', 'Skipped'), ('error', 'Errors'), ('ok', 'OK')] %}
+        {% for code, label in actions %}
+            <a href="?{% if code %}action={{ code }}{% endif %}" class="{% if action_filter == code %}active{% endif %}">{{ label }}</a>
+        {% endfor %}
+    </div>
+
+    {% if not rows %}
+        <p style="color:var(--text-dim);">No rows match this filter.</p>
+    {% else %}
+    <table>
+        <thead>
+            <tr>
+                <th>Action</th>
+                <th>Title</th>
+                <th>Grade</th>
+                <th class="num">Qty</th>
+                <th class="num">Old&nbsp;$</th>
+                <th class="num">New / Suggested $</th>
+                <th class="num">Median $</th>
+                <th class="num">Range</th>
+                <th class="num">Comps</th>
+                <th class="num">Delta %</th>
+                <th class="num">7d trend</th>
+                <th>Reason</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in rows %}
+            {% set act = r.action %}
+            {% set pill_cls = {'adjusted':'p-adj','flag_overpriced':'p-over','flag_underpriced':'p-under','skip':'p-skip','error':'p-err','ok':'p-ok'}.get(act, 'p-skip') %}
+            <tr>
+                <td><span class="pill {{ pill_cls }}">{{ act }}</span></td>
+                <td>
+                    {% if r.product_gid and store_domain %}
+                        {% set pid = r.product_gid.split('/')[-1] %}
+                        <a class="title-link" href="https://{{ store_domain }}/admin/products/{{ pid }}" target="_blank">{{ r.title }}</a>
+                    {% else %}
+                        {{ r.title }}
+                    {% endif %}
+                    {% if r.sku %}<div class="reason">SKU {{ r.sku }}{% if r.tcgplayer_id %} · TCG#{{ r.tcgplayer_id }}{% endif %}</div>{% endif %}
+                </td>
+                <td>{% if r.company %}{{ r.company }} {{ r.grade }}{% else %}—{% endif %}</td>
+                <td class="num">{{ r.qty if r.qty is not none else '—' }}</td>
+                <td class="num">{% if r.old_price is not none %}${{ '%.2f' % r.old_price }}{% else %}—{% endif %}</td>
+                <td class="num">
+                    {% if r.new_price is not none %}<strong>${{ '%.2f' % r.new_price }}</strong>
+                    {% elif r.suggested_price is not none %}<em>${{ '%.2f' % r.suggested_price }}</em>
+                    {% else %}—{% endif %}
+                </td>
+                <td class="num">{% if r.median is not none %}${{ '%.2f' % r.median }}{% else %}—{% endif %}</td>
+                <td class="num">
+                    {% if r.low_comp is not none and r.high_comp is not none %}${{ '%.0f' % r.low_comp }}–${{ '%.0f' % r.high_comp }}{% else %}—{% endif %}
+                </td>
+                <td class="num">{{ r.comps_count if r.comps_count is not none else '—' }}</td>
+                <td class="num">
+                    {% if r.delta_pct is not none %}
+                        {% set d = r.delta_pct %}
+                        <span class="{% if d > 0 %}delta-pos{% elif d < 0 %}delta-neg{% else %}delta-zero{% endif %}">{{ '%+.1f' % d }}%</span>
+                    {% else %}—{% endif %}
+                </td>
+                <td class="num">{% if r.trend_7d is not none %}{{ '%+.1f' % r.trend_7d }}%{% else %}—{% endif %}</td>
+                <td class="reason">{{ r.reason or '' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</body>
+</html>
