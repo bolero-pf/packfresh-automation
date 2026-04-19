@@ -191,6 +191,7 @@ def get_live_graded_comps(
     card_name: str = None,
     set_name: str = None,
     card_number: str = None,
+    scrydex_id: str = None,
 ) -> Optional[dict]:
     """
     Fetch real eBay sold comps for a specific graded card from Scrydex listings API.
@@ -199,16 +200,18 @@ def get_live_graded_comps(
     comp counts per window, and raw sales list for outlier visibility. Returns None
     if the card isn't in our Scrydex mapping or no comps found at all.
 
-    For JP cards without a tcgplayer_id, pass card_name + set_name for name-based
-    cache lookup to find the scrydex_id.
+    Identification priority: scrydex_id (if supplied) → tcgplayer_id →
+    name+set+number lookup. Pass scrydex_id directly when the item is
+    Scrydex-only (e.g. JP cards with no TCGplayer marketplace mapping).
 
-    Falls back to scrydex_price_cache (unreliable) if API call fails.
+    Falls back to scrydex_price_cache (unreliable) if the live API call fails.
     """
     company = grade_company.upper().strip()
     grade   = str(grade_value).strip()
 
-    scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name,
-                                     set_name=set_name, card_number=card_number)
+    if not scrydex_id:
+        scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name,
+                                         set_name=set_name, card_number=card_number)
 
     if not scrydex_id:
         logger.debug(f"No scrydex_id for TCG#{tcgplayer_id} / '{card_name}' #{card_number} — falling back to cache")
@@ -221,8 +224,9 @@ def get_live_graded_comps(
     if result:
         return result
 
-    # Live failed — fall back to cache
-    return _fallback_from_cache(tcgplayer_id, company, grade, db)
+    # Live failed — fall back to cache. Use scrydex_id directly so JP cards
+    # (no tcgplayer_id) still resolve via the cache.
+    return _fallback_from_cache(tcgplayer_id, company, grade, db, scrydex_id=scrydex_id)
 
 
 def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90) -> Optional[dict]:
@@ -450,16 +454,31 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
     return company_map
 
 
-def _fallback_from_cache(tcgplayer_id: int, company: str, grade: str, db) -> Optional[dict]:
-    """Read from scrydex_price_cache — unreliable for graded but better than nothing."""
-    row = db.query_one("""
-        SELECT market_price, low_price, mid_price, high_price,
-               trend_1d_pct, trend_7d_pct, trend_30d_pct, fetched_at
-        FROM scrydex_price_cache
-        WHERE tcgplayer_id = %s AND price_type = 'graded'
-          AND grade_company = %s AND grade_value = %s
-        ORDER BY fetched_at DESC LIMIT 1
-    """, (int(tcgplayer_id), company, grade))
+def _fallback_from_cache(tcgplayer_id, company: str, grade: str, db,
+                         *, scrydex_id: str = None) -> Optional[dict]:
+    """Read from scrydex_price_cache — unreliable for graded but better than nothing.
+    Looks up by scrydex_id when supplied (preferred for JP cards that have no
+    TCGplayer mapping), else by tcgplayer_id."""
+    if scrydex_id:
+        row = db.query_one("""
+            SELECT market_price, low_price, mid_price, high_price,
+                   trend_1d_pct, trend_7d_pct, trend_30d_pct, fetched_at
+            FROM scrydex_price_cache
+            WHERE scrydex_id = %s AND price_type = 'graded'
+              AND grade_company = %s AND grade_value = %s
+            ORDER BY fetched_at DESC LIMIT 1
+        """, (scrydex_id, company, grade))
+    elif tcgplayer_id:
+        row = db.query_one("""
+            SELECT market_price, low_price, mid_price, high_price,
+                   trend_1d_pct, trend_7d_pct, trend_30d_pct, fetched_at
+            FROM scrydex_price_cache
+            WHERE tcgplayer_id = %s AND price_type = 'graded'
+              AND grade_company = %s AND grade_value = %s
+            ORDER BY fetched_at DESC LIMIT 1
+        """, (int(tcgplayer_id), company, grade))
+    else:
+        return None
     if not row:
         return None
 

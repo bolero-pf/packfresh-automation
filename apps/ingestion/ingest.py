@@ -452,26 +452,30 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
     qty = item.get("quantity", 1)
     tcg_id = item.get("tcgplayer_id")
 
+    sid = item.get("scrydex_id")  # preferred when set (Scrydex-only / JP cards)
+
     new_market = None
     if price_override is not None:
         new_market = Decimal(str(price_override)).quantize(Decimal("0.01"))
-    elif grade_changed and tcg_id:
-        # Scrydex first (live eBay comps → cache)
+    elif grade_changed and (tcg_id or sid):
+        # Scrydex first (live eBay comps → cache). scrydex_id takes priority
+        # so JP cards without a TCGplayer mapping still resolve.
         if db_module:
             try:
                 from graded_pricing import get_live_graded_comps
                 comps = get_live_graded_comps(
-                    int(tcg_id), company, grade, db_module,
+                    int(tcg_id) if tcg_id else None, company, grade, db_module,
                     card_name=item.get("product_name"),
                     set_name=item.get("set_name"),
                     card_number=item.get("card_number"),
+                    scrydex_id=sid,
                 )
                 if comps and comps.get("market"):
                     new_market = Decimal(str(comps["market"])).quantize(Decimal("0.01"))
                     logger.info(f"Grade update price from Scrydex ({comps.get('source', '?')}): "
-                                f"${new_market} for {company} {grade} TCG#{tcg_id}")
+                                f"${new_market} for {company} {grade} sid={sid} tcg={tcg_id}")
             except Exception as e:
-                logger.warning(f"Scrydex graded lookup failed for TCG#{tcg_id}: {e}")
+                logger.warning(f"Scrydex graded lookup failed for sid={sid} tcg={tcg_id}: {e}")
 
         # PPT fallback
         if new_market is None and ppt_client:
@@ -532,6 +536,7 @@ def convert_item_type(item_id: str, to_graded: bool,
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     qty = item.get("quantity", 1)
     tcg_id = item.get("tcgplayer_id")
+    sid = item.get("scrydex_id")
 
     new_market = None
     if price_override is not None:
@@ -544,16 +549,17 @@ def convert_item_type(item_id: str, to_graded: bool,
             raise ValueError("grade_value is required when converting to graded")
 
         # Price lookup: Scrydex live listings → Scrydex cache → PPT fallback
-        if new_market is None and tcg_id:
+        if new_market is None and (tcg_id or sid):
             # Try Scrydex first (live eBay comps)
             if db_module:
                 try:
                     from graded_pricing import get_live_graded_comps
                     comps = get_live_graded_comps(
-                        int(tcg_id), company, grade, db_module,
+                        int(tcg_id) if tcg_id else None, company, grade, db_module,
                         card_name=item.get("product_name"),
                         set_name=item.get("set_name"),
                         card_number=item.get("card_number"),
+                        scrydex_id=sid,
                     )
                     if comps and comps.get("market"):
                         new_market = Decimal(str(comps["market"])).quantize(Decimal("0.01"))

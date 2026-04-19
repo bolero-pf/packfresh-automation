@@ -1913,8 +1913,9 @@ def preview_graded_item(item_id):
                     result["set_mismatch"] = overlap < 0.5
 
     # ── Scrydex graded pricing (always live for slabs) ──────────────────────
-    # Pass card_name + set_name so JP cards without tcgplayer_id can still
-    # be resolved by name search in the cache.
+    # Prefer scrydex_id when set on the item (Scrydex-only JP cards use this
+    # path since they have no tcgplayer_id). card_name+set_name remain as a
+    # name-based resolution fallback.
     from graded_pricing import get_live_graded_comps
     result["scrydex"] = None
     if grade:
@@ -1923,6 +1924,7 @@ def preview_graded_item(item_id):
             card_name=item.get("product_name"),
             set_name=item.get("set_name"),
             card_number=item.get("card_number"),
+            scrydex_id=item.get("scrydex_id"),
         )
 
     return jsonify(_serialize(result))
