@@ -1015,10 +1015,21 @@ def relink_item(item_id: str, data: dict) -> dict:
     grade_company = item.get("grade_company")
     grade_value = item.get("grade_value")
     derived = None
+    # Scrydex sends JP-marketplace prices in JPY; convert on read so derived
+    # market_price is always USD before it's written back to intake_items.
+    # Rate lives in env (SCRYDEX_JPY_USD_RATE) so ops can tweak without a
+    # redeploy when the yen moves.
+    import os as _os
+    jpy_rate = float(_os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
+    price_expr = (
+        "CASE WHEN currency = 'JPY' "
+        f"THEN ROUND(market_price::numeric * {jpy_rate}::numeric, 2) "
+        "ELSE market_price END AS market_price_usd"
+    )
     try:
         if is_graded and grade_company and grade_value:
-            cache_row = query_one("""
-                SELECT market_price
+            cache_row = query_one(f"""
+                SELECT {price_expr}
                 FROM scrydex_price_cache
                 WHERE ((%s IS NOT NULL AND tcgplayer_id = %s)
                        OR (%s IS NOT NULL AND scrydex_id = %s))
@@ -1030,11 +1041,11 @@ def relink_item(item_id: str, data: dict) -> dict:
                 LIMIT 1
             """, (tcgplayer_id, tcgplayer_id, scrydex_id, scrydex_id,
                   grade_company, grade_value, variant))
-            if cache_row and cache_row.get("market_price") is not None:
-                derived = Decimal(str(cache_row["market_price"]))
+            if cache_row and cache_row.get("market_price_usd") is not None:
+                derived = Decimal(str(cache_row["market_price_usd"]))
         else:
-            cache_row = query_one("""
-                SELECT market_price
+            cache_row = query_one(f"""
+                SELECT {price_expr}
                 FROM scrydex_price_cache
                 WHERE ((%s IS NOT NULL AND tcgplayer_id = %s)
                        OR (%s IS NOT NULL AND scrydex_id = %s))
@@ -1045,12 +1056,12 @@ def relink_item(item_id: str, data: dict) -> dict:
                 LIMIT 1
             """, (tcgplayer_id, tcgplayer_id, scrydex_id, scrydex_id,
                   condition, variant))
-            if cache_row and cache_row.get("market_price") is not None:
-                derived = Decimal(str(cache_row["market_price"]))
+            if cache_row and cache_row.get("market_price_usd") is not None:
+                derived = Decimal(str(cache_row["market_price_usd"]))
             # Condition fallback chain — if NM/LP/MP/HP missing, try NM.
             if derived is None and condition != "NM":
-                nm_row = query_one("""
-                    SELECT market_price
+                nm_row = query_one(f"""
+                    SELECT {price_expr}
                     FROM scrydex_price_cache
                     WHERE ((%s IS NOT NULL AND tcgplayer_id = %s)
                            OR (%s IS NOT NULL AND scrydex_id = %s))
@@ -1060,8 +1071,8 @@ def relink_item(item_id: str, data: dict) -> dict:
                     ORDER BY fetched_at DESC
                     LIMIT 1
                 """, (tcgplayer_id, tcgplayer_id, scrydex_id, scrydex_id, variant))
-                if nm_row and nm_row.get("market_price") is not None:
-                    derived = Decimal(str(nm_row["market_price"]))
+                if nm_row and nm_row.get("market_price_usd") is not None:
+                    derived = Decimal(str(nm_row["market_price_usd"]))
     except Exception as e:
         logger.warning(f"Cache-backed price derivation failed for relink on {item_id}: {e}")
 

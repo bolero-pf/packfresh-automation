@@ -48,6 +48,26 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
 
+# Currency conversion for scrydex_price_cache. Scrydex sends JP-marketplace
+# rows in JPY and eBay graded rows in USD (see migrate_scrydex_currency.py).
+# Rate is deliberately a config knob — forex changes. Override with
+# SCRYDEX_JPY_USD_RATE env var if you want a fresher number without a redeploy.
+# 0.0066 USD/JPY ≈ ¥150/USD, reasonable as of 2026.
+_JPY_USD_RATE = float(os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
+
+
+def _USD_PRICE_SQL(col: str) -> str:
+    """Return a SQL snippet that converts a cached price column to USD based on
+    the row's `currency` column. NULL/USD pass through unchanged. Keeps the
+    conversion in the DB so downstream Python code can stay currency-blind.
+    """
+    rate = _JPY_USD_RATE
+    return (
+        f"CASE "
+        f"WHEN currency = 'JPY' THEN ROUND(({col})::numeric * {rate}::numeric, 2) "
+        f"ELSE {col} END"
+    )
+
 # Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
 # In Docker: WORKDIR=/app, shared/ is at /app/shared/ (not ../shared/)
 _pf_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared", "static")
@@ -452,11 +472,15 @@ def search_cards_for_relink():
     # One row per (scrydex_id, variant) — cards with 1st Ed + Unlimited
     # share a scrydex_id but trade at very different prices, so the user
     # needs to pick the specific printing they're holding.
+    # market_price is converted to USD at query time — JP-marketplace rows
+    # land in the cache as JPY (see migrate_scrydex_currency.py).
     sql = f"""
         SELECT DISTINCT ON (scrydex_id, variant)
                scrydex_id, tcgplayer_id, product_name, product_name_en,
                expansion_name, expansion_name_en, language_code,
-               card_number, rarity, variant, image_small, image_medium, market_price
+               card_number, rarity, variant, image_small, image_medium,
+               currency,
+               {_USD_PRICE_SQL('market_price')} AS market_price
         FROM scrydex_price_cache
         WHERE {' AND '.join(where)}
         ORDER BY scrydex_id, variant

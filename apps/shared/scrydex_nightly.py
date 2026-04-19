@@ -33,11 +33,13 @@ UPSERT_SQL = """
         trend_1d_pct, trend_7d_pct, trend_30d_pct,
         image_small, image_medium, image_large,
         product_name_en, expansion_name_en, language_code,
+        currency,
         fetched_at
     ) VALUES (
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s,
+        %s,
         NOW()
     )
     ON CONFLICT (game, scrydex_id, variant, condition, price_type,
@@ -60,6 +62,7 @@ UPSERT_SQL = """
         image_small       = EXCLUDED.image_small,
         image_medium      = EXCLUDED.image_medium,
         image_large       = EXCLUDED.image_large,
+        currency          = EXCLUDED.currency,
         fetched_at        = NOW()
 """
 
@@ -323,6 +326,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
                 None, None, None, None, None, None, None,
                 v_img_s, v_img_m, v_img_l,
                 product_name_en, expansion_name_en, language_code,
+                None,  # currency
             ))
             continue
 
@@ -335,6 +339,10 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
             t30 = (trends.get("days_30") or {}).get("percent_change")
             grade_co = p.get("company") if price_type == "graded" else None
             grade_val = str(p.get("grade", "")) if price_type == "graded" else None
+            # Scrydex sends a per-price `currency` — JP-marketplace rows for
+            # Japanese cards come through as JPY while eBay-sourced graded
+            # rows are USD. Capture it so downstream queries can convert.
+            currency = (p.get("currency") or "USD").upper()
 
             rows.append((
                 game, scrydex_id, v_tcg_id, expansion_id, expansion_name,
@@ -343,6 +351,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
                 p.get("market"), p.get("low"), p.get("mid"), p.get("high"),
                 t1, t7, t30, v_img_s, v_img_m, v_img_l,
                 product_name_en, expansion_name_en, language_code,
+                currency,
             ))
     return rows
 
