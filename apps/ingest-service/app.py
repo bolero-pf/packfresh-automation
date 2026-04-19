@@ -2008,7 +2008,11 @@ def debug_sealed(tcgplayer_id):
 
 @app.route("/api/ppt/search-sealed", methods=["POST"])
 def ppt_search_sealed():
-    """Search for sealed products by name. Uses cache first; pass live=true to skip cache."""
+    """Search for sealed products by name across all TCGs.
+    Cache first (multi-TCG: pokemon, onepiece, lorcana, mtg, riftbound),
+    then live PPT/Scrydex fallback for the configured game.
+    Pass live=true to skip cache.
+    """
     if not ppt:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
@@ -2017,24 +2021,36 @@ def ppt_search_sealed():
         return jsonify({"error": "No query"}), 400
     live_only = data.get("live", False)
     try:
-        if live_only:
-            results = ppt.primary.search_sealed_products(q, limit=5)
-            results = ppt._stamp(results, ppt._primary_source)
-        else:
-            results = ppt.search_sealed_products(q, limit=5)
-        for r in results:
+        results = []
+        cache = getattr(ppt, "cache", None)
+        if cache and not live_only:
+            try:
+                results = cache.search_sealed_products(q, limit=5, all_games=True)
+                results = ppt._stamp(results, "cache")
+            except Exception as e:
+                app.logger.warning(f"Cross-game sealed cache search failed: {e}")
+                results = []
+        if not results:
+            live = ppt.primary.search_sealed_products(q, limit=5) or []
+            results = ppt._stamp(live, ppt._primary_source)
+        for r in (results or []):
             if not r.get("tcgplayer_id"):
                 tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
                 if tcg_id:
-                    r["tcgplayer_id"] = int(tcg_id)
-        return jsonify({"results": results})
+                    try:
+                        r["tcgplayer_id"] = int(tcg_id)
+                    except (TypeError, ValueError):
+                        pass
+        return jsonify({"results": results or []})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/ppt/search-cards", methods=["POST"])
 def ppt_search_cards():
-    """Search PPT for individual cards by name."""
+    """Search for individual cards by name across all TCGs.
+    Cache first (multi-TCG), then live PPT/Scrydex fallback for the configured game.
+    """
     if not ppt:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
@@ -2044,7 +2060,18 @@ def ppt_search_cards():
     try:
         set_name = data.get("set_name") or None
         limit = data.get("limit", 8)
-        results = ppt.search_cards(q, set_name=set_name, limit=limit)
+        results = []
+        cache = getattr(ppt, "cache", None)
+        if cache:
+            try:
+                results = cache.search_cards(q, set_name=set_name, limit=limit, all_games=True)
+                results = ppt._stamp(results, "cache")
+            except Exception as e:
+                app.logger.warning(f"Cross-game card cache search failed: {e}")
+                results = []
+        if not results:
+            live = ppt.primary.search_cards(q, set_name=set_name, limit=limit) or []
+            results = ppt._stamp(live, ppt._primary_source)
         for r in (results or []):
             if not r.get("market_price"):
                 conds = (r.get("prices") or {}).get("conditions") or {}

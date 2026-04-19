@@ -133,14 +133,27 @@ class PriceCache:
         all_groups = sorted(by_sid.items(), key=lambda x: len(x[1][0].get("product_name", "")))
         return all_groups[0][1]
 
-    def search_cards(self, query: str, *, set_name: str = None, limit: int = 5) -> list[dict]:
-        """Search cards by name in the local cache."""
-        params = [f"%{query}%", self.game]
-        sql = """
-            SELECT DISTINCT ON (scrydex_id) *
-            FROM scrydex_price_cache
-            WHERE product_type = 'card' AND product_name ILIKE %s AND game = %s
+    def search_cards(self, query: str, *, set_name: str = None, limit: int = 5,
+                     all_games: bool = False) -> list[dict]:
+        """Search cards by name in the local cache.
+
+        all_games=True drops the game filter so multi-TCG manual entry can find
+        non-Pokemon cards (One Piece, Lorcana, MTG, etc.) in one search.
         """
+        if all_games:
+            params = [f"%{query}%"]
+            sql = """
+                SELECT DISTINCT ON (scrydex_id) *
+                FROM scrydex_price_cache
+                WHERE product_type = 'card' AND product_name ILIKE %s
+            """
+        else:
+            params = [f"%{query}%", self.game]
+            sql = """
+                SELECT DISTINCT ON (scrydex_id) *
+                FROM scrydex_price_cache
+                WHERE product_type = 'card' AND product_name ILIKE %s AND game = %s
+            """
         if set_name:
             sql += " AND expansion_name ILIKE %s"
             params.append(f"%{set_name}%")
@@ -159,15 +172,27 @@ class PriceCache:
                 results.append(self._build_card_dict(card_rows, row.get("tcgplayer_id")))
         return results
 
-    def search_sealed_products(self, query: str, *, set_name: str = None, limit: int = 5) -> list[dict]:
+    def search_sealed_products(self, query: str, *, set_name: str = None, limit: int = 5,
+                                all_games: bool = False) -> list[dict]:
         """Search sealed products by name in the local cache.
-        Results are sorted so base products appear before bundles/art sets."""
-        params = [f"%{query}%", self.game]
-        sql = """
-            SELECT DISTINCT ON (scrydex_id) *
-            FROM scrydex_price_cache
-            WHERE product_type = 'sealed' AND product_name ILIKE %s AND game = %s
+        Results are sorted so base products appear before bundles/art sets.
+
+        all_games=True drops the game filter (multi-TCG manual entry).
         """
+        if all_games:
+            params = [f"%{query}%"]
+            sql = """
+                SELECT DISTINCT ON (scrydex_id) *
+                FROM scrydex_price_cache
+                WHERE product_type = 'sealed' AND product_name ILIKE %s
+            """
+        else:
+            params = [f"%{query}%", self.game]
+            sql = """
+                SELECT DISTINCT ON (scrydex_id) *
+                FROM scrydex_price_cache
+                WHERE product_type = 'sealed' AND product_name ILIKE %s AND game = %s
+            """
         if set_name:
             sql += " AND expansion_name ILIKE %s"
             params.append(f"%{set_name}%")
