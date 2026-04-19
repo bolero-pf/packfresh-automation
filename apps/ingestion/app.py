@@ -487,6 +487,38 @@ def search_cards_for_relink():
     return jsonify({"results": results, "total": len(results)})
 
 
+@app.route("/api/ingest/debug/scrydex/<path:scrydex_id>")
+def debug_scrydex(scrydex_id):
+    """One-off diagnostic: return every cache row + the raw Scrydex JSONB for a
+    scrydex_id. Use this when a card's prices look wrong (e.g. JP cards showing
+    $8k raw NM) to see whether the bug is in our sync, our search, or upstream
+    Scrydex data itself.
+    """
+    rows = db.query("""
+        SELECT scrydex_id, tcgplayer_id, expansion_id, language_code,
+               product_name, product_name_en, variant, condition, price_type,
+               grade_company, grade_value, market_price, low_price, mid_price,
+               high_price, image_small, image_medium, image_large, fetched_at
+        FROM scrydex_price_cache
+        WHERE scrydex_id = %s
+        ORDER BY price_type, variant, condition, grade_company NULLS FIRST, grade_value
+    """, (scrydex_id,))
+
+    meta = db.query_one("""
+        SELECT game, scrydex_id, printed_number, artist, raw
+        FROM scrydex_card_meta
+        WHERE scrydex_id = %s
+        LIMIT 1
+    """, (scrydex_id,))
+
+    return jsonify({
+        "scrydex_id": scrydex_id,
+        "cache_row_count": len(rows),
+        "cache_rows": _serialize(rows),
+        "meta": _serialize(meta) if meta else None,
+    })
+
+
 @app.route("/api/ingest/item/<item_id>/relink", methods=["POST"])
 def relink_item(item_id):
     """Relink an item to a different PPT product (change name, tcgplayer_id, market price)."""
