@@ -2529,10 +2529,14 @@ def split_singles(session_id):
 @app.route("/api/ingest/session/<session_id>/route-summary")
 def route_summary(session_id):
     """Get routing status for a session's raw items."""
+    # variance vs variant: intake writes the Collectr/CSV printing marker to
+    # `variance`; ingest's Unexpected-Item flow and graded fields use `variant`.
+    # Return both so the frontend can fall back and show foil/printing chips
+    # regardless of which code path added the row.
     items = db.query("""
         SELECT id, product_name, set_name, condition, market_price, quantity,
                routing_destination, routing_reviewed_at, tcgplayer_id, scrydex_id,
-               card_number, offer_price, variant
+               card_number, offer_price, variant, variance
         FROM intake_items
         WHERE session_id = %s
           AND product_type = 'raw'
@@ -2682,7 +2686,7 @@ def route_enriched(session_id):
     items = db.query("""
         SELECT id, product_name, set_name, condition, market_price, quantity,
                routing_destination, tcgplayer_id, card_number, offer_price,
-               variant, rarity, language
+               variant, variance, rarity, language
         FROM intake_items
         WHERE session_id = %s
           AND product_type = 'raw'
