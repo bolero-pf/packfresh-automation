@@ -489,7 +489,10 @@ class ScrydexClient:
             # Identity
             "name": raw.get("name"),
             "setName": expansion.get("name", ""),
+            "expansionId": expansion.get("id", ""),
+            "game": self.game,
             "cardNumber": raw.get("number") or raw.get("printed_number"),
+            "printedNumber": raw.get("printed_number"),
             "tcgPlayerId": tcg_id,
             "scrydexId": scrydex_id,
             "rarity": raw.get("rarity"),

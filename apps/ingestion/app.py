@@ -1307,7 +1307,7 @@ def _push_raw_item(item: dict) -> dict:
     condition = item.get("condition") or "NM"
     qty       = item.get("quantity", 1)
     cost      = float(item.get("offer_price", 0)) / max(qty, 1)
-    card_type = "pokemon"  # default; could be inferred from tags later
+    card_type = None  # will be derived from card_data.game (Scrydex) below
 
     # Fetch PPT data for image URL + clean name + real card number
     image_url = None
@@ -1323,8 +1323,33 @@ def _push_raw_item(item: dict) -> dict:
                 set_name  = card_data.get("setName") or set_name
                 # Real card number e.g. "004/125" — not the Collectr set code
                 ppt_card_number = card_data.get("cardNumber") or card_data.get("number")
+                # Derive card_type from the card's actual game so OP cards
+                # don't get binned with Pokemon (storage.CARD_TYPE_MAP knows
+                # both Scrydex game ids ('magicthegathering', 'onepiece')
+                # and short labels ('mtg', 'op')).
+                if card_data.get("game"):
+                    card_type = _canonical_card_type(card_data["game"])
         except Exception as e:
             logger.warning(f"PPT fetch for raw card TCG#{tcg_id} failed: {e}")
+
+    # Last-resort game lookup if cache miss + PPT lookup failed: hit
+    # scrydex_price_cache directly by tcgplayer_id (cross-game).
+    if not card_type and tcg_id:
+        try:
+            row = db.query_one(
+                "SELECT game FROM scrydex_price_cache WHERE tcgplayer_id = %s LIMIT 1",
+                (int(tcg_id),),
+            )
+            if row and row.get("game"):
+                card_type = _canonical_card_type(row["game"])
+        except Exception as e:
+            logger.debug(f"scrydex game lookup for TCG#{tcg_id} failed: {e}")
+
+    # Default if everything failed (manual entries, off-catalog cards):
+    # fall back to pokemon bin to preserve previous behavior. The downstream
+    # raw_cards row also stores card_type so it can be corrected later.
+    if not card_type:
+        card_type = "pokemon"
 
     # Assign bin(s) — one card at a time for placement accuracy
     assignments = assign_bins(card_type, qty, db)

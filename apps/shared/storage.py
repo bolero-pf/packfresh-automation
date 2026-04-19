@@ -18,19 +18,27 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Map from various input strings to canonical card_type values
+# Map from various input strings to canonical card_type values.
+# Accepts both human labels ("magic") and Scrydex game ids
+# ("magicthegathering") so callers can pass card_data.get("game") directly.
 CARD_TYPE_MAP = {
-    "pokemon":  "pokemon",
-    "magic":    "magic",
-    "mtg":      "magic",
-    "yugioh":   "yugioh",
-    "yu-gi-oh": "yugioh",
-    "other":    "other",
+    "pokemon":            "pokemon",
+    "magic":              "magic",
+    "mtg":                "magic",
+    "magicthegathering":  "magic",
+    "onepiece":           "onepiece",
+    "one_piece":          "onepiece",
+    "op":                 "onepiece",
+    "lorcana":            "lorcana",
+    "riftbound":          "riftbound",
+    "yugioh":             "yugioh",
+    "yu-gi-oh":           "yugioh",
+    "other":              "other",
 }
 
 
 def _canonical_card_type(card_type: str) -> str:
-    return CARD_TYPE_MAP.get((card_type or "pokemon").lower().strip(), "pokemon")
+    return CARD_TYPE_MAP.get((card_type or "pokemon").lower().strip(), "other")
 
 
 def assign_bins(card_type: str, count: int, db) -> list[dict]:
