@@ -1989,15 +1989,28 @@ function _renderSessionCard() {
     }
 
     // Figure out copy indicator — "Copy 3 of 19" for singles, "(1-5)" for splits.
-    // Two items only count as siblings when they share name + set + variance
-    // AND grade. OP14-041 Alt Art ($102) and OP14-041 Normal ($0.24) share
-    // name and set but are completely different products — must not collapse.
-    const _siblingKey = (i) => [
-        i.product_name || '',
-        i.set_name || '',
-        (i.variance || '').trim(),
-        i.is_graded ? `${i.grade_company || ''}|${i.grade_value || ''}` : '',
-    ].join('§');
+    // Sibling = literally the same product. Two cards collapse only when they
+    // share TCGPlayer ID (per-variant id from Scrydex sync) AND condition AND
+    // grade. Falls back to name + set + card_number + variance when there's
+    // no tcgplayer_id (manual entries). Real cases this protects against:
+    //   - OP14-041 Boa Hancock (Leader) vs OP14-112 Boa Hancock (SR) —
+    //     same name + set, different tcg_ids → not siblings
+    //   - OP14-041 Alt Art vs OP14-041 Normal — same name + set + tcg differs
+    //     because Scrydex now stores per-variant tcg → not siblings
+    const _siblingKey = (i) => {
+        const parts = [];
+        if (i.tcgplayer_id) {
+            parts.push('tcg:' + i.tcgplayer_id);
+        } else {
+            parts.push('manual:' + (i.product_name || ''));
+            parts.push((i.set_name || ''));
+            parts.push((i.card_number || ''));
+            parts.push((i.variance || '').trim());
+        }
+        parts.push(i.condition || '');
+        if (i.is_graded) parts.push((i.grade_company || '') + '|' + (i.grade_value || ''));
+        return parts.join('§');
+    };
     const itemKey = _siblingKey(item);
 
     let copyLabel = '';
