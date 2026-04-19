@@ -100,13 +100,19 @@ class PriceCache:
         """
         Read card data from scrydex_price_cache.
         Returns PPT-shaped dict or None if not cached.
+
+        TCGPlayer IDs are globally unique across all games (TCGplayer assigns
+        them sequentially), so we deliberately do NOT filter by self.game here.
+        That used to mean an intake-service initialized for game='pokemon' would
+        return "not found" for any One Piece / Lorcana / MTG TCG ID even though
+        the row was sitting in cache.
         """
         tcg_id = int(tcgplayer_id)
         rows = self.db.query("""
             SELECT * FROM scrydex_price_cache
-            WHERE tcgplayer_id = %s AND product_type = 'card' AND game = %s
+            WHERE tcgplayer_id = %s AND product_type = 'card'
             ORDER BY variant, condition, price_type
-        """, (tcg_id, self.game))
+        """, (tcg_id,))
 
         if not rows:
             return None
@@ -132,13 +138,17 @@ class PriceCache:
                         'case', 'plus -', 'plus case', 'international version')
 
     def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, **kwargs) -> Optional[dict]:
-        """Read sealed product from cache. Returns PPT-shaped dict."""
+        """Read sealed product from cache. Returns PPT-shaped dict.
+
+        TCGPlayer IDs are globally unique — no game filter needed (and
+        applying one breaks cross-game lookups).
+        """
         tcg_id = int(tcgplayer_id)
         rows = self.db.query("""
             SELECT * FROM scrydex_price_cache
-            WHERE tcgplayer_id = %s AND product_type = 'sealed' AND game = %s
+            WHERE tcgplayer_id = %s AND product_type = 'sealed'
             ORDER BY variant, condition
-        """, (tcg_id, self.game))
+        """, (tcg_id,))
 
         if not rows:
             return None
@@ -188,20 +198,20 @@ class PriceCache:
         all_games=True drops the game filter so multi-TCG manual entry can find
         non-Pokemon cards (One Piece, Lorcana, MTG, etc.) in one search.
         """
+        # Whole-query forms used to boost card-code matches: "P-075" should
+        # promote rows whose printed_number = 'P-075' over rows that just
+        # happen to contain "P" + "75" as separate tokens (otherwise MTG sets
+        # like 10E with printed_number '275' bury the actual hit).
+        full_query = (query or "").strip()
+        full_query_forms = [full_query] if full_query else []
+
+        where_parts: list[str] = ["product_type = 'card'"]
         params: list = []
-        sql = """
-            SELECT DISTINCT ON (scrydex_id) *
-            FROM scrydex_price_cache
-            WHERE product_type = 'card'
-        """
         if not all_games:
-            sql += " AND game = %s"
+            where_parts.append("game = %s")
             params.append(self.game)
 
         for forms in self._tokenize(query):
-            # Each token group: any form matching any of the 5 columns counts as a match
-            # Includes printed_number ("OP14-041" / "4/102") so customers can search
-            # by what's printed on the card without our leading-zero hack.
             ors = []
             for f in forms:
                 ors.append("(product_name ILIKE %s OR card_number ILIKE %s "
@@ -209,18 +219,46 @@ class PriceCache:
                            "OR expansion_id ILIKE %s OR expansion_name ILIKE %s)")
                 p = f"%{f}%"
                 params.extend([p, p, p, p, p])
-            sql += " AND (" + " OR ".join(ors) + ")"
+            where_parts.append("(" + " OR ".join(ors) + ")")
 
         if set_name:
-            sql += " AND expansion_name ILIKE %s"
+            where_parts.append("expansion_name ILIKE %s")
             params.append(f"%{set_name}%")
-        sql += " ORDER BY scrydex_id, condition LIMIT %s"
-        params.append(limit)
 
-        hits = self.db.query(sql, tuple(params))
+        where_clause = " AND ".join(where_parts)
+
+        # Relevance score: exact printed_number > printed_number prefix >
+        # printed_number contains > anything else. Wrap in a subquery so we
+        # can DISTINCT ON (scrydex_id) for de-duplication, then ORDER BY score.
+        # NOTE: parameter order matters — score placeholders appear FIRST in
+        # the SQL (in the SELECT list), so they must come first in the params
+        # tuple too.
+        score_sql = "0"
+        score_params: list = []
+        if full_query:
+            score_sql = (
+                "(CASE WHEN LOWER(printed_number) = LOWER(%s) THEN 100 ELSE 0 END) + "
+                "(CASE WHEN printed_number ILIKE %s THEN 30 ELSE 0 END) + "
+                "(CASE WHEN printed_number ILIKE %s THEN 10 ELSE 0 END)"
+            )
+            score_params = [full_query, f"{full_query}%", f"%{full_query}%"]
+
+        sql = f"""
+            SELECT scrydex_id, tcgplayer_id, score FROM (
+                SELECT DISTINCT ON (scrydex_id) scrydex_id, tcgplayer_id,
+                       ({score_sql}) AS score
+                FROM scrydex_price_cache
+                WHERE {where_clause}
+                ORDER BY scrydex_id, condition, price_type
+            ) sub
+            ORDER BY score DESC, scrydex_id
+            LIMIT %s
+        """
+        sub_params = score_params + params + [limit]
+
+        hits = self.db.query(sql, tuple(sub_params))
         results = []
         for row in hits:
-            # Get all rows for this card to build full dict
             card_rows = self.db.query("""
                 SELECT * FROM scrydex_price_cache
                 WHERE scrydex_id = %s ORDER BY variant, condition, price_type

@@ -1640,8 +1640,24 @@
                             addHtml += '<div class="form-group" style="width:70px; margin:0;"><label>Cond</label><select id="session-raw-condition"><option value="NM">NM</option><option value="LP">LP</option><option value="MP">MP</option><option value="HP">HP</option><option value="DMG">DMG</option></select></div>';
                             addHtml += '<div class="form-group" style="width:50px; margin:0;"><label>Qty</label><input type="number" id="session-raw-qty" value="1" min="1"></div>';
                             addHtml += '<button class="btn btn-primary btn-sm" onclick="smartCardSearch(\'' + _sid + '\', ' + _opct + ', \'session\')">Search</button>';
+                            addHtml += '<button class="btn btn-secondary btn-sm" onclick="toggleManualCardAdd(\'' + _sid + '\', ' + _opct + ')">Manual</button>';
                             addHtml += '</div>';
                             addHtml += '<div id="session-raw-results" style="margin-top:8px;"></div>';
+
+                            // Manual card add — for cards Scrydex doesn\'t have (Tin Pack variants, DON!! cards, etc.)
+                            addHtml += '<div id="session-card-manual" style="display:none; margin-top:12px; padding:12px; background:var(--surface-1); border-radius:6px; border:1px solid var(--border);">';
+                            addHtml += '<h5 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Manual Card Add (for cards not in Scrydex)</h5>';
+                            addHtml += '<div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">';
+                            addHtml += '<div class="form-group" style="flex:2; min-width:160px; margin:0;"><label style="font-size:0.8rem;">Card Name</label><input type="text" id="session-card-manual-name" placeholder="e.g. Monkey.D.Luffy"></div>';
+                            addHtml += '<div class="form-group" style="flex:1; min-width:120px; margin:0;"><label style="font-size:0.8rem;">Set</label><input type="text" id="session-card-manual-set" placeholder="e.g. Tin Pack Set Vol. 2"></div>';
+                            addHtml += '<div class="form-group" style="width:90px; margin:0;"><label style="font-size:0.8rem;">Card #</label><input type="text" id="session-card-manual-num" placeholder="P-075"></div>';
+                            addHtml += '<div class="form-group" style="width:100px; margin:0;"><label style="font-size:0.8rem;">TCGPlayer ID</label><input type="number" id="session-card-manual-tcgid" placeholder="required"></div>';
+                            addHtml += '<div class="form-group" style="width:70px; margin:0;"><label style="font-size:0.8rem;">Cond</label><select id="session-card-manual-cond"><option value="NM">NM</option><option value="LP">LP</option><option value="MP">MP</option><option value="HP">HP</option><option value="DMG">DMG</option></select></div>';
+                            addHtml += '<div class="form-group" style="width:90px; margin:0;"><label style="font-size:0.8rem;">Price</label><input type="number" id="session-card-manual-price" step="0.01" min="0" placeholder="$0.00"></div>';
+                            addHtml += '<div class="form-group" style="width:55px; margin:0;"><label style="font-size:0.8rem;">Qty</label><input type="number" id="session-card-manual-qty" value="1" min="1"></div>';
+                            addHtml += '<button class="btn btn-success btn-sm" onclick="submitManualCardAdd(\'' + _sid + '\', ' + _opct + ')">Add</button>';
+                            addHtml += '</div></div>';
+
                             addHtml += '</div>';
                         }
                         addHtml += '</div>';
@@ -1862,6 +1878,9 @@
             }
             // Enrich breakdown summaries inline without full reload
             _enrichIntakeBreakdowns(items, sessionId);
+            // Restore the user's "Sealed Product" vs "Individual Card" choice
+            // so adding card after card doesn't keep flipping back to sealed
+            _restoreSessionAddType();
         } catch(err) {
             body.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
         }
@@ -4021,6 +4040,10 @@
     // ═══════════════════════════════ ADD SEALED ITEM TO EXISTING SESSION ═══════════════════════════════
 
     function switchSessionAddType(type) {
+        // Remember choice across viewSession reloads — adding multiple cards
+        // in a row shouldn't keep flipping back to "Sealed Product"
+        window._lastSessionAddType = type;
+        try { sessionStorage.setItem('pf_lastSessionAddType', type); } catch(e) {}
         const sealedDiv = document.getElementById('session-add-sealed');
         const cardDiv = document.getElementById('session-add-card');
         const sealedBtn = document.getElementById('session-add-type-sealed');
@@ -4031,9 +4054,85 @@
         if (cardBtn) { cardBtn.className = 'btn btn-sm ' + (type === 'card' ? 'btn-primary' : 'btn-secondary'); }
     }
 
+    function _restoreSessionAddType() {
+        // Called after viewSession finishes rendering — restores the user's
+        // previously chosen add type (sealed vs card) so reloads don't reset it.
+        let stored = window._lastSessionAddType;
+        if (!stored) {
+            try { stored = sessionStorage.getItem('pf_lastSessionAddType'); } catch(e) {}
+        }
+        if (stored === 'card' && document.getElementById('session-add-type-card')) {
+            switchSessionAddType('card');
+        }
+        // Re-open manual card panel if it was open before reload
+        if (window._lastSessionManualCardOpen) {
+            const el = document.getElementById('session-card-manual');
+            if (el) {
+                el.style.display = 'block';
+                const nameInput = document.getElementById('session-card-manual-name');
+                if (nameInput) nameInput.focus();
+            }
+        }
+    }
+
     function toggleManualSealedAdd(sessionId, offerPct) {
         const el = document.getElementById('session-sealed-manual');
         el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    }
+
+    function toggleManualCardAdd(sessionId, offerPct) {
+        const el = document.getElementById('session-card-manual');
+        const open = el.style.display === 'none';
+        el.style.display = open ? 'block' : 'none';
+        // Persist the open state across viewSession reloads so adding card
+        // after card via manual flow doesn't make you re-open the panel
+        window._lastSessionManualCardOpen = open;
+        if (open) {
+            const nameInput = document.getElementById('session-card-manual-name');
+            if (nameInput) nameInput.focus();
+        }
+    }
+
+    async function submitManualCardAdd(sessionId, offerPct) {
+        const name = document.getElementById('session-card-manual-name').value.trim();
+        const setName = document.getElementById('session-card-manual-set').value.trim();
+        const cardNum = document.getElementById('session-card-manual-num').value.trim();
+        const tcgId = document.getElementById('session-card-manual-tcgid').value.trim();
+        const condition = document.getElementById('session-card-manual-cond').value;
+        const price = parseFloat(document.getElementById('session-card-manual-price').value) || 0;
+        const qty = parseInt(document.getElementById('session-card-manual-qty').value) || 1;
+
+        if (!name) { alert('Card name is required'); return; }
+        if (!tcgId) { alert('TCGPlayer ID is required (so the card can be linked to inventory later)'); return; }
+        if (price <= 0) { alert('Price is required'); return; }
+
+        try {
+            const r = await fetch('/api/intake/add-raw-card', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    tcgplayer_id: parseInt(tcgId),
+                    card_name: name,
+                    set_name: setName,
+                    card_number: cardNum,
+                    condition: condition,
+                    quantity: qty,
+                    market_price: price,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Failed to add'); return; }
+
+            ['session-card-manual-name','session-card-manual-set','session-card-manual-num',
+             'session-card-manual-tcgid','session-card-manual-price'].forEach(id => {
+                const el = document.getElementById(id); if (el) el.value = '';
+            });
+            document.getElementById('session-card-manual-qty').value = '1';
+            // Keep the manual panel open for the next card — adding multiple
+            // off-catalog cards in a row is the whole point of this flow
+            viewSession(sessionId, true);
+        } catch(err) { alert(err.message); }
     }
 
     async function submitManualSealedAdd(sessionId, offerPct) {
