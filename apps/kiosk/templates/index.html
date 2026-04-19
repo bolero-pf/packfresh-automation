@@ -367,6 +367,17 @@ header {
   cursor: pointer; padding: 8px; font-weight: 500;
 }
 .sheet-body { padding: 16px 20px 24px; overflow-y: auto; flex: 1; }
+/* Slim themed scrollbar so it doesn't look like a stacked system widget.
+   Applies to both the sheet body and the inner set-list. */
+.sheet-body, .set-list { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.sheet-body::-webkit-scrollbar, .set-list::-webkit-scrollbar { width: 6px; }
+.sheet-body::-webkit-scrollbar-track, .set-list::-webkit-scrollbar-track { background: transparent; }
+.sheet-body::-webkit-scrollbar-thumb, .set-list::-webkit-scrollbar-thumb {
+  background: var(--border); border-radius: 3px;
+}
+.sheet-body::-webkit-scrollbar-thumb:hover, .set-list::-webkit-scrollbar-thumb:hover {
+  background: var(--dim);
+}
 .sheet-section { margin-bottom: 22px; }
 .sheet-section-title {
   font-size: 0.72rem; color: var(--dim); text-transform: uppercase;
@@ -376,26 +387,44 @@ header {
 .chip {
   min-height: 44px; padding: 0 16px;
   display: inline-flex; align-items: center; gap: 6px;
-  background: var(--surface2); border: 1.5px solid var(--border); border-radius: 22px;
+  /* Off-state: outline button feel — clearly tappable, not blending with surface */
+  background: rgba(240, 240, 248, 0.04);
+  border: 1.5px solid rgba(240, 240, 248, 0.28);
+  border-radius: 22px;
   color: var(--text); font-family: var(--sans); font-size: 0.92rem; font-weight: 500;
   cursor: pointer; user-select: none; transition: all 0.12s;
+}
+.chip:hover {
+  background: rgba(240, 240, 248, 0.08);
+  border-color: rgba(240, 240, 248, 0.45);
 }
 .chip.on {
   background: var(--accent); border-color: var(--accent); color: #0a0a0f;
 }
+.chip.on:hover {
+  background: var(--accent); border-color: var(--accent);
+}
 .chip .qty { color: var(--dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
-.chip.on .qty { color: rgba(10,10,15,0.65); }
+.chip.on .qty { color: rgba(10,10,15,0.7); font-weight: 600; }
 .chip.cond-NM.on { background: #14532d; border-color: #4ade80; color: #4ade80; }
-.chip.cond-LP.on { background: rgba(232,197,71,0.18); border-color: #e8c547; color: #e8c547; }
-.chip.cond-MP.on { background: rgba(251,146,60,0.18); border-color: #fb923c; color: #fb923c; }
-.chip.cond-HP.on { background: rgba(248,113,113,0.18); border-color: #f87171; color: #f87171; }
-.chip.cond-DMG.on { background: rgba(185,28,28,0.18); border-color: #b91c1c; color: #f87171; }
+.chip.cond-LP.on { background: rgba(232,197,71,0.22); border-color: #e8c547; color: #e8c547; }
+.chip.cond-MP.on { background: rgba(251,146,60,0.22); border-color: #fb923c; color: #fb923c; }
+.chip.cond-HP.on { background: rgba(248,113,113,0.22); border-color: #f87171; color: #f87171; }
+.chip.cond-DMG.on { background: rgba(185,28,28,0.22); border-color: #b91c1c; color: #f87171; }
 
 .set-search-input {
   width: 100%; min-height: 44px; padding: 0 14px;
-  background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px;
+  background: rgba(240, 240, 248, 0.06);
+  border: 1.5px solid rgba(240, 240, 248, 0.28);
+  border-radius: 10px;
   color: var(--text); font-family: var(--sans); font-size: 0.95rem;
   outline: none; margin-bottom: 10px;
+  transition: border-color 0.12s, background 0.12s;
+}
+.set-search-input::placeholder { color: var(--dim); }
+.set-search-input:focus {
+  border-color: var(--accent);
+  background: rgba(232, 197, 71, 0.06);
 }
 .set-list { max-height: 280px; overflow-y: auto; padding-right: 4px; }
 .set-row {
@@ -412,9 +441,17 @@ header {
 .price-row { display: flex; gap: 10px; align-items: center; }
 .price-input {
   flex: 1; min-height: 48px; padding: 0 14px;
-  background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px;
+  background: rgba(240, 240, 248, 0.06);
+  border: 1.5px solid rgba(240, 240, 248, 0.28);
+  border-radius: 10px;
   color: var(--text); font-family: var(--mono); font-size: 1rem; outline: none;
   text-align: center;
+  transition: border-color 0.12s, background 0.12s;
+}
+.price-input::placeholder { color: var(--dim); }
+.price-input:focus {
+  border-color: var(--accent);
+  background: rgba(232, 197, 71, 0.06);
 }
 .price-dash { color: var(--dim); font-size: 1.1rem; }
 
@@ -498,6 +535,10 @@ header {
       <button class="clear-link" onclick="clearAllFilters()">Clear all</button>
     </div>
     <div class="sheet-body">
+      <div class="sheet-section">
+        <div class="sheet-section-title">Game</div>
+        <div class="chip-row" id="sheet-games"></div>
+      </div>
       <div class="sheet-section" id="sheet-era-section" style="display:none;">
         <div class="sheet-section-title">Era (Pokémon)</div>
         <div class="chip-row" id="sheet-eras"></div>
@@ -733,10 +774,10 @@ function _refreshFiltersBtn() {
 async function loadGames() {
   try {
     const d = await get('/api/games');
+    _gameCache = d.games || [];
     const strip = document.getElementById('game-pills');
-    const games = d.games || [];
-    const totalQty = games.reduce((s, g) => s + (g.qty || 0), 0);
-    const items = [{ code: '', label: 'All', qty: totalQty }, ...games];
+    const totalQty = _gameCache.reduce((s, g) => s + (g.qty || 0), 0);
+    const items = [{ code: '', label: 'All', qty: totalQty }, ..._gameCache];
     strip.innerHTML = items.map(g =>
       `<span class="game-pill${_filters.game === g.code ? ' active' : ''}" data-game="${esc(g.code)}">
         ${esc(g.label)}<span class="qty">${g.qty}</span>
@@ -744,13 +785,14 @@ async function loadGames() {
     ).join('');
     strip.querySelectorAll('.game-pill').forEach(el => {
       el.addEventListener('click', () => {
-        _filters.game = el.getAttribute('data-game');
+        const newGame = el.getAttribute('data-game');
+        if (_filters.game === newGame) return;
+        _filters.game = newGame;
         // Switching games invalidates set + era — they're game-scoped
         _filters.set = '';
         _filters.era = '';
         loadGames();          // re-render pills with new active state
         loadSetsForFilters(); // refresh available sets for this game
-        loadEras();           // eras only meaningful for pokemon
         _refreshFiltersBtn();
         doSearch();
       });
@@ -759,9 +801,12 @@ async function loadGames() {
 }
 
 // ── Bottom sheet: open / close / draft / apply ───────────────────────────────
+let _gameCache = []; // populated by loadGames(), reused inside the sheet
+
 function openFilterSheet() {
   // Snapshot current filters into a draft so Cancel just closes
   _draft = {
+    game: _filters.game,
     era: _filters.era,
     set: _filters.set,
     sort: _filters.sort,
@@ -769,9 +814,8 @@ function openFilterSheet() {
     minP: _filters.minP,
     maxP: _filters.maxP,
   };
-  // Era section visibility — only for Pokemon
-  document.getElementById('sheet-era-section').style.display =
-    (_filters.game === 'pokemon' || _filters.game === '') ? '' : 'none';
+  renderGameChips();
+  _refreshSheetEraVisibility();
   // Conditions
   document.querySelectorAll('#sheet-conds .chip').forEach(el => {
     const c = el.getAttribute('data-cond');
@@ -802,7 +846,7 @@ function closeFilterSheet(e) {
 
 function clearAllFilters() {
   _draft = {
-    era: '', set: '', sort: 'name_asc',
+    game: '', era: '', set: '', sort: 'name_asc',
     conds: new Set(['NM','LP','MP','HP','DMG']),
     minP: '', maxP: '',
   };
@@ -812,9 +856,12 @@ function clearAllFilters() {
   });
   document.getElementById('price-min').value = '';
   document.getElementById('price-max').value = '';
-  renderEraChips();
-  document.getElementById('set-search-input').value = '';
-  renderSetList();
+  renderGameChips();
+  _refreshSheetEraVisibility();
+  loadSetsForFilters().then(() => {
+    document.getElementById('set-search-input').value = '';
+    renderSetList();
+  });
 }
 
 function applyFilterSheet() {
@@ -824,8 +871,47 @@ function applyFilterSheet() {
   _draft.maxP = document.getElementById('price-max').value || '';
   Object.assign(_filters, _draft);
   closeFilterSheet({ target: { id: 'filter-sheet-overlay' } });
+  // Re-render the top-strip game pills so the active state matches
+  loadGames();
   _refreshFiltersBtn();
   doSearch();
+}
+
+function _refreshSheetEraVisibility() {
+  const sec = document.getElementById('sheet-era-section');
+  if (!sec) return;
+  const g = _draft ? _draft.game : _filters.game;
+  // Era only meaningful for Pokemon (or All, which still includes Pokemon)
+  sec.style.display = (g === 'pokemon' || g === '') ? '' : 'none';
+}
+
+function renderGameChips() {
+  const wrap = document.getElementById('sheet-games');
+  if (!wrap) return;
+  const totalQty = _gameCache.reduce((s, g) => s + (g.qty || 0), 0);
+  const items = [{ code: '', label: 'All', qty: totalQty }, ..._gameCache];
+  wrap.innerHTML = items.map(g => {
+    const active = (_draft ? _draft.game : _filters.game) === g.code;
+    return `<span class="chip${active ? ' on' : ''}" data-game="${esc(g.code)}">${esc(g.label)} <span class="qty">${g.qty}</span></span>`;
+  }).join('');
+  wrap.querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', async () => {
+      if (!_draft) return;
+      const newGame = el.getAttribute('data-game');
+      if (_draft.game === newGame) return;
+      _draft.game = newGame;
+      // Switching games invalidates set + era selections — they're game-scoped
+      _draft.era = '';
+      _draft.set = '';
+      renderGameChips();
+      _refreshSheetEraVisibility();
+      // Refetch sets/eras scoped to the new draft.game
+      await loadSetsForFilters(_draft.era, _draft.game);
+      renderEraChips();
+      document.getElementById('set-search-input').value = '';
+      renderSetList();
+    });
+  });
 }
 
 function toggleSheetCond(el) {
@@ -861,8 +947,8 @@ function renderEraChips() {
       _draft.era = (_draft.era === era) ? '' : era;
       _draft.set = '';
       wrap.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === el && _draft.era === era));
-      // Refresh sets to be era-scoped
-      loadSetsForFilters(_draft.era).then(renderSetList);
+      // Refresh sets to be era-scoped (also honor any draft-level game change)
+      loadSetsForFilters(_draft.era, _draft.game).then(renderSetList);
     });
   });
 }
@@ -887,10 +973,11 @@ function renderSetList() {
   });
 }
 
-async function loadSetsForFilters(era) {
+async function loadSetsForFilters(era, gameOverride) {
   try {
     const params = new URLSearchParams();
-    if (_filters.game) params.set('game', _filters.game);
+    const g = (gameOverride !== undefined) ? gameOverride : _filters.game;
+    if (g)   params.set('game', g);
     if (era) params.set('era', era);
     const url = '/api/sets' + (params.toString() ? '?' + params : '');
     const d = await get(url);
