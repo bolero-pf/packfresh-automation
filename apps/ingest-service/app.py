@@ -1192,23 +1192,37 @@ def accept_price_no_link(item_id):
 
 @app.route("/api/intake/add-raw-card", methods=["POST"])
 def add_raw_card():
-    """Add a single raw card to a session via manual form entry."""
+    """Add a single raw card to a session. tcgplayer_id is now optional so
+    staff can enter cards Scrydex doesn't track (MTG PEOE promos, prerelease
+    stamps, Scrydex-only JP) manually — in that case the client must supply
+    card_name, condition, quantity, and market_price, and the item lands as
+    unmapped for staff to relink later if the card shows up in Scrydex.
+    """
     data = request.json or {}
 
-    required = ["session_id", "tcgplayer_id", "card_name", "condition", "quantity"]
+    required = ["session_id", "card_name", "condition", "quantity"]
     missing = [f for f in required if not data.get(f)]
     if missing:
         return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
 
+    tcgplayer_id = None
+    if data.get("tcgplayer_id"):
+        try:
+            tcgplayer_id = int(data["tcgplayer_id"])
+        except (ValueError, TypeError) as e:
+            return jsonify({"error": f"Invalid tcgplayer_id: {e}"}), 400
     try:
-        tcgplayer_id = int(data["tcgplayer_id"])
         quantity = int(data["quantity"])
     except (ValueError, TypeError) as e:
-        return jsonify({"error": f"Invalid number: {e}"}), 400
+        return jsonify({"error": f"Invalid quantity: {e}"}), 400
 
-    # Get price from PPT
+    # No tcg_id → caller must supply market_price; we can't look it up.
+    if tcgplayer_id is None and not data.get("market_price"):
+        return jsonify({"error": "market_price is required when tcgplayer_id is not provided"}), 400
+
+    # Get price from PPT — only when we have a tcg_id to look up.
     market_price = None
-    if ppt:
+    if ppt and tcgplayer_id is not None:
         try:
             card_data = ppt.get_card_by_tcgplayer_id(tcgplayer_id)
             if card_data:

@@ -244,7 +244,7 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
     return execute_many_batch(sql, params_list)
 
 
-def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
+def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
                          set_name: str, card_number: str, condition: str,
                          rarity: str, quantity: int, market_price: Decimal,
                          offer_percentage: Decimal,
@@ -253,6 +253,10 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
                          variance: str = "") -> dict:
     """
     Add a single raw card item to a session (manual entry flow).
+
+    tcgplayer_id may be None for cards Scrydex doesn't track (MTG PEOE
+    promos, prerelease stamps, Scrydex-only JP). In that case the row is
+    marked is_mapped=FALSE so staff can relink later if a mapping shows up.
 
     If quantity > 1, explode into N separate qty=1 rows with staggered
     created_at timestamps. This preserves the physical stack order through
@@ -267,6 +271,7 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
     unit_offer, unit_cost = calc_offer_price(
         market_price, 1, offer_percentage, product_type="raw")
 
+    is_mapped = tcgplayer_id is not None
     first_row = None
     for i in range(max(1, quantity)):
         row = execute_returning("""
@@ -276,12 +281,12 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
                  quantity, market_price, offer_price, unit_cost_basis, is_mapped,
                  is_graded, grade_company, grade_value,
                  created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s, %s,
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     CURRENT_TIMESTAMP + (%s * INTERVAL '1 microsecond'))
             RETURNING *
         """, (session_id, product_name, tcgplayer_id, "raw",
               set_name, card_number, condition, rarity, variance or "",
-              1, market_price, unit_offer, unit_cost,
+              1, market_price, unit_offer, unit_cost, is_mapped,
               is_graded, grade_company or None, grade_value or None,
               i))
         if first_row is None:

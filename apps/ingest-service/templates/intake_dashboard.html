@@ -422,6 +422,23 @@
                                     <input type="number" id="intake-card-qty" value="1" min="1">
                                 </div>
                                 <button class="btn btn-primary btn-sm" onclick="intakeCardSearch()">Search</button>
+                                <button class="btn btn-secondary btn-sm" onclick="toggleIntakeCardManual()" title="Use when Scrydex doesn't track this printing (MTG PEOE promos, prerelease stamps)">Manual</button>
+                            </div>
+                            <div id="intake-card-manual" style="display:none; margin-bottom:12px; padding:12px; background:var(--surface-1); border-radius:6px; border:1px solid var(--border);">
+                                <h5 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Manual Card Add (for cards Scrydex doesn't track — MTG PEOE, prerelease stamps)</h5>
+                                <div style="display:grid; grid-template-columns:2fr 1fr 90px; gap:8px; margin-bottom:8px;">
+                                    <div><label style="font-size:0.78rem;">Name *</label><input type="text" id="intake-card-manual-name" placeholder="Consult the Star Charts"></div>
+                                    <div><label style="font-size:0.78rem;">Set</label><input type="text" id="intake-card-manual-set" placeholder="Edge of Eternities Promos"></div>
+                                    <div><label style="font-size:0.78rem;">Card #</label><input type="text" id="intake-card-manual-cardnum" placeholder="51s"></div>
+                                </div>
+                                <div style="display:grid; grid-template-columns:90px 1fr 90px 70px 70px; gap:8px; margin-bottom:8px;">
+                                    <div><label style="font-size:0.78rem;">TCG ID</label><input type="number" id="intake-card-manual-tcgid" placeholder="opt"></div>
+                                    <div><label style="font-size:0.78rem;">Variant</label><input type="text" id="intake-card-manual-variant" placeholder="Foil / Prerelease / Normal"></div>
+                                    <div><label style="font-size:0.78rem;">Price * ($)</label><input type="number" id="intake-card-manual-price" step="0.01" min="0" placeholder="0.00"></div>
+                                    <div><label style="font-size:0.78rem;">Cond</label><select id="intake-card-manual-cond"><option>NM</option><option>LP</option><option>MP</option><option>HP</option><option>DMG</option></select></div>
+                                    <div><label style="font-size:0.78rem;">Qty</label><input type="number" id="intake-card-manual-qty" value="1" min="1"></div>
+                                </div>
+                                <button class="btn btn-success btn-sm" onclick="submitIntakeCardManual()">Add Card</button>
                             </div>
                         </div>
 
@@ -1294,6 +1311,61 @@
         smartCardSearch(intakeSessionId, offerPct, 'intake');
     }
 
+    function toggleIntakeCardManual() {
+        const el = document.getElementById('intake-card-manual');
+        el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        if (el.style.display === 'block') {
+            // Pre-fill from search inputs so staff don't retype the name
+            const nm = document.getElementById('intake-card-manual-name');
+            if (!nm.value) nm.value = (document.getElementById('intake-card-search')?.value || '').trim();
+            const st = document.getElementById('intake-card-manual-set');
+            if (!st.value) st.value = (document.getElementById('intake-card-set')?.value || '').trim();
+            const tcg = document.getElementById('intake-card-manual-tcgid');
+            if (!tcg.value) tcg.value = (document.getElementById('intake-card-tcgid')?.value || '').trim();
+            document.getElementById('intake-card-manual-cond').value =
+                document.getElementById('intake-card-condition')?.value || 'NM';
+            document.getElementById('intake-card-manual-qty').value =
+                document.getElementById('intake-card-qty')?.value || '1';
+            setTimeout(() => nm.focus(), 50);
+        }
+    }
+
+    async function submitIntakeCardManual() {
+        if (!intakeSessionId) { alert('Start an intake session first'); return; }
+        const name = document.getElementById('intake-card-manual-name').value.trim();
+        const price = parseFloat(document.getElementById('intake-card-manual-price').value);
+        if (!name) { alert('Name is required'); return; }
+        if (isNaN(price) || price < 0) { alert('Enter a valid price'); return; }
+
+        const tcgRaw = document.getElementById('intake-card-manual-tcgid').value.trim();
+        const body = {
+            session_id: intakeSessionId,
+            card_name: name,
+            tcgplayer_id: tcgRaw ? parseInt(tcgRaw) : null,
+            market_price: price,
+            set_name: document.getElementById('intake-card-manual-set').value.trim() || null,
+            card_number: document.getElementById('intake-card-manual-cardnum').value.trim() || null,
+            variance: document.getElementById('intake-card-manual-variant').value.trim() || null,
+            quantity: parseInt(document.getElementById('intake-card-manual-qty').value) || 1,
+            condition: document.getElementById('intake-card-manual-cond').value,
+        };
+        try {
+            const r = await fetch('/api/intake/add-raw-card', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(body),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Add failed'); return; }
+            // Reset form, keep drawer open for next entry
+            ['intake-card-manual-name','intake-card-manual-set','intake-card-manual-cardnum',
+             'intake-card-manual-tcgid','intake-card-manual-variant','intake-card-manual-price']
+                .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+            document.getElementById('intake-card-manual-qty').value = '1';
+            document.getElementById('intake-card-manual-name').focus();
+            loadIntakeItems();
+        } catch(err) { alert(err.message); }
+    }
+
     async function loadIntakeItems() {
         if (!intakeSessionId) return;
         try {
@@ -1652,7 +1724,7 @@
                             addHtml += '<div class="form-group" style="flex:2; min-width:160px; margin:0;"><label style="font-size:0.8rem;">Card Name</label><input type="text" id="session-card-manual-name" placeholder="e.g. Monkey.D.Luffy"></div>';
                             addHtml += '<div class="form-group" style="flex:1; min-width:120px; margin:0;"><label style="font-size:0.8rem;">Set</label><input type="text" id="session-card-manual-set" placeholder="e.g. Tin Pack Set Vol. 2"></div>';
                             addHtml += '<div class="form-group" style="width:90px; margin:0;"><label style="font-size:0.8rem;">Card #</label><input type="text" id="session-card-manual-num" placeholder="P-075"></div>';
-                            addHtml += '<div class="form-group" style="width:100px; margin:0;"><label style="font-size:0.8rem;">TCGPlayer ID</label><input type="number" id="session-card-manual-tcgid" placeholder="required"></div>';
+                            addHtml += '<div class="form-group" style="width:100px; margin:0;"><label style="font-size:0.8rem;">TCGPlayer ID</label><input type="number" id="session-card-manual-tcgid" placeholder="optional"></div>';
                             addHtml += '<div class="form-group" style="width:70px; margin:0;"><label style="font-size:0.8rem;">Cond</label><select id="session-card-manual-cond"><option value="NM">NM</option><option value="LP">LP</option><option value="MP">MP</option><option value="HP">HP</option><option value="DMG">DMG</option></select></div>';
                             addHtml += '<div class="form-group" style="width:90px; margin:0;"><label style="font-size:0.8rem;">Price</label><input type="number" id="session-card-manual-price" step="0.01" min="0" placeholder="$0.00"></div>';
                             addHtml += '<div class="form-group" style="width:55px; margin:0;"><label style="font-size:0.8rem;">Qty</label><input type="number" id="session-card-manual-qty" value="1" min="1"></div>';
@@ -4104,7 +4176,6 @@
         const qty = parseInt(document.getElementById('session-card-manual-qty').value) || 1;
 
         if (!name) { alert('Card name is required'); return; }
-        if (!tcgId) { alert('TCGPlayer ID is required (so the card can be linked to inventory later)'); return; }
         if (price <= 0) { alert('Price is required'); return; }
 
         try {
@@ -4113,7 +4184,7 @@
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     session_id: sessionId,
-                    tcgplayer_id: parseInt(tcgId),
+                    tcgplayer_id: tcgId ? parseInt(tcgId) : null,
                     card_name: name,
                     set_name: setName,
                     card_number: cardNum,

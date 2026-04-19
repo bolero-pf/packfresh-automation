@@ -3569,6 +3569,7 @@ function openAddItem(sessionId) {
                 <div style="width:55px;"><label style="font-size:0.78rem; color:var(--text-dim);">Qty</label>
                     <input type="number" id="ai-card-qty" value="1" min="1" style="width:100%; margin-top:4px;"></div>
                 <button class="btn btn-primary btn-sm" onclick="_aiCardSearch()" style="height:38px;">Search</button>
+                <button class="btn btn-secondary btn-sm" onclick="_aiShowCardManualEntry()" style="height:38px;" title="Use when Scrydex doesn't track this printing (e.g. MTG PEOE promos)">Manual</button>
             </div>
         </div>
 
@@ -3576,6 +3577,112 @@ function openAddItem(sessionId) {
     `;
     document.getElementById('add-item-modal').classList.add('active');
     setTimeout(() => document.getElementById('add-item-search').focus(), 100);
+}
+
+// Full manual-card form — for cards Scrydex doesn't track (MTG PEOE promos,
+// prerelease stamps, older JP sealed, etc.). Name + price required, everything
+// else optional. No tcg_id/scrydex_id → item flags as unmapped so staff can
+// relink later if the data shows up in Scrydex.
+function _aiShowCardManualEntry() {
+    const resultsDiv = document.getElementById('add-item-search-results');
+    const preCond = document.getElementById('ai-card-condition')?.value || 'NM';
+    const preQty = document.getElementById('ai-card-qty')?.value || '1';
+    const preIsGraded = document.getElementById('ai-is-graded')?.checked || false;
+    const preGradeCo = document.getElementById('ai-grade-company')?.value || 'PSA';
+    const preGradeVal = document.getElementById('ai-grade-value')?.value || '10';
+    const preName = (document.getElementById('ai-card-search')?.value || '').trim();
+    const preSet = (document.getElementById('ai-card-set')?.value || '').trim();
+    const preTcg = (document.getElementById('ai-card-tcgid')?.value || '').trim();
+
+    resultsDiv.innerHTML = `
+        <div style="background:var(--surface-2); border-radius:8px; padding:14px;">
+            <div style="font-weight:700; margin-bottom:6px;">Manual card entry</div>
+            <div style="font-size:0.78rem; color:var(--text-dim); margin-bottom:12px;">
+                For cards Scrydex doesn't track — MTG promo sets (PEOE, PMKM, etc.), prerelease stamps, Scrydex-only JP, one-offs.
+                Leave TCG ID blank if unknown; item flags as unmapped.
+            </div>
+            <div style="display:grid; grid-template-columns:2fr 1fr 90px; gap:8px; margin-bottom:8px;">
+                <div><label style="font-size:0.72rem; color:var(--text-dim);">Name *</label>
+                    <input type="text" id="aim-name" value="${preName.replace(/"/g,'&quot;')}" placeholder="Consult the Star Charts" style="width:100%;"></div>
+                <div><label style="font-size:0.72rem; color:var(--text-dim);">Set</label>
+                    <input type="text" id="aim-set" value="${preSet.replace(/"/g,'&quot;')}" placeholder="Edge of Eternities Promos" style="width:100%;"></div>
+                <div><label style="font-size:0.72rem; color:var(--text-dim);">Card #</label>
+                    <input type="text" id="aim-cardnum" placeholder="51s" style="width:100%;"></div>
+            </div>
+            <div style="display:grid; grid-template-columns:90px 1fr 90px 70px 70px; gap:8px; margin-bottom:8px;">
+                <div><label style="font-size:0.72rem; color:var(--text-dim);">TCG ID</label>
+                    <input type="number" id="aim-tcgid" value="${preTcg}" placeholder="optional" style="width:100%;"></div>
+                <div><label style="font-size:0.72rem; color:var(--text-dim);">Variant</label>
+                    <input type="text" id="aim-variant" placeholder="Foil / Prerelease / Normal" style="width:100%;"></div>
+                <div><label style="font-size:0.72rem; color:var(--text-dim);">Price * ($)</label>
+                    <input type="number" id="aim-price" step="0.01" min="0" placeholder="0.00" style="width:100%;"></div>
+                <div><label style="font-size:0.72rem; color:var(--text-dim);">Cond</label>
+                    <select id="aim-cond" style="width:100%;">
+                        ${['NM','LP','MP','HP','DMG'].map(c => `<option value="${c}" ${c===preCond?'selected':''}>${c}</option>`).join('')}
+                    </select></div>
+                <div><label style="font-size:0.72rem; color:var(--text-dim);">Qty</label>
+                    <input type="number" id="aim-qty" value="${preQty}" min="1" style="width:100%;"></div>
+            </div>
+            <div style="display:flex; gap:12px; align-items:center; margin-bottom:12px; padding:8px 10px; background:var(--surface); border-radius:6px;">
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.85rem;">
+                    <input type="checkbox" id="aim-is-graded" ${preIsGraded?'checked':''} onchange="document.getElementById('aim-grade-row').style.display = this.checked ? 'flex' : 'none';">
+                    <span style="font-weight:600;">Graded</span>
+                </label>
+                <span id="aim-grade-row" style="display:${preIsGraded?'flex':'none'}; gap:6px; align-items:center;">
+                    <select id="aim-grade-company" style="padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">
+                        ${['PSA','BGS','CGC','SGC'].map(c => `<option value="${c}" ${c===preGradeCo?'selected':''}>${c}</option>`).join('')}
+                    </select>
+                    <select id="aim-grade-value" style="padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">
+                        ${['10','9.5','9','8.5','8','7','6','5'].map(g => `<option value="${g}" ${g===preGradeVal?'selected':''}>${g}</option>`).join('')}
+                    </select>
+                </span>
+            </div>
+            <div style="display:flex; gap:8px;">
+                <button class="btn btn-primary" onclick="_aiSubmitManualCard()">Add Card</button>
+                <button class="btn btn-secondary" onclick="document.getElementById('add-item-search-results').innerHTML='';">Back</button>
+            </div>
+        </div>
+    `;
+    setTimeout(() => document.getElementById('aim-name').focus(), 50);
+}
+
+async function _aiSubmitManualCard() {
+    const name = document.getElementById('aim-name').value.trim();
+    const price = parseFloat(document.getElementById('aim-price').value);
+    if (!name) { alert('Name is required'); return; }
+    if (isNaN(price) || price < 0) { alert('Enter a valid price'); return; }
+
+    const isGraded = document.getElementById('aim-is-graded').checked;
+    const tcgRaw = document.getElementById('aim-tcgid').value.trim();
+    const body = {
+        product_name: name,
+        tcgplayer_id: tcgRaw ? parseInt(tcgRaw) : null,
+        market_price: price,
+        set_name: document.getElementById('aim-set').value.trim() || null,
+        card_number: document.getElementById('aim-cardnum').value.trim() || null,
+        variant: document.getElementById('aim-variant').value.trim() || null,
+        quantity: parseInt(document.getElementById('aim-qty').value) || 1,
+        product_type: 'raw',
+        condition: document.getElementById('aim-cond').value,
+        is_graded: isGraded,
+    };
+    if (isGraded) {
+        body.grade_company = document.getElementById('aim-grade-company').value;
+        body.grade_value = document.getElementById('aim-grade-value').value;
+    }
+    try {
+        const r = await fetch(`/api/ingest/session/${_addItemSessionId}/add-item`, {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Add failed'); return; }
+        const sid = _addItemSessionId;
+        document.getElementById('add-item-search-results').innerHTML =
+            `<div class="alert alert-success">Added ${name}${body.variant ? ' · '+body.variant : ''} @ $${price.toFixed(2)}</div>`;
+        viewSession(sid, true);
+        setTimeout(() => { if (_addItemSessionId) _aiShowCardManualEntry(); }, 1000);
+    } catch(err) { alert(err.message); }
 }
 
 function _aiSwitchType(type) {
