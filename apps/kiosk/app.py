@@ -465,12 +465,28 @@ def card_detail():
     same card are fetched as distinct detail views. '' or omitted treats
     the default (normal/holofoil) bucket.
     """
-    card_name = request.args.get("name", "")
-    set_name  = request.args.get("set", "")
-    variant   = (request.args.get("variant") or "").strip()
+    card_name    = request.args.get("name", "")
+    set_name     = request.args.get("set", "")
+    variant      = (request.args.get("variant") or "").strip()
+    tcgplayer_id = request.args.get("tcgplayer_id", type=int)
+    scrydex_id   = (request.args.get("scrydex_id") or "").strip()
 
     # Match the grouping rule from /api/browse: default variants fold to ''.
     variant_filter = "AND CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') THEN '' ELSE variant END = %s"
+
+    # Two cards can share name + set + variant_fold (e.g. OP14-041 Boa Hancock
+    # Leader Alt Art vs OP14-112 Boa Hancock SR Alt Art — same name, same set,
+    # both fold to variant_key='altArt'). The browse view groups by tcgplayer_id
+    # so they show as separate cards; the detail view must filter by it too or
+    # the copies + averaged price collapse them back together.
+    id_filter = ""
+    extra: list = []
+    if scrydex_id:
+        id_filter = "AND scrydex_id = %s"
+        extra.append(scrydex_id)
+    elif tcgplayer_id:
+        id_filter = "AND tcgplayer_id = %s"
+        extra.append(tcgplayer_id)
 
     copies = db.query(f"""
         SELECT id, barcode, card_name, set_name, card_number,
@@ -480,13 +496,14 @@ def card_detail():
         WHERE card_name = %s AND set_name = %s
           AND state = 'STORED' AND current_hold_id IS NULL
           {variant_filter}
+          {id_filter}
         ORDER BY
             CASE condition
                 WHEN 'NM'  THEN 1 WHEN 'LP'  THEN 2 WHEN 'MP' THEN 3
                 WHEN 'HP'  THEN 4 WHEN 'DMG' THEN 5 ELSE 9
             END,
             current_price DESC
-    """, (card_name, set_name, variant))
+    """, (card_name, set_name, variant, *extra))
 
     # Image fallback to Scrydex cache when raw_cards.image_url is missing
     # (e.g. JP cards entered before TCGplayer images were available, or
@@ -571,17 +588,33 @@ def create_hold():
         set_name  = line.get("set_name", "")
         condition = line.get("condition", "NM")
         variant   = (line.get("variant") or "").strip()
+        tcgplayer_id = line.get("tcgplayer_id")
+        scrydex_id   = (line.get("scrydex_id") or "").strip()
         qty       = max(1, int(line.get("qty", 1)))
 
-        available = db.query("""
+        # Disambiguate same-name-same-set-same-variant cards (e.g. OP14-041
+        # and OP14-112 Boa Hancock both fold to altArt) by tcgplayer_id /
+        # scrydex_id. Without this, a hold for one would steal copies of
+        # the other in created_at order.
+        id_filter = ""
+        id_params: list = []
+        if scrydex_id:
+            id_filter = " AND scrydex_id = %s"
+            id_params.append(scrydex_id)
+        elif tcgplayer_id:
+            id_filter = " AND tcgplayer_id = %s"
+            id_params.append(int(tcgplayer_id))
+
+        available = db.query(f"""
             SELECT id, barcode FROM raw_cards
             WHERE card_name = %s AND set_name = %s
               AND condition = %s AND state = 'STORED'
               AND current_hold_id IS NULL
               AND CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') THEN '' ELSE variant END = %s
+              {id_filter}
             ORDER BY created_at ASC
             LIMIT %s
-        """, (card_name, set_name, condition, variant, qty))
+        """, (card_name, set_name, condition, variant, *id_params, qty))
 
         if not available:
             errors.append(f"No {condition} copies available for {card_name}")
@@ -856,9 +889,22 @@ def champion_checkout():
         set_name = line.get("set_name", "")
         condition = line.get("condition", "NM")
         variant = (line.get("variant") or "").strip()
+        tcgplayer_id = line.get("tcgplayer_id")
+        scrydex_id   = (line.get("scrydex_id") or "").strip()
         qty = max(1, int(line.get("qty", 1)))
 
-        available = db.query("""
+        # Disambiguate same-name+set+variant cards via tcg/scrydex id
+        # (mirrors create_hold; e.g. OP14-041 vs OP14-112 Boa Hancock)
+        id_filter = ""
+        id_params: list = []
+        if scrydex_id:
+            id_filter = " AND scrydex_id = %s"
+            id_params.append(scrydex_id)
+        elif tcgplayer_id:
+            id_filter = " AND tcgplayer_id = %s"
+            id_params.append(int(tcgplayer_id))
+
+        available = db.query(f"""
             SELECT id, barcode, card_name, set_name, card_number,
                    condition, current_price, image_url
             FROM raw_cards
@@ -866,9 +912,10 @@ def champion_checkout():
               AND condition = %s AND state = 'STORED'
               AND current_hold_id IS NULL
               AND CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') THEN '' ELSE variant END = %s
+              {id_filter}
             ORDER BY created_at ASC
             LIMIT %s
-        """, (card_name, set_name, condition, variant, qty))
+        """, (card_name, set_name, condition, variant, *id_params, qty))
 
         if not available:
             errors.append(f"No {condition} copies available for {card_name}")

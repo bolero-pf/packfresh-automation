@@ -1124,7 +1124,17 @@ async function openDetail(card) {
   overlay.classList.add('active');
 
   try {
-    const d = await get(`/api/card?name=${encodeURIComponent(card.card_name)}&set=${encodeURIComponent(card.set_name||'')}&variant=${encodeURIComponent(card.variant_key||'')}`);
+    // tcgplayer_id is the actual card identity. Two cards with the same
+    // name + set + variant_fold (e.g. Boa Hancock OP14-041 vs OP14-112)
+    // would otherwise collapse into one detail view with averaged prices.
+    const _params = new URLSearchParams({
+      name: card.card_name,
+      set: card.set_name || '',
+      variant: card.variant_key || '',
+    });
+    if (card.tcgplayer_id) _params.set('tcgplayer_id', card.tcgplayer_id);
+    if (card.scrydex_id)   _params.set('scrydex_id',   card.scrydex_id);
+    const d = await get('/api/card?' + _params);
     renderDetail(card, d.copies || []);
   } catch(e) {
     panel.innerHTML = `<div class="empty"><p>${e.message}</p></div>`;
@@ -1150,11 +1160,15 @@ function renderDetail(card, copies) {
   const condOrder = ['NM','LP','MP','HP','DMG'];
   const cardVariantKey = card.variant_key || '';
   const cardVariantLabel = card.variant_label || '';
+  const cardTcgId = card.tcgplayer_id || '';
+  const cardSxId  = card.scrydex_id || '';
+  const probe = { card_name: card.card_name, set_name: card.set_name,
+                  variant_key: cardVariantKey, tcg_id: cardTcgId, scrydex_id: cardSxId };
   const condRows = Object.entries(byCondition)
     .sort(([a],[b]) => condOrder.indexOf(a) - condOrder.indexOf(b))
     .map(([cond, copies]) => {
       const avgPrice = copies.reduce((s,c) => s + (parseFloat(c.current_price)||0), 0) / copies.length;
-      const inCart = _cart.filter(ci => ci.card_name === card.card_name && ci.set_name === card.set_name && ci.condition === cond && (ci.variant_key||'') === cardVariantKey);
+      const inCart = _cart.filter(ci => _sameCartItem(ci, { ...probe, condition: cond }));
       const cartQty = inCart.reduce((s,ci) => s + ci.qty, 0);
       const actionHtml = cartQty > 0
         ? `<div class="copy-action"><div class="copy-qty-bar">
@@ -1163,7 +1177,7 @@ function renderDetail(card, copies) {
             <button class="qty-btn" data-delta="1">+</button>
           </div></div>`
         : `<div class="copy-action"><button class="copy-add-btn">+ Add to Picks</button></div>`;
-      return `<div class="copy-row${cartQty>0?' selected':''}" data-cond="${cond}" data-variant-key="${esc(cardVariantKey)}" data-variant-label="${esc(cardVariantLabel)}" data-avail="${copies.length}" data-price="${avgPrice.toFixed(2)}" data-card-name="${esc(card.card_name)}" data-set-name="${esc(card.set_name||'')}" data-image-url="${esc(card.image_url||'')}">
+      return `<div class="copy-row${cartQty>0?' selected':''}" data-cond="${cond}" data-variant-key="${esc(cardVariantKey)}" data-variant-label="${esc(cardVariantLabel)}" data-tcg-id="${esc(String(cardTcgId))}" data-scrydex-id="${esc(cardSxId)}" data-avail="${copies.length}" data-price="${avgPrice.toFixed(2)}" data-card-name="${esc(card.card_name)}" data-set-name="${esc(card.set_name||'')}" data-image-url="${esc(card.image_url||'')}">
         <div class="copy-info">
           <div class="copy-cond"><span class="cond-pill cond-${cond}">${cond}</span></div>
           <div class="copy-num">${copies.length} available${copies[0]?.card_number ? ' · #'+copies[0].card_number : ''}</div>
@@ -1225,7 +1239,8 @@ document.addEventListener('click', function(e) {
   addToCart(row.dataset.cardName, row.dataset.setName, row.dataset.cond, 1,
             parseFloat(row.dataset.price) || 0, row.dataset.imageUrl,
             parseInt(row.dataset.avail) || 1,
-            row.dataset.variantKey || '', row.dataset.variantLabel || '');
+            row.dataset.variantKey || '', row.dataset.variantLabel || '',
+            row.dataset.tcgId || '', row.dataset.scrydexId || '');
   // Swap add button to qty bar in place
   row.classList.add('selected');
   row.querySelector('.copy-action').innerHTML = `<div class="copy-qty-bar">
@@ -1247,13 +1262,17 @@ document.addEventListener('click', function(e) {
   const setName = row.dataset.setName;
   const cond = row.dataset.cond;
   const variantKey = row.dataset.variantKey || '';
+  const tcgId = row.dataset.tcgId || '';
+  const sxId  = row.dataset.scrydexId || '';
   const avail = parseInt(row.dataset.avail);
   const delta = parseInt(btn.dataset.delta);
-  const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond && (c.variant_key||'') === variantKey);
+  const probe = { card_name: cardName, set_name: setName, condition: cond,
+                  variant_key: variantKey, tcg_id: tcgId, scrydex_id: sxId };
+  const item = _cart.find(c => _sameCartItem(c, probe));
   if (!item) return;
   const newQty = item.qty + delta;
   if (newQty < 1) {
-    removeFromCart(cardName, setName, cond, variantKey);
+    removeFromCart(cardName, setName, cond, variantKey, tcgId, sxId);
     row.classList.remove('selected');
     row.querySelector('.copy-action').innerHTML = '<button class="copy-add-btn">+ Add to Picks</button>';
     _updateDetailPicksBtn();
@@ -1280,13 +1299,17 @@ document.addEventListener('click', function(e) {
   const setName = row.dataset.setName;
   const cond = row.dataset.condition;
   const variantKey = row.dataset.variantKey || '';
+  const tcgId = row.dataset.tcgId || '';
+  const sxId  = row.dataset.scrydexId || '';
   const delta = parseInt(btn.dataset.delta);
   const avail = parseInt(row.dataset.avail) || 999;
-  const item = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond && (c.variant_key||'') === variantKey);
+  const probe = { card_name: cardName, set_name: setName, condition: cond,
+                  variant_key: variantKey, tcg_id: tcgId, scrydex_id: sxId };
+  const item = _cart.find(c => _sameCartItem(c, probe));
   if (!item) return;
   const newQty = item.qty + delta;
   if (newQty < 1) {
-    removeFromCart(cardName, setName, cond, variantKey);
+    removeFromCart(cardName, setName, cond, variantKey, tcgId, sxId);
     renderCart(document.getElementById('cart-panel'));
     return;
   }
@@ -1316,24 +1339,41 @@ document.addEventListener('click', function(e) {
 });
 
 
-function addToCart(cardName, setName, cond, qty, price, imageUrl, avail, variantKey, variantLabel) {
+// Identity key for a cart line. Two raw_cards with the same name + set +
+// variant fold can still be different products (OP14-041 vs OP14-112 Boa
+// Hancock both share name + set + variant_fold='altArt'); the actual
+// distinguisher is tcgplayer_id (or scrydex_id when there's no TCG ID).
+function _cartItemKey(c) {
+  const tcg = c.tcg_id || c.tcgplayer_id || '';
+  const sx  = c.scrydex_id || '';
+  return [c.card_name||'', c.set_name||'', c.condition||'',
+          c.variant_key||'', String(tcg), sx].join('§');
+}
+function _sameCartItem(a, b) { return _cartItemKey(a) === _cartItemKey(b); }
+
+function addToCart(cardName, setName, cond, qty, price, imageUrl, avail, variantKey, variantLabel, tcgId, scrydexId) {
   variantKey = variantKey || '';
-  const existing = _cart.find(c => c.card_name === cardName && c.set_name === setName && c.condition === cond && (c.variant_key||'') === variantKey);
+  const probe = { card_name: cardName, set_name: setName, condition: cond,
+                  variant_key: variantKey, tcg_id: tcgId || '', scrydex_id: scrydexId || '' };
+  const existing = _cart.find(c => _sameCartItem(c, probe));
   if (existing) {
     existing.qty = Math.min(existing.qty + qty, MAX);
     if (avail) existing.avail = avail;
   } else {
     _cart.push({ card_name: cardName, set_name: setName, condition: cond,
                  variant_key: variantKey, variant_label: variantLabel || '',
+                 tcg_id: tcgId || '', scrydex_id: scrydexId || '',
                  qty, price, image_url: imageUrl, avail: avail || qty });
   }
   updateCartBadge();
   _saveCart();
 }
 
-function removeFromCart(cardName, setName, cond, variantKey) {
+function removeFromCart(cardName, setName, cond, variantKey, tcgId, scrydexId) {
   variantKey = variantKey || '';
-  _cart = _cart.filter(c => !(c.card_name === cardName && c.set_name === setName && c.condition === cond && (c.variant_key||'') === variantKey));
+  const probe = { card_name: cardName, set_name: setName, condition: cond,
+                  variant_key: variantKey, tcg_id: tcgId || '', scrydex_id: scrydexId || '' };
+  _cart = _cart.filter(c => !_sameCartItem(c, probe));
   updateCartBadge();
   _saveCart();
 }
@@ -1393,7 +1433,7 @@ function renderCart(panel) {
   const items = _cart.map(c => {
     const vBadge = c.variant_label ? `<span class="variant-badge" style="margin-left:6px;">${esc(c.variant_label)}</span>` : '';
     return `
-    <div class="cart-item" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}" data-variant-key="${esc(c.variant_key||'')}" data-avail="${c.avail || c.qty}">
+    <div class="cart-item" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}" data-variant-key="${esc(c.variant_key||'')}" data-tcg-id="${esc(String(c.tcg_id||''))}" data-scrydex-id="${esc(c.scrydex_id||'')}" data-avail="${c.avail || c.qty}">
       ${c.image_url ? `<img src="${esc(c.image_url)}" style="aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
       <div class="cart-item-info">
         <div class="cart-item-name">${esc(c.card_name)}${vBadge}</div>
@@ -1489,11 +1529,13 @@ async function submitHold() {
   errEl.style.display = 'none';
 
   const items = _cart.map(c => ({
-    card_name: c.card_name,
-    set_name:  c.set_name,
-    condition: c.condition,
-    variant:   c.variant_key || '',
-    qty:       c.qty,
+    card_name:    c.card_name,
+    set_name:     c.set_name,
+    condition:    c.condition,
+    variant:      c.variant_key || '',
+    tcgplayer_id: c.tcg_id || null,
+    scrydex_id:   c.scrydex_id || null,
+    qty:          c.qty,
   }));
 
   try {
@@ -1584,11 +1626,13 @@ async function submitChampionCheckout() {
   errEl.style.display = 'none';
 
   const items = _cart.map(c => ({
-    card_name: c.card_name,
-    set_name:  c.set_name,
-    condition: c.condition,
-    variant:   c.variant_key || '',
-    qty:       c.qty,
+    card_name:    c.card_name,
+    set_name:     c.set_name,
+    condition:    c.condition,
+    variant:      c.variant_key || '',
+    tcgplayer_id: c.tcg_id || null,
+    scrydex_id:   c.scrydex_id || null,
+    qty:          c.qty,
   }));
 
   try {
