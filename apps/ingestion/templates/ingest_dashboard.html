@@ -3492,23 +3492,338 @@ async function slabRelinkByTcgId() {
 
 let _addItemSessionId = null;
 
+let _aiMode = 'sealed';  // 'sealed' or 'card'
+
 function openAddItem(sessionId) {
     _addItemSessionId = sessionId;
+    _aiMode = 'sealed';
     document.getElementById('add-item-body').innerHTML = `
         <h3 style="margin-bottom:12px;">Add Item</h3>
-        <div style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px;">
-            <div style="flex:1;">
-                <label style="font-size:0.85rem; color:var(--text-dim);">Search Products</label>
-                <input type="text" id="add-item-search" placeholder="e.g. Celebrations ETB, Charizard ex"
-                       style="width:100%; margin-top:4px;"
-                       onkeydown="if(event.key==='Enter') addItemSearch()">
-            </div>
-            <button class="btn btn-primary btn-sm" onclick="addItemSearch()" style="height:40px;">Search</button>
+        <div style="display:flex; gap:4px; margin-bottom:12px;">
+            <button class="btn btn-sm btn-primary" id="ai-type-sealed" onclick="_aiSwitchType('sealed')">Sealed Product</button>
+            <button class="btn btn-sm btn-secondary" id="ai-type-card" onclick="_aiSwitchType('card')">Individual Card</button>
         </div>
+
+        <!-- Sealed search -->
+        <div id="ai-sealed-area">
+            <div style="display:flex; gap:8px; align-items:flex-end; margin-bottom:12px;">
+                <div style="flex:1;">
+                    <label style="font-size:0.85rem; color:var(--text-dim);">Search Products</label>
+                    <input type="text" id="add-item-search" placeholder="e.g. Celebrations ETB"
+                           style="width:100%; margin-top:4px;"
+                           onkeydown="if(event.key==='Enter') addItemSearch()">
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="addItemSearch()" style="height:40px;">Search</button>
+            </div>
+        </div>
+
+        <!-- Card search -->
+        <div id="ai-card-area" style="display:none;">
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; padding:8px 10px; background:var(--surface-2); border-radius:6px;">
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.85rem;">
+                    <input type="checkbox" id="ai-is-graded" onchange="_aiToggleGraded()" style="width:16px;height:16px;">
+                    <span style="font-weight:600;">Graded Card</span>
+                </label>
+                <span id="ai-grade-fields" style="display:none; align-items:center; gap:6px;">
+                    <select id="ai-grade-company" style="padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">
+                        <option value="PSA">PSA</option><option value="BGS">BGS</option>
+                        <option value="CGC">CGC</option><option value="SGC">SGC</option>
+                    </select>
+                    <select id="ai-grade-value" style="padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">
+                        <option value="10">10</option><option value="9.5">9.5</option>
+                        <option value="9">9</option><option value="8.5">8.5</option>
+                        <option value="8">8</option><option value="7">7</option>
+                    </select>
+                </span>
+                <span style="color:var(--text-dim); font-size:0.75rem;" id="ai-graded-hint">PSA/BGS/CGC — uses live eBay comps</span>
+            </div>
+            <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:flex-end; margin-bottom:10px;">
+                <div style="flex:2; min-width:140px;"><label style="font-size:0.78rem; color:var(--text-dim);">Card Name</label>
+                    <input type="text" id="ai-card-search" placeholder="e.g. Charizard ex" style="width:100%; margin-top:4px;" onkeydown="if(event.key==='Enter') _aiCardSearch()"></div>
+                <div style="flex:1; min-width:110px;"><label style="font-size:0.78rem; color:var(--text-dim);">Set (opt)</label>
+                    <input type="text" id="ai-card-set" placeholder="e.g. Paldean Fates" style="width:100%; margin-top:4px;"></div>
+                <div style="width:85px;"><label style="font-size:0.78rem; color:var(--text-dim);">TCG ID</label>
+                    <input type="number" id="ai-card-tcgid" placeholder="opt" style="width:100%; margin-top:4px;" onkeydown="if(event.key==='Enter') _aiCardSearch()"></div>
+                <div style="width:70px;" id="ai-cond-group"><label style="font-size:0.78rem; color:var(--text-dim);">Cond</label>
+                    <select id="ai-card-condition" style="width:100%; margin-top:4px;">
+                        <option value="NM">NM</option><option value="LP">LP</option>
+                        <option value="MP">MP</option><option value="HP">HP</option>
+                        <option value="DMG">DMG</option>
+                    </select></div>
+                <div style="width:55px;"><label style="font-size:0.78rem; color:var(--text-dim);">Qty</label>
+                    <input type="number" id="ai-card-qty" value="1" min="1" style="width:100%; margin-top:4px;"></div>
+                <button class="btn btn-primary btn-sm" onclick="_aiCardSearch()" style="height:38px;">Search</button>
+            </div>
+        </div>
+
         <div id="add-item-search-results"></div>
     `;
     document.getElementById('add-item-modal').classList.add('active');
     setTimeout(() => document.getElementById('add-item-search').focus(), 100);
+}
+
+function _aiSwitchType(type) {
+    _aiMode = type;
+    document.getElementById('ai-type-sealed').className = 'btn btn-sm ' + (type === 'sealed' ? 'btn-primary' : 'btn-secondary');
+    document.getElementById('ai-type-card').className = 'btn btn-sm ' + (type === 'card' ? 'btn-primary' : 'btn-secondary');
+    document.getElementById('ai-sealed-area').style.display = type === 'sealed' ? '' : 'none';
+    document.getElementById('ai-card-area').style.display = type === 'card' ? '' : 'none';
+    document.getElementById('add-item-search-results').innerHTML = '';
+    setTimeout(() => document.getElementById(type === 'sealed' ? 'add-item-search' : 'ai-card-search')?.focus(), 50);
+}
+
+function _aiToggleGraded() {
+    const isG = document.getElementById('ai-is-graded').checked;
+    document.getElementById('ai-grade-fields').style.display = isG ? 'inline-flex' : 'none';
+    const cg = document.getElementById('ai-cond-group');
+    if (cg) { cg.style.opacity = isG ? '0.4' : '1'; cg.title = isG ? 'Not used for graded' : ''; }
+    document.getElementById('ai-graded-hint').style.display = isG ? 'none' : '';
+}
+
+async function _aiCardSearch() {
+    const tcgId = (document.getElementById('ai-card-tcgid').value || '').trim();
+    const resultsDiv = document.getElementById('add-item-search-results');
+    const condition = document.getElementById('ai-card-condition').value;
+    const qty = parseInt(document.getElementById('ai-card-qty').value) || 1;
+    const isGraded = document.getElementById('ai-is-graded').checked;
+    const gradeCompany = document.getElementById('ai-grade-company').value;
+    const gradeValue = document.getElementById('ai-grade-value').value;
+
+    if (tcgId) {
+        await _aiLookupByTcg(parseInt(tcgId), condition, qty, isGraded, gradeCompany, gradeValue, resultsDiv);
+        return;
+    }
+    const query = document.getElementById('ai-card-search').value.trim();
+    const setFilter = document.getElementById('ai-card-set').value.trim();
+    if (!query) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a card name or TCG ID</div>'; return; }
+
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+    try {
+        const r = await fetch('/api/ppt/search-cards', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ query, set_name: setFilter || undefined }),
+        });
+        const d = await r.json();
+        if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error || 'Search failed'}</div>`; return; }
+        _aiRenderCardResults(d.results || [], condition, qty, isGraded, gradeCompany, gradeValue, resultsDiv);
+    } catch(e) { resultsDiv.innerHTML = `<div class="alert alert-error">${e.message}</div>`; }
+}
+
+function _aiRenderCardResults(cards, condition, qty, isGraded, gradeCompany, gradeValue, resultsDiv) {
+    if (!cards.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No cards found.</div>'; return; }
+
+    const cardRows = cards.map(c => {
+        const cardTcg = c.tcgPlayerId || c.tcgplayer_id || c.id || '';
+        const setName = c.setName || c.set_name || (c.set ? c.set.name : '') || '';
+        const expCode = (c.expansionId || c.expansion_id || '').toUpperCase();
+        const game = (c.game || '').toLowerCase();
+        const cardNum = c.cardNumber || c.number || '';
+        const rarity = c.rarity || '';
+        const cardImg = c.imageCdnUrl400 || c.imageCdnUrl || c.imageCdnUrl800 || '';
+        const prices = c.prices || {};
+        const variantsObj = (prices && typeof prices === 'object' && prices.variants) || {};
+        const variants = [];
+        Object.keys(variantsObj).forEach(vname => {
+            const vData = variantsObj[vname] || {};
+            const ce = vData[condition] || vData['Near Mint'] || vData['NM'] || {};
+            const p = (typeof ce === 'object') ? (ce.price ?? null) : ce;
+            variants.push({
+                name: vname, price: p,
+                tcgId: vData._tcgplayer_id || cardTcg,
+                img: vData._image_small || vData._image_medium || vData._image_large || cardImg,
+            });
+        });
+        if (!variants.length) {
+            const p = (typeof prices === 'object') ? (prices[condition.toLowerCase()] || prices.market || prices.mid || null) : null;
+            variants.push({ name: '', price: p || c.price || null, tcgId: cardTcg, img: cardImg });
+        }
+        variants.sort((a,b) => (b.price||0) - (a.price||0));
+        return { c, setName, expCode, game, cardNum, rarity, img: variants[0]?.img || cardImg, variants, maxPrice: variants.reduce((m,v)=>Math.max(m,v.price||0),0) };
+    });
+    cardRows.sort((a,b) => b.maxPrice - a.maxPrice);
+
+    resultsDiv.innerHTML = '<div style="max-height:60vh; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">' + cardRows.map(row => {
+        const { c, setName, expCode, game, cardNum, rarity, img, variants } = row;
+        const safeName = (c.name||'').replace(/'/g, "\\'").replace(/"/g,'&quot;');
+        const safeSet = setName.replace(/'/g, "\\'").replace(/"/g,'&quot;');
+        const setCodeId = expCode + (cardNum ? '-' + cardNum : '');
+        const setCodeBadge = expCode ? `<span style="background:var(--surface); border:1px solid var(--border); color:var(--accent); padding:2px 7px; border-radius:4px; font-size:0.72rem; font-weight:700; font-family:ui-monospace,monospace;">${setCodeId}</span>` : '';
+        const gameBadge = (game && game !== 'pokemon') ? `<span style="background:var(--accent-alt,#7c3aed); color:#fff; padding:2px 7px; border-radius:4px; font-size:0.65rem; font-weight:700;">${game.toUpperCase()}</span>` : '';
+        const printingBadges = pfCardPrintingBadges(setName, expCode, variants);
+        const imgHtml = img ? `<img src="${img}" loading="lazy" style="width:80px; height:112px; object-fit:contain; border-radius:6px; flex-shrink:0; background:var(--surface-2);">` : `<div style="width:80px; height:112px; background:var(--surface-2); border-radius:6px; flex-shrink:0;"></div>`;
+
+        const chipsHtml = variants.map(v => {
+            const hasPrice = v.price != null && v.price > 0;
+            const safeVariant = (v.name||'').replace(/'/g, "\\'").replace(/"/g,'&quot;');
+            const isFoil = v.name && /foil|holo|etched/i.test(v.name);
+            const isChase = v.name && /alt|manga|premium|special|enchanted|fullArt|jollyRoger/i.test(v.name);
+            const highlight = isChase || (isFoil && variants.length > 1);
+            const bg = highlight ? 'var(--amber)' : 'var(--surface-2)';
+            const color = highlight ? '#000' : 'var(--text)';
+            const label = v.name || 'Default';
+            const icon = isFoil ? '✦ ' : '';
+            const priceText = hasPrice ? '$' + Number(v.price).toFixed(2) : '—';
+            return `<span onclick="event.stopPropagation(); _aiPickCardVariant(${v.tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${safeVariant}', ${v.price||0}, ${qty}, '${condition}', ${isGraded}, '${gradeCompany}', '${gradeValue}')" style="display:inline-flex; align-items:center; gap:6px; background:${bg}; color:${color}; padding:6px 10px; border-radius:6px; font-size:0.82rem; font-weight:600; cursor:pointer; border:1px solid var(--border);">${icon}${label} <span style="font-weight:700;">${priceText}</span></span>`;
+        }).join(' ');
+
+        const defaultV = variants[0];
+        const safeDefaultVariant = (defaultV.name||'').replace(/'/g, "\\'").replace(/"/g,'&quot;');
+
+        return `<div style="display:flex; gap:12px; padding:8px; border:1px solid var(--border); border-radius:6px; align-items:flex-start; cursor:pointer;" onclick="_aiPickCardVariant(${defaultV.tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${safeDefaultVariant}', ${defaultV.price||0}, ${qty}, '${condition}', ${isGraded}, '${gradeCompany}', '${gradeValue}')">
+            ${imgHtml}
+            <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:6px;">
+                <div>
+                    <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                        ${gameBadge}<span style="font-weight:700; font-size:0.95rem;">${c.name||''}</span>${setCodeBadge}${printingBadges}
+                    </div>
+                    <div style="font-size:0.75rem; color:var(--text-dim); margin-top:2px;">${setName}${rarity ? ' · '+rarity : ''} · TCG#${defaultV.tcgId}</div>
+                    ${isGraded ? `<div style="font-size:0.72rem; color:var(--accent); margin-top:2px;">${gradeCompany} ${gradeValue} — click variant</div>` : ''}
+                </div>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;">${chipsHtml}</div>
+            </div>
+        </div>`;
+    }).join('') + '</div>';
+}
+
+async function _aiLookupByTcg(tcgId, condition, qty, isGraded, gradeCompany, gradeValue, resultsDiv) {
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up TCG#' + tcgId + '...</div>';
+    try {
+        const r = await fetch('/api/ppt/lookup-card', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ tcgplayer_id: tcgId }),
+        });
+        const d = await r.json();
+        if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error || 'Not found'}</div>`; return; }
+        const card = d.card || {};
+        // Synthesize a one-card results list so we can reuse the renderer.
+        const synthetic = [{
+            ...card,
+            tcgPlayerId: tcgId,
+            prices: { variants: _aiVariantsToSearchShape(d.variants || {}) },
+        }];
+        _aiRenderCardResults(synthetic, condition, qty, isGraded, gradeCompany, gradeValue, resultsDiv);
+    } catch(e) { resultsDiv.innerHTML = `<div class="alert alert-error">${e.message}</div>`; }
+}
+
+function _aiVariantsToSearchShape(variantsMap) {
+    // lookup-card returns {variantName: {NM: price, LP: price, ...}}
+    // search-cards wants {variantName: {NM: {price: X}, ...}}.
+    const out = {};
+    for (const vname of Object.keys(variantsMap || {})) {
+        const conds = variantsMap[vname] || {};
+        out[vname] = {};
+        for (const c of Object.keys(conds)) {
+            const p = conds[c];
+            out[vname][c] = (typeof p === 'object') ? p : { price: p };
+        }
+    }
+    return out;
+}
+
+async function _aiPickCardVariant(tcgId, cardName, setName, cardNum, rarity, variant, price, qty, condition, isGraded, gradeCompany, gradeValue) {
+    const resultsDiv = document.getElementById('add-item-search-results');
+    if (isGraded) {
+        // Graded: skip condition picker — grade is the identifier, price already came from live comps lookup on server
+        await _aiSubmit({ tcgId, cardName, setName, cardNum, rarity, variant, qty, condition: 'NM',
+            isGraded: true, gradeCompany, gradeValue, marketPrice: null });
+        return;
+    }
+    // Raw: open compact condition picker so staff can adjust if the physical card differs
+    await _aiShowConditionPicker(tcgId, cardName, setName, cardNum, rarity, variant, qty, condition);
+}
+
+async function _aiShowConditionPicker(tcgId, cardName, setName, cardNum, rarity, variant, qty, condition) {
+    const resultsDiv = document.getElementById('add-item-search-results');
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading conditions...</div>';
+    let variants = {};
+    try {
+        const r = await fetch('/api/ppt/lookup-card', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ tcgplayer_id: tcgId }),
+        });
+        if (r.ok) {
+            const d = await r.json();
+            variants = d.variants || {};
+        }
+    } catch(e) { /* price-free submit fallback */ }
+
+    const variantData = variants[variant] || variants[Object.keys(variants)[0]] || {};
+    let selCond = condition;
+    const render = () => {
+        let html = `<div style="background:var(--surface-2); border-radius:8px; padding:14px;">
+            <div style="margin-bottom:10px;"><strong style="color:var(--accent);">${cardName}</strong>
+                <span style="color:var(--text-dim);"> — ${setName}${cardNum ? ' #'+cardNum : ''} · ${variant || 'Default'} · TCG#${tcgId}</span></div>
+            <div style="display:grid; grid-template-columns:repeat(5, 1fr); gap:8px; margin-bottom:12px;">`;
+        ['NM','LP','MP','HP','DMG'].forEach(cond => {
+            const p = variantData[cond];
+            const has = p != null && p !== undefined;
+            const sel = cond === selCond;
+            html += `<div data-aicond="${cond}" style="background:${sel?'var(--accent)':'var(--surface)'}; color:${sel?'#fff':'var(--text)'}; padding:10px 6px; border-radius:6px; text-align:center; cursor:pointer; border:1px solid var(--border); opacity:${has?'1':'0.4'};">
+                <div style="font-size:0.75rem; font-weight:600;">${cond}</div>
+                <div style="font-size:1rem; font-weight:700;">${has ? '$' + (typeof p === 'object' ? p.price : p).toFixed(2) : '—'}</div>
+            </div>`;
+        });
+        const selP = variantData[selCond];
+        const selPrice = selP != null ? (typeof selP === 'object' ? selP.price : selP) : null;
+        html += `</div><div style="display:flex; gap:8px;">
+            <button id="ai-confirm-cond" class="btn btn-primary">Add ${selCond}${selPrice ? ' — $' + selPrice.toFixed(2) : ''}</button>
+            <button onclick="_aiBackToSearch()" class="btn btn-secondary">Cancel</button>
+        </div></div>`;
+        resultsDiv.innerHTML = html;
+        resultsDiv.querySelectorAll('[data-aicond]').forEach(el => {
+            el.addEventListener('click', () => { selCond = el.getAttribute('data-aicond'); render(); });
+        });
+        document.getElementById('ai-confirm-cond').addEventListener('click', async () => {
+            await _aiSubmit({ tcgId, cardName, setName, cardNum, rarity, variant, qty,
+                condition: selCond, isGraded: false, gradeCompany: '', gradeValue: '',
+                marketPrice: selPrice });
+        });
+    };
+    render();
+}
+
+function _aiBackToSearch() {
+    document.getElementById('add-item-search-results').innerHTML = '';
+    document.getElementById('ai-card-search')?.focus();
+}
+
+async function _aiSubmit(p) {
+    const resultsDiv = document.getElementById('add-item-search-results');
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding...</div>';
+    try {
+        const body = {
+            product_name: p.cardName,
+            tcgplayer_id: p.tcgId,
+            set_name: p.setName,
+            card_number: p.cardNum,
+            rarity: p.rarity,
+            variant: p.variant || null,
+            quantity: p.qty,
+            product_type: 'raw',
+            condition: p.condition,
+            is_graded: p.isGraded,
+            grade_company: p.gradeCompany || null,
+            grade_value: p.gradeValue || null,
+        };
+        if (p.marketPrice != null) body.market_price = p.marketPrice;
+        const r = await fetch(`/api/ingest/session/${_addItemSessionId}/add-item`, {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error || 'Add failed'}</div>`; return; }
+        resultsDiv.innerHTML = `<div class="alert alert-success">Added ${p.cardName}${p.variant ? ' · '+p.variant : ''} (${p.condition})</div>`;
+        // Refresh session so the row appears in Verify with its thumbnail
+        viewSession(_addItemSessionId, true);
+        setTimeout(() => {
+            if (_addItemSessionId) {
+                document.getElementById('ai-card-search').value = '';
+                document.getElementById('ai-card-tcgid').value = '';
+                resultsDiv.innerHTML = '';
+                document.getElementById('ai-card-search').focus();
+            }
+        }, 1200);
+    } catch(e) { resultsDiv.innerHTML = `<div class="alert alert-error">${e.message}</div>`; }
 }
 
 function closeAddItem() {

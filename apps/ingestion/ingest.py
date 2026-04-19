@@ -1491,6 +1491,9 @@ def add_item_to_session(session_id: str, data: dict) -> dict:
     card_number = data.get("card_number")
     rarity = data.get("rarity")
     variant = data.get("variant")
+    is_graded = bool(data.get("is_graded", False))
+    grade_company = (data.get("grade_company") or "").strip() or None
+    grade_value = (data.get("grade_value") or "").strip() or None
 
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     offer_price = (market_price * offer_pct * quantity).quantize(Decimal("0.01"))
@@ -1500,14 +1503,16 @@ def add_item_to_session(session_id: str, data: dict) -> dict:
         INSERT INTO intake_items (
             id, session_id, product_name, set_name, tcgplayer_id,
             quantity, market_price, offer_price, product_type,
-            is_mapped, item_status, condition, card_number, rarity, variant
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            is_mapped, item_status, condition, card_number, rarity, variant,
+            is_graded, grade_company, grade_value
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         item_id, session_id, product_name, set_name,
         int(tcgplayer_id) if tcgplayer_id else None,
         quantity, market_price, offer_price, product_type,
         tcgplayer_id is not None, "good",
         condition, card_number, rarity, variant,
+        is_graded, grade_company, grade_value,
     ))
 
     if tcgplayer_id and product_name:

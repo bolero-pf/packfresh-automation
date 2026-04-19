@@ -543,15 +543,151 @@ def offer_summary(session_id):
 
 @app.route("/api/ingest/session/<session_id>/add-item", methods=["POST"])
 def add_item(session_id):
-    """Add a new item to an ingest session."""
+    """Add a new item to an ingest session.
+    For raw cards with tcgplayer_id, resolves market_price via Scrydex-first
+    (cache → live graded comps → PPT) so the Unexpected Item flow doesn't
+    rely on the client to supply a price.
+    """
     data = request.get_json(silent=True) or {}
     try:
+        product_type = data.get("product_type", "sealed")
+        is_graded = bool(data.get("is_graded", False))
+        tcg_id_raw = data.get("tcgplayer_id")
+        # Price resolution: only run for raw cards that came in without a price.
+        # Sealed items are priced by the client via /api/ppt/search-sealed.
+        if product_type == "raw" and tcg_id_raw and not data.get("market_price"):
+            try:
+                tcg_id = int(tcg_id_raw)
+                market_price = None
+                condition = data.get("condition") or "NM"
+                variant = data.get("variant") or None
+                grade_company = (data.get("grade_company") or "").strip()
+                grade_value = (data.get("grade_value") or "").strip()
+
+                if is_graded and grade_company and grade_value:
+                    from graded_pricing import get_live_graded_comps
+                    try:
+                        live = get_live_graded_comps(tcg_id, grade_company, grade_value, db)
+                        if live and live.get("mid"):
+                            market_price = float(live["mid"])
+                    except Exception as e:
+                        logger.warning(f"Live graded comps failed for TCG#{tcg_id}: {e}")
+                    if market_price is None and ppt:
+                        card_data = ppt.get_card_by_tcgplayer_id(tcg_id)
+                        if card_data:
+                            mp = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
+                            if mp is not None:
+                                market_price = float(mp)
+                else:
+                    # Raw: PriceCache (Scrydex) first, PPT fallback — matches
+                    # project rule "Scrydex-first, PPT fallback" (see CLAUDE.md).
+                    from price_cache import PriceCache
+                    try:
+                        cache = PriceCache(db)
+                        card_data = cache.get_card_by_tcgplayer_id(tcg_id)
+                        if card_data:
+                            from scrydex_client import ScrydexClient
+                            mp = ScrydexClient.extract_condition_price(card_data, condition, variant=variant)
+                            if mp is not None:
+                                market_price = float(mp)
+                    except Exception as e:
+                        logger.warning(f"Scrydex price lookup failed for TCG#{tcg_id}: {e}")
+                    if market_price is None and ppt:
+                        card_data = ppt.get_card_by_tcgplayer_id(tcg_id)
+                        if card_data:
+                            mp = PriceProvider.extract_condition_price(card_data, condition, variant=variant)
+                            if mp is not None:
+                                market_price = float(mp)
+
+                if market_price is not None:
+                    data["market_price"] = market_price
+            except Exception as e:
+                logger.warning(f"add-item price resolution failed: {e}")
+
         item = ingest.add_item_to_session(session_id, data)
         return jsonify({"success": True, "item": _serialize(item)})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.exception(f"Add item failed for session {session_id}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ppt/search-cards", methods=["POST"])
+def ppt_search_cards():
+    """Search for individual raw cards by name across all TCGs — mirrors
+    the intake-service endpoint so the 'Unexpected Item' modal can use the
+    grouped-by-printing UI with variant chips.
+    """
+    if not ppt:
+        return jsonify({"error": "PPT API not configured"}), 503
+    data = request.get_json(silent=True) or {}
+    q = (data.get("query") or "").strip()
+    if not q:
+        return jsonify({"error": "No query"}), 400
+    try:
+        set_name = data.get("set_name") or None
+        limit = int(data.get("limit") or 8)
+        results = []
+        cache = getattr(ppt, "cache", None)
+        if cache:
+            try:
+                results = cache.search_cards(q, set_name=set_name, limit=limit, all_games=True)
+                results = ppt._stamp(results, "cache")
+            except Exception as e:
+                logger.warning(f"Cross-game card cache search failed: {e}")
+                results = []
+        if not results:
+            live = ppt.primary.search_cards(q, set_name=set_name, limit=limit) or []
+            results = ppt._stamp(live, ppt._primary_source)
+        for r in (results or []):
+            if not r.get("market_price"):
+                conds = (r.get("prices") or {}).get("conditions") or {}
+                nm = conds.get("Near Mint") or conds.get("NM") or {}
+                r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
+        return jsonify({"results": results or []})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ppt/lookup-card", methods=["POST"])
+def ppt_lookup_card():
+    """Look up a single card by tcgplayer_id. Returns variants + graded prices
+    (with live eBay comps for graded) — same shape as intake's endpoint so the
+    shared condition-picker flow renders identically in both services.
+    """
+    if not ppt:
+        return jsonify({"error": "PPT API not configured"}), 503
+    data = request.get_json(silent=True) or {}
+    tcgplayer_id = data.get("tcgplayer_id")
+    if not tcgplayer_id:
+        return jsonify({"error": "tcgplayer_id required"}), 400
+    try:
+        card_data = ppt.get_card_by_tcgplayer_id(int(tcgplayer_id))
+        if not card_data:
+            return jsonify({"error": "Card not found"}), 404
+        variants = PriceProvider.extract_variants(card_data)
+        primary_printing = PriceProvider.get_primary_printing(card_data)
+        graded_prices = PriceProvider.extract_graded_prices(card_data)
+        # Live graded comps — cached aggregates are often 3× off for MTG/Pokemon.
+        live_graded = {}
+        try:
+            from graded_pricing import get_live_graded_comps
+            for company_name, grades in graded_prices.items():
+                for grade_val in grades:
+                    live = get_live_graded_comps(int(tcgplayer_id), company_name, grade_val, db)
+                    if live:
+                        live_graded.setdefault(company_name, {})[grade_val] = live
+        except Exception as e:
+            logger.warning(f"Live graded enrichment failed for TCG#{tcgplayer_id}: {e}")
+        return jsonify({
+            "card": card_data,
+            "variants": variants,
+            "primary_printing": primary_printing,
+            "graded_prices": graded_prices,
+            "live_graded": live_graded,
+        })
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
