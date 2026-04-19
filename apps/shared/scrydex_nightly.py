@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 UPSERT_SQL = """
     INSERT INTO scrydex_price_cache (
         game, scrydex_id, tcgplayer_id, expansion_id, expansion_name,
-        product_type, product_name, card_number, rarity,
+        product_type, product_name, card_number, printed_number, rarity,
         variant, condition, price_type, grade_company, grade_value,
         market_price, low_price, mid_price, high_price,
         trend_1d_pct, trend_7d_pct, trend_30d_pct,
@@ -35,7 +35,7 @@ UPSERT_SQL = """
         product_name_en, expansion_name_en, language_code,
         fetched_at
     ) VALUES (
-        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s,
         NOW()
@@ -46,6 +46,7 @@ UPSERT_SQL = """
         tcgplayer_id      = EXCLUDED.tcgplayer_id,
         expansion_name    = EXCLUDED.expansion_name,
         product_name      = EXCLUDED.product_name,
+        printed_number    = EXCLUDED.printed_number,
         product_name_en   = EXCLUDED.product_name_en,
         expansion_name_en = EXCLUDED.expansion_name_en,
         language_code     = EXCLUDED.language_code,
@@ -69,6 +70,81 @@ MAP_SQL = """
         product_type = EXCLUDED.product_type,
         game = EXCLUDED.game,
         updated_at = NOW()
+"""
+
+CARD_META_SQL = """
+    INSERT INTO scrydex_card_meta (
+        game, scrydex_id,
+        printed_number, rarity_code, artist, flavor_text, rules, subtypes,
+        hp, supertype, types, national_pokedex_numbers, evolves_from,
+        attacks, abilities, weaknesses, resistances,
+        retreat_cost, converted_retreat_cost, legalities,
+        card_type, attribute, colors, life, power, printings, tags,
+        raw, fetched_at
+    ) VALUES (
+        %s, %s,
+        %s, %s, %s, %s, %s::jsonb, %s::jsonb,
+        %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
+        %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
+        %s::jsonb, %s, %s::jsonb,
+        %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s::jsonb,
+        %s::jsonb, NOW()
+    )
+    ON CONFLICT (game, scrydex_id) DO UPDATE SET
+        printed_number             = EXCLUDED.printed_number,
+        rarity_code                = EXCLUDED.rarity_code,
+        artist                     = EXCLUDED.artist,
+        flavor_text                = EXCLUDED.flavor_text,
+        rules                      = EXCLUDED.rules,
+        subtypes                   = EXCLUDED.subtypes,
+        hp                         = EXCLUDED.hp,
+        supertype                  = EXCLUDED.supertype,
+        types                      = EXCLUDED.types,
+        national_pokedex_numbers   = EXCLUDED.national_pokedex_numbers,
+        evolves_from               = EXCLUDED.evolves_from,
+        attacks                    = EXCLUDED.attacks,
+        abilities                  = EXCLUDED.abilities,
+        weaknesses                 = EXCLUDED.weaknesses,
+        resistances                = EXCLUDED.resistances,
+        retreat_cost               = EXCLUDED.retreat_cost,
+        converted_retreat_cost     = EXCLUDED.converted_retreat_cost,
+        legalities                 = EXCLUDED.legalities,
+        card_type                  = EXCLUDED.card_type,
+        attribute                  = EXCLUDED.attribute,
+        colors                     = EXCLUDED.colors,
+        life                       = EXCLUDED.life,
+        power                      = EXCLUDED.power,
+        printings                  = EXCLUDED.printings,
+        tags                       = EXCLUDED.tags,
+        raw                        = EXCLUDED.raw,
+        fetched_at                 = NOW()
+"""
+
+EXPANSION_META_SQL = """
+    INSERT INTO scrydex_expansion_meta (
+        game, expansion_id, code, name, type, total, printed_total,
+        release_date, series, language, language_code,
+        logo, symbol, sort_order, is_online_only, raw, fetched_at
+    ) VALUES (
+        %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW()
+    )
+    ON CONFLICT (game, expansion_id) DO UPDATE SET
+        code            = EXCLUDED.code,
+        name            = EXCLUDED.name,
+        type            = EXCLUDED.type,
+        total           = EXCLUDED.total,
+        printed_total   = EXCLUDED.printed_total,
+        release_date    = EXCLUDED.release_date,
+        series          = EXCLUDED.series,
+        language        = EXCLUDED.language,
+        language_code   = EXCLUDED.language_code,
+        logo            = EXCLUDED.logo,
+        symbol          = EXCLUDED.symbol,
+        sort_order      = EXCLUDED.sort_order,
+        is_online_only  = EXCLUDED.is_online_only,
+        raw             = EXCLUDED.raw,
+        fetched_at      = NOW()
 """
 
 
@@ -102,6 +178,93 @@ def _extract_tcg_id(card: dict) -> int | None:
     return None
 
 
+def _to_int(v):
+    """Coerce numeric-string fields (Scrydex sometimes returns '5000' for power)."""
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        try:
+            return int(float(v))
+        except (ValueError, TypeError):
+            return None
+
+
+def _to_jsonb(v):
+    """Serialize a list/dict to a JSON string, or None if empty/missing."""
+    import json as _json
+    if v is None:
+        return None
+    if isinstance(v, (list, dict)) and not v:
+        return None
+    return _json.dumps(v, ensure_ascii=False)
+
+
+def _collect_card_meta_row(card: dict, *, game: str) -> tuple | None:
+    """Build a parameter tuple for CARD_META_SQL from a raw Scrydex card.
+    Promotes high-value fields to columns and stores the full raw dict in `raw`."""
+    scrydex_id = card.get("id")
+    if not scrydex_id:
+        return None
+    return (
+        game,
+        scrydex_id,
+        card.get("printed_number"),
+        card.get("rarity_code"),
+        card.get("artist"),
+        card.get("flavor_text"),
+        _to_jsonb(card.get("rules")),
+        _to_jsonb(card.get("subtypes")),
+        # Pokemon
+        _to_int(card.get("hp")),
+        card.get("supertype"),
+        _to_jsonb(card.get("types")),
+        _to_jsonb(card.get("national_pokedex_numbers")),
+        _to_jsonb(card.get("evolves_from")),
+        _to_jsonb(card.get("attacks")),
+        _to_jsonb(card.get("abilities")),
+        _to_jsonb(card.get("weaknesses")),
+        _to_jsonb(card.get("resistances")),
+        _to_jsonb(card.get("retreat_cost")),
+        _to_int(card.get("converted_retreat_cost")),
+        _to_jsonb(card.get("legalities")),
+        # One Piece (note: top-level `type` collides with table column name `type`,
+        # so it's stored as `card_type`)
+        card.get("type") if game in ("onepiece",) else None,
+        card.get("attribute"),
+        _to_jsonb(card.get("colors")),
+        _to_int(card.get("life")),
+        _to_int(card.get("power")),
+        _to_jsonb(card.get("printings")),
+        _to_jsonb(card.get("tags")),
+        _to_jsonb(card),
+    )
+
+
+def _collect_expansion_meta_row(exp: dict, *, game: str) -> tuple | None:
+    if not exp or not exp.get("id"):
+        return None
+    return (
+        game,
+        exp.get("id"),
+        exp.get("code"),
+        exp.get("name"),
+        exp.get("type"),
+        _to_int(exp.get("total")),
+        _to_int(exp.get("printed_total")),
+        exp.get("release_date"),
+        exp.get("series"),
+        exp.get("language"),
+        exp.get("language_code"),
+        exp.get("logo"),
+        exp.get("symbol"),
+        _to_int(exp.get("sort_order") or exp.get("expansion_sort_order")),
+        bool(exp.get("is_online_only")) if exp.get("is_online_only") is not None else None,
+        _to_jsonb(exp),
+    )
+
+
 def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_name: str,
                         product_type: str, tcg_id: int | None) -> list[tuple]:
     """Extract all price rows from a card or sealed item. Returns list of param tuples.
@@ -116,6 +279,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
 
     name = item.get("name", "")
     card_number = item.get("number") or item.get("printed_number")
+    printed_number = item.get("printed_number")  # on-card "OP14-041" / "4/102"
     rarity = item.get("rarity")
     card_img_s, card_img_m, card_img_l = _extract_images(item)
 
@@ -154,7 +318,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
             default_cond = "U" if product_type == "sealed" else "NM"
             rows.append((
                 game, scrydex_id, v_tcg_id, expansion_id, expansion_name,
-                product_type, name, card_number, rarity,
+                product_type, name, card_number, printed_number, rarity,
                 variant_name, default_cond, "raw", None, None,
                 None, None, None, None, None, None, None,
                 v_img_s, v_img_m, v_img_l,
@@ -174,7 +338,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
 
             rows.append((
                 game, scrydex_id, v_tcg_id, expansion_id, expansion_name,
-                product_type, name, card_number, rarity,
+                product_type, name, card_number, printed_number, rarity,
                 variant_name, condition, price_type, grade_co, grade_val,
                 p.get("market"), p.get("low"), p.get("mid"), p.get("high"),
                 t1, t7, t30, v_img_s, v_img_m, v_img_l,
@@ -192,10 +356,13 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
     from psycopg2.extras import execute_batch
 
     game = client.game
-    stats = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0, "mapped": 0}
+    stats = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0, "mapped": 0,
+             "card_meta": 0, "expansion_meta": 0}
     expansion_name = None
+    expansion_obj_for_meta = None  # remember the first card's expansion dict for meta upsert
     price_batch = []
     map_batch = []
+    card_meta_batch = []
 
     # ── Cards ──────────────────────────────────────────────
     page = 1
@@ -213,6 +380,8 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
             stats["cards"] += 1
             if not expansion_name:
                 expansion_name = (card.get("expansion") or {}).get("name", "")
+            if expansion_obj_for_meta is None:
+                expansion_obj_for_meta = card.get("expansion")
 
             tcg_id = _extract_tcg_id(card)
             # Map every variant's tcgplayer_id (PK is now (scrydex_id, tcgplayer_id))
@@ -225,6 +394,11 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
                         seen.add(v_tcg)
                         map_batch.append((scrydex_id_card, v_tcg, "card", game))
                         stats["mapped"] += 1
+
+            meta_row = _collect_card_meta_row(card, game=game)
+            if meta_row:
+                card_meta_batch.append(meta_row)
+                stats["card_meta"] += 1
 
             rows = _collect_price_rows(card, game=game, expansion_id=expansion_id,
                                        expansion_name=expansion_name or "",
@@ -253,6 +427,8 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
                 stats["sealed"] += 1
                 if not expansion_name:
                     expansion_name = (item.get("expansion") or {}).get("name", "")
+                if expansion_obj_for_meta is None:
+                    expansion_obj_for_meta = item.get("expansion")
 
                 rows = _collect_price_rows(item, game=game, expansion_id=expansion_id,
                                            expansion_name=expansion_name or "",
@@ -272,6 +448,14 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
         with conn.cursor() as cur:
             if map_batch:
                 execute_batch(cur, MAP_SQL, map_batch, page_size=500)
+            if card_meta_batch:
+                execute_batch(cur, CARD_META_SQL, card_meta_batch, page_size=200)
+            # Expansion meta — one row per sync_expansion run
+            if expansion_obj_for_meta:
+                exp_row = _collect_expansion_meta_row(expansion_obj_for_meta, game=game)
+                if exp_row:
+                    cur.execute(EXPANSION_META_SQL, exp_row)
+                    stats["expansion_meta"] += 1
             if price_batch:
                 execute_batch(cur, UPSERT_SQL, price_batch, page_size=500)
             # Sync log

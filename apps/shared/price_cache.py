@@ -199,13 +199,16 @@ class PriceCache:
             params.append(self.game)
 
         for forms in self._tokenize(query):
-            # Each token group: any form matching any of the 4 columns counts as a match
+            # Each token group: any form matching any of the 5 columns counts as a match
+            # Includes printed_number ("OP14-041" / "4/102") so customers can search
+            # by what's printed on the card without our leading-zero hack.
             ors = []
             for f in forms:
                 ors.append("(product_name ILIKE %s OR card_number ILIKE %s "
+                           "OR printed_number ILIKE %s "
                            "OR expansion_id ILIKE %s OR expansion_name ILIKE %s)")
                 p = f"%{f}%"
-                params.extend([p, p, p, p])
+                params.extend([p, p, p, p, p])
             sql += " AND (" + " OR ".join(ors) + ")"
 
         if set_name:
@@ -357,6 +360,7 @@ class PriceCache:
             "expansionId": first.get("expansion_id", ""),
             "game": first.get("game", ""),
             "cardNumber": first.get("card_number"),
+            "printedNumber": first.get("printed_number"),
             "tcgPlayerId": tcg_id,
             "scrydexId": first.get("scrydex_id"),
             "rarity": first.get("rarity"),
