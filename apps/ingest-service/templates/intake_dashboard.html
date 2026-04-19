@@ -4463,10 +4463,9 @@
             const cards = d.results || [];
             if (!cards.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No cards found. Try a different name or set.</div>'; return; }
 
-            const condId = context === 'session' ? 'session-raw-condition' : 'raw-condition';
-            const qtyId = context === 'session' ? 'session-raw-qty' : 'raw-quantity';
-            const condition = document.getElementById(condId).value;
-            const qty = parseInt(document.getElementById(qtyId).value) || 1;
+            const ids = _getCardFormIds(context);
+            const condition = document.getElementById(ids.cond)?.value || 'NM';
+            const qty = parseInt(document.getElementById(ids.qty)?.value) || 1;
 
             // Expand each card into one row per variant — One Piece OP14-041 has both
             // 'Alt Art' ($102) and 'Normal' ($0.24) under the same scrydex_id, so a
