@@ -249,6 +249,25 @@ def get_live_graded_comps(
     return _fallback_from_cache(tcgplayer_id, company, grade, db, scrydex_id=scrydex_id)
 
 
+def _resolve_card_game(scrydex_id: str, db) -> str:
+    """Look up which game a scrydex_id belongs to so we hit the right Scrydex
+    API path. The listings endpoint URL is /{game}/v1/cards/{id}/listings —
+    pinning everything to 'pokemon' (the previous default) made every
+    non-Pokemon graded lookup 404."""
+    if not db or not scrydex_id:
+        return "pokemon"
+    try:
+        row = db.query_one(
+            "SELECT game FROM scrydex_price_cache WHERE scrydex_id = %s LIMIT 1",
+            (scrydex_id,),
+        )
+        if row and row.get("game"):
+            return row["game"]
+    except Exception as e:
+        logger.debug(f"Game resolution failed for {scrydex_id}: {e}")
+    return "pokemon"
+
+
 def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90) -> Optional[dict]:
     """Call Scrydex listings API, filter to grade, compute stats + trends."""
     sx_key  = os.getenv("SCRYDEX_API_KEY", "")
@@ -257,12 +276,16 @@ def _fetch_live(scrydex_id: str, company: str, grade: str, db, *, days: int = 90
         logger.debug("No SCRYDEX_API_KEY/TEAM_ID — skipping live listings")
         return None
 
+    game = _resolve_card_game(scrydex_id, db)
     try:
         from scrydex_client import ScrydexClient
-        sx = ScrydexClient(sx_key, sx_team, db=db)
+        sx = ScrydexClient(sx_key, sx_team, db=db, game=game)
         raw_listings = sx.get_card_listings(scrydex_id, days=days)
     except Exception as e:
-        logger.warning(f"Scrydex listings call failed for {scrydex_id}: {e}")
+        # Scrydex returns 404 for games it doesn't have eBay listings for
+        # (verified: One Piece, MTG, Riftbound — only Pokemon + Lorcana have
+        # graded comp data). Log at debug, not warning, so it doesn't spam.
+        logger.debug(f"Scrydex listings call failed for {game}/{scrydex_id}: {e}")
         return None
 
     now = datetime.now(timezone.utc)

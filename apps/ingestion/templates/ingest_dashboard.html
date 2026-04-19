@@ -1988,18 +1988,29 @@ function _renderSessionCard() {
         html += `<div style="width:260px; height:360px; background:var(--surface-2); border-radius:8px; flex-shrink:0; display:flex; align-items:center; justify-content:center; color:var(--text-dim); font-size:0.85rem;">No image</div>`;
     }
 
-    // Figure out copy indicator — "Copy 3 of 19" for singles, "(1-5)" for splits
+    // Figure out copy indicator — "Copy 3 of 19" for singles, "(1-5)" for splits.
+    // Two items only count as siblings when they share name + set + variance
+    // AND grade. OP14-041 Alt Art ($102) and OP14-041 Normal ($0.24) share
+    // name and set but are completely different products — must not collapse.
+    const _siblingKey = (i) => [
+        i.product_name || '',
+        i.set_name || '',
+        (i.variance || '').trim(),
+        i.is_graded ? `${i.grade_company || ''}|${i.grade_value || ''}` : '',
+    ].join('§');
+    const itemKey = _siblingKey(item);
+
     let copyLabel = '';
     if ((item.quantity || 1) === 1) {
-        // Count how many items share this name (siblings from a split)
-        const siblings = _rsItems.filter(i => i.product_name === item.product_name && i.set_name === item.set_name && (i.quantity || 1) === 1);
+        // Count how many items share this sibling key (only true duplicates from a split)
+        const siblings = _rsItems.filter(i => _siblingKey(i) === itemKey && (i.quantity || 1) === 1);
         if (siblings.length > 1) {
             const copyNum = siblings.indexOf(item) + 1;
             copyLabel = `<span style="font-size:0.78rem; color:var(--accent2,#c084fc); font-weight:600; margin-left:6px;">Copy ${copyNum} of ${siblings.length}</span>`;
         }
     } else {
         // Multi-qty item — show range of which copies this represents
-        const allSame = _rsItems.filter(i => i.product_name === item.product_name && i.set_name === item.set_name);
+        const allSame = _rsItems.filter(i => _siblingKey(i) === itemKey);
         const totalCopies = allSame.reduce((s, i) => s + (i.quantity || 1), 0);
         if (totalCopies > (item.quantity || 1)) {
             let before = 0;
