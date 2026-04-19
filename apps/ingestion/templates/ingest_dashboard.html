@@ -6,6 +6,7 @@
     <title>Pack Fresh — Ingest</title>
     <link rel="stylesheet" href="/pf-static/pf_theme.css">
     <script src="/pf-static/pf_ui.js"></script>
+    <script src="/pf-static/card_badges.js"></script>
     <style>
         .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
 
@@ -829,9 +830,74 @@ async function viewSession(sessionId, _preserveScroll) {
         if (scrollY) requestAnimationFrame(() => window.scrollTo(0, scrollY));
         _loadOfferAdjustment(sessionId);
         _loadSessionBarcodes(sessionId);
+        // Background image + graded-price enrichment so Verify/Breakdown/Push
+        // tables can show thumbnails next to card names. Route already triggers
+        // this when the focus slip opens; doing it on session load means every
+        // stage gets images without blocking first paint.
+        _enrichSessionImages(sessionId);
     } catch(err) {
         el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
+}
+
+// Kick off /enrich-route for the session and merge image_url onto items as
+// each worker finishes. Route session has its own loop (_rsMergeEnrichment)
+// for the focus-slip view; this is the lightweight version for the stage
+// tables — just patches image_url, graded_prices, grading_economics into
+// _currentSessionData.items and re-renders the current stage.
+async function _enrichSessionImages(sessionId) {
+    if (!_currentSessionData || _currentSessionData.session.id !== sessionId) return;
+    const needsEnrichment = (_currentSessionData.items || []).some(i =>
+        i.product_type === 'raw' && !i.is_graded && !i.image_url &&
+        ['good','damaged'].includes(i.item_status || 'good') &&
+        i.is_mapped && !i.pushed_at
+    );
+    if (!needsEnrichment) return;
+
+    try {
+        const er = await fetch(`/api/ingest/session/${sessionId}/enrich-route`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({}),
+        });
+        const ej = await er.json();
+
+        const mergeOnce = async () => {
+            if (!_currentSessionData || _currentSessionData.session.id !== sessionId) return false;
+            const r = await fetch(`/api/ingest/session/${sessionId}/route-enriched`);
+            if (!r.ok) return false;
+            const data = await r.json();
+            let changed = false;
+            const byId = {};
+            for (const it of (data.items || [])) byId[it.id] = it;
+            for (const item of _currentSessionData.items) {
+                const src = byId[item.id];
+                if (src && src._enriched && !item.image_url && src.image_url) {
+                    item.image_url = src.image_url;
+                    item.graded_prices = src.graded_prices || {};
+                    item.grading_economics = src.grading_economics || {};
+                    changed = true;
+                }
+            }
+            if (changed) _rerenderStage();
+            return true;
+        };
+
+        if (ej.status === 'complete' && !ej.job_id) {
+            await mergeOnce();
+            return;
+        }
+        if (!ej.job_id) return;
+        // Poll until complete — uses the same /route-enriched endpoint as the route slip.
+        while (_currentSessionData && _currentSessionData.session.id === sessionId) {
+            await new Promise(r => setTimeout(r, 1500));
+            await mergeOnce();
+            const jr = await fetch(`/api/ingest/enrich-job/${ej.job_id}`);
+            if (!jr.ok) break;
+            const j = await jr.json();
+            if (j.status === 'complete') { await mergeOnce(); break; }
+        }
+    } catch(e) { /* silently ignore — images are optional */ }
 }
 
 // ── VERIFY STAGE ──────────────────────────────────────────────────────────
@@ -1051,8 +1117,25 @@ function _renderVerifyRow(item, sessionId) {
         typeLabel = `<span style="color:${condColor};">${cond}</span>`;
     }
 
+    const isRaw = ptype === 'raw';
+    const thumb = isRaw ? pfCardThumb(item.image_url) : '';
+    const variantStr = item.variant || item.variance || '';
+    const variantChip = isRaw && variantStr ? pfVariantLabel(variantStr) : '';
+    const printingBadges = isRaw ? pfCardPrintingBadges(item.set_name, item.expansion_id, variantStr) : '';
+
     return `<tr style="${rowStyle}" data-item-id="${item.id}">
-        <td class="name-cell" data-label="">${name}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}</td>
+        <td class="name-cell" data-label="">
+            <div style="display:flex; gap:10px; align-items:flex-start;">
+                ${thumb}
+                <div style="flex:1; min-width:0;">
+                    <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                        <span style="font-weight:600;">${name}</span>${variantChip}${printingBadges}
+                    </div>
+                    ${item.set_name ? '<div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">' + item.set_name + (item.card_number ? ' #' + item.card_number : '') + '</div>' : ''}
+                    ${item.tcgplayer_id ? '<div style="font-size:0.7rem; color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</div>' : ''}
+                </div>
+            </div>
+        </td>
         <td data-label="Qty">${item.quantity || 1}</td>
         <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${typeLabel}</span></td>
         <td data-label="Store">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);" title="Market price (not in store)">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
@@ -1649,12 +1732,18 @@ function _renderRouteCards(sessionId, data) {
     </div>`;
 
     // Card list
+    // Build a lookup from the main session items so any image_url populated by
+    // the session-level enrichment (_enrichSessionImages) shows on the route list
+    // too — route-summary's DB query returns null image_url for unpushed items.
+    const _sessionItemById = {};
+    for (const si of (_currentSessionData?.items || [])) _sessionItemById[si.id] = si;
+
     html += '<div id="route-card-list" style="display:flex; flex-direction:column; gap:6px;">';
     for (const item of items) {
         const price = parseFloat(item.market_price || 0);
         const dest = item.routing_destination || 'storage';
         const qty = item.quantity || 1;
-        const imgSrc = item.image_url || '';
+        const imgSrc = item.image_url || (_sessionItemById[item.id]?.image_url) || '';
         const priceStr = `$${price.toFixed(2)}`;
 
         // Auto-reason tag
@@ -1664,12 +1753,15 @@ function _renderRouteCards(sessionId, data) {
 
         const splitBtn = qty > 1 ? `<button class="btn btn-sm" style="font-size:0.65rem; padding:2px 6px; color:var(--accent); border:1px solid var(--accent)33; background:transparent; margin-left:4px;" onclick="event.stopPropagation(); _showSplitRoute('${sessionId}','${item.id}',${qty})">Split</button><button class="btn btn-sm" style="font-size:0.65rem; padding:2px 6px; color:var(--accent2,#c084fc); border:1px solid var(--accent2,#c084fc)33; background:transparent; margin-left:2px;" onclick="event.stopPropagation(); _splitAllSingles('${sessionId}','${item.id}',${qty})">→ Singles</button>` : '';
 
+        const variantStr = item.variant || item.variance || '';
+        const variantChip = variantStr ? pfVariantLabel(variantStr) : '';
+        const printingBadges = pfCardPrintingBadges(item.set_name, item.expansion_id, variantStr);
         html += `<div class="card" style="padding:8px 10px;" data-item-id="${item.id}">
-            <div style="display:flex; gap:8px; align-items:center;">
-                ${imgSrc ? `<img src="${imgSrc}" style="width:40px; height:56px; object-fit:cover; border-radius:4px; flex-shrink:0;" loading="lazy">` : '<div style="width:40px; height:56px; background:var(--surface-2); border-radius:4px; flex-shrink:0;"></div>'}
+            <div style="display:flex; gap:10px; align-items:center;">
+                ${imgSrc ? `<img src="${imgSrc}" style="width:60px; height:84px; object-fit:contain; border-radius:4px; flex-shrink:0; background:var(--surface-2);" loading="lazy">` : '<div style="width:60px; height:84px; background:var(--surface-2); border-radius:4px; flex-shrink:0;"></div>'}
                 <div style="flex:1; min-width:0;">
-                    <div style="font-size:0.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                        ${item.product_name || 'Unknown'}
+                    <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-bottom:2px;">
+                        <span style="font-size:0.88rem; font-weight:700;">${item.product_name || 'Unknown'}</span>${variantChip}${printingBadges}
                     </div>
                     <div style="font-size:0.72rem; color:var(--text-dim);">
                         ${item.set_name||''} ${item.card_number ? '#'+item.card_number : ''} · ${item.condition||'NM'} · <strong>${priceStr}</strong>${qty > 1 ? ' <strong style="color:var(--accent);">x'+qty+'</strong>' : ''}${splitBtn}
@@ -2036,11 +2128,15 @@ function _renderSessionCard() {
     }
 
     // Info panel
+    const _rsVariantStr = item.variant || item.variance || '';
+    const _rsPrintingBadges = pfCardPrintingBadges(item.set_name, item.expansion_id, _rsVariantStr);
+    const _rsVariantChip = _rsVariantStr ? pfVariantLabel(_rsVariantStr) : '';
     html += `<div style="flex:1; min-width:280px; max-width:500px;">
         <div style="font-size:1.3rem; font-weight:700; margin-bottom:4px; line-height:1.3;">${item.product_name || 'Unknown'}${copyLabel}</div>
-        <div style="font-size:0.9rem; color:var(--text-dim); margin-bottom:12px;">
-            ${item.set_name||''} ${item.card_number ? '#'+item.card_number : ''} ${item.variant ? '· '+item.variant : ''}
+        <div style="font-size:0.9rem; color:var(--text-dim); margin-bottom:8px;">
+            ${item.set_name||''} ${item.card_number ? '#'+item.card_number : ''}
         </div>
+        ${_rsVariantChip || _rsPrintingBadges ? `<div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">${_rsVariantChip}${_rsPrintingBadges}</div>` : ''}
         <div style="display:flex; gap:16px; align-items:center; margin-bottom:16px; flex-wrap:wrap;">
             <button onclick="_rsChangeCondition()" title="Change condition"
                     style="font-size:0.85rem; padding:4px 10px; border-radius:6px; font-weight:700; background:${condColor}22; color:${condColor}; border:1px solid ${condColor}44; cursor:pointer;">
@@ -2659,11 +2755,26 @@ function _renderPushContent(data) {
             const isDamaged = item.item_status === 'damaged';
             const name = item.product_name || 'Unknown';
             const ptype = item.product_type || 'sealed';
+            const isRaw = ptype === 'raw';
             let badges = '';
             if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
+            const thumb = isRaw ? pfCardThumb(item.image_url) : '';
+            const variantStr = item.variant || item.variance || '';
+            const variantChip = isRaw && variantStr ? pfVariantLabel(variantStr) : '';
+            const printingBadges = isRaw ? pfCardPrintingBadges(item.set_name, item.expansion_id, variantStr) : '';
             // data attrs use first item's ID for pushLive DOM queries
             html += `<tr style="${isDamaged ? 'background:rgba(255,170,0,0.06);' : ''}" data-item-id="${item.itemIds[0]}" data-item-status="${item.item_status}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${name.replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
-                <td data-label="">${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
+                <td data-label="">
+                    <div style="display:flex; gap:10px; align-items:flex-start;">
+                        ${thumb}
+                        <div style="flex:1; min-width:0;">
+                            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                                <span style="font-weight:600;">${name}</span>${variantChip}${printingBadges}${badges}
+                            </div>
+                            ${item.set_name ? '<div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">' + item.set_name + (item.card_number ? ' #' + item.card_number : '') + '</div>' : ''}
+                        </div>
+                    </div>
+                </td>
                 <td data-label="Qty" style="font-weight:600;">${item.totalQty}</td>
                 <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype}</span></td>
                 <td data-label="Price">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);" title="Market price (not in store)">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
@@ -2699,10 +2810,25 @@ function _renderPushContent(data) {
                 const isDamaged = item.item_status === 'damaged';
                 const name = item.product_name || 'Unknown';
                 const ptype = item.product_type || 'sealed';
+                const isRaw = ptype === 'raw';
                 let badges = '';
                 if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
+                const thumb = isRaw ? pfCardThumb(item.image_url) : '';
+                const variantStr = item.variant || item.variance || '';
+                const variantChip = isRaw && variantStr ? pfVariantLabel(variantStr) : '';
+                const printingBadges = isRaw ? pfCardPrintingBadges(item.set_name, item.expansion_id, variantStr) : '';
                 html += `<tr style="opacity:0.7;">
-                    <td data-label="">${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}</td>
+                    <td data-label="">
+                        <div style="display:flex; gap:10px; align-items:flex-start;">
+                            ${thumb}
+                            <div style="flex:1; min-width:0;">
+                                <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                                    <span style="font-weight:600;">${name}</span>${variantChip}${printingBadges}${badges}
+                                </div>
+                                ${item.set_name ? '<div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">' + item.set_name + (item.card_number ? ' #' + item.card_number : '') + '</div>' : ''}
+                            </div>
+                        </div>
+                    </td>
                     <td data-label="Qty" style="font-weight:600;">${item.totalQty}</td>
                     <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype}</span></td>
                     <td data-label="Price">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
@@ -2834,8 +2960,24 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     }
 
     const approvedStyle = '';
+    const isRaw = (item.product_type || 'sealed') === 'raw';
+    const thumb = isRaw ? pfCardThumb(item.image_url) : '';
+    const variantStr = item.variant || item.variance || '';
+    const variantChip = isRaw && variantStr ? pfVariantLabel(variantStr) : '';
+    const printingBadges = isRaw ? pfCardPrintingBadges(item.set_name, item.expansion_id, variantStr) : '';
     return `<tr style="${rowStyle}${approvedStyle}" data-item-id="${item.id}" data-item-status="${st}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${(item.product_name||'').replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
-        <td class="name-cell" data-label="">${isChild ? '<span style="color:var(--text-dim);">↳</span> ' : ''}${name}${badges}${item.set_name ? '<br><small style="color:var(--text-dim);">' + item.set_name + '</small>' : ''}${item.tcgplayer_id ? '<br><small style="color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</small>' : ''}${(() => {
+        <td class="name-cell" data-label="">
+            <div style="display:flex; gap:10px; align-items:flex-start;">
+                ${thumb}
+                <div style="flex:1; min-width:0;">
+                    <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                        ${isChild ? '<span style="color:var(--text-dim);">↳</span>' : ''}<span style="font-weight:600;">${name}</span>${variantChip}${printingBadges}${badges}
+                    </div>
+                    ${item.set_name ? '<div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">' + item.set_name + (item.card_number ? ' #' + item.card_number : '') + '</div>' : ''}
+                    ${item.tcgplayer_id ? '<div style="font-size:0.7rem; color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</div>' : ''}
+                </div>
+            </div>
+            ${(() => {
             const v = item.velocity;
             if (!v) return '';
             const sold = v.units_sold_90d || 0;

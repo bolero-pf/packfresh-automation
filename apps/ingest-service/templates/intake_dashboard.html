@@ -6,6 +6,7 @@
     <title>Pack Fresh — Intake System</title>
     <link rel="stylesheet" href="/pf-static/pf_theme.css">
     <script src="/pf-static/pf_ui.js"></script>
+    <script src="/pf-static/card_badges.js"></script>
     <style>
         .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
 
@@ -4445,32 +4446,6 @@
 
 
 
-    function _cardPrintingBadges(setName, expCode, variants) {
-        // Heuristics only — Scrydex doesn't expose structured promo/frame metadata
-        // for MTG, so we read signals from the set name, expansion code prefix,
-        // and variant names. False positives are fine; these badges are informational.
-        const badges = [];
-        const sn = (setName || '').toLowerCase();
-        const vj = (variants || []).map(v => (v.name || '').toLowerCase()).join(' ');
-        const mkBadge = (text, bg, fg) =>
-            `<span style="background:${bg}; color:${fg}; padding:2px 7px; border-radius:4px; font-size:0.65rem; font-weight:700; letter-spacing:0.4px;">${text}</span>`;
-
-        // PROMO — set name contains "promo" OR expansion code starts with P followed by 2-4 letters
-        // (e.g. PMKM = Murders at Karlov Manor promos). PLST ("The List") will false-positive here,
-        // but it's rare enough and the badge is informational, not blocking.
-        const isPromoSet = /promos?\b|promo pack|promo series/i.test(sn) ||
-                           (expCode && /^P[A-Z0-9]{2,4}$/.test(expCode));
-        if (isPromoSet) badges.push(mkBadge('PROMO', '#dc2626', '#fff'));
-
-        if (/prerelease/i.test(vj) || /prerelease/i.test(sn)) badges.push(mkBadge('PRERELEASE', '#7c3aed', '#fff'));
-        if (/etched/i.test(vj)) badges.push(mkBadge('ETCHED', '#f59e0b', '#000'));
-        if (/extended art/i.test(sn)) badges.push(mkBadge('EXT ART', '#0891b2', '#fff'));
-        if (/showcase/i.test(sn)) badges.push(mkBadge('SHOWCASE', '#0891b2', '#fff'));
-        if (/borderless/i.test(sn)) badges.push(mkBadge('BORDERLESS', '#0891b2', '#fff'));
-        if (/retro frame/i.test(sn)) badges.push(mkBadge('RETRO', '#0891b2', '#fff'));
-        return badges.join(' ');
-    }
-
     async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offerPct, context) {
         try {
             const r = await fetch('/api/ppt/search-cards', {
@@ -4549,7 +4524,7 @@
                 const setCodeId = expCode + (cardNum ? '-' + cardNum : '');
                 const setCodeBadge = expCode ? `<span style="background:var(--surface); border:1px solid var(--border); color:var(--accent); padding:2px 7px; border-radius:4px; font-size:0.72rem; font-weight:700; font-family:ui-monospace,monospace;">${setCodeId}</span>` : '';
                 const gameBadge = (game && game !== 'pokemon') ? `<span style="background:var(--accent-alt,#7c3aed); color:#fff; padding:2px 7px; border-radius:4px; font-size:0.65rem; font-weight:700;">${game.toUpperCase()}</span>` : '';
-                const printingBadges = _cardPrintingBadges(setName, expCode, variants);
+                const printingBadges = pfCardPrintingBadges(setName, expCode, variants);
 
                 const imgHtml = img
                     ? `<img src="${img}" loading="lazy" style="width:96px; height:134px; object-fit:contain; border-radius:6px; flex-shrink:0; background:var(--surface-2);">`

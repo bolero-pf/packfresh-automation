@@ -2396,7 +2396,7 @@ def route_summary(session_id):
     items = db.query("""
         SELECT id, product_name, set_name, condition, market_price, quantity,
                routing_destination, routing_reviewed_at, tcgplayer_id, scrydex_id,
-               card_number, offer_price
+               card_number, offer_price, variant, image_url
         FROM intake_items
         WHERE session_id = %s
           AND product_type = 'raw'
