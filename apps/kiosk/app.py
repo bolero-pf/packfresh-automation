@@ -260,7 +260,7 @@ def browse():
     # cards don't fragment. Distinguishing variants (1st Ed vs Unlimited,
     # reverseHolofoil, etc.) get their own tile.
     group_key = ("card_name, set_name, tcgplayer_id, "
-                 "CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') "
+                 "CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') "
                  "THEN '' ELSE variant END")
 
     count_row = db.query_one(f"""
@@ -292,7 +292,7 @@ def browse():
         FROM (
             SELECT card_name, set_name, tcgplayer_id, scrydex_id,
                    variant AS variant_raw,
-                   CASE WHEN variant IS NULL OR variant IN ('normal', 'holofoil')
+                   CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
                         THEN ''
                         ELSE variant
                    END AS variant_key,
@@ -361,9 +361,11 @@ def browse():
         # as purple chrome on every card — worse than no badge.
         variant_raw = (r.get("variant_raw") or "").strip()
         variant_key = r.get("variant_key") or ""
-        # Only badge when we know the printing AND it's not the default bucket
-        # (normal/holofoil fold to '' and don't need a badge).
-        if variant_raw and variant_raw not in ("normal", "holofoil"):
+        # Only badge when we know the printing AND it's not a default bucket.
+        # intake_items.variance comes through as Title Case ("Normal","Foil",
+        # "Holofoil"); the SQL CASE folds case-insensitively, so the Python
+        # check has to match. Default printings get no badge.
+        if variant_raw and variant_raw.lower() not in ("normal", "holofoil"):
             variant_label = variant_raw
         else:
             variant_label = None
@@ -475,7 +477,7 @@ def card_detail():
     scrydex_id   = (request.args.get("scrydex_id") or "").strip()
 
     # Match the grouping rule from /api/browse: default variants fold to ''.
-    variant_filter = "AND CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') THEN '' ELSE variant END = %s"
+    variant_filter = "AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s"
 
     # Two cards can share name + set + variant_fold (e.g. OP14-041 Boa Hancock
     # Leader Alt Art vs OP14-112 Boa Hancock SR Alt Art — same name, same set,
@@ -613,7 +615,7 @@ def create_hold():
             WHERE card_name = %s AND set_name = %s
               AND condition = %s AND state = 'STORED'
               AND current_hold_id IS NULL
-              AND CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') THEN '' ELSE variant END = %s
+              AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s
               {id_filter}
             ORDER BY created_at ASC
             LIMIT %s
@@ -914,7 +916,7 @@ def champion_checkout():
             WHERE card_name = %s AND set_name = %s
               AND condition = %s AND state = 'STORED'
               AND current_hold_id IS NULL
-              AND CASE WHEN variant IS NULL OR variant IN ('normal','holofoil') THEN '' ELSE variant END = %s
+              AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s
               {id_filter}
             ORDER BY created_at ASC
             LIMIT %s

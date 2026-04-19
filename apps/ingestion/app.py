@@ -1385,7 +1385,10 @@ def _push_raw_item(item: dict) -> dict:
                 ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
                 cost, float(item.get("market_price", cost)),
                 bin_id, image_url,
-                item.get("variant"), card_type,
+                # intake_items stores it as 'variance', raw_cards as 'variant';
+                # accept either so MTG Foil/etched picks made at intake actually
+                # land on the physical card record.
+                item.get("variance") or item.get("variant"), card_type,
                 item.get("session_id"),
             ))
 
@@ -1489,7 +1492,7 @@ def _push_raw_to_display(item: dict) -> dict:
                 ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
                 cost, float(item.get("market_price", cost)),
                 bin_id, image_url,
-                item.get("variant"),
+                item.get("variance") or item.get("variant"),
                 item.get("session_id"),
             ))
 
@@ -1562,7 +1565,7 @@ def _push_raw_to_grade(item: dict) -> dict:
             ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
             cost, float(item.get("market_price", cost)),
             image_url,
-            item.get("variant"),
+            item.get("variance") or item.get("variant"),
             item.get("session_id"),
         ))
 
