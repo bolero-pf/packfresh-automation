@@ -1070,6 +1070,30 @@ def relink_item(item_id: str, data: dict) -> dict:
     else:
         market_price = Decimal(str(data.get("market_price", item.get("market_price", 0))))
 
+    # Sanity check — a raw card's market price should never exceed the highest
+    # graded price for the same card. If it does, the cache row is almost
+    # certainly in the wrong currency (Scrydex sends JP prices in JPY for some
+    # Japanese marketplaces) or the data is otherwise bad. Reject the write so
+    # staff see the issue instead of silently stamping an absurd price onto
+    # the item. Raise ValueError so the API returns 400 with the message.
+    if not is_graded and derived is not None and derived > 0:
+        best_graded = query_one("""
+            SELECT MAX(market_price) AS max_graded
+            FROM scrydex_price_cache
+            WHERE ((%s IS NOT NULL AND tcgplayer_id = %s)
+                   OR (%s IS NOT NULL AND scrydex_id = %s))
+              AND price_type = 'graded'
+              AND market_price IS NOT NULL
+        """, (tcgplayer_id, tcgplayer_id, scrydex_id, scrydex_id))
+        if best_graded and best_graded.get("max_graded"):
+            max_g = Decimal(str(best_graded["max_graded"]))
+            if max_g > 0 and derived > max_g:
+                raise ValueError(
+                    f"Refusing relink: raw price ${derived:.2f} exceeds best graded "
+                    f"price ${max_g:.2f} — cache data for this card is likely in a "
+                    f"non-USD currency or otherwise wrong. Check the card in Scrydex."
+                )
+
     # Recalculate offer proportionally — keep the same COGS ratio
     old_market = Decimal(str(item.get("market_price", 0)))
     old_offer = Decimal(str(item.get("offer_price", 0)))
