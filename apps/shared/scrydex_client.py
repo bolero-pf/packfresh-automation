@@ -222,14 +222,15 @@ class ScrydexClient:
         return row["scrydex_id"] if row else None
 
     def _save_tcg_mapping(self, scrydex_id: str, tcgplayer_id: int):
-        """Save a Scrydex ID -> TCGPlayer ID mapping."""
+        """Save a Scrydex ID -> TCGPlayer ID mapping. Multiple rows per
+        scrydex_id are allowed (one per variant: normal/altArt/foil/etc.)."""
         if not self.db or not tcgplayer_id:
             return
         try:
             self.db.execute("""
                 INSERT INTO scrydex_tcg_map (scrydex_id, tcgplayer_id)
                 VALUES (%s, %s)
-                ON CONFLICT (scrydex_id) DO UPDATE SET tcgplayer_id = EXCLUDED.tcgplayer_id
+                ON CONFLICT (scrydex_id, tcgplayer_id) DO UPDATE SET updated_at = NOW()
             """, (scrydex_id, int(tcgplayer_id)))
         except Exception as e:
             logger.warning(f"Failed to save TCG mapping {scrydex_id} -> {tcgplayer_id}: {e}")
@@ -293,6 +294,26 @@ class ScrydexClient:
 
                 if cond_short == "NM" and market is not None:
                     variant_nm[display_name] = market
+
+            # Per-variant image (OP altArt has its own /OP14-041A/large URL).
+            # Underscore-prefixed keys live alongside condition names so they
+            # don't collide with NM/LP/etc. lookups.
+            v_images = v.get("images") or []
+            for img in v_images:
+                if img.get("type") == "front":
+                    v_conditions["_image_small"] = img.get("small")
+                    v_conditions["_image_medium"] = img.get("medium")
+                    v_conditions["_image_large"] = img.get("large")
+                    break
+
+            # Per-variant TCGPlayer ID (OP14-041 normal=668333, altArt=668335)
+            for mp in (v.get("marketplaces") or []):
+                if mp.get("name") == "tcgplayer" and mp.get("product_id"):
+                    try:
+                        v_conditions["_tcgplayer_id"] = int(mp["product_id"])
+                    except (ValueError, TypeError):
+                        pass
+                    break
 
             if v_conditions:
                 result["variants"][display_name] = v_conditions

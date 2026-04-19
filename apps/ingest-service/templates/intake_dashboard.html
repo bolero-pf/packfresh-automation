@@ -4372,15 +4372,17 @@
             // Expand each card into one row per variant — One Piece OP14-041 has both
             // 'Alt Art' ($102) and 'Normal' ($0.24) under the same scrydex_id, so a
             // single row hides the AA print and defaults to the cheap normal price.
+            // Each variant carries its own image + tcgplayer_id (Scrydex stores
+            // them per-variant in marketplaces[] and images[]).
             const rows = [];
             cards.forEach(c => {
-                const tcgId = c.tcgPlayerId || c.tcgplayer_id || c.id || '';
+                const cardTcg = c.tcgPlayerId || c.tcgplayer_id || c.id || '';
                 const setName = c.setName || c.set_name || (c.set ? c.set.name : '') || '';
                 const expCode = (c.expansionId || c.expansion_id || '').toUpperCase();
                 const game = (c.game || '').toLowerCase();
                 const cardNum = c.cardNumber || c.number || '';
                 const rarity = c.rarity || '';
-                const img = c.imageCdnUrl400 || c.imageCdnUrl || c.imageCdnUrl800 || '';
+                const cardImg = c.imageCdnUrl400 || c.imageCdnUrl || c.imageCdnUrl800 || '';
                 const prices = c.prices || {};
                 const variantsObj = (prices && typeof prices === 'object' && prices.variants) || {};
                 const variantNames = Object.keys(variantsObj);
@@ -4389,13 +4391,15 @@
                     let p = null;
                     if (typeof prices === 'object') p = prices[condition.toLowerCase()] || prices.market || prices.mid || null;
                     if (!p && c.price) p = c.price;
-                    rows.push({ c, tcgId, setName, expCode, game, cardNum, rarity, img, variant: '', price: p });
+                    rows.push({ c, tcgId: cardTcg, setName, expCode, game, cardNum, rarity, img: cardImg, variant: '', price: p });
                 } else {
                     variantNames.forEach(vname => {
                         const vData = variantsObj[vname] || {};
                         const condEntry = vData[condition] || vData['Near Mint'] || vData['NM'] || {};
                         const p = (typeof condEntry === 'object') ? (condEntry.price ?? null) : condEntry;
-                        rows.push({ c, tcgId, setName, expCode, game, cardNum, rarity, img, variant: vname, price: p });
+                        const vImg = vData._image_small || vData._image_medium || vData._image_large || cardImg;
+                        const vTcg = vData._tcgplayer_id || cardTcg;
+                        rows.push({ c, tcgId: vTcg, setName, expCode, game, cardNum, rarity, img: vImg, variant: vname, price: p });
                     });
                 }
             });

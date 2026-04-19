@@ -303,6 +303,19 @@ class PriceCache:
                     "price": float(market) if market is not None else None,
                     "low": float(low) if low is not None else None,
                 }
+                # Per-variant image + tcg_id (each variant row carries its own
+                # image_* + tcgplayer_id after the per-variant sync fix).
+                # Set once per variant — first row wins, all rows for one
+                # variant carry the same metadata.
+                if "_image_small" not in variants_data[variant]:
+                    if r.get("image_small"):
+                        variants_data[variant]["_image_small"] = r.get("image_small")
+                    if r.get("image_medium"):
+                        variants_data[variant]["_image_medium"] = r.get("image_medium")
+                    if r.get("image_large"):
+                        variants_data[variant]["_image_large"] = r.get("image_large")
+                if "_tcgplayer_id" not in variants_data[variant] and r.get("tcgplayer_id"):
+                    variants_data[variant]["_tcgplayer_id"] = r.get("tcgplayer_id")
             elif price_type == "graded":
                 company = (r.get("grade_company") or "").upper()
                 grade = r.get("grade_value") or ""

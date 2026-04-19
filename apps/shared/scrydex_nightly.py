@@ -43,7 +43,7 @@ UPSERT_SQL = """
     ON CONFLICT (game, scrydex_id, variant, condition, price_type,
                  grade_company_key, grade_value_key)
     DO UPDATE SET
-        tcgplayer_id      = COALESCE(scrydex_price_cache.tcgplayer_id, EXCLUDED.tcgplayer_id),
+        tcgplayer_id      = EXCLUDED.tcgplayer_id,
         expansion_name    = EXCLUDED.expansion_name,
         product_name      = EXCLUDED.product_name,
         product_name_en   = EXCLUDED.product_name_en,
@@ -65,26 +65,40 @@ UPSERT_SQL = """
 MAP_SQL = """
     INSERT INTO scrydex_tcg_map (scrydex_id, tcgplayer_id, product_type, game, updated_at)
     VALUES (%s, %s, %s, %s, NOW())
-    ON CONFLICT (scrydex_id) DO UPDATE SET
-        tcgplayer_id = EXCLUDED.tcgplayer_id, updated_at = NOW()
+    ON CONFLICT (scrydex_id, tcgplayer_id) DO UPDATE SET
+        product_type = EXCLUDED.product_type,
+        game = EXCLUDED.game,
+        updated_at = NOW()
 """
 
 
 def _extract_images(item: dict) -> tuple[str, str, str]:
+    """Extract front-type image URLs from a Scrydex item or variant."""
     for img in (item.get("images") or []):
         if img.get("type") == "front":
             return img.get("small", ""), img.get("medium", ""), img.get("large", "")
     return "", "", ""
 
 
+def _extract_variant_tcg_id(variant: dict) -> int | None:
+    """Per-variant TCGPlayer product_id. Each variant of a Scrydex card has its
+    own marketplaces entry (OP14-041 normal=668333, OP14-041 altArt=668335)."""
+    for mp in (variant.get("marketplaces") or []):
+        if mp.get("name") == "tcgplayer" and mp.get("product_id"):
+            try:
+                return int(mp["product_id"])
+            except (ValueError, TypeError):
+                pass
+    return None
+
+
 def _extract_tcg_id(card: dict) -> int | None:
+    """Card-level TCGPlayer ID — first variant that has one. Kept for callers
+    that don't need per-variant resolution (sealed products, sync log)."""
     for v in (card.get("variants") or []):
-        for mp in (v.get("marketplaces") or []):
-            if mp.get("name") == "tcgplayer" and mp.get("product_id"):
-                try:
-                    return int(mp["product_id"])
-                except (ValueError, TypeError):
-                    pass
+        tcg = _extract_variant_tcg_id(v)
+        if tcg:
+            return tcg
     return None
 
 
@@ -103,7 +117,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
     name = item.get("name", "")
     card_number = item.get("number") or item.get("printed_number")
     rarity = item.get("rarity")
-    img_s, img_m, img_l = _extract_images(item)
+    card_img_s, card_img_m, card_img_l = _extract_images(item)
 
     # Language + English translation (JP sets ship translation.en.name in
     # Scrydex responses). For English sets, there's no translation block —
@@ -124,16 +138,26 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
         variant_name = v.get("name", "normal")
         prices = v.get("prices") or []
 
+        # Per-variant tcg_id (OP14-041 altArt has 668335, normal has 668333) —
+        # falls back to card-level if variant has no marketplace entry.
+        v_tcg_id = _extract_variant_tcg_id(v) or tcg_id
+
+        # Per-variant image (OP altArt → /OP14-041A/large; Pokemon variants
+        # rarely have their own image since 1st Ed and Unlimited look the same)
+        v_img_s, v_img_m, v_img_l = _extract_images(v)
+        if not v_img_s:
+            v_img_s, v_img_m, v_img_l = card_img_s, card_img_m, card_img_l
+
         if not prices:
             # No price data yet — emit placeholder row with null prices.
             # Default condition: U (unopened) for sealed, NM for cards.
             default_cond = "U" if product_type == "sealed" else "NM"
             rows.append((
-                game, scrydex_id, tcg_id, expansion_id, expansion_name,
+                game, scrydex_id, v_tcg_id, expansion_id, expansion_name,
                 product_type, name, card_number, rarity,
                 variant_name, default_cond, "raw", None, None,
                 None, None, None, None, None, None, None,
-                img_s, img_m, img_l,
+                v_img_s, v_img_m, v_img_l,
                 product_name_en, expansion_name_en, language_code,
             ))
             continue
@@ -149,11 +173,11 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
             grade_val = str(p.get("grade", "")) if price_type == "graded" else None
 
             rows.append((
-                game, scrydex_id, tcg_id, expansion_id, expansion_name,
+                game, scrydex_id, v_tcg_id, expansion_id, expansion_name,
                 product_type, name, card_number, rarity,
                 variant_name, condition, price_type, grade_co, grade_val,
                 p.get("market"), p.get("low"), p.get("mid"), p.get("high"),
-                t1, t7, t30, img_s, img_m, img_l,
+                t1, t7, t30, v_img_s, v_img_m, v_img_l,
                 product_name_en, expansion_name_en, language_code,
             ))
     return rows
@@ -191,9 +215,16 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
                 expansion_name = (card.get("expansion") or {}).get("name", "")
 
             tcg_id = _extract_tcg_id(card)
-            if tcg_id and card.get("id"):
-                map_batch.append((card["id"], tcg_id, "card", game))
-                stats["mapped"] += 1
+            # Map every variant's tcgplayer_id (PK is now (scrydex_id, tcgplayer_id))
+            scrydex_id_card = card.get("id")
+            if scrydex_id_card:
+                seen = set()
+                for v in (card.get("variants") or []):
+                    v_tcg = _extract_variant_tcg_id(v)
+                    if v_tcg and v_tcg not in seen:
+                        seen.add(v_tcg)
+                        map_batch.append((scrydex_id_card, v_tcg, "card", game))
+                        stats["mapped"] += 1
 
             rows = _collect_price_rows(card, game=game, expansion_id=expansion_id,
                                        expansion_name=expansion_name or "",
