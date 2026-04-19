@@ -12,8 +12,11 @@ Usage:
 """
 
 import logging
+import re
 from decimal import Decimal
 from typing import Optional
+
+_TOKEN_SPLIT = re.compile(r"[\s\-_/]+")
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,13 @@ class PriceCache:
     def __init__(self, db, game: str = "pokemon"):
         self.db = db
         self.game = game
+
+    @staticmethod
+    def _tokenize(query: str) -> list[str]:
+        """Split a search query into tokens on whitespace/hyphen/underscore/slash.
+        Empty fallback returns the raw query so a blank-ish input still queries."""
+        toks = [t for t in _TOKEN_SPLIT.split((query or "").strip()) if t]
+        return toks or [query.strip()] if (query or "").strip() else []
 
     def get_card_by_tcgplayer_id(self, tcgplayer_id, **kwargs) -> Optional[dict]:
         """
@@ -137,23 +147,30 @@ class PriceCache:
                      all_games: bool = False) -> list[dict]:
         """Search cards by name in the local cache.
 
+        Multi-token search: each whitespace/hyphen-separated token must match
+        product_name OR card_number OR expansion_id OR expansion_name. So
+        "boa hancock OP14" finds the One Piece Boa Hancock from the OP14 set,
+        and "OP14-041" finds card #041 in OP14.
+
         all_games=True drops the game filter so multi-TCG manual entry can find
         non-Pokemon cards (One Piece, Lorcana, MTG, etc.) in one search.
         """
-        if all_games:
-            params = [f"%{query}%"]
-            sql = """
-                SELECT DISTINCT ON (scrydex_id) *
-                FROM scrydex_price_cache
-                WHERE product_type = 'card' AND product_name ILIKE %s
-            """
-        else:
-            params = [f"%{query}%", self.game]
-            sql = """
-                SELECT DISTINCT ON (scrydex_id) *
-                FROM scrydex_price_cache
-                WHERE product_type = 'card' AND product_name ILIKE %s AND game = %s
-            """
+        params: list = []
+        sql = """
+            SELECT DISTINCT ON (scrydex_id) *
+            FROM scrydex_price_cache
+            WHERE product_type = 'card'
+        """
+        if not all_games:
+            sql += " AND game = %s"
+            params.append(self.game)
+
+        for tok in self._tokenize(query):
+            sql += (" AND (product_name ILIKE %s OR card_number ILIKE %s "
+                    "OR expansion_id ILIKE %s OR expansion_name ILIKE %s)")
+            p = f"%{tok}%"
+            params.extend([p, p, p, p])
+
         if set_name:
             sql += " AND expansion_name ILIKE %s"
             params.append(f"%{set_name}%")
@@ -177,22 +194,25 @@ class PriceCache:
         """Search sealed products by name in the local cache.
         Results are sorted so base products appear before bundles/art sets.
 
+        Tokenized search across product_name, expansion_id, expansion_name.
         all_games=True drops the game filter (multi-TCG manual entry).
         """
-        if all_games:
-            params = [f"%{query}%"]
-            sql = """
-                SELECT DISTINCT ON (scrydex_id) *
-                FROM scrydex_price_cache
-                WHERE product_type = 'sealed' AND product_name ILIKE %s
-            """
-        else:
-            params = [f"%{query}%", self.game]
-            sql = """
-                SELECT DISTINCT ON (scrydex_id) *
-                FROM scrydex_price_cache
-                WHERE product_type = 'sealed' AND product_name ILIKE %s AND game = %s
-            """
+        params: list = []
+        sql = """
+            SELECT DISTINCT ON (scrydex_id) *
+            FROM scrydex_price_cache
+            WHERE product_type = 'sealed'
+        """
+        if not all_games:
+            sql += " AND game = %s"
+            params.append(self.game)
+
+        for tok in self._tokenize(query):
+            sql += (" AND (product_name ILIKE %s OR expansion_id ILIKE %s "
+                    "OR expansion_name ILIKE %s)")
+            p = f"%{tok}%"
+            params.extend([p, p, p])
+
         if set_name:
             sql += " AND expansion_name ILIKE %s"
             params.append(f"%{set_name}%")
@@ -281,6 +301,8 @@ class PriceCache:
         return {
             "name": first.get("product_name"),
             "setName": first.get("expansion_name", ""),
+            "expansionId": first.get("expansion_id", ""),
+            "game": first.get("game", ""),
             "cardNumber": first.get("card_number"),
             "tcgPlayerId": tcg_id,
             "scrydexId": first.get("scrydex_id"),
@@ -312,6 +334,8 @@ class PriceCache:
         return {
             "name": first.get("product_name"),
             "setName": first.get("expansion_name", ""),
+            "expansionId": first.get("expansion_id", ""),
+            "game": first.get("game", ""),
             "tcgPlayerId": tcg_id,
             "scrydexId": first.get("scrydex_id"),
             "unopenedPrice": market_price,

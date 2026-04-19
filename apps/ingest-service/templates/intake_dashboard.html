@@ -1188,13 +1188,17 @@
                 const safeName = (p.name || '').replace(/'/g, "\\'");
                 const img = p.imageCdnUrl400 || p.imageCdnUrl || p.imageCdnUrl800 || '';
                 const src = p._price_source ? ({cache:'cache',ppt:'PPT',scrydex:'SDX'}[p._price_source]||p._price_source) : '';
+                const expCode = (p.expansionId || p.expansion_id || '').toUpperCase();
+                const game = (p.game || '').toLowerCase();
+                const setCodeBadge = expCode ? `<span style="background:var(--surface); border:1px solid var(--border); color:var(--accent); padding:1px 6px; border-radius:4px; font-size:0.7rem; font-weight:700; font-family:ui-monospace,monospace; margin-right:4px;">${expCode}</span>` : '';
+                const gameBadge = (game && game !== 'pokemon') ? `<span style="background:var(--accent-alt,#7c3aed); color:#fff; padding:1px 6px; border-radius:4px; font-size:0.65rem; font-weight:600; margin-right:4px;">${game.toUpperCase()}</span>` : '';
                 const nameLower = (p.name||'').toLowerCase();
                 const isBundle = ['art bundle','set of','bundle (','pack of','case','display'].some(kw => nameLower.includes(kw));
                 return `<div style="display:flex; gap:10px; align-items:center; padding:8px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:4px; cursor:pointer;${isBundle ? ' opacity:0.6; border-left:3px solid var(--amber);' : ''}" onclick="addIntakeSealed(${tcgId}, '${safeName}', '${setName}', ${price}, ${qty})" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
-                    ${img ? `<img src="${img}" style="width:48px; height:48px; object-fit:contain; border-radius:4px; flex-shrink:0;">` : '<div style="width:48px;height:48px;background:var(--surface-2);border-radius:4px;flex-shrink:0;"></div>'}
+                    ${img ? `<img src="${img}" loading="lazy" style="width:48px; height:48px; object-fit:contain; border-radius:4px; flex-shrink:0;">` : '<div style="width:48px;height:48px;background:var(--surface-2);border-radius:4px;flex-shrink:0;"></div>'}
                     <div style="flex:1; min-width:0;">
-                        <div style="font-weight:600; font-size:0.9rem;">${p.name}${isBundle ? ' <span style="color:var(--amber);font-size:0.7rem;font-weight:700;">⚠ BUNDLE</span>' : ''}</div>
-                        <div style="font-size:0.8rem; color:var(--text-dim);">${p.setName || p.set_name || ''} · TCG#${tcgId}</div>
+                        <div style="font-weight:600; font-size:0.9rem;">${gameBadge}${p.name}${isBundle ? ' <span style="color:var(--amber);font-size:0.7rem;font-weight:700;">⚠ BUNDLE</span>' : ''}</div>
+                        <div style="font-size:0.8rem; color:var(--text-dim);">${setCodeBadge}${p.setName || p.set_name || ''} · TCG#${tcgId}</div>
                     </div>
                     <div style="text-align:right; flex-shrink:0;">
                         <div style="font-weight:700;">$\${Number(price).toFixed(2)}</div>
@@ -4368,8 +4372,11 @@
             resultsDiv.innerHTML = cards.map(c => {
                 const tcgId = c.tcgPlayerId || c.tcgplayer_id || c.id || '';
                 const setName = c.setName || c.set_name || (c.set ? c.set.name : '') || '';
+                const expCode = (c.expansionId || c.expansion_id || '').toUpperCase();
+                const game = (c.game || '').toLowerCase();
                 const cardNum = c.cardNumber || c.number || '';
                 const rarity = c.rarity || '';
+                const img = c.imageCdnUrl400 || c.imageCdnUrl || c.imageCdnUrl800 || '';
                 let price = null;
                 const prices = c.prices || {};
                 if (typeof prices === 'object') {
@@ -4384,9 +4391,22 @@
                 const inGraded = _isGradedContext(context);
                 const _gfSearch = inGraded ? _getGradeFields(context) : null;
                 const gradeLabel = inGraded ? (' · <span style="color:var(--accent);font-weight:600;">' + (_gfSearch.company||'PSA') + ' ' + (_gfSearch.value||'10') + ' — click for graded price</span>') : '';
-                return `<div class="search-result" onclick="addCardFromSearch('${sessionId}', ${tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${condition}', ${qty}, ${price || 0}, '${context}')">
-                    <h4>${c.name} ${cardNum ? '#'+cardNum : ''}</h4>
-                    <p>${setName}${rarity ? ' \u00b7 '+rarity : ''} \u00b7 TCG#${tcgId} \u00b7 ${condition}: $${displayPrice} \u00b7 Qty ${qty} \u00b7 Offer: $${offer}${gradeLabel}</p>
+
+                // Set-code badge: prominent for non-Pokemon (OP14, ST20, OP14-041 etc.) so it can be matched against the printed code on the card
+                const setCodeId = expCode + (cardNum ? '-' + cardNum : '');
+                const setCodeBadge = expCode ? `<span style="background:var(--surface); border:1px solid var(--border); color:var(--accent); padding:2px 6px; border-radius:4px; font-size:0.72rem; font-weight:700; font-family:ui-monospace,monospace;">${setCodeId}</span> ` : '';
+                const gameBadge = (game && game !== 'pokemon') ? `<span style="background:var(--accent-alt,#7c3aed); color:#fff; padding:1px 6px; border-radius:4px; font-size:0.65rem; font-weight:600; margin-right:4px;">${game.toUpperCase()}</span>` : '';
+                const imgHtml = img
+                    ? `<img src="${img}" loading="lazy" style="width:48px; height:67px; object-fit:contain; border-radius:4px; flex-shrink:0; background:var(--surface-2);">`
+                    : `<div style="width:48px; height:67px; background:var(--surface-2); border-radius:4px; flex-shrink:0;"></div>`;
+
+                return `<div class="search-result" style="display:flex; gap:10px; align-items:center; padding:8px 10px;" onclick="addCardFromSearch('${sessionId}', ${tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${condition}', ${qty}, ${price || 0}, '${context}')">
+                    ${imgHtml}
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-weight:600; font-size:0.92rem;">${gameBadge}${c.name||''}${cardNum && !expCode ? ' #'+cardNum : ''}</div>
+                        <div style="font-size:0.78rem; color:var(--text-dim); margin-top:2px;">${setCodeBadge}${setName}${rarity ? ' · '+rarity : ''} · TCG#${tcgId}</div>
+                        <div style="font-size:0.78rem; color:var(--text-dim); margin-top:2px;">${condition}: $${displayPrice} · Qty ${qty} · Offer: $${offer}${gradeLabel}</div>
+                    </div>
                 </div>`;
             }).join('');
         } catch(err) {
