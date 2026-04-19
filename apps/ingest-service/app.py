@@ -1239,8 +1239,11 @@ def add_raw_card():
                         )
                         market_price = PriceProvider.extract_condition_price(card_data, "NM")
                 else:
+                    # Pass variance so non-Pokemon cards (One Piece Alt Art etc.)
+                    # get the variant-specific price, not the primary printing's
+                    variance_for_price = (data.get("variance") or "").strip() or None
                     market_price = PriceProvider.extract_condition_price(
-                        card_data, data["condition"]
+                        card_data, data["condition"], variant=variance_for_price
                     )
                 # Enrich with data from PPT if not provided
                 if not data.get("set_name") and card_data.get("setName"):
@@ -1288,6 +1291,7 @@ def add_raw_card():
         is_graded=bool(data.get("is_graded", False)),
         grade_company=data.get("grade_company", "") or "",
         grade_value=data.get("grade_value", "") or "",
+        variance=(data.get("variance") or "").strip(),
     )
 
     # Recalculate session totals

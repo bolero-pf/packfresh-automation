@@ -249,7 +249,8 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
                          rarity: str, quantity: int, market_price: Decimal,
                          offer_percentage: Decimal,
                          is_graded: bool = False, grade_company: str = "",
-                         grade_value: str = "") -> dict:
+                         grade_value: str = "",
+                         variance: str = "") -> dict:
     """
     Add a single raw card item to a session (manual entry flow).
 
@@ -271,15 +272,15 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id: int,
         row = execute_returning("""
             INSERT INTO intake_items
                 (session_id, product_name, tcgplayer_id, product_type,
-                 set_name, card_number, condition, rarity,
+                 set_name, card_number, condition, rarity, variance,
                  quantity, market_price, offer_price, unit_cost_basis, is_mapped,
                  is_graded, grade_company, grade_value,
                  created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s, %s,
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s, %s,
                     CURRENT_TIMESTAMP + (%s * INTERVAL '1 microsecond'))
             RETURNING *
         """, (session_id, product_name, tcgplayer_id, "raw",
-              set_name, card_number, condition, rarity,
+              set_name, card_number, condition, rarity, variance or "",
               1, market_price, unit_offer, unit_cost,
               is_graded, grade_company or None, grade_value or None,
               i))

@@ -4369,7 +4369,11 @@
             const condition = document.getElementById(condId).value;
             const qty = parseInt(document.getElementById(qtyId).value) || 1;
 
-            resultsDiv.innerHTML = cards.map(c => {
+            // Expand each card into one row per variant — One Piece OP14-041 has both
+            // 'Alt Art' ($102) and 'Normal' ($0.24) under the same scrydex_id, so a
+            // single row hides the AA print and defaults to the cheap normal price.
+            const rows = [];
+            cards.forEach(c => {
                 const tcgId = c.tcgPlayerId || c.tcgplayer_id || c.id || '';
                 const setName = c.setName || c.set_name || (c.set ? c.set.name : '') || '';
                 const expCode = (c.expansionId || c.expansion_id || '').toUpperCase();
@@ -4377,33 +4381,55 @@
                 const cardNum = c.cardNumber || c.number || '';
                 const rarity = c.rarity || '';
                 const img = c.imageCdnUrl400 || c.imageCdnUrl || c.imageCdnUrl800 || '';
-                let price = null;
                 const prices = c.prices || {};
-                if (typeof prices === 'object') {
-                    price = prices[condition.toLowerCase()] || prices.market || prices.mid || null;
+                const variantsObj = (prices && typeof prices === 'object' && prices.variants) || {};
+                const variantNames = Object.keys(variantsObj);
+
+                if (variantNames.length === 0) {
+                    let p = null;
+                    if (typeof prices === 'object') p = prices[condition.toLowerCase()] || prices.market || prices.mid || null;
+                    if (!p && c.price) p = c.price;
+                    rows.push({ c, tcgId, setName, expCode, game, cardNum, rarity, img, variant: '', price: p });
+                } else {
+                    variantNames.forEach(vname => {
+                        const vData = variantsObj[vname] || {};
+                        const condEntry = vData[condition] || vData['Near Mint'] || vData['NM'] || {};
+                        const p = (typeof condEntry === 'object') ? (condEntry.price ?? null) : condEntry;
+                        rows.push({ c, tcgId, setName, expCode, game, cardNum, rarity, img, variant: vname, price: p });
+                    });
                 }
-                if (!price && c.price) price = c.price;
+            });
+
+            // Sort: highest-priced variant first within each card, so the Alt Art / chase print appears above the cheap base
+            rows.sort((a, b) => (b.price || 0) - (a.price || 0));
+
+            resultsDiv.innerHTML = rows.map(row => {
+                const { c, tcgId, setName, expCode, game, cardNum, rarity, img, variant, price } = row;
                 const displayPrice = price ? Number(price).toFixed(2) : 'no price';
                 const offer = price ? (price * qty * offerPct / 100).toFixed(2) : String.fromCharCode(8212);
                 const safeName = (c.name||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
                 const safeSet = setName.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                const safeVariant = (variant||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 
                 const inGraded = _isGradedContext(context);
                 const _gfSearch = inGraded ? _getGradeFields(context) : null;
                 const gradeLabel = inGraded ? (' · <span style="color:var(--accent);font-weight:600;">' + (_gfSearch.company||'PSA') + ' ' + (_gfSearch.value||'10') + ' — click for graded price</span>') : '';
 
-                // Set-code badge: prominent for non-Pokemon (OP14, ST20, OP14-041 etc.) so it can be matched against the printed code on the card
                 const setCodeId = expCode + (cardNum ? '-' + cardNum : '');
                 const setCodeBadge = expCode ? `<span style="background:var(--surface); border:1px solid var(--border); color:var(--accent); padding:2px 6px; border-radius:4px; font-size:0.72rem; font-weight:700; font-family:ui-monospace,monospace;">${setCodeId}</span> ` : '';
                 const gameBadge = (game && game !== 'pokemon') ? `<span style="background:var(--accent-alt,#7c3aed); color:#fff; padding:1px 6px; border-radius:4px; font-size:0.65rem; font-weight:600; margin-right:4px;">${game.toUpperCase()}</span>` : '';
+                const isChase = variant && /alt|manga|premium|special|enchanted|fullArt|jollyRoger/i.test(variant);
+                const variantBadge = variant
+                    ? `<span style="background:${isChase ? 'var(--amber)' : 'var(--surface-2)'}; color:${isChase ? '#000' : 'var(--text)'}; padding:1px 6px; border-radius:4px; font-size:0.7rem; font-weight:700; margin-right:6px;">${variant}</span>`
+                    : '';
                 const imgHtml = img
                     ? `<img src="${img}" loading="lazy" style="width:48px; height:67px; object-fit:contain; border-radius:4px; flex-shrink:0; background:var(--surface-2);">`
                     : `<div style="width:48px; height:67px; background:var(--surface-2); border-radius:4px; flex-shrink:0;"></div>`;
 
-                return `<div class="search-result" style="display:flex; gap:10px; align-items:center; padding:8px 10px;" onclick="addCardFromSearch('${sessionId}', ${tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${condition}', ${qty}, ${price || 0}, '${context}')">
+                return `<div class="search-result" style="display:flex; gap:10px; align-items:center; padding:8px 10px;" onclick="addCardFromSearch('${sessionId}', ${tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${condition}', ${qty}, ${price || 0}, '${context}', '${safeVariant}')">
                     ${imgHtml}
                     <div style="flex:1; min-width:0;">
-                        <div style="font-weight:600; font-size:0.92rem;">${gameBadge}${c.name||''}${cardNum && !expCode ? ' #'+cardNum : ''}</div>
+                        <div style="font-weight:600; font-size:0.92rem;">${gameBadge}${variantBadge}${c.name||''}${cardNum && !expCode ? ' #'+cardNum : ''}</div>
                         <div style="font-size:0.78rem; color:var(--text-dim); margin-top:2px;">${setCodeBadge}${setName}${rarity ? ' · '+rarity : ''} · TCG#${tcgId}</div>
                         <div style="font-size:0.78rem; color:var(--text-dim); margin-top:2px;">${condition}: $${displayPrice} · Qty ${qty} · Offer: $${offer}${gradeLabel}</div>
                     </div>
@@ -4414,12 +4440,12 @@
         }
     }
 
-    async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context) {
+    async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, preselectedVariant) {
         const resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : context === 'intake' ? 'intake-search-results' : 'raw-search-results');
 
         // Detail lookup to get all variant/condition prices
         resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading pricing...</div>';
-        
+
         let variants = {};
         let primaryVariant = 'Default';
         try {
@@ -4436,6 +4462,10 @@
                 if (!variants[primaryVariant] && Object.keys(variants).length) {
                     primaryVariant = Object.keys(variants)[0];
                 }
+                // If the user picked a specific variant in search results, honor it
+                if (preselectedVariant && variants[preselectedVariant]) {
+                    primaryVariant = preselectedVariant;
+                }
                 const card = ld.card || {};
                 if (card.setName && !setName) setName = card.setName;
                 if (card.cardNumber && !cardNum) cardNum = card.cardNumber;
@@ -4445,7 +4475,7 @@
 
         const variantNames = Object.keys(variants);
         if (!variantNames.length) {
-            _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv);
+            _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv, preselectedVariant || '');
             return;
         }
 
@@ -4521,7 +4551,7 @@
         });
         // Confirm
         document.getElementById('cond-confirm-btn').addEventListener('click', function() {
-            _finalizeCardAdd(pc.sessionId, pc.tcgId, pc.cardName, pc.setName, pc.cardNum, pc.rarity, selectedCond, qty, selectedPrice || 0, pc.context);
+            _finalizeCardAdd(pc.sessionId, pc.tcgId, pc.cardName, pc.setName, pc.cardNum, pc.rarity, selectedCond, qty, selectedPrice || 0, pc.context, null, pc.primaryVariant || '');
         });
         // Cancel
         document.getElementById('cond-cancel-btn').addEventListener('click', function() {
@@ -4529,7 +4559,7 @@
         });
     }
 
-    async function _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv) {
+    async function _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv, variance) {
         if (!resultsDiv) resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : context === 'intake' ? 'intake-search-results' : 'raw-search-results');
 
         if (!price || price <= 0) {
@@ -4559,6 +4589,7 @@
                     condition: condition, set_name: setName, card_number: cardNum,
                     rarity: rarity, quantity: qty, market_price: price,
                     is_graded: isGraded, grade_company: gradeCompany, grade_value: gradeValue,
+                    variance: variance || '',
                 }),
             });
             const d = await r.json();

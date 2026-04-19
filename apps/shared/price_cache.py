@@ -32,6 +32,7 @@ CONDITION_DISPLAY = {
 
 # Scrydex variant names -> PPT display names
 VARIANT_DISPLAY = {
+    # Pokemon
     "normal": "Normal",
     "holofoil": "Holofoil",
     "reverseHolofoil": "Reverse Holofoil",
@@ -40,6 +41,20 @@ VARIANT_DISPLAY = {
     "firstEditionShadowlessHolofoil": "1st Edition Shadowless Holofoil",
     "unlimitedShadowlessHolofoil": "Shadowless Holofoil",
     "pokemonCenter": "Pokemon Center",
+    # One Piece
+    "altArt": "Alt Art",
+    "specialAltArt": "Special Alt Art",
+    "mangaAltArt": "Manga Alt Art",
+    "premiumAltArt": "Premium Alt Art",
+    "foil": "Foil",
+    "jollyRogerFoil": "Jolly Roger Foil",
+    "fullArt": "Full Art",
+    "parallel": "Parallel",
+    # Lorcana
+    "cold_foil": "Cold Foil",
+    "enchanted": "Enchanted",
+    # MTG
+    "etched": "Etched Foil",
 }
 
 GRADE_TO_KEY = {
@@ -57,11 +72,29 @@ class PriceCache:
         self.game = game
 
     @staticmethod
-    def _tokenize(query: str) -> list[str]:
+    def _tokenize(query: str) -> list[list[str]]:
         """Split a search query into tokens on whitespace/hyphen/underscore/slash.
-        Empty fallback returns the raw query so a blank-ish input still queries."""
-        toks = [t for t in _TOKEN_SPLIT.split((query or "").strip()) if t]
-        return toks or [query.strip()] if (query or "").strip() else []
+
+        Returns a list of token-equivalence-groups: each group is a list of
+        strings that should OR-match (any one matching counts as the token
+        matching). A digit-only token like "041" expands to ["041", "41"]
+        because Scrydex stores card numbers without leading zeros (OP14-041
+        is stored as card_number="41").
+        """
+        raw = (query or "").strip()
+        if not raw:
+            return []
+        toks = [t for t in _TOKEN_SPLIT.split(raw) if t]
+        if not toks:
+            toks = [raw]
+        groups: list[list[str]] = []
+        for t in toks:
+            forms = [t]
+            stripped = t.lstrip("0")
+            if t.isdigit() and stripped and stripped != t:
+                forms.append(stripped)
+            groups.append(forms)
+        return groups
 
     def get_card_by_tcgplayer_id(self, tcgplayer_id, **kwargs) -> Optional[dict]:
         """
@@ -165,11 +198,15 @@ class PriceCache:
             sql += " AND game = %s"
             params.append(self.game)
 
-        for tok in self._tokenize(query):
-            sql += (" AND (product_name ILIKE %s OR card_number ILIKE %s "
-                    "OR expansion_id ILIKE %s OR expansion_name ILIKE %s)")
-            p = f"%{tok}%"
-            params.extend([p, p, p, p])
+        for forms in self._tokenize(query):
+            # Each token group: any form matching any of the 4 columns counts as a match
+            ors = []
+            for f in forms:
+                ors.append("(product_name ILIKE %s OR card_number ILIKE %s "
+                           "OR expansion_id ILIKE %s OR expansion_name ILIKE %s)")
+                p = f"%{f}%"
+                params.extend([p, p, p, p])
+            sql += " AND (" + " OR ".join(ors) + ")"
 
         if set_name:
             sql += " AND expansion_name ILIKE %s"
@@ -207,11 +244,14 @@ class PriceCache:
             sql += " AND game = %s"
             params.append(self.game)
 
-        for tok in self._tokenize(query):
-            sql += (" AND (product_name ILIKE %s OR expansion_id ILIKE %s "
-                    "OR expansion_name ILIKE %s)")
-            p = f"%{tok}%"
-            params.extend([p, p, p])
+        for forms in self._tokenize(query):
+            ors = []
+            for f in forms:
+                ors.append("(product_name ILIKE %s OR expansion_id ILIKE %s "
+                           "OR expansion_name ILIKE %s)")
+                p = f"%{f}%"
+                params.extend([p, p, p])
+            sql += " AND (" + " OR ".join(ors) + ")"
 
         if set_name:
             sql += " AND expansion_name ILIKE %s"
