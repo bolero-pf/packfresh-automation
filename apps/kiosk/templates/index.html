@@ -297,48 +297,139 @@ header {
 .confirm-box h3 { margin-bottom: 10px; }
 .confirm-box p { color: var(--dim); font-size: 0.9rem; margin-bottom: 20px; }
 
-/* Filter drawer */
-.filter-bar {
-  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-  padding: 10px 20px; background: var(--surface);
-  border-bottom: 1px solid var(--border); max-width: 1200px; margin: 0 auto;
+/* Top filter strip — Game pills (horizontal scroll) + Filters button.
+   Not sticky on its own — header is already sticky and a second sticky
+   element here would have to compute the header's height to avoid overlap. */
+.filter-strip {
+  display: flex; gap: 10px; align-items: center; padding: 10px 16px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  max-width: 1200px; margin: 0 auto;
 }
-.filter-bar .filter-select { min-width: 0; flex-shrink: 1; }
-@media (max-width: 480px) {
-  .filter-bar { gap: 6px; padding: 8px 12px; }
-  .cond-toggle { padding: 4px 8px; font-size: 0.7rem; }
-  .filter-bar .filter-select { font-size: 0.78rem; height: 34px; }
+.game-pills {
+  display: flex; gap: 8px; overflow-x: auto; flex: 1; padding: 2px 0;
+  scrollbar-width: none;
 }
-.filter-toggle {
-  background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--r);
-  color: var(--dim); padding: 6px 14px; font-family: var(--sans); font-size: 0.82rem;
-  cursor: pointer; transition: all 0.15s;
+.game-pills::-webkit-scrollbar { display: none; }
+.game-pill {
+  flex-shrink: 0; min-height: 44px; padding: 0 18px;
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--surface2); border: 1.5px solid var(--border); border-radius: 22px;
+  color: var(--text); font-family: var(--sans); font-size: 0.95rem; font-weight: 500;
+  cursor: pointer; user-select: none; transition: all 0.15s; white-space: nowrap;
 }
-.filter-toggle.active { border-color: var(--accent); color: var(--accent); }
-.filter-drawer {
-  display: none; padding: 12px 20px; background: var(--surface);
-  border-bottom: 1px solid var(--border); max-width: 1200px; margin: 0 auto;
+.game-pill .qty { color: var(--dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.game-pill.active {
+  background: var(--accent); border-color: var(--accent); color: #0a0a0f;
 }
-.filter-drawer.open { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-.filter-group { display: flex; flex-direction: column; gap: 4px; }
-.filter-label { font-size: 0.7rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; }
-.filter-select {
-  height: 38px; background: var(--surface2); border: 1.5px solid var(--border);
-  border-radius: 8px; color: var(--text); padding: 0 10px; font-size: 0.82rem;
-  font-family: var(--sans); outline: none; cursor: pointer;
+.game-pill.active .qty { color: rgba(10,10,15,0.65); }
+
+.filters-btn {
+  flex-shrink: 0; min-height: 44px; padding: 0 18px;
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--surface2); border: 1.5px solid var(--border); border-radius: 22px;
+  color: var(--text); font-family: var(--sans); font-size: 0.95rem; font-weight: 500;
+  cursor: pointer;
 }
-.cond-toggle {
+.filters-btn.has-active { border-color: var(--accent); color: var(--accent); }
+.filters-btn .badge {
   display: inline-flex; align-items: center; justify-content: center;
-  padding: 4px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 600;
-  cursor: pointer; border: 1.5px solid; transition: all 0.15s; user-select: none;
+  min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px;
+  background: var(--accent); color: #0a0a0f;
+  font-size: 0.78rem; font-weight: 700; font-variant-numeric: tabular-nums;
 }
-.cond-toggle.on { opacity: 1; }
-.cond-toggle.off { opacity: 0.3; }
+
+/* Bottom sheet overlay */
+.sheet-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+  display: none; z-index: 100; align-items: flex-end;
+  animation: fadeIn 0.18s ease-out;
+}
+.sheet-overlay.open { display: flex; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.sheet {
+  width: 100%; max-width: 760px; margin: 0 auto;
+  background: var(--surface); border-top-left-radius: 18px; border-top-right-radius: 18px;
+  max-height: 90vh; display: flex; flex-direction: column;
+  animation: slideUp 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  box-shadow: 0 -10px 40px rgba(0,0,0,0.5);
+}
+@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+
+.sheet-grip { width: 36px; height: 4px; background: var(--border); border-radius: 2px; margin: 10px auto 0; }
+.sheet-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 20px; border-bottom: 1px solid var(--border);
+}
+.sheet-header h3 { font-family: var(--sans); font-size: 1.05rem; font-weight: 600; }
+.sheet-header .clear-link {
+  background: none; border: none; color: var(--accent); font-size: 0.85rem;
+  cursor: pointer; padding: 8px; font-weight: 500;
+}
+.sheet-body { padding: 16px 20px 24px; overflow-y: auto; flex: 1; }
+.sheet-section { margin-bottom: 22px; }
+.sheet-section-title {
+  font-size: 0.72rem; color: var(--dim); text-transform: uppercase;
+  letter-spacing: 0.1em; margin-bottom: 10px; font-weight: 600;
+}
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  min-height: 44px; padding: 0 16px;
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--surface2); border: 1.5px solid var(--border); border-radius: 22px;
+  color: var(--text); font-family: var(--sans); font-size: 0.92rem; font-weight: 500;
+  cursor: pointer; user-select: none; transition: all 0.12s;
+}
+.chip.on {
+  background: var(--accent); border-color: var(--accent); color: #0a0a0f;
+}
+.chip .qty { color: var(--dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.chip.on .qty { color: rgba(10,10,15,0.65); }
+.chip.cond-NM.on { background: #14532d; border-color: #4ade80; color: #4ade80; }
+.chip.cond-LP.on { background: rgba(232,197,71,0.18); border-color: #e8c547; color: #e8c547; }
+.chip.cond-MP.on { background: rgba(251,146,60,0.18); border-color: #fb923c; color: #fb923c; }
+.chip.cond-HP.on { background: rgba(248,113,113,0.18); border-color: #f87171; color: #f87171; }
+.chip.cond-DMG.on { background: rgba(185,28,28,0.18); border-color: #b91c1c; color: #f87171; }
+
+.set-search-input {
+  width: 100%; min-height: 44px; padding: 0 14px;
+  background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px;
+  color: var(--text); font-family: var(--sans); font-size: 0.95rem;
+  outline: none; margin-bottom: 10px;
+}
+.set-list { max-height: 280px; overflow-y: auto; padding-right: 4px; }
+.set-row {
+  min-height: 48px; padding: 0 14px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border-radius: 8px; cursor: pointer; user-select: none;
+}
+.set-row + .set-row { margin-top: 4px; }
+.set-row:hover { background: var(--surface2); }
+.set-row.on { background: rgba(232,197,71,0.12); color: var(--accent); }
+.set-row .qty { color: var(--dim); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+.set-row.on .qty { color: var(--accent); }
+
+.price-row { display: flex; gap: 10px; align-items: center; }
 .price-input {
-  width: 80px; height: 34px; background: var(--surface2); border: 1.5px solid var(--border);
-  border-radius: 8px; color: var(--text); padding: 0 8px; font-size: 0.82rem;
-  font-family: var(--mono); outline: none; text-align: center;
+  flex: 1; min-height: 48px; padding: 0 14px;
+  background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px;
+  color: var(--text); font-family: var(--mono); font-size: 1rem; outline: none;
+  text-align: center;
 }
+.price-dash { color: var(--dim); font-size: 1.1rem; }
+
+.sheet-footer {
+  padding: 14px 20px; border-top: 1px solid var(--border);
+  display: flex; gap: 10px; align-items: center;
+  background: var(--surface);
+}
+.sheet-apply {
+  flex: 1; min-height: 56px; border-radius: 12px; border: none;
+  background: var(--accent); color: #0a0a0f;
+  font-family: var(--sans); font-size: 1.05rem; font-weight: 700;
+  cursor: pointer; transition: opacity 0.15s;
+}
+.sheet-apply:disabled { opacity: 0.55; }
 
 /* Empty / loading */
 .empty { text-align: center; padding: 80px 20px; color: var(--dim); }
@@ -388,37 +479,65 @@ header {
   </div>
 </header>
 
-<!-- Condition pills + filter toggle -->
-<div class="filter-bar">
-  <span class="cond-toggle on" data-cond="NM" onclick="toggleCond(this)" style="border-color:#4ade80;background:rgba(74,222,128,0.15);color:#4ade80;">NM</span>
-  <span class="cond-toggle on" data-cond="LP" onclick="toggleCond(this)" style="border-color:#e8c547;background:rgba(232,197,71,0.15);color:#e8c547;">LP</span>
-  <span class="cond-toggle on" data-cond="MP" onclick="toggleCond(this)" style="border-color:#fb923c;background:rgba(251,146,60,0.15);color:#fb923c;">MP</span>
-  <span class="cond-toggle on" data-cond="HP" onclick="toggleCond(this)" style="border-color:#f87171;background:rgba(248,113,113,0.15);color:#f87171;">HP</span>
-  <span class="cond-toggle on" data-cond="DMG" onclick="toggleCond(this)" style="border-color:#b91c1c;background:rgba(185,28,28,0.15);color:#b91c1c;">DMG</span>
-  <select class="filter-select" id="era-filter" onchange="onEraChange()">
-    <option value="">All Eras</option>
-  </select>
-  <select class="filter-select" id="set-filter" onchange="doSearch()">
-    <option value="">All Sets</option>
-  </select>
-  <select class="filter-select" id="sort-select" onchange="doSearch()">
-    <option value="name_asc">Name A–Z</option>
-    <option value="price_asc">Price Low–High</option>
-    <option value="price_desc">Price High–Low</option>
-    <option value="newest">Newest</option>
-  </select>
-  <button class="filter-toggle" id="filter-toggle-btn" onclick="toggleFilterDrawer()">$ Price</button>
+<!-- Top filter strip: Game pills (always visible) + Filters button -->
+<div class="filter-strip">
+  <div class="game-pills" id="game-pills"></div>
+  <button class="filters-btn" id="filters-btn" onclick="openFilterSheet()">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+    <span>Filters</span>
+    <span class="badge" id="filters-count" style="display:none;">0</span>
+  </button>
 </div>
 
-<!-- Expandable filter drawer -->
-<div class="filter-drawer" id="filter-drawer">
-  <div class="filter-group">
-    <span class="filter-label">Price Min</span>
-    <input class="price-input" id="price-min" type="number" min="0" step="1" placeholder="$0" onchange="doSearch()">
-  </div>
-  <div class="filter-group">
-    <span class="filter-label">Price Max</span>
-    <input class="price-input" id="price-max" type="number" min="0" step="1" placeholder="∞" onchange="doSearch()">
+<!-- Bottom-sheet filter overlay -->
+<div class="sheet-overlay" id="filter-sheet-overlay" onclick="closeFilterSheet(event)">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <div class="sheet-grip"></div>
+    <div class="sheet-header">
+      <h3>Filters</h3>
+      <button class="clear-link" onclick="clearAllFilters()">Clear all</button>
+    </div>
+    <div class="sheet-body">
+      <div class="sheet-section" id="sheet-era-section" style="display:none;">
+        <div class="sheet-section-title">Era (Pokémon)</div>
+        <div class="chip-row" id="sheet-eras"></div>
+      </div>
+      <div class="sheet-section">
+        <div class="sheet-section-title">Set</div>
+        <input class="set-search-input" id="set-search-input" placeholder="Search sets…" oninput="renderSetList()" autocomplete="off">
+        <div class="set-list" id="sheet-sets"></div>
+      </div>
+      <div class="sheet-section">
+        <div class="sheet-section-title">Condition</div>
+        <div class="chip-row" id="sheet-conds">
+          <span class="chip cond-NM on" data-cond="NM" onclick="toggleSheetCond(this)">NM</span>
+          <span class="chip cond-LP on" data-cond="LP" onclick="toggleSheetCond(this)">LP</span>
+          <span class="chip cond-MP on" data-cond="MP" onclick="toggleSheetCond(this)">MP</span>
+          <span class="chip cond-HP on" data-cond="HP" onclick="toggleSheetCond(this)">HP</span>
+          <span class="chip cond-DMG on" data-cond="DMG" onclick="toggleSheetCond(this)">DMG</span>
+        </div>
+      </div>
+      <div class="sheet-section">
+        <div class="sheet-section-title">Sort</div>
+        <div class="chip-row" id="sheet-sort">
+          <span class="chip on" data-sort="name_asc" onclick="setSheetSort(this)">Name A–Z</span>
+          <span class="chip" data-sort="price_asc" onclick="setSheetSort(this)">Price Low–High</span>
+          <span class="chip" data-sort="price_desc" onclick="setSheetSort(this)">Price High–Low</span>
+          <span class="chip" data-sort="newest" onclick="setSheetSort(this)">Newest</span>
+        </div>
+      </div>
+      <div class="sheet-section">
+        <div class="sheet-section-title">Price</div>
+        <div class="price-row">
+          <input class="price-input" id="price-min" type="number" inputmode="numeric" min="0" step="1" placeholder="Min $">
+          <span class="price-dash">—</span>
+          <input class="price-input" id="price-max" type="number" inputmode="numeric" min="0" step="1" placeholder="Max $">
+        </div>
+      </div>
+    </div>
+    <div class="sheet-footer">
+      <button class="sheet-apply" id="sheet-apply" onclick="applyFilterSheet()">Apply</button>
+    </div>
   </div>
 </div>
 
@@ -454,7 +573,7 @@ header {
 const MAX = 20;
 const KIOSK_ACCESS_KEY = '{{ access_key }}';
 let _cart = [];  // [{card_name, set_name, condition, qty, price, image_url}]
-let _activeConditions = new Set(['NM','LP','MP','HP','DMG']);
+// Active conditions live on _filters.conds now (set in the bottom-sheet apply flow)
 let _hasAccess = false;
 
 // Access gate — check URL param or localStorage
@@ -570,27 +689,213 @@ function themedConfirm(title, msg) {
   });
 }
 
-// ── Filter Controls ──────────────────────────────────────────────────────────
-function toggleCond(el) {
-  const cond = el.getAttribute('data-cond');
-  if (_activeConditions.has(cond)) {
-    if (_activeConditions.size <= 1) return; // keep at least one
-    _activeConditions.delete(cond);
-    el.classList.remove('on');
-    el.classList.add('off');
+// ── Filter state (committed) — drives the URL/search ─────────────────────────
+let _filters = {
+  game: '',          // '' = all games
+  era:  '',          // only meaningful when game === 'pokemon'
+  set:  '',          // exact set name
+  sort: 'name_asc',
+  conds: new Set(['NM','LP','MP','HP','DMG']),
+  minP: '',
+  maxP: '',
+};
+// Sheet's pending state — committed only when Apply pressed
+let _draft = null;
+let _allSets = [];   // current /api/sets response, for in-sheet search filter
+
+function _activeFilterCount() {
+  let n = 0;
+  if (_filters.game)   n++;
+  if (_filters.era)    n++;
+  if (_filters.set)    n++;
+  if (_filters.sort && _filters.sort !== 'name_asc') n++;
+  if (_filters.conds.size && _filters.conds.size !== 5) n++;
+  if (_filters.minP)   n++;
+  if (_filters.maxP)   n++;
+  return n;
+}
+
+function _refreshFiltersBtn() {
+  const btn = document.getElementById('filters-btn');
+  const badge = document.getElementById('filters-count');
+  const n = _activeFilterCount();
+  if (n > 0) {
+    btn.classList.add('has-active');
+    badge.style.display = 'inline-flex';
+    badge.textContent = String(n);
   } else {
-    _activeConditions.add(cond);
-    el.classList.remove('off');
-    el.classList.add('on');
+    btn.classList.remove('has-active');
+    badge.style.display = 'none';
   }
+}
+
+// ── Game pills (top strip) — single-select, fires search immediately ─────────
+async function loadGames() {
+  try {
+    const d = await get('/api/games');
+    const strip = document.getElementById('game-pills');
+    const games = d.games || [];
+    const totalQty = games.reduce((s, g) => s + (g.qty || 0), 0);
+    const items = [{ code: '', label: 'All', qty: totalQty }, ...games];
+    strip.innerHTML = items.map(g =>
+      `<span class="game-pill${_filters.game === g.code ? ' active' : ''}" data-game="${esc(g.code)}">
+        ${esc(g.label)}<span class="qty">${g.qty}</span>
+      </span>`
+    ).join('');
+    strip.querySelectorAll('.game-pill').forEach(el => {
+      el.addEventListener('click', () => {
+        _filters.game = el.getAttribute('data-game');
+        // Switching games invalidates set + era — they're game-scoped
+        _filters.set = '';
+        _filters.era = '';
+        loadGames();          // re-render pills with new active state
+        loadSetsForFilters(); // refresh available sets for this game
+        loadEras();           // eras only meaningful for pokemon
+        _refreshFiltersBtn();
+        doSearch();
+      });
+    });
+  } catch(e) {}
+}
+
+// ── Bottom sheet: open / close / draft / apply ───────────────────────────────
+function openFilterSheet() {
+  // Snapshot current filters into a draft so Cancel just closes
+  _draft = {
+    era: _filters.era,
+    set: _filters.set,
+    sort: _filters.sort,
+    conds: new Set(_filters.conds),
+    minP: _filters.minP,
+    maxP: _filters.maxP,
+  };
+  // Era section visibility — only for Pokemon
+  document.getElementById('sheet-era-section').style.display =
+    (_filters.game === 'pokemon' || _filters.game === '') ? '' : 'none';
+  // Conditions
+  document.querySelectorAll('#sheet-conds .chip').forEach(el => {
+    const c = el.getAttribute('data-cond');
+    el.classList.toggle('on', _draft.conds.has(c));
+  });
+  // Sort
+  document.querySelectorAll('#sheet-sort .chip').forEach(el => {
+    el.classList.toggle('on', el.getAttribute('data-sort') === _draft.sort);
+  });
+  // Price
+  document.getElementById('price-min').value = _draft.minP || '';
+  document.getElementById('price-max').value = _draft.maxP || '';
+  // Eras + Sets — re-render with selection state
+  renderEraChips();
+  document.getElementById('set-search-input').value = '';
+  renderSetList();
+
+  document.getElementById('filter-sheet-overlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeFilterSheet(e) {
+  if (e && e.target.id !== 'filter-sheet-overlay') return;
+  document.getElementById('filter-sheet-overlay').classList.remove('open');
+  document.body.style.overflow = '';
+  _draft = null;
+}
+
+function clearAllFilters() {
+  _draft = {
+    era: '', set: '', sort: 'name_asc',
+    conds: new Set(['NM','LP','MP','HP','DMG']),
+    minP: '', maxP: '',
+  };
+  document.querySelectorAll('#sheet-conds .chip').forEach(el => el.classList.add('on'));
+  document.querySelectorAll('#sheet-sort .chip').forEach(el => {
+    el.classList.toggle('on', el.getAttribute('data-sort') === 'name_asc');
+  });
+  document.getElementById('price-min').value = '';
+  document.getElementById('price-max').value = '';
+  renderEraChips();
+  document.getElementById('set-search-input').value = '';
+  renderSetList();
+}
+
+function applyFilterSheet() {
+  if (!_draft) return;
+  // Pull live price input values (not bound on every keystroke)
+  _draft.minP = document.getElementById('price-min').value || '';
+  _draft.maxP = document.getElementById('price-max').value || '';
+  Object.assign(_filters, _draft);
+  closeFilterSheet({ target: { id: 'filter-sheet-overlay' } });
+  _refreshFiltersBtn();
   doSearch();
 }
 
-function toggleFilterDrawer() {
-  const d = document.getElementById('filter-drawer');
-  const btn = document.getElementById('filter-toggle-btn');
-  d.classList.toggle('open');
-  btn.classList.toggle('active');
+function toggleSheetCond(el) {
+  if (!_draft) return;
+  const cond = el.getAttribute('data-cond');
+  if (_draft.conds.has(cond)) {
+    if (_draft.conds.size <= 1) return; // keep at least one
+    _draft.conds.delete(cond);
+    el.classList.remove('on');
+  } else {
+    _draft.conds.add(cond);
+    el.classList.add('on');
+  }
+}
+
+function setSheetSort(el) {
+  if (!_draft) return;
+  _draft.sort = el.getAttribute('data-sort');
+  document.querySelectorAll('#sheet-sort .chip').forEach(x => x.classList.toggle('on', x === el));
+}
+
+function renderEraChips() {
+  const wrap = document.getElementById('sheet-eras');
+  if (!wrap) return;
+  const eras = _eraCache || [];
+  wrap.innerHTML = eras.map(e =>
+    `<span class="chip${(_draft && _draft.era === e.name) ? ' on' : ''}" data-era="${esc(e.name)}">${esc(e.name)} <span class="qty">${e.set_count}</span></span>`
+  ).join('');
+  wrap.querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => {
+      if (!_draft) return;
+      const era = el.getAttribute('data-era');
+      _draft.era = (_draft.era === era) ? '' : era;
+      _draft.set = '';
+      wrap.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === el && _draft.era === era));
+      // Refresh sets to be era-scoped
+      loadSetsForFilters(_draft.era).then(renderSetList);
+    });
+  });
+}
+
+function renderSetList() {
+  const list = document.getElementById('sheet-sets');
+  if (!list) return;
+  const filter = (document.getElementById('set-search-input').value || '').toLowerCase().trim();
+  const visible = _allSets.filter(s => !filter || (s.name || '').toLowerCase().includes(filter));
+  list.innerHTML = visible.slice(0, 200).map(s =>
+    `<div class="set-row${(_draft && _draft.set === s.name) ? ' on' : ''}" data-set="${esc(s.name)}">
+       <span>${esc(s.name)}</span><span class="qty">${s.qty}</span>
+     </div>`
+  ).join('') || '<div style="padding:12px;color:var(--dim);text-align:center;">No sets match.</div>';
+  list.querySelectorAll('.set-row').forEach(el => {
+    el.addEventListener('click', () => {
+      if (!_draft) return;
+      const name = el.getAttribute('data-set');
+      _draft.set = (_draft.set === name) ? '' : name;
+      list.querySelectorAll('.set-row').forEach(x => x.classList.toggle('on', x === el && _draft.set === name));
+    });
+  });
+}
+
+async function loadSetsForFilters(era) {
+  try {
+    const params = new URLSearchParams();
+    if (_filters.game) params.set('game', _filters.game);
+    if (era) params.set('era', era);
+    const url = '/api/sets' + (params.toString() ? '?' + params : '');
+    const d = await get(url);
+    _allSets = d.sets || [];
+  } catch(e) { _allSets = []; }
 }
 
 function _saveCart() {
@@ -621,48 +926,17 @@ async function boot() {
 
   updateCartBadge();
   updateChampionUI();
-  await Promise.all([loadSets(), loadEras()]);
+  await Promise.all([loadGames(), loadSetsForFilters(), loadEras()]);
+  _refreshFiltersBtn();
   doSearch();
 }
 
+let _eraCache = [];
 async function loadEras() {
   try {
     const d = await get('/api/eras');
-    const sel = document.getElementById('era-filter');
-    (d.eras || []).forEach(e => {
-      const o = document.createElement('option');
-      o.value = e.name;
-      o.textContent = `${e.name} (${e.set_count})`;
-      sel.appendChild(o);
-    });
-  } catch(e) {}
-}
-
-async function loadSets(era) {
-  try {
-    const url = era ? `/api/sets?era=${encodeURIComponent(era)}` : '/api/sets';
-    const d = await get(url);
-    const sel = document.getElementById('set-filter');
-    const prev = sel.value;
-    sel.innerHTML = '<option value="">All Sets</option>';
-    (d.sets || []).forEach(s => {
-      const o = document.createElement('option');
-      o.value = o.textContent = s;
-      sel.appendChild(o);
-    });
-    // Restore previous selection if it still exists in the new list
-    if (prev && [...sel.options].some(o => o.value === prev)) {
-      sel.value = prev;
-    }
-  } catch(e) {}
-}
-
-async function onEraChange() {
-  const era = document.getElementById('era-filter').value;
-  // Reset set filter when era changes, then reload sets scoped to era
-  document.getElementById('set-filter').value = '';
-  await loadSets(era);
-  doSearch();
+    _eraCache = d.eras || [];
+  } catch(e) { _eraCache = []; }
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -673,17 +947,16 @@ function debounce() {
 
 async function doSearch(page) {
   _page = page || 1;
-  const q   = document.getElementById('q').value.trim();
-  const set = document.getElementById('set-filter').value;
-  const era = document.getElementById('era-filter')?.value || '';
-  const sort = document.getElementById('sort-select')?.value || 'name_asc';
-  const minP = document.getElementById('price-min')?.value || '';
-  const maxP = document.getElementById('price-max')?.value || '';
-  const conds = [..._activeConditions].join(',');
-  const params = new URLSearchParams({ q, set, page: _page, sort, condition: conds });
-  if (era) params.set('era', era);
-  if (minP) params.set('min_price', minP);
-  if (maxP) params.set('max_price', maxP);
+  const q = document.getElementById('q').value.trim();
+  const conds = [..._filters.conds].join(',');
+  const params = new URLSearchParams({
+    q, page: _page, sort: _filters.sort, condition: conds,
+  });
+  if (_filters.game) params.set('game', _filters.game);
+  if (_filters.set)  params.set('set', _filters.set);
+  if (_filters.era)  params.set('era', _filters.era);
+  if (_filters.minP) params.set('min_price', _filters.minP);
+  if (_filters.maxP) params.set('max_price', _filters.maxP);
 
   const grid = document.getElementById('grid');
   grid.innerHTML = '<div class="spinner"></div>';

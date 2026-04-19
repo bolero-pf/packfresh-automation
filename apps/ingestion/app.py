@@ -1370,14 +1370,14 @@ def _push_raw_item(item: dict) -> dict:
                     state, cost_basis, current_price, last_price_update,
                     bin_id, image_url,
                     is_graded, grade_company, grade_value,
-                    variant, language,
+                    variant, language, game,
                     intake_session_id, stored_at
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s,
                     'STORED', %s, %s, CURRENT_TIMESTAMP,
                     %s, %s,
                     FALSE, NULL, NULL,
-                    %s, 'EN',
+                    %s, 'EN', %s,
                     %s, CURRENT_TIMESTAMP
                 )
             """, (
@@ -1385,7 +1385,7 @@ def _push_raw_item(item: dict) -> dict:
                 ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
                 cost, float(item.get("market_price", cost)),
                 bin_id, image_url,
-                item.get("variant"),
+                item.get("variant"), card_type,
                 item.get("session_id"),
             ))
 

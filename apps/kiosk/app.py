@@ -191,6 +191,7 @@ def browse():
     min_price  = request.args.get("min_price", type=float)
     max_price  = request.args.get("max_price", type=float)
     era        = (request.args.get("era") or "").strip()
+    game       = (request.args.get("game") or "").strip().lower()
     sort       = (request.args.get("sort") or "name_asc").strip()
     page       = max(1, int(request.args.get("page", 1)))
     offset     = (page - 1) * 24
@@ -198,6 +199,13 @@ def browse():
     filters = ["state = 'STORED'", "current_hold_id IS NULL"]
     params  = []
 
+    if game:
+        # Game filter is canonical (pokemon / onepiece / magic / lorcana /
+        # riftbound). Era only applies inside Pokemon — combining game=onepiece
+        # with era=Vintage would zero everything, so callers should clear era
+        # when switching game.
+        filters.append("game = %s")
+        params.append(game)
     if q:
         filters.append("(card_name ILIKE %s OR set_name ILIKE %s OR card_number ILIKE %s)")
         params += [f"%{q}%", f"%{q}%", f"%{q}%"]
@@ -381,31 +389,70 @@ def browse():
 @app.route("/api/sets")
 def list_sets():
     era = (request.args.get("era") or "").strip()
-    rows = db.query("""
-        SELECT DISTINCT set_name FROM raw_cards
-        WHERE state = 'STORED' AND set_name IS NOT NULL
-        ORDER BY set_name ASC LIMIT 200
-    """)
-    sets = [r["set_name"] for r in rows]
+    game = (request.args.get("game") or "").strip().lower()
+    where = ["state = 'STORED'", "set_name IS NOT NULL", "current_hold_id IS NULL"]
+    params: list = []
+    if game:
+        where.append("game = %s")
+        params.append(game)
+    rows = db.query(f"""
+        SELECT set_name, COUNT(*) AS qty FROM raw_cards
+        WHERE {' AND '.join(where)}
+        GROUP BY set_name
+        ORDER BY set_name ASC
+        LIMIT 500
+    """, tuple(params))
+    sets = [{"name": r["set_name"], "qty": r["qty"]} for r in rows]
     if era:
-        sets = [s for s in sets if _classify_era(s) == era]
-    return jsonify({"sets": sets})
+        sets = [s for s in sets if _classify_era(s["name"]) == era]
+    # Backward-compat: also return a flat name list for older callers
+    return jsonify({"sets": sets, "names": [s["name"] for s in sets]})
 
 
 @app.route("/api/eras")
 def list_eras():
-    """Return available eras based on sets currently in stock."""
-    rows = db.query("""
+    """Return available eras based on Pokemon sets currently in stock.
+    Era classification is Pokemon-only; non-Pokemon games skip this filter."""
+    where = ["state = 'STORED'", "set_name IS NOT NULL", "current_hold_id IS NULL",
+             "game = 'pokemon'"]
+    rows = db.query(f"""
         SELECT DISTINCT set_name FROM raw_cards
-        WHERE state = 'STORED' AND set_name IS NOT NULL
+        WHERE {' AND '.join(where)}
     """)
     era_counts = {}
     for r in rows:
         era = _classify_era(r["set_name"])
         era_counts[era] = era_counts.get(era, 0) + 1
-    # Return eras sorted by name, with set counts
     eras = [{"name": k, "set_count": v} for k, v in sorted(era_counts.items())]
     return jsonify({"eras": eras})
+
+
+@app.route("/api/games")
+def list_games():
+    """Return distinct games (IPs) currently in stock with available counts.
+    Powers the kiosk's top-level game filter."""
+    rows = db.query("""
+        SELECT COALESCE(game, 'pokemon') AS game, COUNT(*) AS qty
+        FROM raw_cards
+        WHERE state = 'STORED' AND current_hold_id IS NULL
+        GROUP BY COALESCE(game, 'pokemon')
+        ORDER BY qty DESC
+    """)
+    label_map = {
+        "pokemon":   "Pokémon",
+        "onepiece":  "One Piece",
+        "magic":     "Magic",
+        "lorcana":   "Lorcana",
+        "riftbound": "Riftbound",
+        "yugioh":    "Yu-Gi-Oh!",
+        "other":     "Other",
+    }
+    games = [{
+        "code":  r["game"],
+        "label": label_map.get(r["game"], r["game"].title()),
+        "qty":   r["qty"],
+    } for r in rows]
+    return jsonify({"games": games})
 
 
 @app.route("/api/card")
