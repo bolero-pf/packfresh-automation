@@ -1090,9 +1090,26 @@ def _enrich_one_item(key, item):
         graded_prices = None
 
         if tcg_id:
-            # TCG-mapped path: PPT for image + graded comps via TCG → Scrydex resolve
+            # TCG-mapped path. The `ppt` wrapper only returns imageCdnUrl* for
+            # games where Scrydex is primary (MTG, One Piece, Lorcana) — for
+            # Pokemon it routes through the actual PPT API which doesn't return
+            # images at all, so Pokemon thumbnails were silently blank. Read
+            # directly from the Scrydex cache (populated by sync for every
+            # synced game incl. Pokemon) and fall back to the live client only
+            # if the cache hasn't caught this card yet.
             card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
-            if card_data:
+            cache_row = db.query_one("""
+                SELECT image_small, image_medium, image_large
+                FROM scrydex_price_cache
+                WHERE tcgplayer_id = %s
+                ORDER BY fetched_at DESC
+                LIMIT 1
+            """, (int(tcg_id),))
+            if cache_row:
+                image_url = (cache_row.get("image_large")
+                             or cache_row.get("image_medium")
+                             or cache_row.get("image_small"))
+            if not image_url and card_data:
                 image_url = (card_data.get("imageCdnUrl800")
                              or card_data.get("imageCdnUrl")
                              or card_data.get("imageCdnUrl400"))
