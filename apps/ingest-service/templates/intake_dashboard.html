@@ -1741,13 +1741,13 @@
                                                 btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
                                             }
                                             btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button><div class="action-dropdown">';
-                                            if (!i.is_graded && s.session_type !== 'raw') {
+                                            if (!i.is_graded && i.product_type !== 'raw') {
                                                 btns += status !== 'damaged' ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">&#9888; Damaged${i.quantity > 1 ? ' (partial?)' : ''}</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
                                             }
                                             btns += `<button onclick="markItemStatus('${i.id}','${sessionId}','rejected')">🗑 Remove</button><hr>`;
                                             btns += `<button onclick="overridePrice('${i.id}','${sessionId}',${i.market_price||0})">Override Price</button>`;
                                             btns += `<button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">Change Qty (${i.quantity})</button>`;
-                                            if (s.session_type === 'raw') {
+                                            if (i.product_type === 'raw') {
                                                 if (i.is_graded) {
                                                     btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},true,'${i.grade_company||''}','${i.grade_value||''}')">&#x1F3C5; Change Grade (${i.grade_company} ${i.grade_value})</button>`;
                                                 } else {
@@ -1755,8 +1755,8 @@
                                                     btns += `<button onclick="editCondition('${i.id}','${sessionId}','${i.condition || i.listing_condition || 'NM'}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},'${(i.product_name||'').replace(/'/g,"\\'")}${i.set_name ? ' · '+i.set_name.replace(/'/g,"\\'") : ''}')">${condBadgeHtml(i.condition || i.listing_condition || 'NM')} Change Condition</button>`;
                                                 }
                                             }
-                                            
-                                            if (s.session_type !== 'raw' && i.tcgplayer_id) {
+
+                                            if (i.product_type !== 'raw' && i.tcgplayer_id) {
                                                 btns += `<hr><button onclick="openIntakeBreakdown(${i.tcgplayer_id}, '${(i.product_name||'').replace(/'/g,'').replace(/"/g,'')}', ${i.market_price||0})">📦 Breakdown Recipe</button>`;
                                                 if (bd && bdVal > 0) {
                                                     btns += `<button onclick="applyBreakdownPriceWithQty('${i.id}','${sessionId}',${bdVal},'${(bd.variant_names||'breakdown').replace(/'/g,'')}',${i.quantity})">💲 Price as Breakdown ($${bdVal.toFixed(2)})</button>`;
