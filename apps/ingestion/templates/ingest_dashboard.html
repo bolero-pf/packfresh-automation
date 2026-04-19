@@ -872,8 +872,15 @@ async function _enrichSessionImages(sessionId) {
             for (const it of (data.items || [])) byId[it.id] = it;
             for (const item of _currentSessionData.items) {
                 const src = byId[item.id];
-                if (src && src._enriched && !item.image_url && src.image_url) {
+                if (!src) continue;
+                // Images are joined from scrydex_price_cache server-side and
+                // come back on the first call, so merge them immediately —
+                // don't wait on the worker-driven _enriched flag.
+                if (src.image_url && !item.image_url) {
                     item.image_url = src.image_url;
+                    changed = true;
+                }
+                if (src._enriched && !item.graded_prices) {
                     item.graded_prices = src.graded_prices || {};
                     item.grading_economics = src.grading_economics || {};
                     changed = true;
@@ -883,12 +890,13 @@ async function _enrichSessionImages(sessionId) {
             return true;
         };
 
-        if (ej.status === 'complete' && !ej.job_id) {
-            await mergeOnce();
-            return;
-        }
+        // First merge is synchronous — images come back on this call, not in
+        // a polling loop. That's the main latency win on session open.
+        await mergeOnce();
+
+        if (ej.status === 'complete' && !ej.job_id) return;
         if (!ej.job_id) return;
-        // Poll until complete — uses the same /route-enriched endpoint as the route slip.
+        // Poll until graded-comps worker finishes — doesn't block the image display.
         while (_currentSessionData && _currentSessionData.session.id === sessionId) {
             await new Promise(r => setTimeout(r, 1500));
             await mergeOnce();
@@ -2008,12 +2016,20 @@ async function _rsMergeEnrichment() {
         for (const item of (data.items || [])) {
             enrichedMap[item.id] = item;
         }
-        // Merge enrichment data into existing items
+        // Merge enrichment data into existing items. Image URLs now come back
+        // on the very first response (joined from scrydex_price_cache server-side)
+        // even when the background graded-comps worker hasn't finished, so we
+        // merge them eagerly. _enrichLoading only flips off once the full result
+        // with graded data is in.
         let changed = false;
         for (const item of _rsItems) {
             const enriched = enrichedMap[item.id];
-            if (enriched && item._enrichLoading && enriched._enriched) {
+            if (!enriched) continue;
+            if (enriched.image_url && !item.image_url) {
                 item.image_url = enriched.image_url;
+                changed = true;
+            }
+            if (item._enrichLoading && enriched._enriched) {
                 item.graded_prices = enriched.graded_prices || {};
                 item.grading_economics = enriched.grading_economics || {};
                 item._enrichLoading = false;

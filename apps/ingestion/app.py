@@ -2550,19 +2550,35 @@ def route_summary(session_id):
     # `variance`; ingest's Unexpected-Item flow and graded fields use `variant`.
     # Return both so the frontend can fall back and show foil/printing chips
     # regardless of which code path added the row.
+    # Image pulled from scrydex_price_cache via LATERAL join — lights up
+    # thumbnails on first render without waiting for enrichment.
     items = db.query("""
-        SELECT id, product_name, set_name, condition, market_price, quantity,
-               routing_destination, routing_reviewed_at, tcgplayer_id, scrydex_id,
-               card_number, offer_price, variant, variance
-        FROM intake_items
-        WHERE session_id = %s
-          AND product_type = 'raw'
-          AND is_graded IS NOT TRUE
-          AND item_status IN ('good', 'damaged')
-          AND is_mapped = TRUE
-          AND pushed_at IS NULL
-        ORDER BY created_at ASC
+        SELECT i.id, i.product_name, i.set_name, i.condition, i.market_price, i.quantity,
+               i.routing_destination, i.routing_reviewed_at, i.tcgplayer_id, i.scrydex_id,
+               i.card_number, i.offer_price, i.variant, i.variance,
+               img.image_large, img.image_medium, img.image_small
+        FROM intake_items i
+        LEFT JOIN LATERAL (
+            SELECT image_large, image_medium, image_small
+            FROM scrydex_price_cache
+            WHERE (i.tcgplayer_id IS NOT NULL AND tcgplayer_id = i.tcgplayer_id)
+               OR (i.scrydex_id IS NOT NULL AND scrydex_id = i.scrydex_id)
+            ORDER BY fetched_at DESC
+            LIMIT 1
+        ) img ON true
+        WHERE i.session_id = %s
+          AND i.product_type = 'raw'
+          AND i.is_graded IS NOT TRUE
+          AND i.item_status IN ('good', 'damaged')
+          AND i.is_mapped = TRUE
+          AND i.pushed_at IS NULL
+        ORDER BY i.created_at ASC
     """, (session_id,))
+
+    # Collapse image_* columns into a single image_url field the frontend expects.
+    for it in items:
+        it["image_url"] = it.pop("image_large", None) or it.pop("image_medium", None) or it.pop("image_small", None)
+        it.pop("image_large", None); it.pop("image_medium", None); it.pop("image_small", None)
 
     by_dest = {"storage": 0, "display": 0, "grade": 0, "bulk": 0}
     for item in items:
@@ -2699,19 +2715,34 @@ def enrich_one(session_id):
 
 @app.route("/api/ingest/session/<session_id>/route-enriched")
 def route_enriched(session_id):
-    """Get routing data enriched with PPT graded prices, images, and grading economics."""
+    """Get routing data enriched with PPT graded prices, images, and grading economics.
+
+    Images come straight from the Scrydex cache via LATERAL join so they're
+    available on the very first call — no waiting for the background worker.
+    The worker only fills in graded_prices + grading_economics (which require
+    live eBay comps and are genuinely slow).
+    """
     items = db.query("""
-        SELECT id, product_name, set_name, condition, market_price, quantity,
-               routing_destination, tcgplayer_id, card_number, offer_price,
-               variant, variance, rarity, language
-        FROM intake_items
-        WHERE session_id = %s
-          AND product_type = 'raw'
-          AND is_graded IS NOT TRUE
-          AND item_status IN ('good', 'damaged')
-          AND is_mapped = TRUE
-          AND pushed_at IS NULL
-        ORDER BY created_at ASC
+        SELECT i.id, i.product_name, i.set_name, i.condition, i.market_price, i.quantity,
+               i.routing_destination, i.tcgplayer_id, i.card_number, i.offer_price,
+               i.variant, i.variance, i.rarity, i.language, i.scrydex_id,
+               img.image_large, img.image_medium, img.image_small
+        FROM intake_items i
+        LEFT JOIN LATERAL (
+            SELECT image_large, image_medium, image_small
+            FROM scrydex_price_cache
+            WHERE (i.tcgplayer_id IS NOT NULL AND tcgplayer_id = i.tcgplayer_id)
+               OR (i.scrydex_id IS NOT NULL AND scrydex_id = i.scrydex_id)
+            ORDER BY fetched_at DESC
+            LIMIT 1
+        ) img ON true
+        WHERE i.session_id = %s
+          AND i.product_type = 'raw'
+          AND i.is_graded IS NOT TRUE
+          AND i.item_status IN ('good', 'damaged')
+          AND i.is_mapped = TRUE
+          AND i.pushed_at IS NULL
+        ORDER BY i.created_at ASC
     """, (session_id,))
 
     cache = _enrich_cache.get(session_id, {})
@@ -2725,22 +2756,26 @@ def route_enriched(session_id):
         variant = d.get("variant") or ""
         base = str(tcg_id) if tcg_id else (sid or "")
         key = f"{base}|{variant}" if variant else base
+        # Image is already joined from scrydex_price_cache — no worker wait.
+        joined_image = (d.pop("image_large", None)
+                        or d.pop("image_medium", None)
+                        or d.pop("image_small", None))
         cached = cache.get(key)  # None if not yet fetched
         if cached is not None and "error" not in cached:
             d["_enriched"] = True
-            d["image_url"] = cached.get("image_url")
+            d["image_url"] = cached.get("image_url") or joined_image
             d["graded_prices"] = cached.get("graded_prices", {})
             d["grading_economics"] = cached.get("grading_economics", {})
         elif cached is not None:
-            # PPT errored for this card — still mark as enriched (done, just no data)
+            # Worker errored for this card — still mark as enriched (done, just no graded data)
             d["_enriched"] = True
-            d["image_url"] = None
+            d["image_url"] = joined_image
             d["graded_prices"] = {}
             d["grading_economics"] = {}
         else:
-            # Not yet fetched by background worker
+            # Not yet fetched by background worker — but the image is already here.
             d["_enriched"] = False
-            d["image_url"] = None
+            d["image_url"] = joined_image
             d["graded_prices"] = {}
             d["grading_economics"] = {}
         enriched.append(d)
