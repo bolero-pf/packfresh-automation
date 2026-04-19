@@ -221,7 +221,11 @@ def run_slab_updater():
     """Nightly slab price sync — runs after Scrydex sync so cache is fresh."""
     try:
         from slab_updater import run as slab_run
-        results = slab_run(apply=True, csv_path="slab_updates.csv")
+        # apply=False — slabs never auto-adjust. Every over/underpriced
+        # finding lands in the dashboard at /dashboard/slab-runs as a flag
+        # for human review. Charm pricing is applied at click-to-apply time
+        # (handled in the dashboard, not here).
+        results = slab_run(apply=False, csv_path="slab_updates.csv")
         adjusted = sum(1 for r in results if r.get("action") == "adjusted")
         flagged  = sum(1 for r in results if "flag" in (r.get("action") or ""))
         print(f"✅ Slab updater done: {len(results)} slabs, {adjusted} adjusted, {flagged} flagged")
