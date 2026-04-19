@@ -355,13 +355,16 @@ def browse():
 
         # variant_key is the bucket value used for filtering & cart matching
         # (NULL/normal/holofoil all fold to ''). variant_label is the badge
-        # shown on the tile — only present when the card has more than one
-        # printing in Scrydex, so customers know to verify which they're
-        # picking.
-        variant_raw = r.get("variant_raw") or ""
+        # shown on the tile only when we actually know which printing this
+        # is. Showing "(unspecified)" when raw_cards.variant is empty (most
+        # MTG cards historically) tells the customer nothing, and showed up
+        # as purple chrome on every card — worse than no badge.
+        variant_raw = (r.get("variant_raw") or "").strip()
         variant_key = r.get("variant_key") or ""
-        if n_variants > 1:
-            variant_label = variant_raw or "(unspecified)"
+        # Only badge when we know the printing AND it's not the default bucket
+        # (normal/holofoil fold to '' and don't need a badge).
+        if variant_raw and variant_raw not in ("normal", "holofoil"):
+            variant_label = variant_raw
         else:
             variant_label = None
 
