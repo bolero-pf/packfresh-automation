@@ -995,7 +995,6 @@ def relink_item(item_id: str, data: dict) -> dict:
 
     product_name = data.get("product_name", item.get("product_name"))
     tcgplayer_id = data.get("tcgplayer_id")
-    market_price = Decimal(str(data.get("market_price", item.get("market_price", 0))))
     set_name = data.get("set_name", item.get("set_name"))
     scrydex_id = data.get("scrydex_id")
     # variant distinguishes printings that share a TCG product (1st Ed vs
@@ -1004,6 +1003,72 @@ def relink_item(item_id: str, data: dict) -> dict:
 
     if not tcgplayer_id and not scrydex_id:
         raise ValueError("Relink requires tcgplayer_id or scrydex_id")
+
+    # Always re-derive market_price from the Scrydex cache using the item's
+    # actual condition (and grade if graded). The client passes a price taken
+    # from the search listing, which can be for any condition/variant — saving
+    # it blindly caused "crazy price" writebacks (e.g. a PSA-10 value landing
+    # on a raw LP card). Fall back to the client value if the cache has
+    # nothing for this combo.
+    condition = item.get("condition") or "NM"
+    is_graded = bool(item.get("is_graded"))
+    grade_company = item.get("grade_company")
+    grade_value = item.get("grade_value")
+    derived = None
+    try:
+        if is_graded and grade_company and grade_value:
+            cache_row = query_one("""
+                SELECT market_price
+                FROM scrydex_price_cache
+                WHERE ((%s IS NOT NULL AND tcgplayer_id = %s)
+                       OR (%s IS NOT NULL AND scrydex_id = %s))
+                  AND price_type = 'graded'
+                  AND grade_company = %s
+                  AND grade_value = %s
+                  AND COALESCE(variant, '') = COALESCE(%s, '')
+                ORDER BY fetched_at DESC
+                LIMIT 1
+            """, (tcgplayer_id, tcgplayer_id, scrydex_id, scrydex_id,
+                  grade_company, grade_value, variant))
+            if cache_row and cache_row.get("market_price") is not None:
+                derived = Decimal(str(cache_row["market_price"]))
+        else:
+            cache_row = query_one("""
+                SELECT market_price
+                FROM scrydex_price_cache
+                WHERE ((%s IS NOT NULL AND tcgplayer_id = %s)
+                       OR (%s IS NOT NULL AND scrydex_id = %s))
+                  AND price_type = 'raw'
+                  AND condition = %s
+                  AND COALESCE(variant, '') = COALESCE(%s, '')
+                ORDER BY fetched_at DESC
+                LIMIT 1
+            """, (tcgplayer_id, tcgplayer_id, scrydex_id, scrydex_id,
+                  condition, variant))
+            if cache_row and cache_row.get("market_price") is not None:
+                derived = Decimal(str(cache_row["market_price"]))
+            # Condition fallback chain — if NM/LP/MP/HP missing, try NM.
+            if derived is None and condition != "NM":
+                nm_row = query_one("""
+                    SELECT market_price
+                    FROM scrydex_price_cache
+                    WHERE ((%s IS NOT NULL AND tcgplayer_id = %s)
+                           OR (%s IS NOT NULL AND scrydex_id = %s))
+                      AND price_type = 'raw'
+                      AND condition = 'NM'
+                      AND COALESCE(variant, '') = COALESCE(%s, '')
+                    ORDER BY fetched_at DESC
+                    LIMIT 1
+                """, (tcgplayer_id, tcgplayer_id, scrydex_id, scrydex_id, variant))
+                if nm_row and nm_row.get("market_price") is not None:
+                    derived = Decimal(str(nm_row["market_price"]))
+    except Exception as e:
+        logger.warning(f"Cache-backed price derivation failed for relink on {item_id}: {e}")
+
+    if derived is not None:
+        market_price = derived
+    else:
+        market_price = Decimal(str(data.get("market_price", item.get("market_price", 0))))
 
     # Recalculate offer proportionally — keep the same COGS ratio
     old_market = Decimal(str(item.get("market_price", 0)))

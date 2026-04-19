@@ -414,7 +414,12 @@ def search_cards_for_relink():
     if not query and not set_nm and not tcg_id:
         return jsonify({"error": "query, set_name, or tcgplayer_id required"}), 400
 
-    where = ["product_type = 'card'"]
+    # Filter hard to raw NM only — scrydex_price_cache holds one row per
+    # (scrydex_id, variant, condition, price_type, grade). Without this the
+    # DISTINCT ON below could land on a graded row (price_type='graded' sorts
+    # before 'raw' alphabetically) and return a PSA-10 price as the card's
+    # "market_price", which then got written onto items via the relink flow.
+    where = ["product_type = 'card'", "price_type = 'raw'", "condition = 'NM'"]
     params = []
 
     if tcg_id:
@@ -454,7 +459,7 @@ def search_cards_for_relink():
                card_number, rarity, variant, image_small, image_medium, market_price
         FROM scrydex_price_cache
         WHERE {' AND '.join(where)}
-        ORDER BY scrydex_id, variant, price_type ASC, condition ASC
+        ORDER BY scrydex_id, variant
         LIMIT %s
     """
     params.append(limit)
