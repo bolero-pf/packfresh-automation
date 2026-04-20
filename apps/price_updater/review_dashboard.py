@@ -27,11 +27,21 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 from inventory.routes import bp as inventory_bp
 app.register_blueprint(inventory_bp)
 
-from auth import register_auth_hooks
+from auth import register_auth_hooks, get_current_user
 register_auth_hooks(app, roles=["owner"],
                     public_paths=('/health', '/ping', '/favicon.ico', '/reddit-feed.csv'),
                     public_prefixes=('/static', '/pf-static'),
-                    skip_jwt_prefixes=('/price_update',))
+                    skip_jwt_prefixes=('/price_update', '/run-raw-updater',
+                                       '/run-scrydex-sync', '/run-slab-updater'))
+
+
+def _authorized_trigger():
+    """Allow authenticated owners OR valid X-Flow-Secret (Shopify Flow cron)."""
+    secret = request.headers.get("X-Flow-Secret", "")
+    flow_secret = os.environ.get("VIP_FLOW_SECRET", "")
+    if get_current_user():
+        return True
+    return bool(flow_secret) and secret == flow_secret
 
 REDDIT_FEED_USER = os.environ["REDDIT_USER_NAME"]
 REDDIT_FEED_PASS = os.environ["REDDIT_USER_PASS"]
@@ -47,6 +57,9 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "price-updater-fallback-key"
 @app.post("/price_update")
 def price_update():
     """Trigger nightly price sync (dailyrunner.py) in background."""
+    if not _authorized_trigger():
+        from flask import jsonify
+        return jsonify({"error": "Unauthorized"}), 401
     try:
         SCRIPT = ROOT / "dailyrunner.py"
         LOG = ROOT / "run_output.log"
@@ -279,6 +292,8 @@ def runlog():
 def trigger_scrydex_sync():
     """Manually trigger Scrydex cache sync."""
     from flask import jsonify
+    if not _authorized_trigger():
+        return jsonify({"error": "Unauthorized"}), 401
     threading.Thread(target=run_scrydex_sync, daemon=True).start()
     if request.method == "GET":
         return redirect("/dashboard/runlog")
@@ -291,6 +306,8 @@ def trigger_slab_updater():
     mode — it auto-adjusts overpriced in-stock slabs and persists every row
     (adjusted, flagged, skipped) to slab_price_runs for review."""
     from flask import jsonify
+    if not _authorized_trigger():
+        return jsonify({"error": "Unauthorized"}), 401
     threading.Thread(target=run_slab_updater, daemon=True).start()
     if request.method == "GET":
         return redirect("/dashboard/slab-runs")
@@ -437,6 +454,8 @@ def trigger_raw_updater():
     deltas land in /dashboard/raw-runs as flags for human review.
     Designed to be hit nightly from a Shopify Flow."""
     from flask import jsonify
+    if not _authorized_trigger():
+        return jsonify({"error": "Unauthorized"}), 401
     def _go():
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
         sys.path.insert(0, str(Path(__file__).resolve().parent))
