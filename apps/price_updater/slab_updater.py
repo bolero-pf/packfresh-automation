@@ -363,7 +363,7 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
 
         results.append(entry)
         _record_run_row(db_module, run_id, started_at, entry)
-        logger.info(f"  {title}: ${current:.2f} vs median ${median:.2f} ({comps_n} comps) → {entry['action']}")
+        logger.info(f"  {title}: ${current:.2f} vs market ${market:.2f} ({comps_n} comps) → {entry['action']}")
 
     logger.info(f"\nDone. run_id={run_id}  {len(slabs)} slabs, {updated} adjusted, {flagged} flagged")
 
