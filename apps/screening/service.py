@@ -716,7 +716,8 @@ def screen_every_order(order_gid: str) -> dict:
     active_verification_tier = 0     # highest tier among sibling orders (1 or 2)
     non_cancelled_totals = []       # all orders that aren't cancelled (for cumulative)
     max_previous_total = 0.0        # for spend spike
-    unfulfilled_siblings = []       # for combine
+    unfulfilled_siblings = []       # for combine (same shipping address)
+    verification_siblings = []      # for cumulative verification (any address — identity concern)
 
     for edge in all_edges:
         node = edge["node"]
@@ -743,17 +744,21 @@ def screen_every_order(order_gid: str) -> dict:
                 else:
                     active_verification_tier = max(active_verification_tier, 1)
 
-        # Unfulfilled/on-hold siblings for combine — must match shipping address
+        # Unfulfilled/on-hold siblings — base filter (not self, not cancelled, not pre-order)
         if nid != order_gid and status in ("UNFULFILLED", "ON_HOLD") and financial not in CANCELLED_STATUSES:
             if not (tags & COMBINE_SKIP_TAGS):
+                sibling = {
+                    "order_gid": nid,
+                    "order_name": node.get("name", "?"),
+                    "total": total,
+                    "created_at": node.get("createdAt"),
+                }
+                # All siblings count for cumulative verification (identity, not shipping)
+                verification_siblings.append(sibling)
+                # Combine shipping requires matching address
                 sib_ship_addr = _normalize_address(node.get("shippingAddress"))
                 if current_ship_addr and sib_ship_addr and current_ship_addr == sib_ship_addr:
-                    unfulfilled_siblings.append({
-                        "order_gid": nid,
-                        "order_name": node.get("name", "?"),
-                        "total": total,
-                        "created_at": node.get("createdAt"),
-                    })
+                    unfulfilled_siblings.append(sibling)
 
     cumulative_total = sum(non_cancelled_totals)
 
@@ -771,8 +776,10 @@ def screen_every_order(order_gid: str) -> dict:
                                     is_first_order=(order_count <= 1))
 
                 # Also hold sibling orders so they appear grouped in verification
+                # Use verification_siblings (not unfulfilled_siblings) — verification is a
+                # customer-identity concern, so address mismatches shouldn't exclude siblings.
                 tag = "high-value-tier2" if tier >= 2 else "high-value-tier1"
-                for s in unfulfilled_siblings:
+                for s in verification_siblings:
                     try:
                         shopify_gql(ORDER_TAGS_ADD, {"id": s["order_gid"], "tags": [tag, "hold-for-review"]})
                     except Exception as e:
