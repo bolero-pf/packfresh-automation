@@ -418,6 +418,61 @@ def slab_run_apply_row(row_id):
     })
 
 
+@app.route('/dashboard/slab-backfill')
+def slab_backfill_page():
+    """Page that runs the slab tcg_id backfill in dry-run mode and shows
+    proposed matches. User clicks "Run backfill" to actually write metafields,
+    or picks individual rows for the ambiguous set."""
+    return render_template("slab_backfill.html")
+
+
+@app.route('/api/slab-backfill/preview', methods=["GET"])
+def api_slab_backfill_preview():
+    """Run the matcher in dry-run mode (no Shopify writes) and return JSON."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import db as shared_db
+    shared_db.init_pool()
+    from slab_backfill import run as backfill_run
+    out = backfill_run(apply=False, db_module=shared_db)
+    return jsonify(out)
+
+
+@app.route('/api/slab-backfill/apply', methods=["POST"])
+def api_slab_backfill_apply():
+    """Apply ALL confident + collapsed-variant matches (writes Shopify
+    metafields). Ambiguous + no_match rows are returned for visibility but
+    not written."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import db as shared_db
+    shared_db.init_pool()
+    from slab_backfill import run as backfill_run
+    out = backfill_run(apply=True, db_module=shared_db)
+    return jsonify(out)
+
+
+@app.route('/api/slab-backfill/manual', methods=["POST"])
+def api_slab_backfill_manual():
+    """Write a manually-picked tcgplayer_id metafield for one ambiguous slab.
+    Body: {product_gid, tcgplayer_id}."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from slab_backfill import _set_tcg_metafield
+    body = request.get_json(silent=True) or {}
+    pgid = body.get("product_gid")
+    tcg  = body.get("tcgplayer_id")
+    if not pgid or not tcg:
+        return jsonify({"ok": False, "error": "product_gid + tcgplayer_id required"}), 400
+    try:
+        _set_tcg_metafield(pgid, int(tcg))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return jsonify({"ok": True, "tcgplayer_id": int(tcg)})
+
+
 @app.route('/dashboard/slab-runs/row/<int:row_id>/dismiss', methods=["POST"])
 def slab_run_dismiss_row(row_id):
     """Mark a flagged row as dismissed without changing Shopify."""

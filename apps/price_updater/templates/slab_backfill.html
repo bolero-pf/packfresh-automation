@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Slab TCG ID Backfill</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
+<style>
+    body { padding: 24px; max-width: 1500px; margin: 0 auto; }
+    h1 { font-size: 1.4rem; margin-bottom: 4px; }
+    .sub { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 18px; }
+    .section { margin: 28px 0; }
+    .section-h { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+    .section-h h2 { font-size: 1.05rem; font-weight: 600; }
+    .section-h .count { color: var(--text-dim); font-family: var(--font-mono); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: var(--surface); color: var(--text-dim); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 600; }
+    .pill-ok    { background: rgba(34,197,94,0.18); color: #4ade80; }
+    .pill-warn  { background: rgba(245,158,11,0.18); color: #fbbf24; }
+    .pill-info  { background: rgba(79,125,249,0.18); color: #7aadff; }
+    .pill-err   { background: rgba(239,68,68,0.18); color: #f87171; }
+    .pill-skip  { background: var(--surface-2); color: var(--text-dim); }
+    .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+    .actions { display: flex; gap: 10px; margin-bottom: 12px; }
+    .ambig-pick { display: flex; flex-direction: column; gap: 4px; }
+    .ambig-pick button {
+        text-align: left; min-height: 36px; padding: 6px 10px; border-radius: 6px;
+        background: var(--surface-2); border: 1.5px solid var(--border); color: var(--text);
+        font-family: var(--font-sans); font-size: 0.8rem; cursor: pointer;
+    }
+    .ambig-pick button:hover { border-color: var(--accent); }
+    .ambig-pick button.applied { background: rgba(34,197,94,0.18); border-color: #4ade80; color: #4ade80; }
+</style>
+</head>
+<body>
+    <h1>Slab TCG ID Backfill</h1>
+    <div class="sub">
+        Auto-match in-stock slabs with no <code>tcg_id</code> metafield against
+        scrydex_price_cache. Confident + same-card-variant matches get the
+        metafield written automatically. Ambiguous picks are exposed below for a
+        single click to resolve.
+    </div>
+
+    <div class="actions">
+        <button class="btn btn-secondary" id="btn-preview">Preview (dry run)</button>
+        <button class="btn btn-primary" id="btn-apply">Run backfill (writes metafields)</button>
+    </div>
+
+    <div id="status" style="color:var(--text-dim); font-size:0.9rem;"></div>
+    <div id="results"></div>
+
+<script>
+async function preview() {
+    document.getElementById('status').textContent = 'Scanning Shopify slab inventory…';
+    const r = await fetch('/api/slab-backfill/preview');
+    const d = await r.json();
+    document.getElementById('status').textContent = '';
+    render(d, /*applied=*/false);
+}
+
+async function apply() {
+    if (!confirm('This will write tcgplayer_id metafields to Shopify for every confident + collapsed-variant slab. OK?')) return;
+    document.getElementById('status').textContent = 'Writing metafields…';
+    const r = await fetch('/api/slab-backfill/apply', {method: 'POST'});
+    const d = await r.json();
+    document.getElementById('status').textContent =
+        `Done. ${d.applied} written, ${d.errors.length} errors. ` +
+        `Refresh after to verify.`;
+    render(d, /*applied=*/true);
+}
+
+async function pickManual(btn, productGid, tcg) {
+    btn.disabled = true;
+    const r = await fetch('/api/slab-backfill/manual', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({product_gid: productGid, tcgplayer_id: tcg}),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+        alert('Failed: ' + (d.error || 'unknown'));
+        btn.disabled = false;
+        return;
+    }
+    btn.classList.add('applied');
+    btn.textContent = '✓ Applied  ' + btn.textContent;
+    // Disable other picks for the same row
+    btn.parentElement.querySelectorAll('button').forEach(b => { if (b !== btn) b.disabled = true; });
+}
+
+function esc(s) { return String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]); }
+function num(n) { return n == null ? '—' : Number(n).toFixed(2); }
+
+function render(d, applied) {
+    const out = document.getElementById('results');
+    const blocks = [];
+    blocks.push(`<div style="margin-bottom:16px; padding:10px 14px; background:var(--surface-2); border-radius:8px;">
+        <strong>Scanned:</strong> ${d.scanned} in-stock slabs missing tcg_id ·
+        <strong>Confident:</strong> ${d.confident.length} ·
+        <strong>Collapsed-variant:</strong> ${d.collapsed.length} ·
+        <strong>Ambiguous:</strong> ${d.ambiguous.length} ·
+        <strong>No match:</strong> ${d.no_match.length}
+        ${applied ? `· <strong>Applied:</strong> ${d.applied} · <strong>Errors:</strong> ${d.errors.length}` : ''}
+    </div>`);
+
+    if (d.ambiguous.length) {
+        blocks.push(`<div class="section"><div class="section-h">
+            <h2>Ambiguous — click the right candidate</h2>
+            <span class="count">${d.ambiguous.length}</span>
+        </div><table><thead><tr>
+            <th>Title</th><th>Pick the matching candidate</th>
+        </tr></thead><tbody>` +
+        d.ambiguous.map(r => `<tr>
+            <td>${esc(r.title)}<div style="color:var(--text-dim);font-size:0.74rem;margin-top:2px;">SKU ${esc(r.sku)} · qty ${r.qty}</div></td>
+            <td><div class="ambig-pick">${
+                r.candidates.map(c => `<button onclick="pickManual(this, '${esc(r.product_gid)}', ${c.tcgplayer_id})">
+                    [${num(c.score)}] tcg=${c.tcgplayer_id} · ${esc(c.expansion_name)} · ${esc(c.variant)} · ${esc(c.product_name)}
+                </button>`).join('')
+            }</div></td>
+        </tr>`).join('') + '</tbody></table></div>');
+    }
+
+    if (d.confident.length || d.collapsed.length) {
+        const merged = [
+            ...d.confident.map(r => ({...r, kind: 'confident'})),
+            ...d.collapsed.map(r => ({...r, kind: 'collapsed'})),
+        ];
+        blocks.push(`<div class="section"><div class="section-h">
+            <h2>Auto-matched</h2>
+            <span class="count">${merged.length}</span>
+        </div><table><thead><tr>
+            <th>Kind</th><th>Title</th><th>Set</th><th>Variant</th><th class="num">Score</th><th class="num">TCG</th><th>Status</th>
+        </tr></thead><tbody>` +
+        merged.map(r => `<tr>
+            <td><span class="pill ${r.kind === 'confident' ? 'pill-ok' : 'pill-info'}">${r.kind}</span></td>
+            <td>${esc(r.title)}</td>
+            <td>${esc(r.expansion_name)}</td>
+            <td>${esc(r.variant)}</td>
+            <td class="num">${num(r.score)}</td>
+            <td class="num">${r.tcgplayer_id}</td>
+            <td>${r.status === 'applied' ? '<span class="pill pill-ok">✓ written</span>'
+                : r.status === 'error' ? '<span class="pill pill-err">' + esc(r.error||'error') + '</span>'
+                : '<span class="pill pill-skip">proposed</span>'}</td>
+        </tr>`).join('') + '</tbody></table></div>');
+    }
+
+    if (d.no_match.length) {
+        blocks.push(`<div class="section"><div class="section-h">
+            <h2>No match — needs Scrydex catalog or manual entry</h2>
+            <span class="count">${d.no_match.length}</span>
+        </div><table><thead><tr>
+            <th>Title</th><th>Reason</th>
+        </tr></thead><tbody>` +
+        d.no_match.map(r => `<tr>
+            <td>${esc(r.title)}</td>
+            <td style="color:var(--text-dim);font-size:0.78rem;">${esc(r.reason)}</td>
+        </tr>`).join('') + '</tbody></table></div>');
+    }
+
+    out.innerHTML = blocks.join('');
+}
+
+document.getElementById('btn-preview').onclick = preview;
+document.getElementById('btn-apply').onclick   = apply;
+preview();  // auto-load on first render
+</script>
+</body>
+</html>
