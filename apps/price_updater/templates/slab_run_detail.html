@@ -31,6 +31,19 @@
         .reason { color: var(--text-dim); font-size: 0.78rem; }
         a.title-link { color: var(--text); }
         a.title-link:hover { color: var(--accent); }
+        .row-actions { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+        .row-btn {
+            min-height: 32px; padding: 0 12px; border-radius: 6px;
+            font-size: 0.78rem; font-weight: 600; cursor: pointer;
+            border: 1.5px solid transparent;
+        }
+        .row-btn-apply { background: var(--accent); color: #0a0a0f; border-color: var(--accent); }
+        .row-btn-apply:hover { filter: brightness(1.1); }
+        .row-btn-dismiss { background: transparent; color: var(--text-dim); border-color: var(--border); }
+        .row-btn-dismiss:hover { border-color: var(--text-dim); color: var(--text); }
+        .row-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+        .applied-tag { color: #4ade80; font-size: 0.78rem; font-weight: 600; }
+        .dismissed-tag { color: var(--text-dim); font-size: 0.78rem; font-style: italic; }
     </style>
 </head>
 <body>
@@ -63,13 +76,14 @@
                 <th class="num">Delta %</th>
                 <th class="num">7d trend</th>
                 <th>Reason</th>
+                <th>Action</th>
             </tr>
         </thead>
         <tbody>
         {% for r in rows %}
             {% set act = r.action %}
             {% set pill_cls = {'adjusted':'p-adj','flag_overpriced':'p-over','flag_underpriced':'p-under','skip':'p-skip','error':'p-err','ok':'p-ok'}.get(act, 'p-skip') %}
-            <tr>
+            <tr data-row-id="{{ r.id }}">
                 <td><span class="pill {{ pill_cls }}">{{ act }}</span></td>
                 <td>
                     {% if r.product_gid and store_domain %}
@@ -101,10 +115,56 @@
                 </td>
                 <td class="num">{% if r.trend_7d is not none %}{{ '%+.1f' % r.trend_7d }}%{% else %}—{% endif %}</td>
                 <td class="reason">{{ r.reason or '' }}</td>
+                <td>
+                    {% if r.apply_status == 'applied' %}
+                        <span class="applied-tag">✓ Applied{% if r.applied_price %} · ${{ '%.2f' % r.applied_price }}{% endif %}</span>
+                    {% elif r.apply_status == 'dismissed' %}
+                        <span class="dismissed-tag">dismissed</span>
+                    {% elif act in ('flag_overpriced', 'flag_underpriced') and r.suggested_price and r.product_gid %}
+                        <div class="row-actions">
+                            <button class="row-btn row-btn-apply" data-act="apply">Apply ${{ '%.2f' % r.suggested_price }}</button>
+                            <button class="row-btn row-btn-dismiss" data-act="dismiss">Dismiss</button>
+                        </div>
+                    {% else %}—{% endif %}
+                </td>
             </tr>
         {% endfor %}
         </tbody>
     </table>
     {% endif %}
+
+    <script>
+    document.addEventListener('click', async function(e) {
+        const btn = e.target.closest('.row-btn');
+        if (!btn) return;
+        const tr = btn.closest('tr');
+        const rowId = tr && tr.dataset.rowId;
+        if (!rowId) return;
+        const verb = btn.dataset.act === 'apply' ? 'apply' : 'dismiss';
+        // Disable both buttons in this row to prevent double-fire
+        tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
+        try {
+            const r = await fetch(`/dashboard/slab-runs/row/${rowId}/${verb}`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+            });
+            const d = await r.json();
+            const cell = tr.querySelector('td:last-child');
+            if (!r.ok) {
+                cell.innerHTML = `<span style="color:#f87171; font-size:0.78rem;">${d.error || 'failed'}</span>`;
+                tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+                return;
+            }
+            if (verb === 'apply') {
+                cell.innerHTML = `<span class="applied-tag">✓ Applied · $${(d.applied_price||0).toFixed(2)}</span>`;
+            } else {
+                cell.innerHTML = '<span class="dismissed-tag">dismissed</span>';
+            }
+        } catch(err) {
+            tr.querySelector('td:last-child').innerHTML =
+                `<span style="color:#f87171; font-size:0.78rem;">${err.message}</span>`;
+            tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+        }
+    });
+    </script>
 </body>
 </html>

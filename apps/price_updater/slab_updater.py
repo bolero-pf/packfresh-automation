@@ -16,11 +16,45 @@ import os
 import re
 import sys
 import csv
+import math
 import uuid
 import logging
 import argparse
 from datetime import datetime, timezone
 from decimal import Decimal
+
+
+def charm_ceil(price) -> float:
+    """Round price UP to a 'charm' price ending in .99.
+
+    Tier scheme (Sean's preference, always-ceil so we never undercut median):
+      <  $100  -> nearest $5  ending in .99 ($24.99, $29.99, ...)
+      <  $500  -> nearest $10 ending in .99 ($109.99, $119.99, ...)
+      >= $500  -> nearest $25 ending in .99 ($524.99, $549.99, ...)
+
+    Always rounds UP — for a $100 median we suggest $109.99 not $99.99.
+    Sean's positioning: trusted seller, accepts MSRP drops + discounts,
+    so we stay >= market median.
+    """
+    try:
+        p = float(price or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if p <= 0:
+        return 0.0
+    if p < 100:
+        increment = 5
+    elif p < 500:
+        increment = 10
+    else:
+        increment = 25
+    next_step = math.ceil(p / increment) * increment
+    candidate = next_step - 0.01
+    if candidate < p:
+        # Boundary case (e.g. p=$100 with $10 increment lands exactly on $99.99
+        # which is below p — bump to the next tier price up).
+        candidate = next_step + increment - 0.01
+    return round(candidate, 2)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -282,22 +316,26 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
             "delta_pct":   round(delta_pct, 1),
         }
 
-        # Decision logic
-        # Floor: never go below cost basis
+        # Decision logic — Sean's preference: never auto-adjust DOWN, and
+        # all suggestions get charm-ceil rounding (next .99 price >= median,
+        # tiered by price band). Cost basis is the floor.
         safe_price = max(median, cost) if cost else median
+        charm_price = charm_ceil(safe_price)
 
         if abs(delta_pct) <= 10:
             entry["action"] = "ok"
             entry["reason"] = f"within 10% (delta {delta_pct:+.1f}%)"
         elif delta_pct > 10:
-            # Overpriced — auto-adjust for in-stock items
+            # Overpriced
             if apply and slab["qty"] > 0:
-                new_price = round(safe_price, 2)
+                # Legacy CLI path (apply=True) — keep working for manual runs.
+                # Cron path now passes apply=False so this won't fire nightly.
+                new_price = charm_price
                 try:
                     update_variant_price(slab["product_gid"], slab["variant_gid"], new_price)
                     entry["action"] = "adjusted"
                     entry["new_price"] = new_price
-                    entry["reason"] = f"overpriced {delta_pct:+.1f}%, adjusted to median ${new_price}"
+                    entry["reason"] = f"overpriced {delta_pct:+.1f}%, adjusted to charm-ceil ${new_price}"
                     updated += 1
                 except Exception as e:
                     entry["action"] = "error"
@@ -305,13 +343,13 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
             else:
                 entry["action"] = "flag_overpriced"
                 entry["reason"] = f"overpriced {delta_pct:+.1f}% — review"
-                entry["suggested_price"] = round(safe_price, 2)
+                entry["suggested_price"] = charm_price
                 flagged += 1
         else:
-            # Underpriced — always flag for review (don't auto-raise)
+            # Underpriced — flag for review (never auto-raise)
             entry["action"] = "flag_underpriced"
             entry["reason"] = f"underpriced {delta_pct:+.1f}% vs median — review"
-            entry["suggested_price"] = round(safe_price, 2)
+            entry["suggested_price"] = charm_price
             flagged += 1
 
         results.append(entry)

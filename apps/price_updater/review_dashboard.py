@@ -331,10 +331,11 @@ def slab_run_detail(run_id):
     action_filter = (request.args.get("action") or "").strip()
     params = [run_id]
     sql = """
-        SELECT title, sku, qty, company, grade, tcgplayer_id,
+        SELECT id, title, sku, qty, company, grade, tcgplayer_id,
                old_price, new_price, suggested_price, median, low_comp, high_comp,
                comps_count, delta_pct, trend_7d, action, reason,
-               product_gid, variant_gid, started_at
+               product_gid, variant_gid, started_at,
+               apply_status, applied_at, applied_price
         FROM slab_price_runs
         WHERE run_id = %s
     """
@@ -370,6 +371,71 @@ def slab_run_detail(run_id):
         action_filter=action_filter,
         store_domain=os.environ.get("SHOPIFY_STORE", ""),
     )
+
+
+@app.route('/dashboard/slab-runs/row/<int:row_id>/apply', methods=["POST"])
+def slab_run_apply_row(row_id):
+    """Apply a single flagged row's suggested price to Shopify and mark
+    the row as applied. Body may include {price: 12.99} to override the
+    suggested charm-rounded price."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import db as shared_db
+    shared_db.init_pool()
+    from slab_updater import update_variant_price
+
+    row = shared_db.query_one("""
+        SELECT id, product_gid, variant_gid, suggested_price, old_price,
+               apply_status, title
+        FROM slab_price_runs WHERE id = %s
+    """, (row_id,))
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+    if row["apply_status"] in ("applied", "dismissed"):
+        return jsonify({"ok": False, "error": f"row already {row['apply_status']}"}), 409
+    if not row["product_gid"] or not row["variant_gid"]:
+        return jsonify({"ok": False, "error": "row has no Shopify identifiers"}), 400
+
+    body = request.get_json(silent=True) or {}
+    override = body.get("price")
+    target_price = float(override) if override is not None else float(row["suggested_price"] or 0)
+    if target_price <= 0:
+        return jsonify({"ok": False, "error": "no valid price to apply"}), 400
+
+    try:
+        update_variant_price(row["product_gid"], row["variant_gid"], target_price)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Shopify update failed: {e}"}), 502
+
+    shared_db.execute("""
+        UPDATE slab_price_runs
+        SET apply_status = 'applied', applied_at = NOW(), applied_price = %s
+        WHERE id = %s
+    """, (target_price, row_id))
+    return jsonify({
+        "ok": True, "applied_price": target_price, "title": row["title"],
+    })
+
+
+@app.route('/dashboard/slab-runs/row/<int:row_id>/dismiss', methods=["POST"])
+def slab_run_dismiss_row(row_id):
+    """Mark a flagged row as dismissed without changing Shopify."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+
+    row = shared_db.query_one(
+        "SELECT id, apply_status FROM slab_price_runs WHERE id = %s", (row_id,))
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+    if row["apply_status"] in ("applied", "dismissed"):
+        return jsonify({"ok": False, "error": f"row already {row['apply_status']}"}), 409
+    shared_db.execute(
+        "UPDATE slab_price_runs SET apply_status='dismissed', applied_at=NOW() WHERE id = %s",
+        (row_id,))
+    return jsonify({"ok": True})
 
 
 @app.route('/run-dailyrunner', methods=["GET", "POST"])
