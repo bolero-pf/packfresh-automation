@@ -1,28 +1,31 @@
 """
-Backfill missing tcgplayer_id on sealed search results from the store cache.
+Backfill missing tcgplayer_id on sealed search results.
 
 Scrydex's /sealed endpoint does not include marketplaces / product_id (cards
 do, sealed doesn't), so sealed hits from the Scrydex cache land with
-tcgPlayerId=None. The store has been selling sealed forever — if we carry
-the product in Shopify, the TCG ID is already on the product metafield and
-mirrored into inventory_product_cache. Look it up there by title and backfill.
+tcgPlayerId=None. We try, in order:
 
-Match is two-phase:
-  1. Strict: every name-token (>=3 chars) must hit as a word-boundary match.
-  2. Relaxed (only if strict found nothing): drop the tokens that come from
-     the expansion name, since Shopify often names sealed titles without the
-     set prefix — e.g. Scrydex's "Shrouded Fable Kingdra ex Special
-     Illustration Collection" vs. store's "Kingdra ex Special Illustration
-     Collection".
+  1. Store cache (inventory_product_cache) — strict token match against
+     every product title (>=3 chars, word boundary).
+  2. Store cache, relaxed — drop tokens that come from the expansion name,
+     since Shopify often names sealed titles without the set prefix
+     (Scrydex: "Shrouded Fable Kingdra ex Special Illustration Collection"
+     vs. store: "Kingdra ex Special Illustration Collection").
+  3. PPT search by name — for products that are on TCGplayer but never
+     listed in our Shopify store (Costco / Sam's Club bundles, generic
+     retailer-exclusive packs). PPT carries the tcgplayer_id for any
+     product TCGplayer tracks. Exact case-insensitive name match required.
 
-Disambiguate by shortest title and skip on equal-length ties with differing
-TCG IDs. On a hit, persist the scrydex_id -> tcgplayer_id link via the
-price provider's primary client so future lookups resolve natively.
+Disambiguate store-cache hits by shortest title; skip on equal-length ties
+with differing TCG IDs. On any successful match, persist the
+scrydex_id -> tcgplayer_id link via the price provider's primary client so
+future lookups resolve natively without re-running this enrichment.
 
 Shared across the intake, ingest, and inventory services — all three query
 the same inventory_product_cache table.
 """
 import logging
+import os
 import re
 from typing import Optional
 
@@ -54,36 +57,26 @@ def enrich_sealed_with_shopify_tcg(results: list, db_module, price_provider=None
             logger.debug(f"Sealed-TCG enrichment query failed: {e}")
             return []
 
-    for r in results:
-        if r.get("tcgplayer_id") or r.get("tcgPlayerId") or r.get("tcgplayerId"):
-            continue
-        name = (r.get("name") or r.get("product_name") or "").strip()
-        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", name) if len(t) >= 3]
-        if not tokens:
-            continue
+    # Lazy-init a PPT client for the fallback phase — only built if any
+    # result actually misses the store cache.
+    _ppt_client = [None]  # boxed so the closure can mutate it
+    _ppt_init_attempted = [False]
 
-        rows = _lookup(tokens)
-        if not rows:
-            set_name = (r.get("setName") or r.get("set_name") or "")
-            set_tokens = {t.lower() for t in re.findall(r"[A-Za-z0-9]+", set_name) if len(t) >= 3}
-            relaxed = [t for t in tokens if t not in set_tokens]
-            if relaxed and len(relaxed) < len(tokens) and len(relaxed) >= 2:
-                rows = _lookup(relaxed)
-        if not rows:
-            continue
-
-        top: Optional[dict] = rows[0]
-        for other in rows[1:]:
-            if len(other["title"]) == len(top["title"]) and other["tcgplayer_id"] != top["tcgplayer_id"]:
-                top = None
-                break
-        if not top:
-            continue
+    def _get_ppt():
+        if _ppt_init_attempted[0]:
+            return _ppt_client[0]
+        _ppt_init_attempted[0] = True
+        ppt_key = os.getenv("PPT_API_KEY", "")
+        if not ppt_key:
+            return None
         try:
-            tcg_id = int(top["tcgplayer_id"])
-        except (TypeError, ValueError):
-            continue
+            from ppt_client import PPTClient
+            _ppt_client[0] = PPTClient(ppt_key)
+        except Exception as e:
+            logger.debug(f"PPT client init for sealed-TCG fallback failed: {e}")
+        return _ppt_client[0]
 
+    def _persist(r: dict, tcg_id: int) -> None:
         r["tcgplayer_id"] = tcg_id
         r["tcgPlayerId"] = tcg_id
         scrydex_id = r.get("scrydexId") or r.get("scrydex_id")
@@ -92,3 +85,61 @@ def enrich_sealed_with_shopify_tcg(results: list, db_module, price_provider=None
                 saver(scrydex_id, tcg_id)
             except Exception:
                 pass
+
+    for r in results:
+        if r.get("tcgplayer_id") or r.get("tcgPlayerId") or r.get("tcgplayerId"):
+            continue
+        name = (r.get("name") or r.get("product_name") or "").strip()
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", name) if len(t) >= 3]
+        if not tokens or not name:
+            continue
+
+        # Phase 1: strict store-cache match.
+        rows = _lookup(tokens)
+        # Phase 2: relaxed store-cache match (drop set-name tokens). Requires
+        # at least 3 surviving tokens so generic remainders like
+        # ["costco", "bundle"] can't grab the wrong store SKU — they'll fall
+        # through to the PPT phase instead.
+        if not rows:
+            set_name = (r.get("setName") or r.get("set_name") or "")
+            set_tokens = {t.lower() for t in re.findall(r"[A-Za-z0-9]+", set_name) if len(t) >= 3}
+            relaxed = [t for t in tokens if t not in set_tokens]
+            if relaxed and len(relaxed) < len(tokens) and len(relaxed) >= 3:
+                rows = _lookup(relaxed)
+
+        if rows:
+            top: Optional[dict] = rows[0]
+            for other in rows[1:]:
+                if len(other["title"]) == len(top["title"]) and other["tcgplayer_id"] != top["tcgplayer_id"]:
+                    top = None
+                    break
+            if top:
+                try:
+                    _persist(r, int(top["tcgplayer_id"]))
+                    continue
+                except (TypeError, ValueError):
+                    pass
+
+        # Phase 3: PPT fallback — covers products on TCGplayer but never
+        # listed in our store (Costco / Sam's Club bundles).
+        ppt = _get_ppt()
+        if not ppt:
+            continue
+        try:
+            ppt_results = ppt.search_sealed_products(name, limit=3) or []
+        except Exception as e:
+            logger.debug(f"PPT sealed search fallback failed for {name!r}: {e}")
+            continue
+        norm_name = name.lower()
+        for pr in ppt_results:
+            pr_name = (pr.get("name") or "").strip().lower()
+            if pr_name != norm_name:
+                continue
+            pr_tcg = pr.get("tcgPlayerId") or pr.get("tcgplayer_id") or pr.get("id")
+            if not pr_tcg:
+                continue
+            try:
+                _persist(r, int(pr_tcg))
+            except (TypeError, ValueError):
+                pass
+            break
