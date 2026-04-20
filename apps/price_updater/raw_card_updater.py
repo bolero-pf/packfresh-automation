@@ -104,9 +104,11 @@ def _record(db_module, run_id: str, started_at: datetime, entry: dict):
 
 
 # Look up market_price for a (tcgplayer_id, variant, condition) tuple.
-# Variant is case-insensitive — raw_cards stores Title Case ('Normal','Foil')
-# while the cache stores lowercase ('normal','foil'). NULL/'normal'/'holofoil'
-# all fold to the default bucket so single-printing cards still match.
+# Variant normalization: strip non-alphanumerics and lowercase so the three
+# conventions in raw_cards.variant ("Alt Art", "altArt", "alt art") all
+# collapse to the same key ("altart") and match the camelCase convention
+# Scrydex uses in its cache. NULL/"normal"/"holofoil" all fold to the
+# default bucket so single-printing cards still match.
 _CACHE_LOOKUP_SQL = """
     SELECT market_price, low_price, scrydex_id, variant
     FROM scrydex_price_cache
@@ -114,10 +116,16 @@ _CACHE_LOOKUP_SQL = """
       AND product_type = 'card'
       AND price_type   = 'raw'
       AND UPPER(condition) = UPPER(%s)
-      AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
-               THEN '' ELSE LOWER(variant) END
-        = CASE WHEN %s IS NULL OR LOWER(%s) IN ('normal','holofoil')
-               THEN '' ELSE LOWER(%s) END
+      AND CASE WHEN variant IS NULL
+                 OR regexp_replace(LOWER(variant), '[^a-z0-9]', '', 'g') IN ('normal','holofoil')
+               THEN ''
+               ELSE regexp_replace(LOWER(variant), '[^a-z0-9]', '', 'g')
+          END
+        = CASE WHEN %s IS NULL
+                 OR regexp_replace(LOWER(%s), '[^a-z0-9]', '', 'g') IN ('normal','holofoil')
+               THEN ''
+               ELSE regexp_replace(LOWER(%s), '[^a-z0-9]', '', 'g')
+          END
       AND market_price IS NOT NULL
     ORDER BY fetched_at DESC NULLS LAST
     LIMIT 1
