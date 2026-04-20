@@ -1961,11 +1961,15 @@
 
     // ═══════════════════════════════ MAPPING ═══════════════════════════════
     let currentMapCollectrPrice = 0;
+    // Set when the user picks a Scrydex-only search result (sealed JP, etc.).
+    // Cleared when the modal opens or when a TCG ID is pasted/picked.
+    let currentMapScrydexId = null;
 
     function openMapping(itemId, productName, setName, productType, collectrPrice) {
         currentMapItemId = itemId;
         currentMapProductType = productType || 'sealed';
         currentMapCollectrPrice = collectrPrice || 0;
+        currentMapScrydexId = null;
         document.getElementById('map-product-name').textContent = productName;
         document.getElementById('map-set-name').textContent = setName || 'N/A';
         document.getElementById('map-collectr-price').textContent = `$${currentMapCollectrPrice.toFixed(2)}`;
@@ -2137,23 +2141,31 @@
 
     async function confirmLink(price) {
         const tcgId = document.getElementById('map-tcgplayer-id').value;
+        const body = {
+            item_id: currentMapItemId,
+            verify_price: false,
+            override_price: price,
+            session_id: currentSessionId,
+        };
+        // tcg ID takes precedence; scrydex_id is the fallback for Scrydex-only
+        // products (sealed JP, etc.) where no TCG mapping exists.
+        if (tcgId) {
+            body.tcgplayer_id = parseInt(tcgId);
+        } else if (currentMapScrydexId) {
+            body.scrydex_id = currentMapScrydexId;
+        } else {
+            alert('Enter a TCGPlayer ID or pick a Scrydex result'); return;
+        }
         try {
             const r = await fetch('/api/intake/map-item', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    item_id: currentMapItemId,
-                    tcgplayer_id: parseInt(tcgId),
-                    verify_price: false,
-                    override_price: price,
-                    session_id: currentSessionId,
-                }),
+                body: JSON.stringify(body),
             });
             const d = await r.json();
             if (!r.ok) { alert(d.error); return; }
             closeModal('mapping-modal');
             if (d.siblings_linked > 0) {
-                // Brief toast so user knows duplicates were auto-linked
                 const toast = document.createElement('div');
                 toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--green);color:#000;padding:10px 18px;border-radius:8px;font-size:0.85rem;font-weight:600;z-index:9999;';
                 toast.textContent = `✓ Also linked ${d.siblings_linked} duplicate${d.siblings_linked>1?'s':''} automatically`;
@@ -2162,6 +2174,31 @@
             }
             viewSession(currentSessionId, true);
         } catch(err) { alert(err.message); }
+    }
+
+    function pickScrydexResult(scrydexId, name, setName) {
+        // Scrydex-only result selected. scrydex_id is the canonical linker —
+        // tcgplayer_id stays NULL on this item until the price_updater (or a
+        // future Scrydex sync that picks up a TCG mapping) populates it.
+        // Skip the PPT comparison panel and link directly with the Collectr
+        // price as a sensible default (user can still type a TCG ID above to
+        // override and use the compare flow).
+        currentMapScrydexId = scrydexId;
+        const panel = document.getElementById('price-comparison');
+        panel.style.display = 'block';
+        panel.innerHTML = `
+            <div style="background:rgba(192,132,252,0.08); border:1px solid var(--accent2,#c084fc); border-radius:8px; padding:14px; margin-top:12px;">
+                <div style="font-size:0.85rem; font-weight:600; margin-bottom:6px;">
+                    Scrydex match: <span style="color:var(--accent2,#c084fc);">${name}</span>
+                </div>
+                <div style="font-size:0.78rem; color:var(--text-dim); margin-bottom:10px;">
+                    ${setName} · SDX <code>${scrydexId}</code> · No TCG mapping in Scrydex's data — linking by scrydex_id instead. price_updater can crawl TCGplayer once a TCG ID is added later.
+                </div>
+                <button class="btn btn-primary" style="width:100%;"
+                        onclick="confirmLink(${currentMapCollectrPrice})">
+                    Link with Collectr Price ($${currentMapCollectrPrice.toFixed(2)})
+                </button>
+            </div>`;
     }
 
     async function fuzzySearch() {
@@ -2219,10 +2256,22 @@
                 // supports tcgplayer_id linking today, so these aren't directly
                 // selectable here yet.
                 if (!tcgId) {
-                    return `<div class="search-result" style="opacity:0.55; cursor:not-allowed; border-style:dashed;" title="No TCGplayer mapping available — relink in the ingest service to link by Scrydex ID">
+                    if (!sid) {
+                        return `<div class="search-result" style="opacity:0.55; cursor:not-allowed; border-style:dashed;">
+                            <h4>${name}</h4>
+                            <p>${pSetName} ${price ? '• $' + price : ''}</p>
+                            <small style="color:var(--text-dim);">No identifier available — not linkable</small>
+                        </div>`;
+                    }
+                    // Scrydex-only (sealed JP, JP cards, anything Scrydex hasn't
+                    // mapped to TCG). scrydex_id is the canonical linker; the
+                    // price_updater only needs tcgplayer_id later for the live
+                    // crawl, so this still links cleanly.
+                    return `<div class="search-result" style="border:1px solid var(--accent2,#c084fc); background:rgba(192,132,252,0.04); cursor:pointer;"
+                             onclick="pickScrydexResult('${sid}', '${name.replace(/'/g, "\\'")}', '${pSetName.replace(/'/g, "\\'")}')">
                         <h4>${name}</h4>
                         <p>${pSetName} ${price ? '• $' + price : ''}</p>
-                        <small style="color:var(--text-dim);">${sid ? 'Scrydex-only · SDX ' + sid : 'No TCGplayer ID'} — not linkable here</small>
+                        <small style="color:var(--accent2,#c084fc);">Scrydex ID: ${sid} — click to link (no TCG mapping needed)</small>
                     </div>`;
                 }
                 return `<div class="search-result" onclick="document.getElementById('map-tcgplayer-id').value='${tcgId}'">

@@ -1002,18 +1002,29 @@ def update_item_price():
 
 @app.route("/api/intake/map-item", methods=["POST"])
 def map_item():
-    """Map an intake item to a tcgplayer_id, with optional price override."""
+    """Map an intake item to a Scrydex product (preferred) and/or a TCGplayer ID,
+    with optional price override.
+
+    scrydex_id is the canonical linker; tcgplayer_id is a property used by
+    the price_updater to crawl TCGplayer for current low. At least one is
+    required. Sealed products and many JP cards have no TCGplayer mapping
+    in Scrydex's data — those link by scrydex_id alone.
+    """
     data = request.json or {}
     item_id = data.get("item_id")
     tcgplayer_id = data.get("tcgplayer_id")
+    scrydex_id = (data.get("scrydex_id") or "").strip() or None
 
-    if not item_id or not tcgplayer_id:
-        return jsonify({"error": "item_id and tcgplayer_id required"}), 400
+    if not item_id or (not tcgplayer_id and not scrydex_id):
+        return jsonify({"error": "item_id plus tcgplayer_id or scrydex_id required"}), 400
 
-    try:
-        tcgplayer_id = int(tcgplayer_id)
-    except (ValueError, TypeError):
-        return jsonify({"error": "tcgplayer_id must be an integer"}), 400
+    if tcgplayer_id:
+        try:
+            tcgplayer_id = int(tcgplayer_id)
+        except (ValueError, TypeError):
+            return jsonify({"error": "tcgplayer_id must be an integer"}), 400
+    else:
+        tcgplayer_id = None
 
     # Price override from the comparison UI (user picked Collectr, PPT, or custom)
     new_price = None
@@ -1024,8 +1035,9 @@ def map_item():
         except Exception:
             pass
 
-    # Legacy: verify_price still works if called directly
-    if new_price is None and data.get("verify_price") and ppt:
+    # Legacy: verify_price still works if called directly. Only meaningful
+    # when a TCGplayer ID is supplied (PPT lookups are TCG-keyed).
+    if new_price is None and data.get("verify_price") and ppt and tcgplayer_id:
         item = db.query_one("SELECT product_type FROM intake_items WHERE id = %s", (item_id,))
         if item:
             try:
@@ -1045,6 +1057,7 @@ def map_item():
             card_number=data.get("card_number"),
             rarity=data.get("rarity"),
             variance=data.get("variance"),
+            scrydex_id=scrydex_id,
         )
 
         # Auto-link other unmapped items in the same session with the same product_name

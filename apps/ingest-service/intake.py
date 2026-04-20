@@ -298,20 +298,30 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
 # MAPPING ITEMS TO TCGPLAYER IDS
 # ==========================================
 
-def map_item(item_id: str, tcgplayer_id: int,
+def map_item(item_id: str, tcgplayer_id: int = None,
              new_market_price: Decimal = None,
              product_name: str = None, set_name: str = None,
              card_number: str = None, rarity: str = None,
-             variance: str = None) -> dict:
+             variance: str = None,
+             scrydex_id: str = None) -> dict:
     """
-    Map an intake item to a tcgplayer_id.
-    Optionally update the market price (e.g., from PPT verification).
-    Optionally update product_name, set_name, card_number, rarity, variance.
-    Recalculates offer_price based on session's offer_percentage.
+    Map an intake item to a Scrydex product (preferred) and/or a TCGplayer ID.
 
-    Returns updated item row.
+    scrydex_id is the canonical primary identifier — sealed products and
+    most JP cards have no TCGplayer marketplace mapping in Scrydex's data,
+    but they all have a scrydex_id. Pass it directly to link those.
+
+    tcgplayer_id is a property used by the price_updater to crawl TCGplayer
+    for current low prices; it isn't required for linking. When both are
+    supplied, the scrydex↔tcg map is also persisted so future searches
+    show this product as having a TCG mapping.
+
+    Optionally updates market price + identification fields. Recalculates
+    offer_price based on session's offer_percentage. Returns updated row.
     """
-    # Get item and session
+    if not tcgplayer_id and not scrydex_id:
+        raise ValueError("map_item requires tcgplayer_id or scrydex_id")
+
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
         raise ValueError(f"Item {item_id} not found")
@@ -323,33 +333,34 @@ def map_item(item_id: str, tcgplayer_id: int,
     if not session:
         raise ValueError(f"Session for item {item_id} not found")
 
-    # Use new price if provided, otherwise keep existing
     market_price = new_market_price if new_market_price is not None else item["market_price"]
     offer_pct = session["offer_percentage"]
     offer_price, unit_cost_basis = calc_offer_price(
         market_price, item["quantity"], offer_pct,
         product_type=item.get("product_type", "raw"))
 
-    # Build dynamic SET clause
     name = product_name if product_name else item["product_name"]
     sname = set_name if set_name else item.get("set_name")
     cnum = card_number if card_number else item.get("card_number")
     rar = rarity if rarity else item.get("rarity")
     var = variance if variance else item.get("variance") or ""
 
-    # Update item
     updated = execute_returning("""
         UPDATE intake_items
-        SET tcgplayer_id = %s, market_price = %s, offer_price = %s,
+        SET tcgplayer_id = COALESCE(%s, tcgplayer_id),
+            scrydex_id   = COALESCE(%s, scrydex_id),
+            market_price = %s, offer_price = %s,
             unit_cost_basis = %s, is_mapped = TRUE,
             product_name = %s, set_name = %s, card_number = %s, rarity = %s,
             variance = %s
         WHERE id = %s
         RETURNING *
-    """, (tcgplayer_id, market_price, offer_price, unit_cost_basis,
+    """, (tcgplayer_id, scrydex_id, market_price, offer_price, unit_cost_basis,
           name, sname, cnum, rar, var, item_id))
 
-    # Cache the mapping for future imports
+    # Cache the mapping for future imports. tcgplayer_id may be None for
+    # Scrydex-only links (sealed JP, older JP cards) — save_mapping accepts
+    # NULL and the row still helps next time the same Collectr name appears.
     save_mapping(
         name, tcgplayer_id, item["product_type"],
         sname, cnum, variance=var
