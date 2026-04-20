@@ -418,6 +418,160 @@ def slab_run_apply_row(row_id):
     })
 
 
+@app.route('/run-raw-updater', methods=["GET", "POST"])
+def trigger_raw_updater():
+    """Manually trigger the raw card price updater.
+    Always runs in apply_auto=True mode — small drifts auto-apply, larger
+    deltas land in /dashboard/raw-runs as flags for human review.
+    Designed to be hit nightly from a Shopify Flow."""
+    from flask import jsonify
+    def _go():
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            from raw_card_updater import run as raw_run
+            import db as shared_db
+            shared_db.init_pool()
+            raw_run(apply_auto=True, db_module=shared_db)
+        except Exception as e:
+            print(f"❌ raw_card_updater failed: {e}")
+            import traceback; traceback.print_exc()
+    threading.Thread(target=_go, daemon=True).start()
+    if request.method == "GET":
+        return redirect("/dashboard/raw-runs")
+    return jsonify({"ok": True, "started": True}), 200
+
+
+@app.route('/dashboard/raw-runs')
+def raw_runs_list():
+    """List recent raw_card_updater runs with summary counts per action."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+    rows = shared_db.query("""
+        SELECT run_id,
+               MIN(started_at)                                      AS started_at,
+               COUNT(*)                                             AS total,
+               COUNT(*) FILTER (WHERE action = 'auto_applied')      AS auto_applied,
+               COUNT(*) FILTER (WHERE action = 'flag_overpriced')   AS flag_over,
+               COUNT(*) FILTER (WHERE action = 'flag_underpriced')  AS flag_under,
+               COUNT(*) FILTER (WHERE action = 'ok')                AS ok,
+               COUNT(*) FILTER (WHERE action = 'skip')              AS skipped,
+               COUNT(*) FILTER (WHERE action = 'error')             AS errors
+        FROM raw_card_price_runs
+        GROUP BY run_id
+        ORDER BY started_at DESC
+        LIMIT 60
+    """)
+    return render_template("raw_runs.html", runs=rows)
+
+
+@app.route('/dashboard/raw-runs/<run_id>')
+def raw_run_detail(run_id):
+    """Per-row view of one raw card pricing run, with apply/dismiss buttons."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+
+    action_filter = (request.args.get("action") or "").strip()
+    params = [run_id]
+    sql = """
+        SELECT id, raw_card_id, barcode, card_name, set_name, card_number,
+               condition, variant, cost_basis,
+               old_price, new_price, suggested_price,
+               cache_market, cache_low, delta_pct,
+               action, reason, apply_status, applied_at, applied_price,
+               started_at
+        FROM raw_card_price_runs
+        WHERE run_id = %s
+    """
+    if action_filter:
+        sql += " AND action = %s"
+        params.append(action_filter)
+    sql += """
+        ORDER BY
+            CASE action
+                WHEN 'error'            THEN 0
+                WHEN 'flag_underpriced' THEN 1
+                WHEN 'flag_overpriced'  THEN 2
+                WHEN 'auto_applied'     THEN 3
+                WHEN 'ok'               THEN 4
+                WHEN 'skip'             THEN 5
+                ELSE 6
+            END,
+            ABS(COALESCE(delta_pct, 0)) DESC NULLS LAST,
+            card_name
+    """
+    rows = shared_db.query(sql, tuple(params))
+    summary = shared_db.query_one("""
+        SELECT MIN(started_at) AS started_at, COUNT(*) AS total
+        FROM raw_card_price_runs WHERE run_id = %s
+    """, (run_id,))
+    return render_template(
+        "raw_run_detail.html",
+        run_id=run_id, rows=rows, summary=summary, action_filter=action_filter,
+    )
+
+
+@app.route('/dashboard/raw-runs/row/<int:row_id>/apply', methods=["POST"])
+def raw_run_apply_row(row_id):
+    """Apply a single flagged row — write the suggested price (or override)
+    to raw_cards.current_price. Body may include {price: 12.99}."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+
+    row = shared_db.query_one("""
+        SELECT id, raw_card_id, suggested_price, apply_status, card_name
+        FROM raw_card_price_runs WHERE id = %s
+    """, (row_id,))
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+    if row["apply_status"] in ("applied", "dismissed"):
+        return jsonify({"ok": False, "error": f"row already {row['apply_status']}"}), 409
+    if not row["raw_card_id"]:
+        return jsonify({"ok": False, "error": "row has no raw_card_id"}), 400
+
+    body = request.get_json(silent=True) or {}
+    override = body.get("price")
+    target = float(override) if override is not None else float(row["suggested_price"] or 0)
+    if target <= 0:
+        return jsonify({"ok": False, "error": "no valid price to apply"}), 400
+
+    try:
+        shared_db.execute(
+            "UPDATE raw_cards SET current_price = %s, last_price_update = NOW() WHERE id = %s",
+            (round(target, 2), row["raw_card_id"]))
+        shared_db.execute("""
+            UPDATE raw_card_price_runs
+            SET apply_status='applied', applied_at=NOW(), applied_price=%s
+            WHERE id = %s
+        """, (target, row_id))
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"DB update failed: {e}"}), 502
+    return jsonify({"ok": True, "applied_price": target, "card_name": row["card_name"]})
+
+
+@app.route('/dashboard/raw-runs/row/<int:row_id>/dismiss', methods=["POST"])
+def raw_run_dismiss_row(row_id):
+    """Mark a flagged row as dismissed — leaves raw_cards.current_price alone."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+    row = shared_db.query_one(
+        "SELECT id, apply_status FROM raw_card_price_runs WHERE id = %s", (row_id,))
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+    if row["apply_status"] in ("applied", "dismissed"):
+        return jsonify({"ok": False, "error": f"row already {row['apply_status']}"}), 409
+    shared_db.execute(
+        "UPDATE raw_card_price_runs SET apply_status='dismissed', applied_at=NOW() WHERE id = %s",
+        (row_id,))
+    return jsonify({"ok": True})
+
+
 @app.route('/dashboard/slab-backfill')
 def slab_backfill_page():
     """Page that runs the slab tcg_id backfill in dry-run mode and shows

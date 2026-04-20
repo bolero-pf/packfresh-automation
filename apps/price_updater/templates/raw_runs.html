@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Raw Card Updater Runs</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
+    <style>
+        body { padding: 24px; max-width: 1400px; margin: 0 auto; }
+        h1 { font-size: 1.4rem; margin-bottom: 4px; }
+        .sub { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th, td { border-bottom: 1px solid var(--border); padding: 10px 8px; text-align: left; }
+        th { background: var(--surface); color: var(--text-dim); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+        tr:hover td { background: var(--surface-2); }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+        .p-auto  { background: rgba(34,197,94,0.18); color: #4ade80; }
+        .p-over  { background: rgba(245,158,11,0.18); color: #fbbf24; }
+        .p-under { background: rgba(79,125,249,0.18); color: #7aadff; }
+        .p-skip  { background: var(--surface-2); color: var(--text-dim); }
+        .p-err   { background: rgba(239,68,68,0.18); color: #f87171; }
+        .actions { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
+        .num { font-family: var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; }
+        .ts  { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-dim); }
+        .empty { padding: 40px; text-align: center; color: var(--text-dim); border: 1px dashed var(--border); border-radius: 8px; }
+    </style>
+</head>
+<body>
+    <h1>Raw Card Updater Runs</h1>
+    <div class="sub">
+        Refreshes <code>raw_cards.current_price</code> from the Scrydex cache.
+        Small drifts (≤10%) auto-apply. Larger deltas land here as flags for
+        review and per-row apply.
+    </div>
+
+    <div class="actions">
+        <form method="POST" action="/run-raw-updater" style="display:inline;">
+            <button type="submit" class="btn btn-primary">▶ Run raw card updater now</button>
+        </form>
+        <a href="/dashboard/slab-runs" class="btn btn-secondary">→ Slab runs</a>
+    </div>
+
+    {% if not runs %}
+        <div class="empty">No raw card updater runs yet. Hit "Run" to start one.</div>
+    {% else %}
+    <table>
+        <thead>
+            <tr>
+                <th>Started (UTC)</th>
+                <th class="num">Total</th>
+                <th class="num">Auto-applied</th>
+                <th class="num">Flag&nbsp;over</th>
+                <th class="num">Flag&nbsp;under</th>
+                <th class="num">OK</th>
+                <th class="num">Skipped</th>
+                <th class="num">Errors</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in runs %}
+            <tr>
+                <td class="ts">{{ r.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                <td class="num">{{ r.total }}</td>
+                <td class="num">{% if r.auto_applied %}<span class="pill p-auto">{{ r.auto_applied }}</span>{% else %}—{% endif %}</td>
+                <td class="num">{% if r.flag_over %}<span class="pill p-over">{{ r.flag_over }}</span>{% else %}—{% endif %}</td>
+                <td class="num">{% if r.flag_under %}<span class="pill p-under">{{ r.flag_under }}</span>{% else %}—{% endif %}</td>
+                <td class="num" style="color:var(--text-dim);">{{ r.ok }}</td>
+                <td class="num">{% if r.skipped %}<span class="pill p-skip">{{ r.skipped }}</span>{% else %}—{% endif %}</td>
+                <td class="num">{% if r.errors %}<span class="pill p-err">{{ r.errors }}</span>{% else %}—{% endif %}</td>
+                <td><a href="/dashboard/raw-runs/{{ r.run_id }}">view →</a></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</body>
+</html>
