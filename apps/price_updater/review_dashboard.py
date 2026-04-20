@@ -303,16 +303,19 @@ def slab_runs_list():
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
     import db as shared_db
     shared_db.init_pool()
+    # Counts only consider in-stock rows (qty > 0). OOS rows are kept in the
+    # DB for the audit trail but aren't part of Sean's review queue.
     rows = shared_db.query("""
         SELECT run_id,
-               MIN(started_at)                                      AS started_at,
-               COUNT(*)                                             AS total,
-               COUNT(*) FILTER (WHERE action = 'adjusted')          AS adjusted,
-               COUNT(*) FILTER (WHERE action = 'flag_overpriced')   AS flag_over,
-               COUNT(*) FILTER (WHERE action = 'flag_underpriced')  AS flag_under,
-               COUNT(*) FILTER (WHERE action = 'ok')                AS ok,
-               COUNT(*) FILTER (WHERE action = 'skip')              AS skipped,
-               COUNT(*) FILTER (WHERE action = 'error')             AS errors
+               MIN(started_at) AS started_at,
+               COUNT(*) FILTER (WHERE COALESCE(qty,0) > 0) AS total,
+               COUNT(*) FILTER (WHERE COALESCE(qty,0) > 0 AND action = 'adjusted')         AS adjusted,
+               COUNT(*) FILTER (WHERE COALESCE(qty,0) > 0 AND action = 'flag_overpriced')  AS flag_over,
+               COUNT(*) FILTER (WHERE COALESCE(qty,0) > 0 AND action = 'flag_underpriced') AS flag_under,
+               COUNT(*) FILTER (WHERE COALESCE(qty,0) > 0 AND action = 'ok')               AS ok,
+               COUNT(*) FILTER (WHERE COALESCE(qty,0) > 0 AND action = 'skip')             AS skipped,
+               COUNT(*) FILTER (WHERE COALESCE(qty,0) > 0 AND action = 'error')            AS errors,
+               COUNT(*) FILTER (WHERE COALESCE(qty,0) = 0)                                 AS oos_hidden
         FROM slab_price_runs
         GROUP BY run_id
         ORDER BY started_at DESC
@@ -323,26 +326,33 @@ def slab_runs_list():
 
 @app.route('/dashboard/slab-runs/<run_id>')
 def slab_run_detail(run_id):
-    """Show every row from one slab_updater run, filtered by action if requested."""
+    """Show rows from one slab_updater run.
+    Default hides qty=0 (sold/inactive) — Sean keeps those listings for
+    bookkeeping but they're noise in the price-review queue. Pass
+    ?include_oos=1 to show them anyway."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
     import db as shared_db
     shared_db.init_pool()
 
     action_filter = (request.args.get("action") or "").strip()
-    params = [run_id]
-    sql = """
+    include_oos   = (request.args.get("include_oos") or "").strip() == "1"
+
+    where = ["run_id = %s"]
+    params: list = [run_id]
+    if action_filter:
+        where.append("action = %s"); params.append(action_filter)
+    if not include_oos:
+        where.append("COALESCE(qty, 0) > 0")
+    where_sql = " AND ".join(where)
+
+    sql = f"""
         SELECT id, title, sku, qty, company, grade, tcgplayer_id,
                old_price, new_price, suggested_price, median, low_comp, high_comp,
                comps_count, delta_pct, trend_7d, action, reason,
                product_gid, variant_gid, started_at,
                apply_status, applied_at, applied_price
         FROM slab_price_runs
-        WHERE run_id = %s
-    """
-    if action_filter:
-        sql += " AND action = %s"
-        params.append(action_filter)
-    sql += """
+        WHERE {where_sql}
         ORDER BY
             CASE action
                 WHEN 'error'            THEN 0
@@ -358,8 +368,9 @@ def slab_run_detail(run_id):
     """
     rows = shared_db.query(sql, tuple(params))
 
-    summary = shared_db.query_one("""
-        SELECT MIN(started_at) AS started_at, COUNT(*) AS total
+    summary = shared_db.query_one(f"""
+        SELECT MIN(started_at) AS started_at, COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE COALESCE(qty,0) = 0) AS oos_count
         FROM slab_price_runs WHERE run_id = %s
     """, (run_id,))
 
@@ -369,6 +380,7 @@ def slab_run_detail(run_id):
         rows=rows,
         summary=summary,
         action_filter=action_filter,
+        include_oos=include_oos,
         store_domain=os.environ.get("SHOPIFY_STORE", ""),
     )
 

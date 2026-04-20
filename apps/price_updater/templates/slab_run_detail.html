@@ -53,9 +53,18 @@
 
     <div class="filters">
         {% set actions = [('', 'All'), ('adjusted', 'Adjusted'), ('flag_overpriced', 'Flag overpriced'), ('flag_underpriced', 'Flag underpriced'), ('skip', 'Skipped'), ('error', 'Errors'), ('ok', 'OK')] %}
+        {% set oos_q = '&include_oos=1' if include_oos else '' %}
         {% for code, label in actions %}
-            <a href="?{% if code %}action={{ code }}{% endif %}" class="{% if action_filter == code %}active{% endif %}">{{ label }}</a>
+            <a href="?{% if code %}action={{ code }}{% endif %}{{ oos_q }}" class="{% if action_filter == code %}active{% endif %}">{{ label }}</a>
         {% endfor %}
+        {% set act_q = ('action=' ~ action_filter) if action_filter else '' %}
+        {% if include_oos %}
+            <a href="?{{ act_q }}" class="active" style="margin-left:auto;">✓ Showing OOS · click to hide</a>
+        {% else %}
+            <a href="?{{ act_q }}{% if act_q %}&{% endif %}include_oos=1" style="margin-left:auto;">
+                + Show {{ summary.oos_count }} OOS
+            </a>
+        {% endif %}
     </div>
 
     {% if not rows %}
