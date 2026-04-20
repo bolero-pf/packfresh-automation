@@ -1212,15 +1212,15 @@
                 const gameBadge = (game && game !== 'pokemon') ? `<span style="background:var(--accent-alt,#7c3aed); color:#fff; padding:1px 6px; border-radius:4px; font-size:0.65rem; font-weight:600; margin-right:4px;">${game.toUpperCase()}</span>` : '';
                 const nameLower = (p.name||'').toLowerCase();
                 const isBundle = ['art bundle','set of','bundle (','pack of','case','display'].some(kw => nameLower.includes(kw));
-                return `<div style="display:flex; gap:10px; align-items:center; padding:8px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:4px; cursor:pointer;${isBundle ? ' opacity:0.6; border-left:3px solid var(--amber);' : ''}" onclick="addIntakeSealed(${tcgId}, '${safeName}', '${setName}', ${price}, ${qty})" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
+                return `<div style="display:flex; gap:10px; align-items:center; padding:8px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:4px; cursor:pointer;${isBundle ? ' opacity:0.6; border-left:3px solid var(--amber);' : ''}" onclick="addIntakeSealed(${tcgId || 'null'}, '${safeName}', '${setName}', ${price}, ${qty})" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
                     ${img ? `<img src="${img}" loading="lazy" style="width:48px; height:48px; object-fit:contain; border-radius:4px; flex-shrink:0;">` : '<div style="width:48px;height:48px;background:var(--surface-2);border-radius:4px;flex-shrink:0;"></div>'}
                     <div style="flex:1; min-width:0;">
                         <div style="font-weight:600; font-size:0.9rem;">${gameBadge}${p.name}${isBundle ? ' <span style="color:var(--amber);font-size:0.7rem;font-weight:700;">⚠ BUNDLE</span>' : ''}</div>
-                        <div style="font-size:0.8rem; color:var(--text-dim);">${setCodeBadge}${p.setName || p.set_name || ''} · TCG#${tcgId}</div>
+                        <div style="font-size:0.8rem; color:var(--text-dim);">${setCodeBadge}${p.setName || p.set_name || ''}${tcgId ? ' · TCG#' + tcgId : ''}</div>
                     </div>
                     <div style="text-align:right; flex-shrink:0;">
-                        <div style="font-weight:700;">$\${Number(price).toFixed(2)}</div>
-                        <div style="font-size:0.7rem; color:var(--text-dim);">${src} · Offer: $\${offer}</div>
+                        <div style="font-weight:700;">$${Number(price).toFixed(2)}</div>
+                        <div style="font-size:0.7rem; color:var(--text-dim);">${src} · Offer: $${offer}</div>
                     </div>
                 </div>`;
             }).join('');
@@ -4346,11 +4346,11 @@
                 const src = p._price_source ? ({cache:'cache',ppt:'PPT',scrydex:'SDX'}[p._price_source]||p._price_source) : '';
                 const nameLower = (p.name||'').toLowerCase();
                 const isBundle = ['art bundle','set of','bundle (','pack of','case','display'].some(kw => nameLower.includes(kw));
-                return `<div class="search-result" style="display:flex; gap:10px; align-items:center; padding:8px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:4px; cursor:pointer;${isBundle ? ' opacity:0.6; border-left:3px solid var(--amber);' : ''}" onclick="addSealedToSession('${sessionId}', ${tcgId}, '${(p.name||'').replace(/'/g,"\\'")}', '${setName}', ${price}, ${qty}, ${offerPct})" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
+                return `<div class="search-result" style="display:flex; gap:10px; align-items:center; padding:8px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:4px; cursor:pointer;${isBundle ? ' opacity:0.6; border-left:3px solid var(--amber);' : ''}" onclick="addSealedToSession('${sessionId}', ${tcgId || 'null'}, '${(p.name||'').replace(/'/g,"\\'")}', '${setName}', ${price}, ${qty}, ${offerPct})" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
                     ${img ? `<img src="${img}" style="width:48px; height:48px; object-fit:contain; border-radius:4px; flex-shrink:0;">` : '<div style="width:48px;height:48px;background:var(--surface-2);border-radius:4px;flex-shrink:0;"></div>'}
                     <div style="flex:1; min-width:0;">
                         <div style="font-weight:600; font-size:0.9rem;">${p.name}${isBundle ? ' <span style="color:var(--amber);font-size:0.7rem;font-weight:700;">⚠ BUNDLE</span>' : ''}</div>
-                        <div style="font-size:0.8rem; color:var(--text-dim);">${p.setName || p.set_name || ''} · TCG#${tcgId}</div>
+                        <div style="font-size:0.8rem; color:var(--text-dim);">${p.setName || p.set_name || ''}${tcgId ? ' · TCG#' + tcgId : ''}</div>
                     </div>
                     <div style="text-align:right; flex-shrink:0;">
                         <div style="font-weight:700;">$${Number(price).toFixed(2)}</div>
