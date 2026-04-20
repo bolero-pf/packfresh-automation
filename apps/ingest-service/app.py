@@ -2072,9 +2072,65 @@ def ppt_search_sealed():
                         r["tcgplayer_id"] = int(tcg_id)
                     except (TypeError, ValueError):
                         pass
+        _enrich_sealed_with_shopify_tcg(results or [])
         return jsonify({"results": results or []})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _enrich_sealed_with_shopify_tcg(results: list):
+    """Scrydex's /sealed endpoint doesn't carry TCGplayer IDs. For any sealed
+    result still missing one, look up a matching Shopify product in
+    inventory_product_cache by title — the store has been selling sealed
+    forever, so if we carry the product, its TCG ID is already cached.
+    Matches require every name-token (≥3 chars) to hit as a word-boundary,
+    and disambiguate by shortest title when multiple rows share that profile.
+    Also persists the scrydex_id → tcgplayer_id link for future lookups."""
+    import re
+    scrydex = getattr(ppt, "primary", None)
+    saver = getattr(scrydex, "_save_tcg_mapping", None)
+    for r in results:
+        if r.get("tcgplayer_id") or r.get("tcgPlayerId") or r.get("tcgplayerId"):
+            continue
+        name = (r.get("name") or "").strip()
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", name) if len(t) >= 3]
+        if not tokens:
+            continue
+        sql = ("SELECT tcgplayer_id, title FROM inventory_product_cache "
+               "WHERE tcgplayer_id IS NOT NULL")
+        params: list = []
+        for t in tokens:
+            sql += " AND title ~* %s"
+            params.append(r"\m" + re.escape(t) + r"\M")
+        sql += " ORDER BY LENGTH(title) ASC LIMIT 5"
+        try:
+            rows = db.query(sql, tuple(params))
+        except Exception as e:
+            app.logger.debug(f"Shopify-cache sealed enrichment failed: {e}")
+            continue
+        if not rows:
+            continue
+        top = rows[0]
+        # Ambiguity guard: if a second row has the same title length but a
+        # different TCG ID, we can't pick a winner.
+        for other in rows[1:]:
+            if len(other["title"]) == len(top["title"]) and other["tcgplayer_id"] != top["tcgplayer_id"]:
+                top = None
+                break
+        if not top:
+            continue
+        try:
+            tcg_id = int(top["tcgplayer_id"])
+        except (TypeError, ValueError):
+            continue
+        r["tcgplayer_id"] = tcg_id
+        r["tcgPlayerId"] = tcg_id
+        scrydex_id = r.get("scrydexId") or r.get("scrydex_id")
+        if scrydex_id and callable(saver):
+            try:
+                saver(scrydex_id, tcg_id)
+            except Exception:
+                pass
 
 
 @app.route("/api/ppt/search-cards", methods=["POST"])
