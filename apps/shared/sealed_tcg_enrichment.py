@@ -27,9 +27,17 @@ the same inventory_product_cache table.
 import logging
 import os
 import re
+import unicodedata
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_accents(s: str) -> str:
+    """Pokémon -> Pokemon. Scrydex preserves accents, Shopify titles usually
+    don't — if we tokenize 'Pokémon' as-is the regex splits it at 'é' and
+    neither half matches 'Pokemon' in the store cache."""
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 
 def enrich_sealed_with_shopify_tcg(results: list, db_module, price_provider=None) -> None:
@@ -90,7 +98,7 @@ def enrich_sealed_with_shopify_tcg(results: list, db_module, price_provider=None
         if r.get("tcgplayer_id") or r.get("tcgPlayerId") or r.get("tcgplayerId"):
             continue
         name = (r.get("name") or r.get("product_name") or "").strip()
-        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", name) if len(t) >= 3]
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", _strip_accents(name)) if len(t) >= 3]
         if not tokens or not name:
             continue
 
@@ -102,7 +110,7 @@ def enrich_sealed_with_shopify_tcg(results: list, db_module, price_provider=None
         # through to the PPT phase instead.
         if not rows:
             set_name = (r.get("setName") or r.get("set_name") or "")
-            set_tokens = {t.lower() for t in re.findall(r"[A-Za-z0-9]+", set_name) if len(t) >= 3}
+            set_tokens = {t.lower() for t in re.findall(r"[A-Za-z0-9]+", _strip_accents(set_name)) if len(t) >= 3}
             relaxed = [t for t in tokens if t not in set_tokens]
             if relaxed and len(relaxed) < len(tokens) and len(relaxed) >= 3:
                 rows = _lookup(relaxed)
