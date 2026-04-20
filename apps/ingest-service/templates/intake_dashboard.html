@@ -730,7 +730,7 @@
             <!-- Price comparison panel (hidden until Link & Compare is clicked) -->
             <div id="price-comparison" style="display:none;"></div>
 
-            <div class="divider">or search PPT</div>
+            <div class="divider">or search by name</div>
 
             <div class="form-group" style="margin-bottom:8px;">
                 <div style="display:flex; gap:8px;">
@@ -1230,7 +1230,7 @@
             if (anyCache) {
                 resultsDiv.innerHTML += `<div style="margin-top:8px; text-align:center;">
                     <button class="btn btn-secondary btn-sm" onclick="intakeSealedSearch(true)" style="font-size:0.78rem; opacity:0.8;">
-                        Don't see it? Search PPT live →
+                        Don't see it? Search live →
                     </button>
                 </div>`;
             }
@@ -2168,8 +2168,10 @@
         const searchQuery = (document.getElementById('map-search-query').value || '').trim();
         if (!searchQuery) { return; }
         const container = document.getElementById('fuzzy-results');
-        container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
+        container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching prices...</div>';
 
+        // Endpoint name says "ppt" for legacy reasons but it's cache-first
+        // (Scrydex price_cache across multi-TCG) with PPT as live fallback.
         const endpoint = currentMapProductType === 'raw' ? '/api/ppt/search-cards' : '/api/ppt/search-sealed';
         const body = { query: searchQuery };
 
@@ -2196,7 +2198,7 @@
             if (!results.length) {
                 container.innerHTML = `
                     <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:8px;">
-                        <div style="font-size:0.85rem;color:var(--amber);font-weight:600;margin-bottom:10px;">⚠ No PPT match found for "${searchQuery}"</div>
+                        <div style="font-size:0.85rem;color:var(--amber);font-weight:600;margin-bottom:10px;">⚠ No match found for "${searchQuery}"</div>
                         <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:12px;">You can link to a store product instead, or accept the Collectr price with no TCGPlayer link.</div>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;">
                             <button class="btn btn-secondary" onclick="mappingSearchStore()">🏪 Search Store Products</button>
@@ -2206,10 +2208,23 @@
                 return;
             }
             container.innerHTML = results.map(p => {
-                const tcgId = p.tcgPlayerId || p.tcgplayer_id || '';
+                const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.tcgPlayerID || '';
+                const sid = p.scrydexId || p.scrydex_id || '';
                 const price = p.unopenedPrice || p.prices?.market || p.market_price || p.price || '';
                 const name = p.name || p.productName || '?';
                 const pSetName = p.setName || p.set || '';
+                // Scrydex-only rows (no TCG mapping in Scrydex's marketplace data —
+                // common for older JP sets). Show with a dimmed hint instead of a
+                // bogus "click to use" empty insert. The intake mapping flow only
+                // supports tcgplayer_id linking today, so these aren't directly
+                // selectable here yet.
+                if (!tcgId) {
+                    return `<div class="search-result" style="opacity:0.55; cursor:not-allowed; border-style:dashed;" title="No TCGplayer mapping available — relink in the ingest service to link by Scrydex ID">
+                        <h4>${name}</h4>
+                        <p>${pSetName} ${price ? '• $' + price : ''}</p>
+                        <small style="color:var(--text-dim);">${sid ? 'Scrydex-only · SDX ' + sid : 'No TCGplayer ID'} — not linkable here</small>
+                    </div>`;
+                }
                 return `<div class="search-result" onclick="document.getElementById('map-tcgplayer-id').value='${tcgId}'">
                     <h4>${name}</h4>
                     <p>${pSetName} ${price ? '• $' + price : ''}</p>
@@ -4300,7 +4315,7 @@
             if (anyCache) {
                 resultsDiv.innerHTML += `<div style="margin-top:8px; text-align:center;">
                     <button class="btn btn-secondary btn-sm" onclick="searchSealedForSession('${sessionId}', ${offerPct}, true)" style="font-size:0.78rem; opacity:0.8;">
-                        Don't see it? Search PPT live →
+                        Don't see it? Search live →
                     </button>
                 </div>`;
             }
