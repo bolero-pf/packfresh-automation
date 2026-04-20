@@ -29,6 +29,13 @@
     </style>
 </head>
 <body>
+    <div style="display:flex; gap:16px; align-items:center; margin-bottom:16px; padding-bottom:10px; border-bottom:1px solid var(--border); font-size:0.88rem; font-weight:600;">
+        <a href="/dashboard/review" style="color:var(--accent);">Price Review</a>
+        <a href="/dashboard/slab-runs" style="color:var(--accent);">Slab Runs</a>
+        <a href="/dashboard/raw-runs" style="color:var(--text-dim);">Raw Runs</a>
+        <a href="/dashboard/runlog" style="color:var(--accent);">Live Log</a>
+    </div>
+
     <h1>Raw Card Updater Runs</h1>
     <div class="sub">
         Refreshes <code>raw_cards.current_price</code> from the Scrydex cache.
@@ -40,7 +47,7 @@
         <form method="POST" action="/run-raw-updater" style="display:inline;">
             <button type="submit" class="btn btn-primary">▶ Run raw card updater now</button>
         </form>
-        <a href="/dashboard/slab-runs" class="btn btn-secondary">→ Slab runs</a>
+        <a href="/dashboard/runlog" class="btn btn-secondary">Live log</a>
     </div>
 
     {% if not runs %}

@@ -8,11 +8,35 @@
     <style>
         body { padding: 24px; }
         h1 { font-size: 1.3rem; margin-bottom: 12px; }
-        #log { white-space: pre-wrap; background: #0a0a0a; color: #4ade80; font-family: var(--font-mono); padding: 1em; height: 90vh; overflow-y: scroll; border-radius: 8px; border: 1px solid var(--border); }
+        .actions { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+        #log { white-space: pre-wrap; background: #0a0a0a; color: #4ade80; font-family: var(--font-mono); padding: 1em; height: 70vh; overflow-y: scroll; border-radius: 8px; border: 1px solid var(--border); }
     </style>
 </head>
 <body>
+    <div style="display:flex; gap:16px; align-items:center; margin-bottom:16px; padding-bottom:10px; border-bottom:1px solid var(--border); font-size:0.88rem; font-weight:600;">
+        <a href="/dashboard/review" style="color:var(--accent);">Price Review</a>
+        <a href="/dashboard/slab-runs" style="color:var(--accent);">Slab Runs</a>
+        <a href="/dashboard/raw-runs" style="color:var(--accent);">Raw Runs</a>
+        <a href="/dashboard/runlog" style="color:var(--text-dim);">Live Log</a>
+    </div>
+
     <h1>Live Script Log</h1>
+
+    <div class="actions">
+        <form method="POST" action="/run-scrydex-sync" style="display:inline;">
+            <button type="submit" class="btn btn-primary">▶ Run Scrydex sync</button>
+        </form>
+        <form method="POST" action="/run-slab-updater" style="display:inline;">
+            <button type="submit" class="btn btn-secondary">▶ Run slab updater</button>
+        </form>
+        <form method="POST" action="/run-raw-updater" style="display:inline;">
+            <button type="submit" class="btn btn-secondary">▶ Run raw updater</button>
+        </form>
+        <form method="POST" action="/price_update" style="display:inline;">
+            <button type="submit" class="btn btn-secondary">▶ Run price update</button>
+        </form>
+    </div>
+
     <div id="log"></div>
 
     <script>

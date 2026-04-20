@@ -19,6 +19,11 @@
 </head>
 <body>
   <h1>Price Sync Dashboard</h1>
+  <div class="nav" style="border-bottom:1px solid var(--border); padding-bottom:10px;">
+    <a href="/dashboard/slab-runs">Slab Runs</a>
+    <a href="/dashboard/raw-runs">Raw Runs</a>
+    <a href="/dashboard/runlog">Live Log</a>
+  </div>
   <div class="nav">
     <a href="{{ url_for('dashboard', view='review') }}">Needs Review</a>
     <a href="{{ url_for('dashboard', view='pushed') }}">Auto-Updated</a>
