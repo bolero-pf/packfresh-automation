@@ -289,9 +289,14 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
             _record_run_row(db_module, run_id, started_at, entry)
             continue
 
-        # Fetch live comps
+        # Fetch live comps. We use comps["market"] (the smart market price)
+        # not comps["mid"] (raw median): smart market does IQR outlier removal,
+        # protects the most recent 10% of sales from being dropped, and
+        # exponentially decays older sales (14-day half-life). Raw median
+        # treats a sale from 90 days ago the same as today's — bad signal
+        # for fast-moving cards.
         comps = get_live_graded_comps(tcg_id, company, grade_val, db_module)
-        if not comps or not comps.get("mid"):
+        if not comps or not comps.get("market"):
             entry = {**slab, "action": "skip", "reason": "no comp data",
                      "company": company, "grade": grade_val}
             results.append(entry)
@@ -299,16 +304,20 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
             continue
 
         current = slab["price"]
-        median  = comps["mid"]
+        market  = float(comps["market"])
         cost    = slab.get("cost_basis") or 0
         comps_n = comps.get("comps_count", 0)
-        delta_pct = ((current - median) / median * 100) if median > 0 else 0
+        comps_kept = comps.get("comps_kept", comps_n)
+        outliers = comps.get("outliers_dropped", 0)
+        delta_pct = ((current - market) / market * 100) if market > 0 else 0
 
         entry = {
             **slab,
             "company":     company,
             "grade":       grade_val,
-            "median":      median,
+            # NB: column is named 'median' in slab_price_runs for legacy reasons
+            # but we store the smart market price (recency-weighted, IQR-cleaned)
+            "median":      market,
             "low":         comps.get("low"),
             "high":        comps.get("high"),
             "comps_count": comps_n,
@@ -317,9 +326,9 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
         }
 
         # Decision logic — Sean's preference: never auto-adjust DOWN, and
-        # all suggestions get charm-ceil rounding (next .99 price >= median,
-        # tiered by price band). Cost basis is the floor.
-        safe_price = max(median, cost) if cost else median
+        # all suggestions get charm-ceil rounding (next .99 price >= smart
+        # market, tiered by price band). Cost basis is the floor.
+        safe_price = max(market, cost) if cost else market
         charm_price = charm_ceil(safe_price)
 
         if abs(delta_pct) <= 10:
