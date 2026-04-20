@@ -253,8 +253,8 @@
         document.getElementById('result').style.display = 'none';
 
         try {
-            // 1) Fetch PPT item data
-            const pptResp = await fetch(`/api/ppt/sealed/${encodeURIComponent(tcgId)}`);
+            // 1) Fetch sealed item data from pricing provider
+            const pptResp = await fetch(`/api/lookup/sealed/${encodeURIComponent(tcgId)}`);
             if (!pptResp.ok) {
                 const d = await pptResp.json();
                 throw new Error(d.error || `PPT lookup failed (${pptResp.status})`);

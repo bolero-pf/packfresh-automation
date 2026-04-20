@@ -149,8 +149,8 @@ def _build_recommendations(in_stock_only=True):
         # Actual breakdown execution uses 4h threshold.
         try:
             from breakdown_helpers import refresh_stale_component_prices
-            from routes.inventory import _get_ppt_client
-            _ppt = _get_ppt_client()
+            from routes.inventory import _get_price_provider
+            _ppt = _get_price_provider()
             if _ppt:
                 refresh_stale_component_prices(variant_ids, db, _ppt, max_age_hours=24)
         except Exception as e:

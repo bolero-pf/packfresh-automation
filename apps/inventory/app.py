@@ -38,7 +38,7 @@ app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
 
 shopify_client: ShopifyClient = None
 cache_manager:  CacheManager  = None
-ppt_client = None  # PriceProvider instance (PPT, Scrydex, or both)
+ppt_client = None  # PriceProvider instance (Scrydex-first with PPT fallback)
 
 
 from auth import register_auth_hooks

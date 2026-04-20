@@ -303,7 +303,7 @@ def undo_break_down(item_id: str) -> dict:
 DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
 
 # Condition multipliers for raw cards (applied to market price before offer %)
-def update_item_condition(item_id: str, condition: str, ppt_client=None, price_override: float = None) -> dict:
+def update_item_condition(item_id: str, condition: str, price_provider=None, price_override: float = None) -> dict:
     """
     Update a raw card's condition and recalculate its offer price.
     Only adjusts price if condition actually changed or price_override is set.
@@ -367,9 +367,9 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
 
         # 2. PPT fallback — only makes sense when we have a TCG ID, since PPT
         # is keyed on TCGplayer product IDs. Scrydex-only cards skip this.
-        if condition_market is None and tcg_id and ppt_client:
+        if condition_market is None and tcg_id and price_provider:
             try:
-                card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+                card_data = price_provider.get_card_by_tcgplayer_id(int(tcg_id))
                 if card_data:
                     condition_market = PriceProvider.extract_condition_price(
                         card_data, condition, variant=variant)
@@ -422,7 +422,7 @@ def update_item_condition(item_id: str, condition: str, ppt_client=None, price_o
 
 
 def update_item_grade(item_id: str, grade_company: str = None, grade_value: str = None,
-                      ppt_client=None, price_override: float = None,
+                      price_provider=None, price_override: float = None,
                       db_module=None) -> dict:
     """
     Update a graded slab's company/grade and recalculate its offer price.
@@ -478,9 +478,9 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
                 logger.warning(f"Scrydex graded lookup failed for sid={sid} tcg={tcg_id}: {e}")
 
         # PPT fallback
-        if new_market is None and ppt_client:
+        if new_market is None and price_provider:
             try:
-                card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+                card_data = price_provider.get_card_by_tcgplayer_id(int(tcg_id))
                 if card_data:
                     graded_price = PriceProvider.get_graded_price(card_data, company, grade)
                     if graded_price is not None:
@@ -509,7 +509,7 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
 def convert_item_type(item_id: str, to_graded: bool,
                       condition: str = None,
                       grade_company: str = None, grade_value: str = None,
-                      ppt_client=None, price_override: float = None,
+                      price_provider=None, price_override: float = None,
                       db_module=None) -> dict:
     """
     Convert an intake item between raw and graded.
@@ -569,9 +569,9 @@ def convert_item_type(item_id: str, to_graded: bool,
                     logger.warning(f"Scrydex graded lookup failed for TCG#{tcg_id}: {e}")
 
             # PPT fallback
-            if new_market is None and ppt_client:
+            if new_market is None and price_provider:
                 try:
-                    card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+                    card_data = price_provider.get_card_by_tcgplayer_id(int(tcg_id))
                     if card_data:
                         graded_price = PriceProvider.get_graded_price(card_data, company, grade)
                         if graded_price is not None:
@@ -594,9 +594,9 @@ def convert_item_type(item_id: str, to_graded: bool,
         if cond not in valid:
             raise ValueError(f"Invalid condition: {cond}. Must be NM, LP, MP, HP, or DMG")
 
-        if new_market is None and tcg_id and ppt_client:
+        if new_market is None and tcg_id and price_provider:
             try:
-                card_data = ppt_client.get_card_by_tcgplayer_id(int(tcg_id))
+                card_data = price_provider.get_card_by_tcgplayer_id(int(tcg_id))
                 if card_data:
                     cond_price = PriceProvider.extract_condition_price(
                         card_data, cond, variant=item.get("variant"))

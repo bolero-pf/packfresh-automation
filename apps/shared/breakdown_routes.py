@@ -41,7 +41,7 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
 
     Args:
         db_module: the service's db module (must have query, query_one, execute, execute_returning)
-        ppt_getter: callable returning a PPTClient instance (or None to disable PPT features)
+        ppt_getter: callable returning a PriceProvider instance (or None to disable provider features)
         url_prefix: where to mount the blueprint (default /api/breakdown-cache)
         name: blueprint name (must be unique per app, default "breakdown_cache")
     """

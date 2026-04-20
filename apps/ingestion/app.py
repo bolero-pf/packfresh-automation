@@ -167,11 +167,11 @@ else:
     logger.warning("SHOPIFY_TOKEN / SHOPIFY_STORE not set — push-live disabled")
 cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_products=True)
 
-ppt = create_price_provider(db=db)
+pricing = create_price_provider(db=db)
 
 # Register shared breakdown blueprint (replaces breakdown-cache, PPT search, store-prices routes)
 from breakdown_routes import create_breakdown_blueprint
-app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: ppt))
+app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: pricing))
 
 
 def _serialize(obj):
@@ -511,6 +511,70 @@ def search_cards_for_relink():
     return jsonify({"results": results, "total": len(results)})
 
 
+@app.route("/api/ingest/debug/scrydex-live")
+def debug_scrydex_live():
+    """Live Scrydex search bypassing the cache — use when chasing down
+    printings that aren't in our nightly sync (MTG promo sets like PEOE,
+    prerelease stamps, older JP sealed, etc.). Query params:
+      q: search term (required)
+      game: 'magicthegathering' | 'pokemon' | 'onepiece' | 'lorcana'
+      set_name: optional set-name filter
+      limit: default 20
+    Returns Scrydex's raw card objects so we can inspect printings, images,
+    and marketplace mappings directly.
+    """
+    import os as _os
+    sx_key = _os.getenv("SCRYDEX_API_KEY", "")
+    sx_team = _os.getenv("SCRYDEX_TEAM_ID", "")
+    if not sx_key or not sx_team:
+        return jsonify({"error": "SCRYDEX_API_KEY/TEAM_ID not configured"}), 503
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"error": "q is required"}), 400
+    game = (request.args.get("game") or "magicthegathering").strip()
+    set_name = request.args.get("set_name") or None
+    limit = int(request.args.get("limit") or 20)
+
+    from scrydex_client import ScrydexClient
+    client = ScrydexClient(sx_key, sx_team, game=game, db=db)
+    try:
+        results = client.search_cards(q, set_name=set_name, limit=limit)
+        # Trim each card to the fields that matter for printing-diagnosis so
+        # the response stays scannable (a full dump is huge).
+        trimmed = []
+        for c in (results or []):
+            trimmed.append({
+                "scrydex_id": c.get("id"),
+                "name": c.get("name"),
+                "set_name": (c.get("expansion") or {}).get("name"),
+                "expansion_id": (c.get("expansion") or {}).get("id"),
+                "language": c.get("language_code") or (c.get("expansion") or {}).get("language_code"),
+                "number": c.get("number"),
+                "printed_number": c.get("printed_number"),
+                "rarity": c.get("rarity"),
+                "variants": [{
+                    "name": v.get("name"),
+                    "tcg_id": next((mp.get("product_id") for mp in (v.get("marketplaces") or [])
+                                    if mp.get("name") == "tcgplayer"), None),
+                    "raw_prices": [
+                        {"condition": p.get("condition"), "currency": p.get("currency"),
+                         "market": p.get("market"), "low": p.get("low")}
+                        for p in (v.get("prices") or []) if p.get("type") == "raw"
+                    ],
+                    "graded_prices": [
+                        {"company": p.get("company"), "grade": p.get("grade"),
+                         "currency": p.get("currency"), "market": p.get("market")}
+                        for p in (v.get("prices") or []) if p.get("type") == "graded"
+                    ],
+                    "image": next((i.get("large") for i in (v.get("images") or []) if i.get("type") == "front"), None),
+                } for v in (c.get("variants") or [])],
+            })
+        return jsonify({"results": trimmed, "count": len(trimmed)})
+    except Exception as e:
+        logger.exception(f"debug/scrydex-live failed")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ingest/debug/scrydex/<path:scrydex_id>")
 def debug_scrydex(scrydex_id):
     """One-off diagnostic: return every cache row + the raw Scrydex JSONB for a
@@ -615,7 +679,7 @@ def add_item(session_id):
         is_graded = bool(data.get("is_graded", False))
         tcg_id_raw = data.get("tcgplayer_id")
         # Price resolution: only run for raw cards that came in without a price.
-        # Sealed items are priced by the client via /api/ppt/search-sealed.
+        # Sealed items are priced by the client via /api/search/sealed.
         if product_type == "raw" and tcg_id_raw and not data.get("market_price"):
             try:
                 tcg_id = int(tcg_id_raw)
@@ -633,8 +697,8 @@ def add_item(session_id):
                             market_price = float(live["mid"])
                     except Exception as e:
                         logger.warning(f"Live graded comps failed for TCG#{tcg_id}: {e}")
-                    if market_price is None and ppt:
-                        card_data = ppt.get_card_by_tcgplayer_id(tcg_id)
+                    if market_price is None and pricing:
+                        card_data = pricing.get_card_by_tcgplayer_id(tcg_id)
                         if card_data:
                             mp = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
                             if mp is not None:
@@ -653,8 +717,8 @@ def add_item(session_id):
                                 market_price = float(mp)
                     except Exception as e:
                         logger.warning(f"Scrydex price lookup failed for TCG#{tcg_id}: {e}")
-                    if market_price is None and ppt:
-                        card_data = ppt.get_card_by_tcgplayer_id(tcg_id)
+                    if market_price is None and pricing:
+                        card_data = pricing.get_card_by_tcgplayer_id(tcg_id)
                         if card_data:
                             mp = PriceProvider.extract_condition_price(card_data, condition, variant=variant)
                             if mp is not None:
@@ -674,13 +738,13 @@ def add_item(session_id):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/ppt/search-cards", methods=["POST"])
-def ppt_search_cards():
+@app.route("/api/search/cards", methods=["POST"])
+def search_cards():
     """Search for individual raw cards by name across all TCGs — mirrors
     the intake-service endpoint so the 'Unexpected Item' modal can use the
     grouped-by-printing UI with variant chips.
     """
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
     q = (data.get("query") or "").strip()
@@ -690,17 +754,17 @@ def ppt_search_cards():
         set_name = data.get("set_name") or None
         limit = int(data.get("limit") or 8)
         results = []
-        cache = getattr(ppt, "cache", None)
+        cache = getattr(pricing, "cache", None)
         if cache:
             try:
                 results = cache.search_cards(q, set_name=set_name, limit=limit, all_games=True)
-                results = ppt._stamp(results, "cache")
+                results = pricing._stamp(results, "cache")
             except Exception as e:
                 logger.warning(f"Cross-game card cache search failed: {e}")
                 results = []
         if not results:
-            live = ppt.primary.search_cards(q, set_name=set_name, limit=limit) or []
-            results = ppt._stamp(live, ppt._primary_source)
+            live = pricing.primary.search_cards(q, set_name=set_name, limit=limit) or []
+            results = pricing._stamp(live, pricing._primary_source)
         for r in (results or []):
             if not r.get("market_price"):
                 conds = (r.get("prices") or {}).get("conditions") or {}
@@ -711,20 +775,20 @@ def ppt_search_cards():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/ppt/lookup-card", methods=["POST"])
-def ppt_lookup_card():
+@app.route("/api/lookup/card", methods=["POST"])
+def lookup_card():
     """Look up a single card by tcgplayer_id. Returns variants + graded prices
     (with live eBay comps for graded) — same shape as intake's endpoint so the
     shared condition-picker flow renders identically in both services.
     """
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
     tcgplayer_id = data.get("tcgplayer_id")
     if not tcgplayer_id:
         return jsonify({"error": "tcgplayer_id required"}), 400
     try:
-        card_data = ppt.get_card_by_tcgplayer_id(int(tcgplayer_id))
+        card_data = pricing.get_card_by_tcgplayer_id(int(tcgplayer_id))
         if not card_data:
             return jsonify({"error": "Card not found"}), 404
         variants = PriceProvider.extract_variants(card_data)
@@ -782,14 +846,14 @@ def verify_item(item_id):
 
             if condition:
                 result = ingest.update_item_condition(
-                    item_id, condition, ppt_client=ppt,
+                    item_id, condition, price_provider=pricing,
                     price_override=float(price_override) if price_override is not None else None)
             elif grade_company or grade_value:
                 result = ingest.update_item_grade(
                     item_id,
                     grade_company=grade_company,
                     grade_value=grade_value,
-                    ppt_client=ppt,
+                    price_provider=pricing,
                     price_override=float(price_override) if price_override is not None else None,
                     db_module=db)
             elif price_override is not None:
@@ -846,7 +910,7 @@ def convert_item_type_route(item_id):
             condition=data.get("condition"),
             grade_company=data.get("grade_company"),
             grade_value=data.get("grade_value"),
-            ppt_client=ppt,
+            price_provider=pricing,
             price_override=float(price_override) if price_override is not None else None,
             db_module=db,
         )
@@ -871,7 +935,7 @@ def update_condition_route(item_id):
     price_override = data.get("price_override")
     try:
         result = ingest.update_item_condition(
-            item_id, condition, ppt_client=ppt,
+            item_id, condition, price_provider=pricing,
             price_override=float(price_override) if price_override not in (None, "") else None)
         return jsonify({"success": True, "item": _serialize(result)})
     except ValueError as e:
@@ -1151,14 +1215,14 @@ def _enrich_one_item(key, item):
         graded_prices = None
 
         if tcg_id:
-            # TCG-mapped path. The `ppt` wrapper only returns imageCdnUrl* for
+            # TCG-mapped path. The `pricing` wrapper only returns imageCdnUrl* for
             # games where Scrydex is primary (MTG, One Piece, Lorcana) — for
             # Pokemon it routes through the actual PPT API which doesn't return
             # images at all, so Pokemon thumbnails were silently blank. Read
             # directly from the Scrydex cache (populated by sync for every
             # synced game incl. Pokemon) and fall back to the live client only
             # if the cache hasn't caught this card yet.
-            card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+            card_data = pricing.get_card_by_tcgplayer_id(int(tcg_id))
             cache_row = db.query_one("""
                 SELECT image_small, image_medium, image_large
                 FROM scrydex_price_cache
@@ -1526,9 +1590,9 @@ def _push_raw_item(item: dict) -> dict:
     # Fetch PPT data for image URL + clean name + real card number
     image_url = None
     ppt_card_number = None
-    if tcg_id and ppt:
+    if tcg_id and pricing:
         try:
-            card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+            card_data = pricing.get_card_by_tcgplayer_id(int(tcg_id))
             if card_data:
                 image_url = (card_data.get("imageCdnUrl800")
                              or card_data.get("imageCdnUrl")
@@ -1639,9 +1703,9 @@ def _fetch_ppt_data(tcg_id, card_name, set_name):
     """Shared PPT lookup for raw card push functions."""
     image_url = None
     ppt_card_number = None
-    if tcg_id and ppt:
+    if tcg_id and pricing:
         try:
-            card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+            card_data = pricing.get_card_by_tcgplayer_id(int(tcg_id))
             if card_data:
                 image_url = (card_data.get("imageCdnUrl800")
                              or card_data.get("imageCdnUrl")
@@ -1836,7 +1900,7 @@ def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cac
         product_name = item.get("product_name", "Unknown Product")
         our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
 
-        ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id else None
+        ppt_item = pricing.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id else None
         if not ppt_item:
             # PPT lookup failed — build synthetic ppt_item from what we know
             # so enrichment still sets tags, vendor, weight, metafields, AI fields, etc.
@@ -1929,7 +1993,7 @@ def _push_damaged_item(entry: dict, tcg_id: int, qty: int, item: dict,
 
             # Step 1: Create normal enriched listing (qty=0, normal items will increment later)
             normal_product_id = None
-            ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id and ppt else None
+            ppt_item = pricing.get_sealed_product_by_tcgplayer_id(tcg_id) if tcg_id and pricing else None
             if ppt_item and enrichment:
                 market_price = float(ppt_item.get("marketPrice") or ppt_item.get("unopenedPrice") or item.get("market_price") or 0)
                 try:
@@ -2230,9 +2294,9 @@ def push_graded_item(item_id):
 
     # Fetch PPT card data for clean name
     ppt_card = None
-    if tcg_id and ppt:
+    if tcg_id and pricing:
         try:
-            ppt_card = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+            ppt_card = pricing.get_card_by_tcgplayer_id(int(tcg_id))
         except Exception as e:
             logger.warning(f"PPT fetch for graded TCG#{tcg_id}: {e}")
 
@@ -2676,7 +2740,7 @@ def binder_locations():
 @app.route("/api/ingest/session/<session_id>/enrich-route", methods=["POST"])
 def enrich_route(session_id):
     """Kick off background PPT fetch for graded prices + images for all routable items."""
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT not configured"}), 503
 
     # If cache already exists for this session, skip re-fetch unless forced
@@ -3064,10 +3128,10 @@ def enrich_page():
     return render_template("enrich_preview.html", shopify_store_handle=store_handle)
 
 
-@app.route("/api/ppt/search-sealed", methods=["POST"])
-def ppt_search_sealed():
+@app.route("/api/search/sealed", methods=["POST"])
+def search_sealed():
     """Search for sealed products by name. Uses cache first; pass live=true to skip cache."""
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
     q = data.get("query", "").strip()
@@ -3078,10 +3142,10 @@ def ppt_search_sealed():
         if live_only:
             # Bypass cache — go straight to PPT/Scrydex live API
             from price_provider import PriceProvider as _PP
-            results = ppt.primary.search_sealed_products(q, limit=5)
-            results = ppt._stamp(results, ppt._primary_source)
+            results = pricing.primary.search_sealed_products(q, limit=5)
+            results = pricing._stamp(results, pricing._primary_source)
         else:
-            results = ppt.search_sealed_products(q, limit=5)
+            results = pricing.search_sealed_products(q, limit=5)
         for r in results:
             if not r.get("tcgplayer_id"):
                 tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
@@ -3112,14 +3176,14 @@ def store_search():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/ppt/lookup-by-id/<int:tcgplayer_id>")
-def ppt_lookup_by_id(tcgplayer_id):
+@app.route("/api/lookup/by-id/<int:tcgplayer_id>")
+def lookup_by_id(tcgplayer_id):
     """Look up any product (card or sealed) by TCGPlayer ID. Tries card first, then sealed."""
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured"}), 503
     try:
         # Try card first
-        card = ppt.get_card_by_tcgplayer_id(tcgplayer_id)
+        card = pricing.get_card_by_tcgplayer_id(tcgplayer_id)
         if card:
             market_price = PriceProvider.extract_market_price(card)
             variants = PriceProvider.extract_variants(card)
@@ -3138,7 +3202,7 @@ def ppt_lookup_by_id(tcgplayer_id):
             })
 
         # Try sealed
-        sealed = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+        sealed = pricing.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
         if sealed:
             price = sealed.get("unopenedPrice") or sealed.get("marketPrice") or 0
             return jsonify({
@@ -3156,19 +3220,19 @@ def ppt_lookup_by_id(tcgplayer_id):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/ppt/sealed/<int:tcgplayer_id>")
-def ppt_sealed_lookup(tcgplayer_id):
+@app.route("/api/lookup/sealed/<int:tcgplayer_id>")
+def sealed_lookup(tcgplayer_id):
     """Fetch a sealed product from PPT by TCGPlayer ID — used by the preview page."""
-    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    item = pricing.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not item:
         return jsonify({"error": f"No PPT product found for TCGPlayer ID {tcgplayer_id}"}), 404
     return jsonify(item)
 
 
-@app.route("/api/ppt/sealed/<int:tcgplayer_id>/raw")
-def ppt_sealed_raw(tcgplayer_id):
+@app.route("/api/lookup/sealed/<int:tcgplayer_id>/raw")
+def sealed_raw(tcgplayer_id):
     """Return the raw PPT response for debugging — shows all available fields."""
-    item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    item = pricing.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not item:
         return jsonify({"error": f"No PPT product found for TCGPlayer ID {tcgplayer_id}"}), 404
     return jsonify({"keys": list(item.keys()), "data": item})
@@ -3486,8 +3550,8 @@ def _enrich_unmatched_worker(job_id: str, tcg_ids: list[int]):
 
         # Wait out rate limits if we hit them
         wait_count = 0
-        while ppt and ppt.should_throttle() and wait_count < 120:
-            rate_info = ppt.get_rate_limit_info()
+        while pricing and pricing.should_throttle() and wait_count < 120:
+            rate_info = pricing.get_rate_limit_info()
             retry_after = rate_info.get("retry_after") or 5
             job["status"] = f"rate_limited (waiting {retry_after}s)"
             _time.sleep(min(retry_after, 5))
@@ -3495,9 +3559,9 @@ def _enrich_unmatched_worker(job_id: str, tcg_ids: list[int]):
 
         job["status"] = "running"
         try:
-            ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+            ppt_item = pricing.get_sealed_product_by_tcgplayer_id(tcg_id)
             if not ppt_item:
-                ppt_item = ppt.get_card_by_tcgplayer_id(tcg_id)
+                ppt_item = pricing.get_card_by_tcgplayer_id(tcg_id)
             if ppt_item:
                 set_name = ppt_item.get("setName", "") or ""
                 ppt_name = ppt_item.get("name", "") or ""
@@ -3532,7 +3596,7 @@ def enrich_unmatched_start():
     """Start a background job to PPT-enrich all unmatched items.
     Body: { "filter": "sealed"|"all", "game": "pokemon"|... } — same filters as unmatched endpoint.
     """
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT not configured"}), 503
 
     data = request.get_json(silent=True) or {}
@@ -3672,17 +3736,17 @@ def export_unmatched():
     uncached = [i for i in items if i["tcgplayer_id"] not in cached]
     enriched_count = 0
     enrich_errors = 0
-    if ppt and uncached:
+    if pricing and uncached:
         MCAP_KEYWORDS = ("miscellaneous cards & products", "miscellaneous")
         for item in uncached[:enrich_limit]:
-            if ppt.should_throttle():
+            if pricing.should_throttle():
                 break
             tcg_id = item["tcgplayer_id"]
             try:
                 # Try sealed first (faster for our use case)
-                ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+                ppt_item = pricing.get_sealed_product_by_tcgplayer_id(tcg_id)
                 if not ppt_item:
-                    ppt_item = ppt.get_card_by_tcgplayer_id(tcg_id)
+                    ppt_item = pricing.get_card_by_tcgplayer_id(tcg_id)
                 if ppt_item:
                     set_name = ppt_item.get("setName", "") or ""
                     ppt_name = ppt_item.get("name", "") or ""
@@ -3896,7 +3960,7 @@ def enrich_existing_product():
     if not product_gid or not tcgplayer_id:
         return jsonify({"error": "product_gid and tcgplayer_id required"}), 400
 
-    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    ppt_item = pricing.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not ppt_item:
         return jsonify({"error": f"PPT item not found for tcgplayer_id {tcgplayer_id}"}), 404
 
@@ -3924,7 +3988,7 @@ def create_listing():
     if not tcgplayer_id:
         return jsonify({"error": "tcgplayer_id required"}), 400
 
-    ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+    ppt_item = pricing.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not ppt_item:
         return jsonify({"error": f"PPT item not found for tcgplayer_id {tcgplayer_id}"}), 404
 

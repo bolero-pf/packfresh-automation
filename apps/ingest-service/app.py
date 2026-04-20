@@ -18,9 +18,9 @@ Endpoints:
         POST /api/intake/create-session     - Create empty session (for manual entry)
 
     PPT Integration:
-        POST /api/ppt/lookup-card           - Lookup raw card by tcgplayer_id
-        POST /api/ppt/lookup-sealed         - Lookup sealed product by tcgplayer_id
-        POST /api/ppt/parse-title           - Fuzzy match product name
+        POST /api/lookup/card               - Lookup raw card by tcgplayer_id
+        POST /api/lookup/sealed             - Lookup sealed product by tcgplayer_id
+        POST /api/lookup/parse-title        - Fuzzy match product name
 
     Product Mappings:
         GET  /api/mappings                  - List cached mappings
@@ -49,7 +49,6 @@ from functools import wraps
 
 import db
 from price_provider import PriceProvider, PriceError, create_price_provider
-from ppt_client import PPTError  # keep for backward compat in except clauses
 from collectr_parser import parse_collectr_csv
 from collectr_html_parser import parse_collectr_html
 from generic_csv_parser import parse_generic_csv, detect_csv_columns
@@ -70,12 +69,12 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
-# Initialize price provider (PPT, Scrydex, or both — controlled by PRICE_PROVIDER env var)
+# Initialize price provider — Scrydex cache/live primary, PPT fallback (controlled by PRICE_PROVIDER env var)
 try:
-    ppt = create_price_provider(db=db)
-    app.logger.info(f"Price provider initialized (mode={ppt.mode})")
+    pricing = create_price_provider(db=db)
+    app.logger.info(f"Price provider initialized (mode={pricing.mode})")
 except Exception as e:
-    ppt = None
+    pricing = None
     app.logger.warning(f"Price provider init failed — price lookups unavailable: {e}")
 
 # Initialize Shopify client (optional — for store inventory lookups)
@@ -90,9 +89,9 @@ else:
 
 cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_products=True)
 
-# Register shared breakdown blueprint (replaces breakdown-cache, PPT search, store-prices routes)
+# Register shared breakdown blueprint (replaces breakdown-cache, provider search, store-prices routes)
 from breakdown_routes import create_breakdown_blueprint
-app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: ppt))
+app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: pricing))
 
 # Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
 # In Docker: WORKDIR=/app, shared/ is at /app/shared/ (not ../shared/)
@@ -624,7 +623,7 @@ def get_session(session_id):
     tcg_ids = list({int(i["tcgplayer_id"]) for i in items if i.get("tcgplayer_id")})
 
     # JIT refresh stale component market prices in background (don't block response)
-    if tcg_ids and ppt:
+    if tcg_ids and pricing:
         try:
             from breakdown_helpers import refresh_stale_component_prices
             import threading
@@ -637,7 +636,7 @@ def get_session(session_id):
             """, tuple(tcg_ids))
             if _vids:
                 threading.Thread(target=refresh_stale_component_prices,
-                    args=([v["variant_id"] for v in _vids], db, ppt), daemon=True).start()
+                    args=([v["variant_id"] for v in _vids], db, pricing), daemon=True).start()
         except Exception:
             pass
 
@@ -802,7 +801,7 @@ def refresh_session_prices(session_id):
     Fires requests until rate-limited, then returns partial results
     with retry_after and next_offset so the frontend can continue.
     """
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured"}), 503
 
     data = request.json or {}
@@ -833,8 +832,8 @@ def refresh_session_prices(session_id):
         tcg_id, ptype, is_graded, grade_co, grade_val = unique_lookups[idx]
 
         # Check rate limit BEFORE making the request — never trigger a 429
-        if ppt.should_throttle():
-            rate_info = ppt.get_rate_limit_info()
+        if pricing.should_throttle():
+            rate_info = pricing.get_rate_limit_info()
             retry_after = rate_info.get("retry_after") or 60
             rate_limited = True
             app.logger.info(f"PPT throttle: minute_remaining={rate_info['minute_remaining']}, "
@@ -849,9 +848,9 @@ def refresh_session_prices(session_id):
 
         try:
             if ptype == "sealed":
-                ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
+                ppt_data = pricing.get_sealed_product_by_tcgplayer_id(tcg_id)
             else:
-                ppt_data = ppt.get_card_by_tcgplayer_id(tcg_id)
+                ppt_data = pricing.get_card_by_tcgplayer_id(tcg_id)
 
             if ppt_data:
                 source = ppt_data.get("_price_source", "ppt")
@@ -886,7 +885,7 @@ def refresh_session_prices(session_id):
 
             fetched_count += 1
 
-        except PPTError as e:
+        except PriceError as e:
             status_code = getattr(e, 'status_code', None)
             if status_code == 429:
                 # Shouldn't happen since we check should_throttle, but handle gracefully
@@ -1037,16 +1036,16 @@ def map_item():
 
     # Legacy: verify_price still works if called directly. Only meaningful
     # when a TCGplayer ID is supplied (PPT lookups are TCG-keyed).
-    if new_price is None and data.get("verify_price") and ppt and tcgplayer_id:
+    if new_price is None and data.get("verify_price") and pricing and tcgplayer_id:
         item = db.query_one("SELECT product_type FROM intake_items WHERE id = %s", (item_id,))
         if item:
             try:
                 if item["product_type"] == "sealed":
-                    ppt_data = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+                    ppt_data = pricing.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
                 else:
-                    ppt_data = ppt.get_card_by_tcgplayer_id(tcgplayer_id)
+                    ppt_data = pricing.get_card_by_tcgplayer_id(tcgplayer_id)
                 new_price = PriceProvider.extract_market_price(ppt_data)
-            except PPTError as e:
+            except PriceError as e:
                 app.logger.warning(f"PPT verification failed for {tcgplayer_id}: {e}")
 
     try:
@@ -1235,9 +1234,9 @@ def add_raw_card():
 
     # Get price from PPT — only when we have a tcg_id to look up.
     market_price = None
-    if ppt and tcgplayer_id is not None:
+    if pricing and tcgplayer_id is not None:
         try:
-            card_data = ppt.get_card_by_tcgplayer_id(tcgplayer_id)
+            card_data = pricing.get_card_by_tcgplayer_id(tcgplayer_id)
             if card_data:
                 is_graded = bool(data.get("is_graded", False))
                 grade_company = (data.get("grade_company") or "").strip()
@@ -1281,7 +1280,7 @@ def add_raw_card():
                     data["rarity"] = card_data["rarity"]
                 if not data.get("card_name") and card_data.get("name"):
                     data["card_name"] = card_data["name"]
-        except PPTError as e:
+        except PriceError as e:
             app.logger.warning(f"PPT lookup failed for {tcgplayer_id}: {e}")
 
     # Allow manual price override
@@ -1551,9 +1550,9 @@ def update_condition(item_id):
         # Skip re-pricing if caller sent skip_reprice (e.g., relink already set the price)
         tcg_id = item.get("tcgplayer_id")
         skip_reprice = data.get("skip_reprice", False)
-        if tcg_id and ppt and not skip_reprice:
+        if tcg_id and pricing and not skip_reprice:
             try:
-                card_data = ppt.get_card_by_tcgplayer_id(int(tcg_id))
+                card_data = pricing.get_card_by_tcgplayer_id(int(tcg_id))
                 if card_data:
                     variants = PriceProvider.extract_variants(card_data)
                     # Use the item's variance to find the right printing, fall back to primary
@@ -1631,9 +1630,9 @@ def mark_item_graded(item_id):
         except Exception as e:
             app.logger.warning(f"Live graded pricing failed: {e}")
         # Fallback to cache/PPT aggregate
-        if new_price is None and ppt:
+        if new_price is None and pricing:
             try:
-                card_data = ppt.get_card_by_tcgplayer_id(int(item["tcgplayer_id"]))
+                card_data = pricing.get_card_by_tcgplayer_id(int(item["tcgplayer_id"]))
                 if card_data:
                     new_price = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
                     if new_price is None:
@@ -1876,10 +1875,10 @@ def export_session_csv(session_id):
 # PPT INTEGRATION ENDPOINTS
 # ==========================================
 
-@app.route("/api/ppt/lookup-card", methods=["POST"])
-def ppt_lookup_card():
+@app.route("/api/lookup/card", methods=["POST"])
+def lookup_card():
     """Look up a raw card by tcgplayer_id. Returns card data + variant/condition prices."""
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
 
     data = request.json or {}
@@ -1888,7 +1887,7 @@ def ppt_lookup_card():
         return jsonify({"error": "tcgplayer_id required"}), 400
 
     try:
-        card_data = ppt.get_card_by_tcgplayer_id(int(tcgplayer_id))
+        card_data = pricing.get_card_by_tcgplayer_id(int(tcgplayer_id))
         if not card_data:
             return jsonify({"error": "Card not found in PPT"}), 404
 
@@ -1940,14 +1939,14 @@ def ppt_lookup_card():
             "graded_prices": graded_prices,  # {"PSA": {"10": {"avg": 450, ...}, "9": {...}}, ...}
             "live_graded": live_graded,      # {"PSA": {"10": {market, mid, low, high, comps_count, sales, ...}}}
         })
-    except PPTError as e:
+    except PriceError as e:
         return jsonify({"error": str(e)}), 502
 
 
-@app.route("/api/ppt/lookup-sealed", methods=["POST"])
-def ppt_lookup_sealed():
+@app.route("/api/lookup/sealed", methods=["POST"])
+def lookup_sealed():
     """Look up a sealed product by tcgplayer_id via PPT."""
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
 
     data = request.json or {}
@@ -1956,7 +1955,7 @@ def ppt_lookup_sealed():
         return jsonify({"error": "tcgplayer_id required"}), 400
 
     try:
-        product_data = ppt.get_sealed_product_by_tcgplayer_id(int(tcgplayer_id))
+        product_data = pricing.get_sealed_product_by_tcgplayer_id(int(tcgplayer_id))
         if not product_data:
             return jsonify({"error": "Sealed product not found in PPT"}), 404
 
@@ -1971,19 +1970,19 @@ def ppt_lookup_sealed():
             "product": product_data,
             "extracted_price": market_price,  # explicitly extracted for the frontend
         })
-    except PPTError as e:
+    except PriceError as e:
         return jsonify({"error": str(e)}), 502
 
 
-@app.route("/api/ppt/debug-card/<int:tcgplayer_id>")
+@app.route("/api/lookup/debug-card/<int:tcgplayer_id>")
 def debug_card_raw(tcgplayer_id):
     """Debug: dump raw PPT response for a card — bare HTTP, no abstraction."""
     import requests as _requests
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT not configured"}), 503
 
     results = {}
-    base = f"{ppt.base_url}/v2/cards"
+    base = f"{pricing.base_url}/v2/cards"
     combos = {
         "bare":         {"tcgPlayerId": str(tcgplayer_id), "limit": 1},
         "includeEbay":  {"tcgPlayerId": str(tcgplayer_id), "limit": 1, "includeEbay": "true"},
@@ -1991,7 +1990,7 @@ def debug_card_raw(tcgplayer_id):
     }
     for label, params in combos.items():
         try:
-            r = _requests.get(base, headers=ppt.headers, params=params, timeout=15)
+            r = _requests.get(base, headers=pricing.headers, params=params, timeout=15)
             results[label] = {
                 "status": r.status_code,
                 "url": r.url,
@@ -2003,48 +2002,48 @@ def debug_card_raw(tcgplayer_id):
     return jsonify(results)
 
 
-@app.route("/api/ppt/debug-sealed/<int:tcgplayer_id>")
+@app.route("/api/lookup/debug-sealed/<int:tcgplayer_id>")
 def debug_sealed(tcgplayer_id):
     """Debug: compare search vs direct lookup for a sealed product."""
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT not configured"}), 503
     results = {}
     
     # Test 1: Direct lookup by tcgPlayerId
     try:
-        url = f"{ppt.base_url}/v2/sealed-products"
+        url = f"{pricing.base_url}/v2/sealed-products"
         params = {"tcgPlayerId": str(tcgplayer_id)}
-        raw = ppt._get(url, params)
+        raw = pricing._get(url, params)
         results["direct_lookup"] = {
             "url": f"{url}?tcgPlayerId={tcgplayer_id}",
             "response": raw,
         }
-    except PPTError as e:
+    except PriceError as e:
         results["direct_lookup"] = {"error": str(e), "status": e.status_code}
 
     # Test 2: Search (to compare structure)
     try:
-        url2 = f"{ppt.base_url}/v2/sealed-products"
+        url2 = f"{pricing.base_url}/v2/sealed-products"
         params2 = {"search": "Elite Trainer Box", "limit": 1}
-        raw2 = ppt._get(url2, params2)
+        raw2 = pricing._get(url2, params2)
         results["search_example"] = {
             "url": f"{url2}?search=Elite+Trainer+Box&limit=1",
             "response": raw2,
         }
-    except PPTError as e:
+    except PriceError as e:
         results["search_example"] = {"error": str(e), "status": e.status_code}
 
     return jsonify(results)
 
 
-@app.route("/api/ppt/search-sealed", methods=["POST"])
-def ppt_search_sealed():
+@app.route("/api/search/sealed", methods=["POST"])
+def search_sealed():
     """Search for sealed products by name across all TCGs.
     Cache first (multi-TCG: pokemon, onepiece, lorcana, mtg, riftbound),
     then live PPT/Scrydex fallback for the configured game.
     Pass live=true to skip cache.
     """
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
     q = data.get("query", "").strip()
@@ -2053,17 +2052,17 @@ def ppt_search_sealed():
     live_only = data.get("live", False)
     try:
         results = []
-        cache = getattr(ppt, "cache", None)
+        cache = getattr(pricing, "cache", None)
         if cache and not live_only:
             try:
                 results = cache.search_sealed_products(q, limit=5, all_games=True)
-                results = ppt._stamp(results, "cache")
+                results = pricing._stamp(results, "cache")
             except Exception as e:
                 app.logger.warning(f"Cross-game sealed cache search failed: {e}")
                 results = []
         if not results:
-            live = ppt.primary.search_sealed_products(q, limit=5) or []
-            results = ppt._stamp(live, ppt._primary_source)
+            live = pricing.primary.search_sealed_products(q, limit=5) or []
+            results = pricing._stamp(live, pricing._primary_source)
         for r in (results or []):
             if not r.get("tcgplayer_id"):
                 tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
@@ -2093,7 +2092,7 @@ def _enrich_sealed_with_shopify_tcg(results: list):
     skip on equal-length ties with differing TCG IDs. On a hit, persist the
     scrydex_id → tcgplayer_id link for future lookups."""
     import re
-    scrydex = getattr(ppt, "primary", None)
+    scrydex = getattr(pricing, "primary", None)
     saver = getattr(scrydex, "_save_tcg_mapping", None)
 
     def _lookup(tokens: list[str]):
@@ -2151,12 +2150,12 @@ def _enrich_sealed_with_shopify_tcg(results: list):
                 pass
 
 
-@app.route("/api/ppt/search-cards", methods=["POST"])
-def ppt_search_cards():
+@app.route("/api/search/cards", methods=["POST"])
+def search_cards():
     """Search for individual cards by name across all TCGs.
     Cache first (multi-TCG), then live PPT/Scrydex fallback for the configured game.
     """
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
     q = data.get("query", "").strip()
@@ -2166,17 +2165,17 @@ def ppt_search_cards():
         set_name = data.get("set_name") or None
         limit = data.get("limit", 8)
         results = []
-        cache = getattr(ppt, "cache", None)
+        cache = getattr(pricing, "cache", None)
         if cache:
             try:
                 results = cache.search_cards(q, set_name=set_name, limit=limit, all_games=True)
-                results = ppt._stamp(results, "cache")
+                results = pricing._stamp(results, "cache")
             except Exception as e:
                 app.logger.warning(f"Cross-game card cache search failed: {e}")
                 results = []
         if not results:
-            live = ppt.primary.search_cards(q, set_name=set_name, limit=limit) or []
-            results = ppt._stamp(live, ppt._primary_source)
+            live = pricing.primary.search_cards(q, set_name=set_name, limit=limit) or []
+            results = pricing._stamp(live, pricing._primary_source)
         for r in (results or []):
             if not r.get("market_price"):
                 conds = (r.get("prices") or {}).get("conditions") or {}
@@ -2187,10 +2186,10 @@ def ppt_search_cards():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/ppt/parse-title", methods=["POST"])
-def ppt_parse_title():
+@app.route("/api/lookup/parse-title", methods=["POST"])
+def parse_title():
     """Fuzzy-match a product name via PPT's parse-title endpoint (best for card titles)."""
-    if not ppt:
+    if not pricing:
         return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
 
     data = request.json or {}
@@ -2198,7 +2197,7 @@ def ppt_parse_title():
     if not title:
         return jsonify({"error": "title required"}), 400
 
-    matches = ppt.parse_title(title)
+    matches = pricing.parse_title(title)
     return jsonify({"matches": matches})
 
 
@@ -2246,8 +2245,8 @@ def get_barcode(barcode_id):
 def health():
     try:
         db.query("SELECT 1")
-        ppt_status = "configured" if ppt else "not configured"
-        return jsonify({"status": "healthy", "database": "connected", "ppt": ppt_status})
+        provider_status = "configured" if pricing else "not configured"
+        return jsonify({"status": "healthy", "database": "connected", "provider": provider_status})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
@@ -2603,7 +2602,7 @@ def shopify_session_store_check(session_id):
                 """, tuple(all_tcg_ids))
                 if _vids:
                     threading.Thread(target=refresh_stale_component_prices,
-                        args=([v["variant_id"] for v in _vids], db, ppt), daemon=True).start()
+                        args=([v["variant_id"] for v in _vids], db, pricing), daemon=True).start()
             except Exception as e:
                 app.logger.warning(f"Component price refresh skipped: {e}")
 

@@ -55,7 +55,7 @@ def _get_cache_manager():
     import app as _app
     return _app.cache_manager
 
-def _get_ppt_client():
+def _get_price_provider():
     import app as _app
     return _app.ppt_client
 
@@ -422,10 +422,10 @@ def add_item_page():
     return _render_add_page()
 
 
-@bp.route("/api/ppt/sealed/<int:tcgplayer_id>")
+@bp.route("/api/lookup/sealed/<int:tcgplayer_id>")
 @requires_auth
-def ppt_sealed_lookup(tcgplayer_id):
-    ppt = _get_ppt_client()
+def sealed_lookup(tcgplayer_id):
+    ppt = _get_price_provider()
     if ppt is None:
         return jsonify({"error": "PPT not configured"}), 503
     item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
@@ -434,13 +434,13 @@ def ppt_sealed_lookup(tcgplayer_id):
     return jsonify(item)
 
 
-@bp.route("/api/ppt/search")
+@bp.route("/api/search/inventory")
 @requires_auth
-def ppt_search():
+def search_inventory():
     q = (request.args.get("q") or "").strip()
     if not q:
         return jsonify([])
-    ppt = _get_ppt_client()
+    ppt = _get_price_provider()
     if ppt is None:
         return jsonify({"error": "PPT not configured"}), 503
     results = ppt.search_sealed_products(q, limit=8)
@@ -478,7 +478,7 @@ def create_listing():
     if not tcgplayer_id:
         return jsonify({"error": "tcgplayer_id required"}), 400
 
-    ppt = _get_ppt_client()
+    ppt = _get_price_provider()
     if ppt is None:
         return jsonify({"error": "PPT not configured"}), 503
 
@@ -986,7 +986,7 @@ async function runSearch(q){{
   dd.innerHTML = '<div class="search-result-item" style="color:var(--dim);">Searching…</div>';
   dd.style.display = 'block';
   try{{
-    const r = await fetch('/inventory/api/ppt/search?q='+encodeURIComponent(q));
+    const r = await fetch('/inventory/api/search/inventory?q='+encodeURIComponent(q));
     const items = await r.json();
     if(!items.length){{
       dd.innerHTML = '<div class="search-result-item" style="color:var(--dim);">No results — try a TCGPlayer ID below</div>';
@@ -1030,7 +1030,7 @@ async function doPreview(){{
 
   try{{
     const [pptResp, previewResp] = await Promise.all([
-      fetch('/inventory/api/ppt/sealed/'+encodeURIComponent(tcgId)),
+      fetch('/inventory/api/lookup/sealed/'+encodeURIComponent(tcgId)),
       fetch('/inventory/api/enrich/preview', {{
         method:'POST', headers:{{'Content-Type':'application/json'}},
         body: JSON.stringify({{product_name:'', set_name:'', tcgplayer_id: tcgId}})

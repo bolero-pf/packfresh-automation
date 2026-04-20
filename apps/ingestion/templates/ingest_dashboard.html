@@ -3722,7 +3722,7 @@ async function _aiCardSearch() {
 
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
     try {
-        const r = await fetch('/api/ppt/search-cards', {
+        const r = await fetch('/api/search/cards', {
             method: 'POST', headers: {'Content-Type':'application/json'},
             body: JSON.stringify({ query, set_name: setFilter || undefined }),
         });
@@ -3811,7 +3811,7 @@ function _aiRenderCardResults(cards, condition, qty, isGraded, gradeCompany, gra
 async function _aiLookupByTcg(tcgId, condition, qty, isGraded, gradeCompany, gradeValue, resultsDiv) {
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up TCG#' + tcgId + '...</div>';
     try {
-        const r = await fetch('/api/ppt/lookup-card', {
+        const r = await fetch('/api/lookup/card', {
             method: 'POST', headers: {'Content-Type':'application/json'},
             body: JSON.stringify({ tcgplayer_id: tcgId }),
         });
@@ -3860,7 +3860,7 @@ async function _aiShowConditionPicker(tcgId, cardName, setName, cardNum, rarity,
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading conditions...</div>';
     let variants = {};
     try {
-        const r = await fetch('/api/ppt/lookup-card', {
+        const r = await fetch('/api/lookup/card', {
             method: 'POST', headers: {'Content-Type':'application/json'},
             body: JSON.stringify({ tcgplayer_id: tcgId }),
         });
@@ -3963,7 +3963,7 @@ async function addItemSearch(live) {
     try {
         const body = { query };
         if (live) body.live = true;
-        const sr = await fetch('/api/ppt/search-sealed', {
+        const sr = await fetch('/api/search/sealed', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body),
@@ -4130,7 +4130,7 @@ async function addItemManual() {
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up TCG#' + tcgId + '...</div>';
 
     try {
-        const lr = await fetch(`/api/ppt/lookup-by-id/${tcgId}`);
+        const lr = await fetch(`/api/lookup/by-id/${tcgId}`);
         const ld = await lr.json();
 
         if (ld.found) {

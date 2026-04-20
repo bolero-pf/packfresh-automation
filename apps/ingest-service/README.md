@@ -71,12 +71,12 @@ railway up
 | POST | `/api/intake/create-session` | Create empty session |
 | POST | `/api/intake/add-raw-card` | Add card (auto-prices from PPT) |
 
-### PPT Integration
+### Price provider (Scrydex-first, PPT fallback)
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/ppt/lookup-card` | Raw card price by tcgplayer_id |
-| POST | `/api/ppt/lookup-sealed` | Sealed product price by tcgplayer_id |
-| POST | `/api/ppt/parse-title` | Fuzzy match product name |
+| POST | `/api/lookup/card` | Raw card price by tcgplayer_id |
+| POST | `/api/lookup/sealed` | Sealed product price by tcgplayer_id |
+| POST | `/api/lookup/parse-title` | Fuzzy match product name |
 
 ### Utility
 | Method | Path | Description |

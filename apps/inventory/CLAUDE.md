@@ -24,7 +24,7 @@ The breakdown system spans 3 services (inventory, ingest-service, ingestion) sha
 ### Key Functions
 - `_build_recommendations()` in breakdown.py — Joins inventory + recipes, computes scores
 - `refresh_stale_component_prices()` in shared/breakdown_helpers.py — JIT market price refresh
-- PPT client via `_get_ppt_client()` from routes/inventory.py
+- Price provider via `_get_price_provider()` from routes/inventory.py
 
 ## AI Enrichment (temporary backfill tool)
 - Page at `/inventory/ai-enrichment` for batch-generating agentic metafields + GTINs

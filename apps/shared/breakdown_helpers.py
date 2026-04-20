@@ -23,7 +23,7 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
     Args:
         variant_ids: list of variant UUIDs to check
         db: database module with query() and execute() functions
-        ppt: PPTClient instance (or None to skip refresh)
+        ppt: PriceProvider instance (or None to skip refresh)
         max_age_hours: consider prices stale after this many hours
 
     Returns:

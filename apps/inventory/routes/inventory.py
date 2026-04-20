@@ -64,7 +64,7 @@ def _get_cache_manager():
     import app as _app
     return _app.cache_manager
 
-def _get_ppt_client():
+def _get_price_provider():
     import app as _app
     return _app.ppt_client
 
@@ -451,21 +451,21 @@ def zero_physical():
 def add_item_page():
     return _render_add_page()
 
-@bp.route("/api/ppt/sealed/<int:tcgplayer_id>")
+@bp.route("/api/lookup/sealed/<int:tcgplayer_id>")
 @requires_auth
-def ppt_sealed_lookup(tcgplayer_id):
-    ppt = _get_ppt_client()
+def sealed_lookup(tcgplayer_id):
+    ppt = _get_price_provider()
     if ppt is None: return jsonify({"error": "PPT not configured"}), 503
     item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not item: return jsonify({"error": f"No PPT product for {tcgplayer_id}"}), 404
     return jsonify(item)
 
-@bp.route("/api/ppt/search")
+@bp.route("/api/search/inventory")
 @requires_auth
-def ppt_search():
+def search_inventory():
     q = (request.args.get("q") or "").strip()
     if not q: return jsonify([])
-    ppt = _get_ppt_client()
+    ppt = _get_price_provider()
     if ppt is None: return jsonify({"error": "PPT not configured"}), 503
     return jsonify(ppt.search_sealed_products(q, limit=8))
 
@@ -491,7 +491,7 @@ def create_listing():
     tcgplayer_id = data.get("tcgplayer_id")
     quantity     = int(data.get("quantity", 0))
     if not tcgplayer_id: return jsonify({"error": "tcgplayer_id required"}), 400
-    ppt = _get_ppt_client()
+    ppt = _get_price_provider()
     if ppt is None: return jsonify({"error": "PPT not configured"}), 503
     ppt_item = ppt.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
     if not ppt_item: return jsonify({"error": f"No PPT product for {tcgplayer_id}"}), 404
@@ -1131,7 +1131,7 @@ async function runSearch(q){{
   dd.innerHTML='<div class="dd-item" style="color:var(--dim);">Searching…</div>';
   dd.style.display='block';
   try{{
-    const r   = await fetch('/inventory/api/ppt/search?q='+encodeURIComponent(q));
+    const r   = await fetch('/inventory/api/search/inventory?q='+encodeURIComponent(q));
     const items = await r.json();
     if(!Array.isArray(items)||!items.length){{
       dd.innerHTML='<div class="dd-item" style="color:var(--dim);">No results</div>';
@@ -1176,7 +1176,7 @@ async function doPreview(){{
   btn.disabled=true; btn.innerHTML='<span class="spinner"></span>Loading…';
   hideErr(); document.getElementById('result').style.display='none';
   try{{
-    const pr = await fetch('/inventory/api/ppt/sealed/'+encodeURIComponent(tcgId));
+    const pr = await fetch('/inventory/api/lookup/sealed/'+encodeURIComponent(tcgId));
     if(!pr.ok){{ const d=await pr.json(); throw new Error(d.error||'PPT lookup failed'); }}
     const ppt = await pr.json();
     _ppt = ppt;
