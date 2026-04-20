@@ -2083,19 +2083,22 @@ def _enrich_sealed_with_shopify_tcg(results: list):
     result still missing one, look up a matching Shopify product in
     inventory_product_cache by title — the store has been selling sealed
     forever, so if we carry the product, its TCG ID is already cached.
-    Matches require every name-token (≥3 chars) to hit as a word-boundary,
-    and disambiguate by shortest title when multiple rows share that profile.
-    Also persists the scrydex_id → tcgplayer_id link for future lookups."""
+
+    Match is two-phase: strict first (every name-token ≥3 chars must hit as
+    a word-boundary), then — only if strict found nothing — relaxed (drop
+    the tokens that come from the expansion name, since Shopify often names
+    sealed titles without the set prefix, e.g. Scrydex's "Shrouded Fable
+    Kingdra ex Special Illustration Collection" vs. store's "Kingdra ex
+    Special Illustration Collection"). Disambiguate by shortest title and
+    skip on equal-length ties with differing TCG IDs. On a hit, persist the
+    scrydex_id → tcgplayer_id link for future lookups."""
     import re
     scrydex = getattr(ppt, "primary", None)
     saver = getattr(scrydex, "_save_tcg_mapping", None)
-    for r in results:
-        if r.get("tcgplayer_id") or r.get("tcgPlayerId") or r.get("tcgplayerId"):
-            continue
-        name = (r.get("name") or "").strip()
-        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", name) if len(t) >= 3]
+
+    def _lookup(tokens: list[str]):
         if not tokens:
-            continue
+            return []
         sql = ("SELECT tcgplayer_id, title FROM inventory_product_cache "
                "WHERE tcgplayer_id IS NOT NULL")
         params: list = []
@@ -2104,15 +2107,30 @@ def _enrich_sealed_with_shopify_tcg(results: list):
             params.append(r"\m" + re.escape(t) + r"\M")
         sql += " ORDER BY LENGTH(title) ASC LIMIT 5"
         try:
-            rows = db.query(sql, tuple(params))
+            return db.query(sql, tuple(params))
         except Exception as e:
             app.logger.debug(f"Shopify-cache sealed enrichment failed: {e}")
+            return []
+
+    for r in results:
+        if r.get("tcgplayer_id") or r.get("tcgPlayerId") or r.get("tcgplayerId"):
             continue
+        name = (r.get("name") or "").strip()
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9]+", name) if len(t) >= 3]
+        if not tokens:
+            continue
+
+        rows = _lookup(tokens)
+        if not rows:
+            set_name = (r.get("setName") or r.get("set_name") or "")
+            set_tokens = {t.lower() for t in re.findall(r"[A-Za-z0-9]+", set_name) if len(t) >= 3}
+            relaxed = [t for t in tokens if t not in set_tokens]
+            if relaxed and len(relaxed) < len(tokens) and len(relaxed) >= 2:
+                rows = _lookup(relaxed)
         if not rows:
             continue
+
         top = rows[0]
-        # Ambiguity guard: if a second row has the same title length but a
-        # different TCG ID, we can't pick a winner.
         for other in rows[1:]:
             if len(other["title"]) == len(top["title"]) and other["tcgplayer_id"] != top["tcgplayer_id"]:
                 top = None
