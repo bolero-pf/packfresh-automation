@@ -152,20 +152,30 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
         q = request.args.get("q", "").strip()
         if not q:
             return jsonify({"results": []})
-        ppt = _get_ppt()
-        if not ppt:
-            return jsonify({"results": [], "error": "PPT not configured"}), 503
+        pricing = _get_ppt()
+        if not pricing:
+            return jsonify({"results": [], "error": "Price provider not configured"}), 503
         try:
-            results = ppt.search_sealed_products(q, limit=10)
-            # Normalize fields — PPT returns varying field names
+            results = pricing.search_sealed_products(q, limit=10) or []
+            # Normalize fields — provider returns varying field names
             for r in results:
                 if not r.get("tcgplayer_id"):
                     tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
                     if tcg_id:
-                        r["tcgplayer_id"] = int(tcg_id)
+                        try:
+                            r["tcgplayer_id"] = int(tcg_id)
+                        except (TypeError, ValueError):
+                            pass
                 # Sealed products: price is in unopenedPrice, not market_price
                 if not r.get("market_price"):
                     r["market_price"] = r.get("unopenedPrice") or r.get("marketPrice") or r.get("midPrice") or 0
+            # Scrydex sealed hits don't carry tcgplayer_id — backfill from
+            # inventory_product_cache when the store already carries the product.
+            try:
+                from sealed_tcg_enrichment import enrich_sealed_with_shopify_tcg
+                enrich_sealed_with_shopify_tcg(results, db_module, price_provider=pricing)
+            except Exception as e:
+                logger.debug(f"Sealed-TCG enrichment skipped: {e}")
             return jsonify({"results": results})
         except Exception as e:
             details = e.args[2] if len(e.args) > 2 else {}
