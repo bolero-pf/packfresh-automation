@@ -575,20 +575,22 @@ def slab_run_set_tcg(row_id):
     market  = float(comps["market"])
     cost    = float(row["cost_basis"] or 0)
     comps_n = comps.get("comps_count")
-    delta_pct = ((current - market) / market * 100) if market > 0 else 0
 
-    safe_price = max(market, cost) if cost else market
+    # Decision target is charm_ceil(market) — see slab_updater.run() for why.
+    safe_price  = max(market, cost) if cost else market
     charm_price = charm_ceil(safe_price)
+    target      = charm_price or market
+    delta_pct   = ((current - target) / target * 100) if target > 0 else 0
 
     if abs(delta_pct) <= 10:
-        action, reason, suggested = "ok", f"within 10% (delta {delta_pct:+.1f}%)", None
+        action, reason, suggested = "ok", f"within 10% of target ${target:.2f} (delta {delta_pct:+.1f}%)", None
     elif delta_pct > 10:
         action = "flag_overpriced"
-        reason = f"overpriced {delta_pct:+.1f}% — review"
+        reason = f"{delta_pct:+.1f}% over target ${target:.2f} — review"
         suggested = charm_price
     else:
         action = "flag_underpriced"
-        reason = f"underpriced {delta_pct:+.1f}% vs median — review"
+        reason = f"{delta_pct:+.1f}% below target ${target:.2f} — review"
         suggested = charm_price
 
     shared_db.execute("""

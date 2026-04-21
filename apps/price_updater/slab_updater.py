@@ -313,7 +313,16 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
         comps_n = comps.get("comps_count", 0)
         comps_kept = comps.get("comps_kept", comps_n)
         outliers = comps.get("outliers_dropped", 0)
-        delta_pct = ((current - market) / market * 100) if market > 0 else 0
+
+        # Decision target is charm_ceil(market), not raw market. Charm ceiling
+        # intentionally lifts price to the next .99 tier — a $12 market
+        # becomes a $14.99 target. Computing delta vs raw market means a card
+        # priced correctly at $14.99 re-flags every run as "+25% overpriced"
+        # and ping-pongs forever. Delta is the gap vs the actual target price.
+        safe_price  = max(market, cost) if cost else market
+        charm_price = charm_ceil(safe_price)
+        target      = charm_price or market
+        delta_pct   = ((current - target) / target * 100) if target > 0 else 0
 
         entry = {
             **slab,
@@ -329,17 +338,13 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
             "delta_pct":   round(delta_pct, 1),
         }
 
-        # Decision logic — Sean's preference: never auto-adjust DOWN, and
-        # all suggestions get charm-ceil rounding (next .99 price >= smart
-        # market, tiered by price band). Cost basis is the floor.
-        safe_price = max(market, cost) if cost else market
-        charm_price = charm_ceil(safe_price)
-
+        # Sean's preference: never auto-adjust DOWN. Cost basis is the floor,
+        # charm-ceil is the target.
         if abs(delta_pct) <= 10:
             entry["action"] = "ok"
-            entry["reason"] = f"within 10% (delta {delta_pct:+.1f}%)"
+            entry["reason"] = f"within 10% of target ${target:.2f} (delta {delta_pct:+.1f}%)"
         elif delta_pct > 10:
-            # Overpriced
+            # Priced above target
             if apply and slab["qty"] > 0:
                 # Legacy CLI path (apply=True) — keep working for manual runs.
                 # Cron path now passes apply=False so this won't fire nightly.
@@ -348,20 +353,20 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
                     update_variant_price(slab["product_gid"], slab["variant_gid"], new_price)
                     entry["action"] = "adjusted"
                     entry["new_price"] = new_price
-                    entry["reason"] = f"overpriced {delta_pct:+.1f}%, adjusted to charm-ceil ${new_price}"
+                    entry["reason"] = f"{delta_pct:+.1f}% over target ${target:.2f}, adjusted to ${new_price}"
                     updated += 1
                 except Exception as e:
                     entry["action"] = "error"
                     entry["reason"] = f"price update failed: {e}"
             else:
                 entry["action"] = "flag_overpriced"
-                entry["reason"] = f"overpriced {delta_pct:+.1f}% — review"
+                entry["reason"] = f"{delta_pct:+.1f}% over target ${target:.2f} — review"
                 entry["suggested_price"] = charm_price
                 flagged += 1
         else:
-            # Underpriced — flag for review (never auto-raise)
+            # Priced below target — flag for review (never auto-raise)
             entry["action"] = "flag_underpriced"
-            entry["reason"] = f"underpriced {delta_pct:+.1f}% vs median — review"
+            entry["reason"] = f"{delta_pct:+.1f}% below target ${target:.2f} — review"
             entry["suggested_price"] = charm_price
             flagged += 1
 
