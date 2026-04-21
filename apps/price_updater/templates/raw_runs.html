@@ -26,6 +26,11 @@
         .num { font-family: var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; }
         .ts  { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-dim); }
         .empty { padding: 40px; text-align: center; color: var(--text-dim); border: 1px dashed var(--border); border-radius: 8px; }
+        .run-status { font-size: 0.85rem; color: var(--text-dim); font-family: var(--font-mono); }
+        .run-status.ok { color: #4ade80; }
+        .run-status.err { color: #f87171; }
+        tr.new-run td { animation: flash-new 2s ease-out; }
+        @keyframes flash-new { 0% { background: rgba(34,197,94,0.35);} 100% { background: transparent;} }
     </style>
 </head>
 <body>
@@ -44,10 +49,9 @@
     </div>
 
     <div class="actions">
-        <form method="POST" action="/run-raw-updater" style="display:inline;">
-            <button type="submit" class="btn btn-primary">▶ Run raw card updater now</button>
-        </form>
+        <button id="run-btn" class="btn btn-primary" data-trigger="/run-raw-updater">▶ Run raw card updater now</button>
         <a href="/dashboard/runlog" class="btn btn-secondary">Live log</a>
+        <span id="run-status" class="run-status"></span>
     </div>
 
     {% if not runs %}
@@ -84,5 +88,89 @@
         </tbody>
     </table>
     {% endif %}
+
+    <script>
+    const detailPrefix = '/dashboard/raw-runs/';
+    function collectRunIds() {
+        return new Set(
+            [...document.querySelectorAll(`tbody tr a[href^="${detailPrefix}"]`)]
+              .map(a => a.getAttribute('href').split('/').pop())
+        );
+    }
+    let knownRunIds = collectRunIds();
+    let pollTimer = null;
+    const btn = document.getElementById('run-btn');
+    const status = document.getElementById('run-status');
+
+    async function refreshTable() {
+        const r = await fetch(window.location.pathname);
+        const html = await r.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const newTbody = doc.querySelector('tbody');
+        const oldTbody = document.querySelector('tbody');
+        if (!newTbody || !oldTbody) return false;
+        const beforeIds = knownRunIds;
+        oldTbody.replaceWith(newTbody);
+        knownRunIds = collectRunIds();
+        document.querySelectorAll('tbody tr').forEach(tr => {
+            const a = tr.querySelector(`a[href^="${detailPrefix}"]`);
+            if (a) {
+                const id = a.getAttribute('href').split('/').pop();
+                if (!beforeIds.has(id)) tr.classList.add('new-run');
+            }
+        });
+        return [...knownRunIds].some(id => !beforeIds.has(id));
+    }
+
+    function startPolling() {
+        if (pollTimer) clearInterval(pollTimer);
+        let ticks = 0;
+        let sawNewRun = false;
+        const startedAt = Date.now();
+        pollTimer = setInterval(async () => {
+            ticks++;
+            try {
+                const gotNew = await refreshTable();
+                if (gotNew) sawNewRun = true;
+                const elapsed = Math.round((Date.now() - startedAt)/1000);
+                if (sawNewRun) {
+                    status.textContent = `✓ New run is populating (${elapsed}s elapsed) — refreshing…`;
+                    status.className = 'run-status ok';
+                } else {
+                    status.textContent = `Running… waiting for first row (${elapsed}s elapsed)`;
+                }
+            } catch(e) {
+                status.textContent = 'Refresh failed: ' + e.message;
+                status.className = 'run-status err';
+            }
+            if (ticks >= 100) { clearInterval(pollTimer); btn.disabled = false; }
+        }, 3000);
+    }
+
+    btn.addEventListener('click', async function() {
+        btn.disabled = true;
+        status.className = 'run-status';
+        status.textContent = 'Starting…';
+        try {
+            const r = await fetch(btn.dataset.trigger, {
+                method:'POST', headers:{'Content-Type':'application/json'}, body:'{}',
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                status.textContent = 'Error: ' + (d.error || r.statusText);
+                status.className = 'run-status err';
+                btn.disabled = false;
+                return;
+            }
+            status.textContent = '✓ Running now — polling for new run…';
+            status.className = 'run-status ok';
+            startPolling();
+        } catch(err) {
+            status.textContent = 'Error: ' + err.message;
+            status.className = 'run-status err';
+            btn.disabled = false;
+        }
+    });
+    </script>
 </body>
 </html>

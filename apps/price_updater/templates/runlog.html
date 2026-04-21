@@ -23,19 +23,41 @@
     <h1>Live Script Log</h1>
 
     <div class="actions">
-        <form method="POST" action="/run-scrydex-sync" style="display:inline;">
-            <button type="submit" class="btn btn-primary">▶ Run Scrydex sync</button>
-        </form>
-        <form method="POST" action="/run-slab-updater" style="display:inline;">
-            <button type="submit" class="btn btn-secondary">▶ Run slab updater</button>
-        </form>
-        <form method="POST" action="/run-raw-updater" style="display:inline;">
-            <button type="submit" class="btn btn-secondary">▶ Run raw updater</button>
-        </form>
-        <form method="POST" action="/price_update" style="display:inline;">
-            <button type="submit" class="btn btn-secondary">▶ Run price update</button>
-        </form>
+        <button class="btn btn-primary"   data-trigger="/run-scrydex-sync">▶ Run Scrydex sync</button>
+        <button class="btn btn-secondary" data-trigger="/run-slab-updater">▶ Run slab updater</button>
+        <button class="btn btn-secondary" data-trigger="/run-raw-updater">▶ Run raw updater</button>
+        <button class="btn btn-secondary" data-trigger="/price_update">▶ Run price update</button>
+        <span id="trigger-status" style="font-family:var(--font-mono); font-size:0.85rem; color:var(--text-dim);"></span>
     </div>
+
+    <script>
+    document.querySelectorAll('[data-trigger]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const status = document.getElementById('trigger-status');
+            btn.disabled = true;
+            status.textContent = 'Starting ' + btn.textContent.trim() + '…';
+            status.style.color = 'var(--text-dim)';
+            try {
+                const r = await fetch(btn.dataset.trigger, {
+                    method:'POST', headers:{'Content-Type':'application/json'}, body:'{}',
+                });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) {
+                    status.textContent = '✗ ' + (d.error || r.statusText);
+                    status.style.color = '#f87171';
+                } else {
+                    status.textContent = '✓ Started — output streams below';
+                    status.style.color = '#4ade80';
+                }
+            } catch(err) {
+                status.textContent = '✗ ' + err.message;
+                status.style.color = '#f87171';
+            } finally {
+                setTimeout(() => { btn.disabled = false; }, 1500);
+            }
+        });
+    });
+    </script>
 
     <div id="log"></div>
 
