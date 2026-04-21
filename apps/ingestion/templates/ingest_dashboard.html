@@ -429,7 +429,7 @@
 
 <!-- Confirm dialog now provided by shared pf_ui.js (themedConfirm) -->
 
-<div id="prompt-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:11000; align-items:center; justify-content:center;">
+<div id="prompt-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:13000; align-items:center; justify-content:center;">
     <div class="confirm-box" style="min-width:280px;">
         <h3 id="prompt-title"></h3>
         <p id="prompt-msg" style="color:var(--text-dim); font-size:0.9rem; margin-bottom:12px;"></p>
@@ -4096,13 +4096,15 @@ function _showTcgIdEntry() {
 }
 
 async function addItemSelect(tcgId, name, price, setName) {
+    const sid = _addItemSessionId;
+    if (!sid) { alert('Session lost — reopen Unexpected Item and try again.'); return; }
     const input = await themedPrompt('Quantity', `How many "${name}"?`, '1');
     if (input === null) return;
     const qty = parseInt(input);
     if (isNaN(qty) || qty < 1) { alert('Quantity must be at least 1'); return; }
 
     try {
-        const r = await fetch(`/api/ingest/session/${_addItemSessionId}/add-item`, {
+        const r = await fetch(`/api/ingest/session/${sid}/add-item`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
@@ -4115,7 +4117,6 @@ async function addItemSelect(tcgId, name, price, setName) {
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
-        const sid = _addItemSessionId;
         closeAddItem();
         viewSession(sid, true);
     } catch(err) { alert(err.message); }
