@@ -447,6 +447,173 @@ def slab_run_apply_row(row_id):
     })
 
 
+@app.route('/dashboard/slab-runs/row/<int:row_id>/suggest-tcg', methods=["POST"])
+def slab_run_suggest_tcg(row_id):
+    """Suggest candidate TCGPlayer IDs for a skipped 'no tcg_id' row.
+
+    Reuses slab_backfill's title parser + cache scorer — no Scrydex credits
+    consumed when the cache already covers the card. Returns up to 5
+    candidates sorted by match score.
+    """
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import db as shared_db
+    shared_db.init_pool()
+
+    row = shared_db.query_one(
+        "SELECT id, title FROM slab_price_runs WHERE id = %s", (row_id,))
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+
+    from slab_backfill import parse_title, _candidates_from_cache, _score_candidates
+    parsed = parse_title(row["title"])
+    cands = _candidates_from_cache(parsed, shared_db)
+    scored = _score_candidates(parsed, cands)
+
+    # Enrich top 5 with image + card_number from cache
+    out = []
+    seen_tcg = set()
+    for score, r in scored[:12]:
+        tcg = r.get("tcgplayer_id")
+        if not tcg or tcg in seen_tcg:
+            continue
+        seen_tcg.add(tcg)
+        img = shared_db.query_one("""
+            SELECT image_small, card_number FROM scrydex_price_cache
+            WHERE scrydex_id = %s AND tcgplayer_id = %s LIMIT 1
+        """, (r["scrydex_id"], tcg))
+        out.append({
+            "tcgplayer_id":   tcg,
+            "scrydex_id":     r["scrydex_id"],
+            "product_name":   r["product_name"],
+            "expansion_name": r["expansion_name"],
+            "variant":        r.get("variant"),
+            "card_number":    (img or {}).get("card_number") or r.get("printed_number"),
+            "image_small":    (img or {}).get("image_small"),
+            "score":          score,
+        })
+        if len(out) >= 5:
+            break
+
+    return jsonify({
+        "ok": True,
+        "parsed": {"game": parsed["game"], "card_number": parsed["card_number"]},
+        "candidates": out,
+    })
+
+
+@app.route('/dashboard/slab-runs/row/<int:row_id>/set-tcg', methods=["POST"])
+def slab_run_set_tcg(row_id):
+    """Write a TCGPlayer ID metafield on the Shopify product, then re-price
+    this one variant inline. Body: {tcgplayer_id: int}.
+
+    On success the slab_price_runs row is updated with fresh pricing (action
+    flips from 'skip' to ok/flag_under/flag_over) and the new state is
+    returned so the UI can render Apply/Dismiss buttons in place.
+    """
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import db as shared_db
+    shared_db.init_pool()
+
+    body = request.get_json(silent=True) or {}
+    try:
+        tcg_id = int(body.get("tcgplayer_id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "tcgplayer_id required (int)"}), 400
+    if tcg_id <= 0:
+        return jsonify({"ok": False, "error": "tcgplayer_id must be positive"}), 400
+
+    row = shared_db.query_one("""
+        SELECT id, product_gid, variant_gid, title, company, grade,
+               old_price, qty, cost_basis
+        FROM slab_price_runs WHERE id = %s
+    """, (row_id,))
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+    if not row["product_gid"]:
+        return jsonify({"ok": False, "error": "row has no Shopify product"}), 400
+
+    # Write metafield
+    from slab_backfill import _set_tcg_metafield
+    try:
+        _set_tcg_metafield(row["product_gid"], tcg_id)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Shopify metafield write failed: {e}"}), 502
+
+    # Re-price this one variant using the same logic as slab_updater.run()
+    from graded_pricing import get_live_graded_comps
+    from slab_updater import charm_ceil
+
+    company = row["company"]
+    grade   = row["grade"]
+    if not company or not grade:
+        # Row was skipped for "no grade in title" — can't price without a grade
+        shared_db.execute("""
+            UPDATE slab_price_runs SET tcgplayer_id = %s WHERE id = %s
+        """, (tcg_id, row_id))
+        return jsonify({
+            "ok": True, "tcgplayer_id": tcg_id,
+            "action": "skip", "reason": "no grade in title — fix title then rerun",
+        })
+
+    comps = get_live_graded_comps(tcg_id, company, grade, shared_db)
+    if not comps or not comps.get("market"):
+        shared_db.execute("""
+            UPDATE slab_price_runs SET tcgplayer_id = %s,
+                action = 'skip', reason = 'no comp data'
+            WHERE id = %s
+        """, (tcg_id, row_id))
+        return jsonify({
+            "ok": True, "tcgplayer_id": tcg_id,
+            "action": "skip", "reason": "no comp data",
+        })
+
+    current = float(row["old_price"] or 0)
+    market  = float(comps["market"])
+    cost    = float(row["cost_basis"] or 0)
+    comps_n = comps.get("comps_count")
+    delta_pct = ((current - market) / market * 100) if market > 0 else 0
+
+    safe_price = max(market, cost) if cost else market
+    charm_price = charm_ceil(safe_price)
+
+    if abs(delta_pct) <= 10:
+        action, reason, suggested = "ok", f"within 10% (delta {delta_pct:+.1f}%)", None
+    elif delta_pct > 10:
+        action = "flag_overpriced"
+        reason = f"overpriced {delta_pct:+.1f}% — review"
+        suggested = charm_price
+    else:
+        action = "flag_underpriced"
+        reason = f"underpriced {delta_pct:+.1f}% vs median — review"
+        suggested = charm_price
+
+    shared_db.execute("""
+        UPDATE slab_price_runs
+           SET tcgplayer_id = %s,
+               median = %s, low_comp = %s, high_comp = %s,
+               comps_count = %s, trend_7d = %s, delta_pct = %s,
+               suggested_price = %s, action = %s, reason = %s
+         WHERE id = %s
+    """, (
+        tcg_id, market, comps.get("low"), comps.get("high"),
+        comps_n, comps.get("trend_7d_pct"), round(delta_pct, 1),
+        suggested, action, reason, row_id,
+    ))
+
+    return jsonify({
+        "ok": True, "tcgplayer_id": tcg_id,
+        "action": action, "reason": reason,
+        "median": market, "low": comps.get("low"), "high": comps.get("high"),
+        "comps_count": comps_n, "delta_pct": round(delta_pct, 1),
+        "trend_7d": comps.get("trend_7d_pct"),
+        "suggested_price": suggested,
+    })
+
+
 @app.route('/run-raw-updater', methods=["GET", "POST"])
 def trigger_raw_updater():
     """Manually trigger the raw card price updater.

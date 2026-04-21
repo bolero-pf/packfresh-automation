@@ -152,6 +152,10 @@ def fetch_slab_products() -> list[dict]:
 
             for ve in node["variants"]["edges"]:
                 v = ve["node"]
+                # Slabs are unique — once sold, they're gone forever. Don't
+                # waste Scrydex credits or DB rows pricing variants at qty=0.
+                if (v.get("inventoryQuantity") or 0) <= 0:
+                    continue
                 cost_amount = None
                 if v.get("inventoryItem", {}).get("unitCost"):
                     try:

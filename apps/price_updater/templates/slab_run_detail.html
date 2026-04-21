@@ -44,6 +44,34 @@
         .row-btn:disabled { opacity: 0.35; cursor: not-allowed; }
         .applied-tag { color: #4ade80; font-size: 0.78rem; font-weight: 600; }
         .dismissed-tag { color: var(--text-dim); font-size: 0.78rem; font-style: italic; }
+        .tcg-controls { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; min-width: 260px; }
+        .tcg-input {
+            width: 88px; padding: 5px 8px; border: 1px solid var(--border);
+            background: var(--surface-2); color: var(--text);
+            border-radius: 5px; font-family: var(--font-mono); font-size: 0.78rem;
+        }
+        .tcg-input:focus { outline: none; border-color: var(--accent); }
+        .tcg-link {
+            padding: 5px 8px; font-size: 0.72rem; color: var(--text-dim);
+            text-decoration: none; border: 1px solid var(--border); border-radius: 5px;
+        }
+        .tcg-link:hover { color: var(--text); border-color: var(--text-dim); }
+        .tcg-candidates {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px; margin: 6px 0;
+        }
+        .tcg-cand-row {
+            display: flex; gap: 10px; align-items: center; padding: 6px 4px;
+            border-bottom: 1px solid var(--border);
+        }
+        .tcg-cand-row:last-child { border-bottom: none; }
+        .tcg-cand-img { width: 36px; height: 50px; object-fit: contain; background: var(--surface-2); border-radius: 3px; }
+        .tcg-cand-info { flex: 1; font-size: 0.8rem; }
+        .tcg-cand-name { font-weight: 600; color: var(--text); }
+        .tcg-cand-meta { color: var(--text-dim); font-size: 0.72rem; font-family: var(--font-mono); }
+        .tcg-cand-score { color: var(--accent); font-size: 0.7rem; font-family: var(--font-mono); }
+        .tcg-busy { color: var(--text-dim); font-style: italic; font-size: 0.78rem; }
+        .tcg-err { color: #f87171; font-size: 0.78rem; }
     </style>
 </head>
 <body>
@@ -124,7 +152,7 @@
                 </td>
                 <td class="num">{% if r.trend_7d is not none %}{{ '%+.1f' % r.trend_7d }}%{% else %}—{% endif %}</td>
                 <td class="reason">{{ r.reason or '' }}</td>
-                <td>
+                <td class="action-cell">
                     {% if r.apply_status == 'applied' %}
                         <span class="applied-tag">✓ Applied{% if r.applied_price %} · ${{ '%.2f' % r.applied_price }}{% endif %}</span>
                     {% elif r.apply_status == 'dismissed' %}
@@ -133,6 +161,14 @@
                         <div class="row-actions">
                             <button class="row-btn row-btn-apply" data-act="apply">Apply ${{ '%.2f' % r.suggested_price }}</button>
                             <button class="row-btn row-btn-dismiss" data-act="dismiss">Dismiss</button>
+                        </div>
+                    {% elif act == 'skip' and r.reason == 'no tcg_id' and r.product_gid %}
+                        <div class="tcg-controls">
+                            <input type="number" class="tcg-input" placeholder="TCG ID" min="1" step="1">
+                            <button class="row-btn row-btn-apply" data-act="save-tcg">Save</button>
+                            <button class="row-btn row-btn-dismiss" data-act="suggest-tcg">Auto-suggest</button>
+                            <a class="tcg-link" target="_blank"
+                               href="https://www.tcgplayer.com/search/pokemon/product?productLineName=pokemon&q={{ r.title|urlencode }}">Search ↗</a>
                         </div>
                     {% else %}—{% endif %}
                 </td>
@@ -143,23 +179,95 @@
     {% endif %}
 
     <script>
-    document.addEventListener('click', async function(e) {
-        const btn = e.target.closest('.row-btn');
-        if (!btn) return;
-        const tr = btn.closest('tr');
-        const rowId = tr && tr.dataset.rowId;
-        if (!rowId) return;
-        const verb = btn.dataset.act === 'apply' ? 'apply' : 'dismiss';
-        // Disable both buttons in this row to prevent double-fire
+    const pillClass = {
+        'adjusted':'p-adj','flag_overpriced':'p-over','flag_underpriced':'p-under',
+        'skip':'p-skip','error':'p-err','ok':'p-ok',
+    };
+    const fmt$ = v => (v == null ? '—' : '$' + Number(v).toFixed(2));
+    const fmtInt = v => (v == null ? '—' : Number(v).toFixed(0));
+    const fmtPct = v => (v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(1) + '%');
+
+    function renderPricingInRow(tr, d) {
+        // Columns in order: Action, Title, Grade, Qty, Old$, New/Sug$,
+        //   Median$, Range, Comps, Delta%, 7d trend, Reason, Action
+        const tds = tr.querySelectorAll('td');
+        // Action pill (col 0)
+        tds[0].innerHTML = `<span class="pill ${pillClass[d.action] || 'p-skip'}">${d.action}</span>`;
+        // Suggested (col 5) — em = suggestion, strong = applied
+        if (d.suggested_price != null) {
+            tds[5].innerHTML = `<em>${fmt$(d.suggested_price)}</em>`;
+        } else {
+            tds[5].innerHTML = '—';
+        }
+        tds[6].textContent = fmt$(d.median);
+        tds[7].textContent = (d.low != null && d.high != null)
+            ? `$${fmtInt(d.low)}–$${fmtInt(d.high)}` : '—';
+        tds[8].textContent = d.comps_count == null ? '—' : d.comps_count;
+        if (d.delta_pct != null) {
+            const cls = d.delta_pct > 0 ? 'delta-pos' : d.delta_pct < 0 ? 'delta-neg' : 'delta-zero';
+            tds[9].innerHTML = `<span class="${cls}">${fmtPct(d.delta_pct)}</span>`;
+        } else {
+            tds[9].textContent = '—';
+        }
+        tds[10].textContent = fmtPct(d.trend_7d);
+        tds[11].textContent = d.reason || '';
+
+        const actionCell = tds[12];
+        if ((d.action === 'flag_overpriced' || d.action === 'flag_underpriced') && d.suggested_price) {
+            actionCell.innerHTML =
+                `<div class="row-actions">
+                    <button class="row-btn row-btn-apply" data-act="apply">Apply $${Number(d.suggested_price).toFixed(2)}</button>
+                    <button class="row-btn row-btn-dismiss" data-act="dismiss">Dismiss</button>
+                </div>`;
+        } else {
+            actionCell.innerHTML = '—';
+        }
+    }
+
+    function renderCandidates(tr, data) {
+        // Drop or replace the candidates TR right after this row
+        let panel = tr.nextElementSibling;
+        if (panel && panel.classList.contains('tcg-cand-panel')) panel.remove();
+
+        panel = document.createElement('tr');
+        panel.className = 'tcg-cand-panel';
+        const td = document.createElement('td');
+        td.colSpan = 13;
+        const wrap = document.createElement('div');
+        wrap.className = 'tcg-candidates';
+        if (!data.candidates || data.candidates.length === 0) {
+            wrap.innerHTML = `<div class="tcg-busy">No cache hits for this title (game=${data.parsed?.game || '?'} #${data.parsed?.card_number || '?'}). Try the TCGplayer search link and paste the ID manually.</div>`;
+        } else {
+            data.candidates.forEach(c => {
+                const row = document.createElement('div');
+                row.className = 'tcg-cand-row';
+                row.innerHTML =
+                    `${c.image_small ? `<img class="tcg-cand-img" src="${c.image_small}" alt="">` : '<div class="tcg-cand-img"></div>'}
+                     <div class="tcg-cand-info">
+                       <div class="tcg-cand-name">${c.product_name || ''}${c.variant ? ` · <span class="tcg-cand-meta">${c.variant}</span>` : ''}</div>
+                       <div class="tcg-cand-meta">${c.expansion_name || ''} #${c.card_number || '?'} · TCG#${c.tcgplayer_id} · ${c.scrydex_id}</div>
+                     </div>
+                     <span class="tcg-cand-score">score ${Number(c.score).toFixed(2)}</span>
+                     <button class="row-btn row-btn-apply" data-pick-tcg="${c.tcgplayer_id}">Use this</button>`;
+                wrap.appendChild(row);
+            });
+        }
+        td.appendChild(wrap);
+        panel.appendChild(td);
+        tr.after(panel);
+    }
+
+    async function doApplyOrDismiss(tr, verb) {
+        const rowId = tr.dataset.rowId;
         tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
         try {
             const r = await fetch(`/dashboard/slab-runs/row/${rowId}/${verb}`, {
-                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
             });
             const d = await r.json();
-            const cell = tr.querySelector('td:last-child');
+            const cell = tr.querySelector('td.action-cell, td:last-child');
             if (!r.ok) {
-                cell.innerHTML = `<span style="color:#f87171; font-size:0.78rem;">${d.error || 'failed'}</span>`;
+                cell.innerHTML = `<span class="tcg-err">${d.error || 'failed'}</span>`;
                 tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
                 return;
             }
@@ -169,9 +277,88 @@
                 cell.innerHTML = '<span class="dismissed-tag">dismissed</span>';
             }
         } catch(err) {
-            tr.querySelector('td:last-child').innerHTML =
-                `<span style="color:#f87171; font-size:0.78rem;">${err.message}</span>`;
+            tr.querySelector('td.action-cell, td:last-child').innerHTML =
+                `<span class="tcg-err">${err.message}</span>`;
             tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+        }
+    }
+
+    async function doSuggestTcg(tr) {
+        const rowId = tr.dataset.rowId;
+        const panel = tr.nextElementSibling;
+        if (panel && panel.classList.contains('tcg-cand-panel')) {
+            panel.remove();
+            return;  // toggle off
+        }
+        const trigger = tr.querySelector('[data-act="suggest-tcg"]');
+        trigger.disabled = true;
+        trigger.textContent = 'Loading...';
+        try {
+            const r = await fetch(`/dashboard/slab-runs/row/${rowId}/suggest-tcg`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+            });
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || 'suggest failed');
+            renderCandidates(tr, d);
+        } catch(err) {
+            alert('Suggest failed: ' + err.message);
+        } finally {
+            trigger.disabled = false;
+            trigger.textContent = 'Auto-suggest';
+        }
+    }
+
+    async function doSetTcg(tr, tcgId) {
+        const rowId = tr.dataset.rowId;
+        tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
+        const cell = tr.querySelector('td.action-cell, td:last-child');
+        cell.innerHTML = `<span class="tcg-busy">Setting TCG#${tcgId} + repricing...</span>`;
+        // Clear any candidates panel
+        const next = tr.nextElementSibling;
+        if (next && next.classList.contains('tcg-cand-panel')) next.remove();
+        try {
+            const r = await fetch(`/dashboard/slab-runs/row/${rowId}/set-tcg`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tcgplayer_id: Number(tcgId)}),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                cell.innerHTML = `<span class="tcg-err">${d.error || 'failed'}</span>`;
+                return;
+            }
+            renderPricingInRow(tr, d);
+        } catch(err) {
+            cell.innerHTML = `<span class="tcg-err">${err.message}</span>`;
+        }
+    }
+
+    document.addEventListener('click', async function(e) {
+        // Pick-a-candidate (in the suggest panel — the TR is two above)
+        const pick = e.target.closest('[data-pick-tcg]');
+        if (pick) {
+            const panel = pick.closest('.tcg-cand-panel');
+            const tr = panel && panel.previousElementSibling;
+            if (tr) doSetTcg(tr, pick.dataset.pickTcg);
+            return;
+        }
+
+        const btn = e.target.closest('.row-btn');
+        if (!btn) return;
+        const tr = btn.closest('tr');
+        if (!tr || !tr.dataset.rowId) return;
+        const act = btn.dataset.act;
+        if (act === 'apply' || act === 'dismiss') {
+            doApplyOrDismiss(tr, act);
+        } else if (act === 'suggest-tcg') {
+            doSuggestTcg(tr);
+        } else if (act === 'save-tcg') {
+            const input = tr.querySelector('.tcg-input');
+            const val = input && input.value.trim();
+            if (!val || isNaN(Number(val)) || Number(val) <= 0) {
+                alert('Enter a numeric TCGplayer ID');
+                return;
+            }
+            doSetTcg(tr, val);
         }
     });
     </script>
