@@ -2,9 +2,10 @@
 Scrydex API Client — drop-in replacement for PPTClient.
 
 Normalizes Scrydex responses to match PPT's data shape so downstream code
-works unchanged. The key difference: Scrydex uses its own IDs (e.g. "base1-4")
-and does NOT return TCGPlayer IDs. A mapping table (scrydex_tcg_map) bridges
-the two ID systems.
+works unchanged. The key difference: Scrydex uses its own IDs (e.g. "base1-4").
+TCGPlayer IDs are exposed inside variants[].marketplaces[] (one per variant),
+but there's no "search by TCGPlayer ID" endpoint — a mapping table
+(scrydex_tcg_map) bridges the two ID systems for reverse lookups.
 
 Scrydex response shape for cards:
     {"data": [{"id": "base1-4", "name": "Charizard", "number": "4",
@@ -634,9 +635,11 @@ class ScrydexClient:
         """
         PPT-compatible: fetch sealed product by TCGPlayer ID.
 
-        Sealed products in Scrydex do NOT have TCGPlayer IDs at all
-        (no marketplaces array). Only the mapping table works, and it
-        must be manually seeded for sealed products.
+        Sealed products DO have TCGPlayer IDs (one per variant, under
+        variants[].marketplaces[].product_id), but Scrydex has no
+        search-by-TCGPlayer-ID endpoint. The mapping table is the only path;
+        it gets populated by nightly set-based sealed pulls (get_set_sealed
+        -> _normalize_sealed -> _save_tcg_mapping).
         """
         tcg_id = int(tcgplayer_id)
 

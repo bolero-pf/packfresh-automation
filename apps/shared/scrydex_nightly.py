@@ -439,6 +439,18 @@ def sync_expansion(client, expansion_id: str, db) -> dict:
                 if expansion_obj_for_meta is None:
                     expansion_obj_for_meta = item.get("expansion")
 
+                # Map every sealed variant's tcgplayer_id (Base Set Booster Pack
+                # has 3: unlimited/firstEdition/shadowless). Mirrors the card loop.
+                scrydex_id_sealed = item.get("id")
+                if scrydex_id_sealed:
+                    seen_sealed = set()
+                    for v in (item.get("variants") or []):
+                        v_tcg = _extract_variant_tcg_id(v)
+                        if v_tcg and v_tcg not in seen_sealed:
+                            seen_sealed.add(v_tcg)
+                            map_batch.append((scrydex_id_sealed, v_tcg, "sealed", game))
+                            stats["mapped"] += 1
+
                 rows = _collect_price_rows(item, game=game, expansion_id=expansion_id,
                                            expansion_name=expansion_name or "",
                                            product_type="sealed", tcg_id=None)
