@@ -23,6 +23,7 @@ Falls back to scrydex_price_cache if no SCRYDEX_API_KEY or API call fails.
 import json
 import math
 import os
+import threading
 import logging
 from datetime import datetime, timedelta, timezone
 from statistics import median as _median
@@ -37,32 +38,57 @@ logger = logging.getLogger(__name__)
 
 _GRADED_CACHE_TTL_HOURS = 24
 _graded_cache_table_ensured = False
+_graded_cache_init_lock = threading.Lock()
 
 
 def _ensure_graded_cache_table(db):
-    """Lazily CREATE TABLE IF NOT EXISTS so the cache works the first time any
-    service hits this module after deploy — no separate migration step needed."""
+    """CREATE TABLE IF NOT EXISTS, once per process, thread-safe.
+
+    Concurrent CREATE TABLE IF NOT EXISTS calls can race on `pg_type`
+    (unique violation on typname/typnamespace) — the table still ends up
+    created, but the client-visible error is scary. We hold a lock so only
+    one thread issues the DDL per process, and always set the flag in a
+    `finally` so a transient failure (pool exhaustion, race) doesn't cause
+    every subsequent enrichment call to re-try the CREATE and log-spam.
+
+    Services can also call this eagerly at startup via `init_graded_cache`
+    below to avoid the first-request cost and any race risk entirely.
+    """
     global _graded_cache_table_ensured
     if _graded_cache_table_ensured:
         return
-    try:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS graded_comps_cache (
-                scrydex_id   TEXT NOT NULL,
-                variant      TEXT NOT NULL DEFAULT '',
-                days         INTEGER NOT NULL DEFAULT 90,
-                comps_data   JSONB NOT NULL,
-                fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (scrydex_id, variant, days)
-            )
-        """)
-        db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_graded_comps_fetched_at
-                ON graded_comps_cache(fetched_at)
-        """)
-        _graded_cache_table_ensured = True
-    except Exception as e:
-        logger.warning(f"Failed to ensure graded_comps_cache table: {e}")
+    with _graded_cache_init_lock:
+        if _graded_cache_table_ensured:
+            return
+        try:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS graded_comps_cache (
+                    scrydex_id   TEXT NOT NULL,
+                    variant      TEXT NOT NULL DEFAULT '',
+                    days         INTEGER NOT NULL DEFAULT 90,
+                    comps_data   JSONB NOT NULL,
+                    fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (scrydex_id, variant, days)
+                )
+            """)
+            db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_graded_comps_fetched_at
+                    ON graded_comps_cache(fetched_at)
+            """)
+        except Exception as e:
+            # pg_type race → benign, table exists. Pool exhaustion on the
+            # DDL connection → runtime reads/writes will fail gracefully and
+            # we fall through to live fetch. Either way: don't retry.
+            logger.info(f"graded_comps_cache ensure skipped: "
+                        f"{e.__class__.__name__}: {e}")
+        finally:
+            _graded_cache_table_ensured = True
+
+
+def init_graded_cache(db) -> None:
+    """Call once at service startup (before worker threads spin up) to
+    create the cache table without racing. Safe to call multiple times."""
+    _ensure_graded_cache_table(db)
 
 
 def _read_cached_graded_comps(db, scrydex_id: str, variant: Optional[str],

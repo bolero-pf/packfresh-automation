@@ -156,8 +156,20 @@ def server_error(e):
     return jsonify({"error": "Internal server error", "detail": str(e)}), 500
 
 # ─── Init services ──────────────────────────────────────────────────
+# Bigger pool than the 10 default — the enrich-route worker spins up
+# N threads that each do several sequential DB ops, and while that's
+# running the main Flask handler still needs connections for typing/
+# autocomplete/poll requests. Bumping to 30 keeps typing snappy while
+# background enrichment runs.
+db.init_pool(minconn=2, maxconn=30)
 
-db.init_pool()
+# Create the graded_comps_cache table eagerly (before any worker thread
+# can race on CREATE TABLE IF NOT EXISTS + pg_type unique violations).
+try:
+    from graded_pricing import init_graded_cache
+    init_graded_cache(db)
+except Exception as e:
+    logger.warning(f"graded cache init skipped: {e}")
 
 shopify = None
 if os.getenv("SHOPIFY_TOKEN") and os.getenv("SHOPIFY_STORE"):
@@ -1293,9 +1305,12 @@ def _enrich_route_worker(job_id, session_id, items):
 
     errors = 0
     done = 0
-    # 8 concurrent — well under Scrydex's 100 req/sec ceiling and respects the
-    # client's internal throttle. PPT is generous enough to handle it.
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    # 4 concurrent — the per-card work does several sequential DB ops
+    # (get_card_view + graded cache read/write), and at 8 workers we were
+    # starving the main Flask pool and making typing/autocomplete feel
+    # laggy. With the persistent graded_comps_cache on 24h TTL, most
+    # routes hit DB not Scrydex anyway, so thread count matters less.
+    with ThreadPoolExecutor(max_workers=4) as ex:
         futures = [ex.submit(_enrich_one_item, key, item)
                    for key, item in unique.items()]
         for fut in as_completed(futures):
