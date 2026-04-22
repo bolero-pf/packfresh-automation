@@ -20,6 +20,7 @@ sits on top of this for the active session.
 Falls back to scrydex_price_cache if no SCRYDEX_API_KEY or API call fails.
 """
 
+import hashlib
 import json
 import math
 import os
@@ -120,8 +121,13 @@ def _read_cached_graded_comps(db, scrydex_id: str, variant: Optional[str],
 
 def _write_cached_graded_comps(db, scrydex_id: str, variant: Optional[str],
                                 days: int, comps_data: dict) -> None:
-    """Upsert the computed comps into the cache. Best-effort — never raises."""
-    if not db or not scrydex_id or not comps_data:
+    """Upsert the computed comps into the cache. Best-effort — never raises.
+
+    An empty dict is a valid result to cache: it means "Scrydex returned
+    zero useful comps for this card" (common for sealed-era cards and
+    promos with no eBay activity). Caching it prevents every page load
+    from re-paying a Scrydex credit for the same empty result."""
+    if not db or not scrydex_id:
         return
     _ensure_graded_cache_table(db)
     try:
@@ -231,6 +237,19 @@ def _compute_smart_market(sales: list[dict], now: datetime) -> tuple[float, int,
         market = round(sum(s["price"] for s in kept) / len(kept), 2)
 
     return market, len(kept), dropped
+
+
+def _unresolved_cache_key(tcgplayer_id, card_name, set_name, card_number) -> str:
+    """Synthetic scrydex_id-shaped key for negative-caching a failed
+    resolution. Real Scrydex IDs never start with '__', so this can share
+    the graded_comps_cache table without collision risk. Cards with a
+    tcgplayer_id key on that alone; Scrydex-only attempts (no TCG ID)
+    key on a stable hash of name+set+number."""
+    if tcgplayer_id:
+        return f"__unresolved_tcg_{int(tcgplayer_id)}__"
+    blob = f"{card_name or ''}|{set_name or ''}|{card_number or ''}"
+    h = hashlib.md5(blob.encode("utf-8", "ignore")).hexdigest()[:16]
+    return f"__unresolved_key_{h}__"
 
 
 def _resolve_scrydex_id(tcgplayer_id: int | None, db, *,
@@ -526,10 +545,21 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
     company_map = {}
 
     if not scrydex_id:
+        # Negative-cache check: if we already tried and failed to resolve this
+        # exact input within the TTL, skip re-running the 4-strategy resolver
+        # (which does up to 4 DB queries per card per page load). Same table,
+        # synthetic key that can't collide with a real scrydex_id.
+        neg_key = _unresolved_cache_key(tcgplayer_id, card_name, set_name, card_number)
+        if _read_cached_graded_comps(db, neg_key, variant, days) is not None:
+            return {}
         scrydex_id = _resolve_scrydex_id(tcgplayer_id, db, card_name=card_name,
                                          set_name=set_name, card_number=card_number)
-    if not scrydex_id:
-        return {}
+        if not scrydex_id:
+            # Write a sentinel so the next load short-circuits. The dict is
+            # non-empty so the write goes through even before the empty-dict
+            # fix; the read side just cares that a row exists.
+            _write_cached_graded_comps(db, neg_key, variant, days, {"__unresolved__": True})
+            return {}
 
     # Persistent cache hit — skip the Scrydex listings fetch entirely. Routing
     # pages with hundreds of cards used to fire one live API call per card on
@@ -552,7 +582,10 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
         return {}
 
     if not raw_listings:
-        return {}
+        # Scrydex knows the card but has zero eBay sales for it. Cache the
+        # empty result so we don't re-pay a credit on every page load.
+        _write_cached_graded_comps(db, scrydex_id, variant, days, company_map)
+        return company_map
 
     now = datetime.now(timezone.utc)
 
@@ -565,7 +598,8 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
         logger.info(f"Filtered {scrydex_id} listings to variant='{variant}': "
                     f"{len(raw_listings)}/{before} remain")
         if not raw_listings:
-            return {}
+            _write_cached_graded_comps(db, scrydex_id, variant, days, company_map)
+            return company_map
 
     # Group all listings by company + grade. Normalized grade keys so that
     # '10' and '10.0' from different listings collapse into one bucket.
