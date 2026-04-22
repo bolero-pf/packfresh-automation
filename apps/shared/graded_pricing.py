@@ -12,12 +12,15 @@ Usage:
     # result["mid"] = 75.00 (median of 67 comps)
     # result["sales"] = [{price, date}, ...] for outlier inspection
 
-Cost: 1 Scrydex credit per call. Acceptable for per-slab interactive actions (preview,
-intake) and nightly batch updates (~100 slabs = ~100 credits).
+Cost: 1 Scrydex credit per call. The all-grades-at-once `get_all_graded_comps`
+output is cached in `graded_comps_cache` (TTL 24h) so routing-page reloads and
+Railway redeploys don't re-fetch. The in-memory `_enrich_cache` in ingestion
+sits on top of this for the active session.
 
 Falls back to scrydex_price_cache if no SCRYDEX_API_KEY or API call fails.
 """
 
+import json
 import math
 import os
 import logging
@@ -26,6 +29,88 @@ from statistics import median as _median
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ── Persistent cache for get_all_graded_comps ────────────────────────────────
+# Keyed on (scrydex_id, variant, days). JSONB payload is the exact shape
+# returned by get_all_graded_comps. TTL is enforced at read time via fetched_at.
+
+_GRADED_CACHE_TTL_HOURS = 24
+_graded_cache_table_ensured = False
+
+
+def _ensure_graded_cache_table(db):
+    """Lazily CREATE TABLE IF NOT EXISTS so the cache works the first time any
+    service hits this module after deploy — no separate migration step needed."""
+    global _graded_cache_table_ensured
+    if _graded_cache_table_ensured:
+        return
+    try:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS graded_comps_cache (
+                scrydex_id   TEXT NOT NULL,
+                variant      TEXT NOT NULL DEFAULT '',
+                days         INTEGER NOT NULL DEFAULT 90,
+                comps_data   JSONB NOT NULL,
+                fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (scrydex_id, variant, days)
+            )
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_graded_comps_fetched_at
+                ON graded_comps_cache(fetched_at)
+        """)
+        _graded_cache_table_ensured = True
+    except Exception as e:
+        logger.warning(f"Failed to ensure graded_comps_cache table: {e}")
+
+
+def _read_cached_graded_comps(db, scrydex_id: str, variant: Optional[str],
+                              days: int) -> Optional[dict]:
+    """Return the cached comps dict if fresh (within TTL), else None."""
+    if not db or not scrydex_id:
+        return None
+    _ensure_graded_cache_table(db)
+    try:
+        row = db.query_one(
+            f"""
+            SELECT comps_data
+            FROM graded_comps_cache
+            WHERE scrydex_id = %s AND variant = %s AND days = %s
+              AND fetched_at > NOW() - INTERVAL '{_GRADED_CACHE_TTL_HOURS} hours'
+            """,
+            (scrydex_id, variant or "", int(days)),
+        )
+        if row and row.get("comps_data") is not None:
+            data = row["comps_data"]
+            # psycopg2 may return JSONB as dict already, or as str — handle both.
+            if isinstance(data, str):
+                data = json.loads(data)
+            return data
+    except Exception as e:
+        logger.debug(f"graded_comps_cache read failed for {scrydex_id}/{variant}: {e}")
+    return None
+
+
+def _write_cached_graded_comps(db, scrydex_id: str, variant: Optional[str],
+                                days: int, comps_data: dict) -> None:
+    """Upsert the computed comps into the cache. Best-effort — never raises."""
+    if not db or not scrydex_id or not comps_data:
+        return
+    _ensure_graded_cache_table(db)
+    try:
+        db.execute(
+            """
+            INSERT INTO graded_comps_cache (scrydex_id, variant, days, comps_data, fetched_at)
+            VALUES (%s, %s, %s, %s::jsonb, NOW())
+            ON CONFLICT (scrydex_id, variant, days) DO UPDATE
+                SET comps_data = EXCLUDED.comps_data, fetched_at = NOW()
+            """,
+            (scrydex_id, variant or "", int(days),
+             json.dumps(comps_data, default=str)),
+        )
+    except Exception as e:
+        logger.warning(f"graded_comps_cache write failed for {scrydex_id}/{variant}: {e}")
 
 
 # ── Market price computation ─────────────────────────────────────────────────
@@ -420,6 +505,13 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
     if not scrydex_id:
         return {}
 
+    # Persistent cache hit — skip the Scrydex listings fetch entirely. Routing
+    # pages with hundreds of cards used to fire one live API call per card on
+    # every page load; the 24h TTL means repeat loads within a day hit DB only.
+    cached = _read_cached_graded_comps(db, scrydex_id, variant, days)
+    if cached is not None:
+        return cached
+
     sx_key  = os.getenv("SCRYDEX_API_KEY", "")
     sx_team = os.getenv("SCRYDEX_TEAM_ID", "")
     if not sx_key or not sx_team:
@@ -496,6 +588,10 @@ def get_all_graded_comps(tcgplayer_id: int | None, db, *, days: int = 90,
     logger.info(f"All graded comps for {scrydex_id}: "
                 f"{sum(len(g) for g in company_map.values())} grade buckets from "
                 f"{len(raw_listings)} listings")
+
+    # Persist to DB cache so subsequent routing-page loads skip the live fetch.
+    _write_cached_graded_comps(db, scrydex_id, variant, days, company_map)
+
     return company_map
 
 

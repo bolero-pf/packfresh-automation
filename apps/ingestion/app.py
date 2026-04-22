@@ -2723,7 +2723,13 @@ def binder_locations():
 
 @app.route("/api/ingest/session/<session_id>/enrich-route", methods=["POST"])
 def enrich_route(session_id):
-    """Kick off background PPT fetch for graded prices + images for all routable items."""
+    """Kick off background PPT fetch for graded prices + images for routable items.
+
+    Only unreviewed items get enriched — once staff sets a routing destination,
+    the grading economics don't drive any more decisions for that card, so
+    re-fetching its graded comps on every page load is wasted API calls.
+    The read endpoint (`/route-enriched`) still returns every item for display.
+    """
     if not pricing:
         return jsonify({"error": "PPT not configured"}), 503
 
@@ -2745,6 +2751,7 @@ def enrich_route(session_id):
           AND item_status IN ('good', 'damaged')
           AND is_mapped = TRUE
           AND pushed_at IS NULL
+          AND routing_reviewed_at IS NULL
         ORDER BY created_at ASC
     """, (session_id,))
 
