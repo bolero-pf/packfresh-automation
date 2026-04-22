@@ -1946,6 +1946,22 @@ let _rsCounts = { storage: 0, display: 0, grade: 0, bulk: 0 };
 
 let _rsEnrichJobId = null;
 let _rsEnrichDone = false;
+let _rsSiblingGroups = {};  // siblingKey -> [itemId, ...], filled once at load
+
+function _rsSiblingKeyOf(i) {
+    const parts = [];
+    if (i.tcgplayer_id) {
+        parts.push('tcg:' + i.tcgplayer_id);
+    } else {
+        parts.push('manual:' + (i.product_name || ''));
+        parts.push(i.set_name || '');
+        parts.push(i.card_number || '');
+        parts.push((i.variance || '').trim());
+    }
+    parts.push(i.condition || '');
+    if (i.is_graded) parts.push((i.grade_company || '') + '|' + (i.grade_value || ''));
+    return parts.join('\u00a7');
+}
 
 async function startRouteSession(sessionId) {
     _rsSessionId = sessionId;
@@ -1977,11 +1993,22 @@ async function startRouteSession(sessionId) {
 
         _rsItems = _sortItems((data.items || []).map(item => ({
             ...item,
-            image_url: null,
+            image_url: item.image_url || null,  // route-summary now joins images
             graded_prices: {},
             grading_economics: {},
             _enrichLoading: true,  // flag: PPT data not yet loaded
         })));
+
+        // Precompute sibling groups once instead of rescanning all 300+ items
+        // on every card render. _renderSessionCard was calling
+        // _rsItems.filter(...) inside a hot render path, an O(n²) scan that
+        // showed up as visible nav lag on big trades.
+        _rsSiblingGroups = {};
+        for (const it of _rsItems) {
+            if ((it.quantity || 1) !== 1) continue;
+            const k = _rsSiblingKeyOf(it);
+            (_rsSiblingGroups[k] = _rsSiblingGroups[k] || []).push(it.id);
+        }
 
         // Resume: jump to first item that hasn't been reviewed yet
         const firstUnreviewed = _rsItems.findIndex(i => !i.routing_reviewed_at);
@@ -2035,13 +2062,28 @@ async function startRouteSession(sessionId) {
 }
 
 async function _pollAndMergeEnrichment(jobId, total) {
+    // We used to poll /enrich-job AND fetch the full /route-enriched (326
+    // items on a big trade) every 1s. That's 2-3s of server work per poll,
+    // stacked on top of the background enrichment worker — the poll loop
+    // was actually starving the thing it was waiting for. Now we:
+    //   - poll the lightweight /enrich-job progress endpoint every 1.5s
+    //   - only fetch the full /route-enriched when progress advances
+    //     (and at most every 3s), plus one final fetch on completion.
+    let lastProgress = -1;
+    let lastMerge = 0;
     while (_rsActive) {
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 1500));
         try {
             const r = await fetch(`/api/ingest/enrich-job/${jobId}`);
             const j = await r.json();
-            // Periodically merge whatever's been fetched so far
-            await _rsMergeEnrichment();
+            const now = Date.now();
+            const progressed = (j.progress ?? 0) > lastProgress;
+            const throttleOk = now - lastMerge >= 3000;
+            if ((progressed && throttleOk) || j.status === 'complete') {
+                await _rsMergeEnrichment();
+                lastMerge = now;
+                lastProgress = j.progress ?? lastProgress;
+            }
             if (j.status === 'complete') {
                 _rsEnrichDone = true;
                 break;
@@ -2149,29 +2191,14 @@ function _renderSessionCard() {
     //     same name + set, different tcg_ids → not siblings
     //   - OP14-041 Alt Art vs OP14-041 Normal — same name + set + tcg differs
     //     because Scrydex now stores per-variant tcg → not siblings
-    const _siblingKey = (i) => {
-        const parts = [];
-        if (i.tcgplayer_id) {
-            parts.push('tcg:' + i.tcgplayer_id);
-        } else {
-            parts.push('manual:' + (i.product_name || ''));
-            parts.push((i.set_name || ''));
-            parts.push((i.card_number || ''));
-            parts.push((i.variance || '').trim());
-        }
-        parts.push(i.condition || '');
-        if (i.is_graded) parts.push((i.grade_company || '') + '|' + (i.grade_value || ''));
-        return parts.join('§');
-    };
-    const itemKey = _siblingKey(item);
-
     let copyLabel = '';
     if ((item.quantity || 1) === 1) {
-        // Count how many items share this sibling key (only true duplicates from a split)
-        const siblings = _rsItems.filter(i => _siblingKey(i) === itemKey && (i.quantity || 1) === 1);
-        if (siblings.length > 1) {
-            const copyNum = siblings.indexOf(item) + 1;
-            copyLabel = `<span style="font-size:0.78rem; color:var(--accent2,#c084fc); font-weight:600; margin-left:6px;">Copy ${copyNum} of ${siblings.length}</span>`;
+        // Use the precomputed group built in startRouteSession — avoids an
+        // O(n) scan per render × O(n) renders per navigation.
+        const siblingIds = _rsSiblingGroups[_rsSiblingKeyOf(item)] || [];
+        if (siblingIds.length > 1) {
+            const copyNum = siblingIds.indexOf(item.id) + 1;
+            copyLabel = `<span style="font-size:0.78rem; color:var(--accent2,#c084fc); font-weight:600; margin-left:6px;">Copy ${copyNum} of ${siblingIds.length}</span>`;
         }
     } else {
         // Multi-qty item — show range of which copies this represents

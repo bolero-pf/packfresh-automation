@@ -2423,6 +2423,17 @@ def auto_route_session(session_id):
         return jsonify({"success": True, "routed": {"storage": 0, "display": 0, "grade": 0, "bulk": 0},
                         "skipped_reviewed": True})
 
+    # Idempotency short-circuit — if every unreviewed item already has a
+    # destination set, the previous auto-route run's answer still applies
+    # and we don't need to re-compute + re-UPDATE anything. Frontend calls
+    # this on every Route-tab load; without this we pay 300+ UPDATEs per
+    # load for a session that never changed.
+    if all(it.get("routing_destination") for it in items):
+        routed = {"storage": 0, "display": 0, "grade": 0, "bulk": 0}
+        for it in items:
+            routed[it["routing_destination"]] = routed.get(it["routing_destination"], 0) + (it.get("quantity") or 1)
+        return jsonify(_serialize({"success": True, "routed": routed, "skipped_noop": True}))
+
     # Get total binder capacity, accounting for items already routed to display
     binder_remaining = 0
     if get_binder_capacity:
@@ -2437,7 +2448,12 @@ def auto_route_session(session_id):
     """, (session_id,))
     binder_remaining = max(0, binder_remaining - int(already_displayed["qty"] or 0))
 
+    # Assign destinations in Python (binder capacity is stateful across
+    # items so we can't do it in one pure SQL CASE), then bulk-UPDATE in
+    # a single round-trip via VALUES list. Previously this issued one
+    # UPDATE per item — ~400 serial round-trips to Railway took ~2s.
     routed = {"storage": 0, "display": 0, "grade": 0, "bulk": 0}
+    assignments = []  # list of (item_id, destination)
 
     for item in items:
         price = float(item.get("market_price") or 0)
@@ -2451,12 +2467,23 @@ def auto_route_session(session_id):
         else:
             dest = "storage"
 
-        # Do NOT set routing_reviewed_at — these are only defaults, user hasn't decided
-        db.execute("""
-            UPDATE intake_items SET routing_destination = %s
-            WHERE id = %s AND routing_reviewed_at IS NULL
-        """, (dest, item["id"]))
+        assignments.append((item["id"], dest))
         routed[dest] += qty
+
+    if assignments:
+        # Bulk UPDATE via (VALUES) join — one round-trip regardless of
+        # count. The guard on routing_reviewed_at preserves the same
+        # "never overwrite a user's decision" semantics as the row-by-row
+        # form, in case something races between the SELECT and this UPDATE.
+        placeholders = ",".join(["(%s::uuid, %s)"] * len(assignments))
+        flat_params = [v for pair in assignments for v in pair]
+        db.execute(f"""
+            UPDATE intake_items
+            SET routing_destination = v.dest
+            FROM (VALUES {placeholders}) AS v(id, dest)
+            WHERE intake_items.id = v.id
+              AND intake_items.routing_reviewed_at IS NULL
+        """, tuple(flat_params))
 
     return jsonify(_serialize({"success": True, "routed": routed, "binder_remaining": binder_remaining}))
 
