@@ -2458,27 +2458,34 @@ async function _rsRelink() {
         item.grading_economics = {};
         item._enrichLoading = true;
         _renderSessionCard();
-        try {
-            const er = await fetch(`/api/ingest/session/${ctx.sessionId}/enrich-one`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ item_id: ctx.itemId }),
-            });
-            const ed = await er.json();
-            if (er.ok && ed.result && !ed.result.error) {
-                item.image_url = ed.result.image_url || null;
-                item.graded_prices = ed.result.graded_prices || {};
-                item.grading_economics = ed.result.grading_economics || {};
-                item._enrichLoading = false;
-                _renderSessionCard();
-            } else {
-                item._enrichLoading = false;
+        // Fire-and-forget: enrich-one hits live eBay comps and takes
+        // ~1.4s. Awaiting it here used to freeze the route flow after
+        // every relink (especially painful on JP cards where staff are
+        // typing a manual override and then waiting on graded data they
+        // rarely need). Let it finish in the background and patch the
+        // card in place when it lands.
+        (async () => {
+            try {
+                const er = await fetch(`/api/ingest/session/${ctx.sessionId}/enrich-one`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_id: ctx.itemId }),
+                });
+                const ed = await er.json();
+                if (er.ok && ed.result && !ed.result.error) {
+                    item.image_url = ed.result.image_url || null;
+                    item.graded_prices = ed.result.graded_prices || {};
+                    item.grading_economics = ed.result.grading_economics || {};
+                }
+            } catch(e) { /* silent — card stays with no graded data */ }
+            item._enrichLoading = false;
+            // Only re-render if this card is still on screen. If the
+            // user advanced to the next card the late render would
+            // clobber their view.
+            if (_rsItems && _rsItems[_rsIndex] && _rsItems[_rsIndex].id === ctx.itemId) {
                 _renderSessionCard();
             }
-        } catch(e) {
-            item._enrichLoading = false;
-            _renderSessionCard();
-        }
+        })();
     };
     relinkItem(item.id, _rsSessionId, item.product_name || '');
 }

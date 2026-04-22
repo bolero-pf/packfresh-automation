@@ -454,6 +454,18 @@ def search_cards_for_relink():
     where = ["product_type = 'card'", "price_type = 'raw'", "condition = 'NM'"]
     params = []
 
+    # This concat matches the expression indexed by
+    # migrate_search_concat_index.py (idx_scrydex_cache_search_trgm). It
+    # MUST stay byte-identical to the index expression or the planner
+    # won't use the index and we're back to 2s sequential filters.
+    SEARCH_EXPR = (
+        "(COALESCE(product_name, '') || ' ' || "
+        "COALESCE(product_name_en, '') || ' ' || "
+        "COALESCE(expansion_name, '') || ' ' || "
+        "COALESCE(expansion_name_en, '') || ' ' || "
+        "COALESCE(card_number, ''))"
+    )
+
     if tcg_id:
         try:
             where.append("tcgplayer_id = %s")
@@ -464,18 +476,22 @@ def search_cards_for_relink():
     if query:
         tokens = [t.lstrip("#").strip() for t in query.split() if t.strip().lstrip("#")]
         for tok in tokens:
-            like = f"%{tok}%"
-            # Each token must hit one of these columns. Using parameterized
-            # ILIKEs keeps the query injection-safe and leaves matching to
-            # Postgres' default indexes (product_name_en is indexed).
-            where.append("""(
-                product_name      ILIKE %s
-                OR product_name_en   ILIKE %s
-                OR expansion_name    ILIKE %s
-                OR expansion_name_en ILIKE %s
-                OR card_number       ILIKE %s
-            )""")
-            params.extend([like, like, like, like, like])
+            if tok.isdigit():
+                # Numeric tokens: a substring match on card_number ('32' → 32,
+                # 132, 320, 3200…) matched everything and drowned out the
+                # name tokens. Prefer exact card_number equality OR a name
+                # substring — staff typing "umbreon 32" find card #32 exactly,
+                # but "pokemon 151" still finds the set name "151".
+                where.append(
+                    f"(card_number = %s OR {SEARCH_EXPR} ILIKE %s)"
+                )
+                params.extend([tok, f"%{tok}%"])
+            else:
+                # Word tokens: single trigram-indexed ILIKE over all
+                # searchable columns concatenated. One index lookup per
+                # token, ANDed together.
+                where.append(f"{SEARCH_EXPR} ILIKE %s")
+                params.append(f"%{tok}%")
     if set_nm:
         where.append("(expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
         params.append(f"%{set_nm}%")
