@@ -423,6 +423,87 @@ class PriceCache:
             """, (int(tcgplayer_id),))
         return rows[0]["variant"] if rows else None
 
+    def get_card_view(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+    ) -> Optional[dict]:
+        """Single-query card view: all variants × conditions + all graded rows
+        + metadata, in one SELECT. USD throughout.
+
+        Shape matches PriceProvider.get_card_view. Use this directly from a
+        PriceCache instance; PriceProvider delegates to this and falls back to
+        the live primary only when the cache misses.
+        """
+        if not scrydex_id and not tcgplayer_id:
+            return None
+
+        if scrydex_id:
+            rows = self.db.query("""
+                SELECT * FROM scrydex_price_cache
+                WHERE scrydex_id = %s AND product_type = 'card'
+                ORDER BY variant, condition, price_type
+            """, (scrydex_id,))
+        else:
+            rows = self.db.query("""
+                SELECT * FROM scrydex_price_cache
+                WHERE tcgplayer_id = %s AND product_type = 'card'
+                ORDER BY variant, condition, price_type
+            """, (int(tcgplayer_id),))
+
+        if not rows:
+            return None
+
+        first = rows[0]
+        variants_map: dict = {}
+        graded_nested: dict = {}
+
+        for r in rows:
+            variant = r.get("variant") or "normal"
+            currency = r.get("currency")
+            price = _to_usd(r.get("market_price"), currency)
+            if price is None:
+                continue
+            price_type = r.get("price_type", "raw")
+
+            if price_type == "raw":
+                cond = r.get("condition") or "NM"
+                canonical = "DMG" if cond == "DM" else cond
+                variants_map.setdefault(variant, {})[canonical] = price
+            elif price_type == "graded":
+                company = (r.get("grade_company") or "").upper()
+                grade = r.get("grade_value") or ""
+                if company and grade:
+                    graded_nested.setdefault(company, {})[grade] = price
+
+        # Primary variant = holofoil > normal > first available.
+        primary = None
+        for candidate in ("holofoil", "normal"):
+            if candidate in variants_map:
+                primary = candidate
+                break
+        if primary is None and variants_map:
+            primary = next(iter(variants_map))
+
+        # Prefer the holofoil row's image if present, else the first row's.
+        img_row = next((r for r in rows if r.get("variant") == "holofoil"), first)
+
+        return {
+            "scrydex_id":     first.get("scrydex_id"),
+            "tcgplayer_id":   first.get("tcgplayer_id"),
+            "name":           first.get("product_name"),
+            "set_name":       first.get("expansion_name"),
+            "expansion_name": first.get("expansion_name"),
+            "card_number":    first.get("card_number"),
+            "printed_number": first.get("printed_number"),
+            "rarity":         first.get("rarity"),
+            "game":           first.get("game"),
+            "image_small":    img_row.get("image_small"),
+            "image_medium":   img_row.get("image_medium"),
+            "image_large":    img_row.get("image_large"),
+            "variants":       variants_map,
+            "primary_variant": primary,
+            "graded":         graded_nested,
+        }
+
     def search_cards_native(
         self, query: str, *, set_name: str = None, limit: int = 5,
         all_games: bool = False,

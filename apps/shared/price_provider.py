@@ -420,8 +420,7 @@ class PriceProvider:
         self, *, scrydex_id: str = None, tcgplayer_id=None,
     ) -> Optional[dict]:
         """Everything a condition-picker UI needs in one call. Scrydex-native
-        shape, USD throughout. Combines metadata + per-variant condition prices
-        + per-grade prices so callers don't reach into internal dict shapes.
+        shape, USD throughout.
 
         Returns None if the card isn't in cache or primary.
 
@@ -437,28 +436,42 @@ class PriceProvider:
                 "primary_variant": "holofoil",
                 "graded": {
                     "PSA": {"10": Decimal, "9": Decimal, ...},
-                    "CGC": {...},
                 },
             }
         """
-        meta = self.get_card_metadata(scrydex_id=scrydex_id,
-                                       tcgplayer_id=tcgplayer_id)
+        # Single-query cache path — avoids N+1 fan-out across variants.
+        if self.cache and (scrydex_id or tcgplayer_id):
+            try:
+                view = self.cache.get_card_view(
+                    scrydex_id=scrydex_id, tcgplayer_id=tcgplayer_id,
+                )
+                if view:
+                    return view
+            except Exception as e:
+                logger.warning(f"Cache card-view lookup failed: {e}")
+
+        # Primary fallback: assemble a view from the live client's scalar API.
+        # Cache misses for JP / niche cards should be rare; only hit here.
+        if not tcgplayer_id:
+            return None
+
+        meta = None
+        try:
+            meta = self.primary.get_card_metadata(tcgplayer_id)
+        except (PPTError, ScrydexError):
+            pass
         if not meta:
             return None
 
-        # Per-variant condition prices. Iterate every variant the metadata
-        # knows about so the picker can show all printings.
         variants_map: dict = {}
         for v in meta.get("variants") or []:
-            cond_prices = self.get_condition_prices(
-                scrydex_id=meta.get("scrydex_id"),
-                tcgplayer_id=meta.get("tcgplayer_id"),
-                variant=v,
-            )
+            try:
+                cond_prices = self.primary.get_condition_prices(tcgplayer_id, variant=v)
+            except (PPTError, ScrydexError):
+                cond_prices = {}
             if cond_prices:
                 variants_map[v] = cond_prices
 
-        # Primary variant = holofoil > normal > first available.
         primary = None
         for candidate in ("holofoil", "normal"):
             if candidate in variants_map:
@@ -467,34 +480,17 @@ class PriceProvider:
         if primary is None and variants_map:
             primary = next(iter(variants_map))
 
-        # Per-grade prices (PSA 10, etc.), nested by company for UI convenience.
-        graded_flat = {}
-        if self.cache:
-            try:
-                graded_flat = self.cache.get_graded_prices(
-                    scrydex_id=meta.get("scrydex_id"),
-                    tcgplayer_id=meta.get("tcgplayer_id"),
-                    variant=primary,
-                )
-            except Exception as e:
-                logger.warning(f"Cache graded lookup failed: {e}")
-
-        graded_nested: dict = {}
-        for (company, grade), data in graded_flat.items():
-            market = data.get("market")
-            if market is not None:
-                graded_nested.setdefault(company, {})[grade] = market
-
         return {
             **{k: meta.get(k) for k in (
-                "scrydex_id", "tcgplayer_id", "name", "expansion_name",
+                "scrydex_id", "tcgplayer_id", "name",
                 "card_number", "printed_number", "rarity", "game",
                 "image_small", "image_medium", "image_large",
             )},
             "set_name": meta.get("expansion_name"),
+            "expansion_name": meta.get("expansion_name"),
             "variants": variants_map,
             "primary_variant": primary,
-            "graded": graded_nested,
+            "graded": {},
         }
 
 

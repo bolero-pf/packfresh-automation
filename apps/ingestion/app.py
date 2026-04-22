@@ -1205,29 +1205,18 @@ def _enrich_one_item(key, item):
         graded_prices = None
 
         if tcg_id:
-            # TCG-mapped path. The `pricing` wrapper only returns imageCdnUrl* for
-            # games where Scrydex is primary (MTG, One Piece, Lorcana) — for
-            # Pokemon it routes through the actual PPT API which doesn't return
-            # images at all, so Pokemon thumbnails were silently blank. Read
-            # directly from the Scrydex cache (populated by sync for every
-            # synced game incl. Pokemon) and fall back to the live client only
-            # if the cache hasn't caught this card yet.
-            meta = pricing.get_card_metadata(tcgplayer_id=int(tcg_id))
-            cache_row = db.query_one("""
-                SELECT image_small, image_medium, image_large
-                FROM scrydex_price_cache
-                WHERE tcgplayer_id = %s
-                ORDER BY fetched_at DESC
-                LIMIT 1
-            """, (int(tcg_id),))
-            if cache_row:
-                image_url = (cache_row.get("image_large")
-                             or cache_row.get("image_medium")
-                             or cache_row.get("image_small"))
-            if not image_url and meta:
-                image_url = (meta.get("image_large")
-                             or meta.get("image_medium")
-                             or meta.get("image_small"))
+            # TCG-mapped path. One cache read via get_card_view — gives us
+            # image URLs AND the cache-stored graded fallback in a single SQL.
+            view = None
+            if pricing.cache:
+                try:
+                    view = pricing.cache.get_card_view(tcgplayer_id=int(tcg_id))
+                except Exception:
+                    view = None
+            if view:
+                image_url = (view.get("image_large")
+                             or view.get("image_medium")
+                             or view.get("image_small"))
             graded_prices = get_all_graded_comps(
                 int(tcg_id), db,
                 card_name=item.get("product_name"),
@@ -1235,26 +1224,13 @@ def _enrich_one_item(key, item):
                 card_number=item.get("card_number"),
                 variant=variant,
             )
-            if not graded_prices and meta:
-                # Fall back to cache-stored graded rows in the scalar shape.
-                # Nest by company for UI convenience.
-                if pricing.cache:
-                    try:
-                        flat = pricing.cache.get_graded_prices(
-                            scrydex_id=meta.get("scrydex_id"),
-                            tcgplayer_id=int(tcg_id), variant=variant,
-                        )
-                        nested = {}
-                        for (company, grade), data in flat.items():
-                            market = data.get("market")
-                            if market is not None:
-                                nested.setdefault(company, {})[grade] = {
-                                    "price": float(market),
-                                    "method": "scrydex_cache",
-                                }
-                        graded_prices = nested
-                    except Exception:
-                        pass
+            # Cache fallback for graded: reuse view.graded (already USD, already fetched)
+            if not graded_prices and view and view.get("graded"):
+                graded_prices = {
+                    company: {grade: {"price": float(p), "method": "scrydex_cache"}
+                              for grade, p in grades.items()}
+                    for company, grades in view["graded"].items()
+                }
 
         elif sid:
             # Scrydex-only path: image from cache, graded comps via direct scrydex_id
@@ -3405,21 +3381,30 @@ def price_compare_batch():
             "ppt": None,
         }
 
-        # Cache read (instant). Try card first, then sealed.
+        # Cache read (instant) — one query via get_card_view, falls back to
+        # sealed if card miss. Running in a hot loop; keep this to 1-2 queries
+        # max per item.
         try:
-            market = cache.get_raw_condition_price(
-                tcgplayer_id=tcg_id, condition="NM",
-            )
-            meta = cache.get_card_metadata(tcgplayer_id=tcg_id) if market else None
-            if not market:
-                market = cache.get_sealed_market_price(tcg_id)
-                meta = cache.get_sealed_metadata(tcg_id) if market else None
-            if market is not None:
-                row["cache"] = {
-                    "market": float(market),
-                    "name": (meta or {}).get("name"),
-                    "source": "scrydex_cache",
-                }
+            view = cache.get_card_view(tcgplayer_id=tcg_id)
+            if view:
+                primary = view.get("primary_variant")
+                nm = None
+                if primary:
+                    nm = (view.get("variants") or {}).get(primary, {}).get("NM")
+                if nm is not None:
+                    row["cache"] = {
+                        "market": float(nm),
+                        "name": view.get("name"),
+                        "source": "scrydex_cache",
+                    }
+            else:
+                sealed_price = cache.get_sealed_market_price(tcg_id)
+                if sealed_price is not None:
+                    row["cache"] = {
+                        "market": float(sealed_price),
+                        "name": None,
+                        "source": "scrydex_cache",
+                    }
         except Exception:
             pass
 
