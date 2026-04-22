@@ -99,30 +99,126 @@ def _get_last_sync_str() -> str:
 
 # ─── Data helpers ──────────────────────────────────────────────────────────────
 
-def _load_inventory() -> list[dict]:
-    rows = db.query("""
+_SORT_SQL = {
+    "name":           "c.title",
+    "shopify_qty":    "c.shopify_qty",
+    "shopify_price":  "c.shopify_price",
+    "shopify_value":  "(COALESCE(c.shopify_qty,0) * COALESCE(c.shopify_price,0))",
+    "physical_count": "COALESCE(o.physical_count, 0)",
+    "notes":          "COALESCE(o.notes, '')",
+    "committed":      "COALESCE(c.committed, 0)",
+    "breakdown":      "sbc.best_variant_market",
+}
+
+
+def _build_filter_where(*, q=None, in_stock=False, tag_any=None, status="all",
+                        qty_mismatch=False):
+    where = []
+    params: list = []
+
+    if status == "published":
+        where.append("LOWER(COALESCE(c.status, '')) != 'draft'")
+    elif status == "draft":
+        where.append("LOWER(COALESCE(c.status, '')) = 'draft'")
+
+    if q:
+        where.append("LOWER(COALESCE(c.title, '')) LIKE %s")
+        params.append(f"%{q.lower()}%")
+
+    if in_stock:
+        where.append("COALESCE(c.shopify_qty, 0) > 0")
+
+    if tag_any:
+        for t in tag_any:
+            where.append(
+                "(',' || LOWER(REPLACE(COALESCE(c.tags, ''), ', ', ',')) || ',') LIKE %s"
+            )
+            params.append(f"%,{t.lower()},%")
+
+    if qty_mismatch:
+        where.append("COALESCE(o.physical_count, 0) != COALESCE(c.shopify_qty, 0)")
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    return where_sql, params
+
+
+def _build_order_by(sort_col, sort_dir):
+    expr = _SORT_SQL.get(sort_col)
+    direction = "DESC" if sort_dir == "desc" else "ASC"
+    if expr:
+        return f"ORDER BY {expr} {direction} NULLS LAST, c.shopify_variant_id"
+    return "ORDER BY c.title, c.shopify_variant_id"
+
+
+def _query_filtered(*, q=None, in_stock=False, tag_any=None, status="all",
+                    qty_mismatch=False, sort_col=None, sort_dir="asc",
+                    limit=None, offset=0) -> list[dict]:
+    where_sql, params = _build_filter_where(
+        q=q, in_stock=in_stock, tag_any=tag_any,
+        status=status, qty_mismatch=qty_mismatch,
+    )
+    order_sql = _build_order_by(sort_col, sort_dir)
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "LIMIT %s OFFSET %s"
+        params = params + [int(limit), int(offset)]
+
+    sql = f"""
         SELECT
             c.shopify_product_id,
             c.shopify_variant_id,
             c.title                                         AS name,
             c.shopify_qty,
             c.shopify_price,
-            ROUND(c.shopify_qty * c.shopify_price, 2)      AS shopify_value,
+            ROUND(COALESCE(c.shopify_qty,0) * COALESCE(c.shopify_price,0), 2) AS shopify_value,
             c.tags                                          AS shopify_tags,
             LOWER(c.status)                                 AS shopify_status,
             c.inventory_item_id                             AS shopify_inventory_id,
             c.tcgplayer_id,
             COALESCE(c.committed, 0)                        AS committed,
             COALESCE(o.physical_count, 0)                   AS physical_count,
-            COALESCE(o.notes, '')                           AS notes
-        ,sbc.best_variant_market                          AS bd_value
-        ,sbc.variant_count                                 AS bd_variant_count
+            COALESCE(o.notes, '')                           AS notes,
+            sbc.best_variant_market                         AS bd_value,
+            sbc.variant_count                               AS bd_variant_count
         FROM inventory_product_cache c
         LEFT JOIN inventory_overrides o ON o.shopify_variant_id = c.shopify_variant_id
         LEFT JOIN sealed_breakdown_cache sbc ON sbc.tcgplayer_id = c.tcgplayer_id
-        ORDER BY c.title
-    """)
+        {where_sql}
+        {order_sql}
+        {limit_sql}
+    """
+    rows = db.query(sql, tuple(params) if params else None)
     return [dict(r) for r in rows]
+
+
+def _query_totals(*, q=None, in_stock=False, tag_any=None, status="all",
+                  qty_mismatch=False) -> dict:
+    where_sql, params = _build_filter_where(
+        q=q, in_stock=in_stock, tag_any=tag_any,
+        status=status, qty_mismatch=qty_mismatch,
+    )
+    sql = f"""
+        SELECT
+            COUNT(*)                                                          AS cnt,
+            COALESCE(SUM(COALESCE(c.shopify_qty, 0)), 0)                      AS shopify_qty,
+            COALESCE(SUM(COALESCE(o.physical_count, 0)), 0)                   AS physical_count,
+            COALESCE(SUM(COALESCE(c.shopify_qty,0) * COALESCE(c.shopify_price,0)), 0) AS shopify_value
+        FROM inventory_product_cache c
+        LEFT JOIN inventory_overrides o ON o.shopify_variant_id = c.shopify_variant_id
+        {where_sql}
+    """
+    row = db.query_one(sql, tuple(params) if params else None) or {}
+    return {
+        "count":          int(row.get("cnt") or 0),
+        "shopify_qty":    int(row.get("shopify_qty") or 0),
+        "physical_count": int(row.get("physical_count") or 0),
+        "shopify_value":  float(row.get("shopify_value") or 0),
+    }
+
+
+def _count_all() -> int:
+    row = db.query_one("SELECT COUNT(*) AS cnt FROM inventory_product_cache") or {}
+    return int(row.get("cnt") or 0)
 
 def _save_override(variant_id: int, physical_count=None, notes=None):
     if physical_count is None and notes is None:
@@ -176,41 +272,6 @@ CURATED_TAGS = [
     "sealed", "slab", "collection box", "tin", "etb", "pcetb",
     "booster box", "booster pack", "blister", "sleeved", "international", "mtg",
 ]
-
-def _row_has_tag(row, tag: str) -> bool:
-    """Exact match against Shopify's comma-separated tags — no substring matching."""
-    tags_raw = row.get("shopify_tags") or ""
-    tags = {t.strip().lower() for t in tags_raw.split(",")}
-    return tag.lower() in tags
-
-def _apply_filters(rows, *, q=None, in_stock=False, tag_any=None, status="all", qty_mismatch=False):
-    if status == "published":
-        rows = [r for r in rows if r.get("shopify_status") != "draft"]
-    elif status == "draft":
-        rows = [r for r in rows if r.get("shopify_status") == "draft"]
-    if q:
-        rows = [r for r in rows if q in (r.get("name") or "").lower()]
-    if in_stock:
-        rows = [r for r in rows if (r.get("shopify_qty") or 0) > 0]
-    if tag_any:
-        rows = [r for r in rows if all(_row_has_tag(r, t) for t in tag_any)]
-    if qty_mismatch:
-        rows = [r for r in rows if r.get("physical_count", 0) != (r.get("shopify_qty") or 0)]
-    return rows
-
-def _sort_rows(rows, sort_col, sort_dir):
-    SORTABLE = {"name", "shopify_qty", "shopify_price", "shopify_value", "physical_count", "notes", "committed", "breakdown"}
-    if sort_col not in SORTABLE:
-        return rows
-    actual_col = "bd_value" if sort_col == "breakdown" else sort_col
-    def key(r):
-        v = r.get(actual_col)
-        if v is None: return (1, 0, "")
-        try:
-            return (0, float(v), "")
-        except (TypeError, ValueError):
-            return (0, 0, str(v).lower())
-    return sorted(rows, key=key, reverse=(sort_dir == "desc"))
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
 
@@ -314,14 +375,13 @@ def api_push():
 @requires_auth
 def export_csv():
     """Export respects current filters (fix #8)."""
-    rows     = _load_inventory()
     q        = (request.args.get("q") or "").strip().lower()
     in_stock = request.args.get("in_stock") == "1"
     tag_any  = [t.lower() for t in request.args.getlist("tag")]
     status   = request.args.get("status", "all")
     qty_mm   = request.args.get("qty_mismatch") == "1"
-    rows     = _apply_filters(rows, q=q, in_stock=in_stock, tag_any=tag_any,
-                               status=status, qty_mismatch=qty_mm)
+    rows     = _query_filtered(q=q, in_stock=in_stock, tag_any=tag_any,
+                                status=status, qty_mismatch=qty_mm)
     import csv, io
     out  = io.StringIO()
     cols = ["name", "shopify_qty", "shopify_price", "shopify_value",
@@ -343,22 +403,24 @@ def index():
         cm.ensure_tables()
         cm.check_and_refresh_if_stale()
 
+    # Common filter args (shared between GET and POST)
+    q          = (request.args.get("q") or "").strip().lower()
+    in_stock   = request.args.get("in_stock") == "1"
+    tag_any    = [t.lower() for t in request.args.getlist("tag")]
+    status     = request.args.get("status", "all")
+    qty_mm     = request.args.get("qty_mismatch") == "1"
+    sort_col   = request.args.get("sort")
+    sort_dir   = request.args.get("dir", "asc")
+    limit      = int(request.args.get("limit", 400))
+
     # ── Save (POST) ── local-only fields: physical_count, notes ──────────────
     if request.method == "POST" and request.form.get("save") == "1":
         dirty_keys = set((request.form.get("dirty_keys") or "").split(","))
         updates    = request.form.to_dict(flat=True)
-        q          = (request.args.get("q") or "").strip().lower()
-        in_stock   = request.args.get("in_stock") == "1"
-        tag_any    = [t.lower() for t in request.args.getlist("tag")]
-        status     = request.args.get("status", "all")
-        qty_mm     = request.args.get("qty_mismatch") == "1"
-        sort_col   = request.args.get("sort")
-        sort_dir   = request.args.get("dir", "asc")
-        limit      = int(request.args.get("limit", 400))
-        rows       = _load_inventory()
-        filtered   = _apply_filters(rows, q=q, in_stock=in_stock, tag_any=tag_any,
-                                    status=status, qty_mismatch=qty_mm)
-        page       = _sort_rows(filtered, sort_col, sort_dir)[:limit]
+        page = _query_filtered(q=q, in_stock=in_stock, tag_any=tag_any,
+                               status=status, qty_mismatch=qty_mm,
+                               sort_col=sort_col, sort_dir=sort_dir,
+                               limit=limit, offset=0)
 
         for i, row in enumerate(page):
             variant_id = row.get("shopify_variant_id")
@@ -382,27 +444,14 @@ def index():
         return redirect(request.full_path or "/inventory")
 
     # ── GET ───────────────────────────────────────────────────────────────────
-    rows       = _load_inventory()
-    q          = (request.args.get("q") or "").strip().lower()
-    in_stock   = request.args.get("in_stock") == "1"
-    tag_any    = [t.lower() for t in request.args.getlist("tag")]
-    status     = request.args.get("status", "all")
-    qty_mm     = request.args.get("qty_mismatch") == "1"
-    sort_col   = request.args.get("sort")
-    sort_dir   = request.args.get("dir", "asc")
-    limit      = int(request.args.get("limit", 400))
-    total_rows = len(rows)
-    filtered   = _apply_filters(rows, q=q, in_stock=in_stock, tag_any=tag_any,
-                                 status=status, qty_mismatch=qty_mm)
-    filtered   = _sort_rows(filtered, sort_col, sort_dir)
-    page       = filtered[:limit]
+    total_rows = _count_all()
+    totals     = _query_totals(q=q, in_stock=in_stock, tag_any=tag_any,
+                                status=status, qty_mismatch=qty_mm)
+    page       = _query_filtered(q=q, in_stock=in_stock, tag_any=tag_any,
+                                  status=status, qty_mismatch=qty_mm,
+                                  sort_col=sort_col, sort_dir=sort_dir,
+                                  limit=limit, offset=0)
 
-    totals = {
-        "count":          len(filtered),
-        "shopify_qty":    sum((r.get("shopify_qty") or 0) for r in filtered),
-        "physical_count": sum((r.get("physical_count") or 0) for r in filtered),
-        "shopify_value":  sum((r.get("shopify_qty") or 0) * (r.get("shopify_price") or 0) for r in filtered),
-    }
     meta = {
         "last_sync":    _get_last_sync_str(),
         "mode_label":   "DRY RUN" if DRY_RUN else "LIVE",
@@ -421,11 +470,14 @@ def index():
 @bp.route("/push_prices", methods=["POST"])
 @requires_auth
 def push_prices():
-    rows   = _load_inventory()
+    rows = db.query(
+        "SELECT shopify_variant_id, shopify_price FROM inventory_product_cache "
+        "WHERE shopify_price IS NOT NULL"
+    )
     pushed = failed = 0
     for row in rows:
-        vid   = row.get("shopify_variant_id")
-        price = row.get("shopify_price")
+        vid   = row.get("shopify_variant_id") if isinstance(row, dict) else row["shopify_variant_id"]
+        price = row.get("shopify_price") if isinstance(row, dict) else row["shopify_price"]
         if vid and price is not None:
             ok = _update_shopify_price(int(vid), float(price))
             pushed += ok; failed += not ok
