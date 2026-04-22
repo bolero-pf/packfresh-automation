@@ -303,6 +303,200 @@ class PriceProvider:
         from ppt_client import PPTClient
         return PPTClient.extract_condition_price(card_data, condition, variant)
 
+    # ════════════════════════════════════════════════════════════════
+    # Scalar API — the forward-going interface. Cache first, primary
+    # fallback. Always USD. Scrydex-native variant names.
+    # ════════════════════════════════════════════════════════════════
+
+    def get_raw_condition_price(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+        condition: str = "NM", variant: Optional[str] = None,
+    ) -> Optional[Decimal]:
+        """Return USD raw market price. Cache first, then live primary."""
+        if self.cache and (scrydex_id or tcgplayer_id):
+            try:
+                p = self.cache.get_raw_condition_price(
+                    scrydex_id=scrydex_id, tcgplayer_id=tcgplayer_id,
+                    condition=condition, variant=variant,
+                )
+                if p is not None:
+                    return p
+            except Exception as e:
+                logger.warning(f"Cache raw-condition lookup failed: {e}")
+
+        if not tcgplayer_id:
+            return None
+        try:
+            return self.primary.get_raw_condition_price(
+                tcgplayer_id, condition=condition, variant=variant,
+            )
+        except (PPTError, ScrydexError) as e:
+            raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
+
+    def get_condition_prices(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+        variant: Optional[str] = None,
+    ) -> dict:
+        """{our_code: USD Decimal} for every condition available."""
+        if self.cache and (scrydex_id or tcgplayer_id):
+            try:
+                out = self.cache.get_condition_prices(
+                    scrydex_id=scrydex_id, tcgplayer_id=tcgplayer_id,
+                    variant=variant,
+                )
+                if out:
+                    return out
+            except Exception as e:
+                logger.warning(f"Cache condition-prices lookup failed: {e}")
+
+        if not tcgplayer_id:
+            return {}
+        try:
+            return self.primary.get_condition_prices(tcgplayer_id, variant=variant)
+        except (PPTError, ScrydexError):
+            return {}
+
+    def get_graded_price(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+        company: str, grade: str, variant: Optional[str] = None,
+    ) -> Optional[Decimal]:
+        """USD graded market price (PSA 10, etc.). Cache first."""
+        if self.cache and (scrydex_id or tcgplayer_id):
+            try:
+                p = self.cache.get_graded_price(
+                    scrydex_id=scrydex_id, tcgplayer_id=tcgplayer_id,
+                    company=company, grade=grade, variant=variant,
+                )
+                if p is not None:
+                    return p
+            except Exception as e:
+                logger.warning(f"Cache graded lookup failed: {e}")
+
+        if not tcgplayer_id:
+            return None
+        try:
+            return self.primary.get_graded_price_for(
+                tcgplayer_id, company=company, grade=grade,
+            )
+        except (PPTError, ScrydexError):
+            return None
+
+    def get_card_metadata(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+    ) -> Optional[dict]:
+        """Scrydex-native card metadata. Cache first, then primary."""
+        if self.cache and (scrydex_id or tcgplayer_id):
+            try:
+                meta = self.cache.get_card_metadata(
+                    scrydex_id=scrydex_id, tcgplayer_id=tcgplayer_id,
+                )
+                if meta:
+                    return meta
+            except Exception as e:
+                logger.warning(f"Cache metadata lookup failed: {e}")
+
+        if not tcgplayer_id:
+            return None
+        try:
+            return self.primary.get_card_metadata(tcgplayer_id)
+        except (PPTError, ScrydexError):
+            return None
+
+    def get_sealed_market_price(self, tcgplayer_id) -> Optional[Decimal]:
+        """USD unopened price for a sealed product."""
+        if self.cache:
+            try:
+                p = self.cache.get_sealed_market_price(tcgplayer_id)
+                if p is not None:
+                    return p
+            except Exception as e:
+                logger.warning(f"Cache sealed lookup failed: {e}")
+        try:
+            return self.primary.get_sealed_market_price(tcgplayer_id)
+        except (PPTError, ScrydexError):
+            return None
+
+    def get_card_view(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+    ) -> Optional[dict]:
+        """Everything a condition-picker UI needs in one call. Scrydex-native
+        shape, USD throughout. Combines metadata + per-variant condition prices
+        + per-grade prices so callers don't reach into internal dict shapes.
+
+        Returns None if the card isn't in cache or primary.
+
+        Shape:
+            {
+                "scrydex_id", "tcgplayer_id", "name", "set_name",
+                "card_number", "printed_number", "rarity", "game",
+                "image_small" / "image_medium" / "image_large",
+                "variants": {
+                    "holofoil": {"NM": Decimal, "LP": Decimal, ...},
+                    "normal":   {...},
+                },
+                "primary_variant": "holofoil",
+                "graded": {
+                    "PSA": {"10": Decimal, "9": Decimal, ...},
+                    "CGC": {...},
+                },
+            }
+        """
+        meta = self.get_card_metadata(scrydex_id=scrydex_id,
+                                       tcgplayer_id=tcgplayer_id)
+        if not meta:
+            return None
+
+        # Per-variant condition prices. Iterate every variant the metadata
+        # knows about so the picker can show all printings.
+        variants_map: dict = {}
+        for v in meta.get("variants") or []:
+            cond_prices = self.get_condition_prices(
+                scrydex_id=meta.get("scrydex_id"),
+                tcgplayer_id=meta.get("tcgplayer_id"),
+                variant=v,
+            )
+            if cond_prices:
+                variants_map[v] = cond_prices
+
+        # Primary variant = holofoil > normal > first available.
+        primary = None
+        for candidate in ("holofoil", "normal"):
+            if candidate in variants_map:
+                primary = candidate
+                break
+        if primary is None and variants_map:
+            primary = next(iter(variants_map))
+
+        # Per-grade prices (PSA 10, etc.), nested by company for UI convenience.
+        graded_flat = {}
+        if self.cache:
+            try:
+                graded_flat = self.cache.get_graded_prices(
+                    scrydex_id=meta.get("scrydex_id"),
+                    tcgplayer_id=meta.get("tcgplayer_id"),
+                    variant=primary,
+                )
+            except Exception as e:
+                logger.warning(f"Cache graded lookup failed: {e}")
+
+        graded_nested: dict = {}
+        for (company, grade), data in graded_flat.items():
+            market = data.get("market")
+            if market is not None:
+                graded_nested.setdefault(company, {})[grade] = market
+
+        return {
+            **{k: meta.get(k) for k in (
+                "scrydex_id", "tcgplayer_id", "name", "expansion_name",
+                "card_number", "printed_number", "rarity", "game",
+                "image_small", "image_medium", "image_large",
+            )},
+            "set_name": meta.get("expansion_name"),
+            "variants": variants_map,
+            "primary_variant": primary,
+            "graded": graded_nested,
+        }
+
 
 def create_price_provider(db=None, game: str = "pokemon") -> PriceProvider:
     """

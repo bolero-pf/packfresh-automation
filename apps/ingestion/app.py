@@ -698,31 +698,22 @@ def add_item(session_id):
                     except Exception as e:
                         logger.warning(f"Live graded comps failed for TCG#{tcg_id}: {e}")
                     if market_price is None and pricing:
-                        card_data = pricing.get_card_by_tcgplayer_id(tcg_id)
-                        if card_data:
-                            mp = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
-                            if mp is not None:
-                                market_price = float(mp)
+                        mp = pricing.get_graded_price(
+                            tcgplayer_id=tcg_id,
+                            company=grade_company, grade=grade_value,
+                        )
+                        if mp is not None:
+                            market_price = float(mp)
                 else:
-                    # Raw: PriceCache (Scrydex) first, PPT fallback — matches
-                    # project rule "Scrydex-first, PPT fallback" (see CLAUDE.md).
-                    from price_cache import PriceCache
-                    try:
-                        cache = PriceCache(db)
-                        card_data = cache.get_card_by_tcgplayer_id(tcg_id)
-                        if card_data:
-                            from scrydex_client import ScrydexClient
-                            mp = ScrydexClient.extract_condition_price(card_data, condition, variant=variant)
-                            if mp is not None:
-                                market_price = float(mp)
-                    except Exception as e:
-                        logger.warning(f"Scrydex price lookup failed for TCG#{tcg_id}: {e}")
-                    if market_price is None and pricing:
-                        card_data = pricing.get_card_by_tcgplayer_id(tcg_id)
-                        if card_data:
-                            mp = PriceProvider.extract_condition_price(card_data, condition, variant=variant)
-                            if mp is not None:
-                                market_price = float(mp)
+                    # Raw: cache (Scrydex) first, PPT fallback — baked into the
+                    # scalar API's cache-first router.
+                    if pricing:
+                        mp = pricing.get_raw_condition_price(
+                            tcgplayer_id=tcg_id,
+                            condition=condition, variant=variant,
+                        )
+                        if mp is not None:
+                            market_price = float(mp)
 
                 if market_price is not None:
                     data["market_price"] = market_price
@@ -788,28 +779,27 @@ def lookup_card():
     if not tcgplayer_id:
         return jsonify({"error": "tcgplayer_id required"}), 400
     try:
-        card_data = pricing.get_card_by_tcgplayer_id(int(tcgplayer_id))
-        if not card_data:
+        view = pricing.get_card_view(tcgplayer_id=int(tcgplayer_id))
+        if not view:
             return jsonify({"error": "Card not found"}), 404
-        variants = PriceProvider.extract_variants(card_data)
-        primary_printing = PriceProvider.get_primary_printing(card_data)
-        graded_prices = PriceProvider.extract_graded_prices(card_data)
+
         # Live graded comps — cached aggregates are often 3× off for MTG/Pokemon.
         live_graded = {}
         try:
             from graded_pricing import get_live_graded_comps
-            for company_name, grades in graded_prices.items():
+            for company_name, grades in (view.get("graded") or {}).items():
                 for grade_val in grades:
                     live = get_live_graded_comps(int(tcgplayer_id), company_name, grade_val, db)
                     if live:
                         live_graded.setdefault(company_name, {})[grade_val] = live
         except Exception as e:
             logger.warning(f"Live graded enrichment failed for TCG#{tcgplayer_id}: {e}")
+
         return jsonify({
-            "card": card_data,
-            "variants": variants,
-            "primary_printing": primary_printing,
-            "graded_prices": graded_prices,
+            "card": view,
+            "variants": view.get("variants") or {},
+            "primary_printing": view.get("primary_variant"),
+            "graded_prices": view.get("graded") or {},
             "live_graded": live_graded,
         })
     except Exception as e:
@@ -1222,7 +1212,7 @@ def _enrich_one_item(key, item):
             # directly from the Scrydex cache (populated by sync for every
             # synced game incl. Pokemon) and fall back to the live client only
             # if the cache hasn't caught this card yet.
-            card_data = pricing.get_card_by_tcgplayer_id(int(tcg_id))
+            meta = pricing.get_card_metadata(tcgplayer_id=int(tcg_id))
             cache_row = db.query_one("""
                 SELECT image_small, image_medium, image_large
                 FROM scrydex_price_cache
@@ -1234,10 +1224,10 @@ def _enrich_one_item(key, item):
                 image_url = (cache_row.get("image_large")
                              or cache_row.get("image_medium")
                              or cache_row.get("image_small"))
-            if not image_url and card_data:
-                image_url = (card_data.get("imageCdnUrl800")
-                             or card_data.get("imageCdnUrl")
-                             or card_data.get("imageCdnUrl400"))
+            if not image_url and meta:
+                image_url = (meta.get("image_large")
+                             or meta.get("image_medium")
+                             or meta.get("image_small"))
             graded_prices = get_all_graded_comps(
                 int(tcg_id), db,
                 card_name=item.get("product_name"),
@@ -1245,8 +1235,26 @@ def _enrich_one_item(key, item):
                 card_number=item.get("card_number"),
                 variant=variant,
             )
-            if not graded_prices and card_data:
-                graded_prices = PriceProvider.extract_graded_prices(card_data)
+            if not graded_prices and meta:
+                # Fall back to cache-stored graded rows in the scalar shape.
+                # Nest by company for UI convenience.
+                if pricing.cache:
+                    try:
+                        flat = pricing.cache.get_graded_prices(
+                            scrydex_id=meta.get("scrydex_id"),
+                            tcgplayer_id=int(tcg_id), variant=variant,
+                        )
+                        nested = {}
+                        for (company, grade), data in flat.items():
+                            market = data.get("market")
+                            if market is not None:
+                                nested.setdefault(company, {})[grade] = {
+                                    "price": float(market),
+                                    "method": "scrydex_cache",
+                                }
+                        graded_prices = nested
+                    except Exception:
+                        pass
 
         elif sid:
             # Scrydex-only path: image from cache, graded comps via direct scrydex_id
@@ -3183,36 +3191,43 @@ def lookup_by_id(tcgplayer_id):
         return jsonify({"error": "PPT API not configured"}), 503
     try:
         # Try card first
-        card = pricing.get_card_by_tcgplayer_id(tcgplayer_id)
-        if card:
-            market_price = PriceProvider.extract_market_price(card)
-            variants = PriceProvider.extract_variants(card)
+        view = pricing.get_card_view(tcgplayer_id=tcgplayer_id)
+        if view:
+            # Default market = NM of the primary variant. Null-safe when JP
+            # cards lack certain printings.
+            primary = view.get("primary_variant")
+            market = None
+            if primary and view.get("variants", {}).get(primary):
+                market = view["variants"][primary].get("NM")
             return jsonify({
                 "found": True,
                 "type": "card",
-                "name": card.get("name", ""),
-                "set_name": card.get("setName", ""),
-                "card_number": card.get("cardNumber", ""),
-                "rarity": card.get("rarity", ""),
+                "name": view.get("name", ""),
+                "set_name": view.get("set_name", ""),
+                "card_number": view.get("card_number", ""),
+                "rarity": view.get("rarity", ""),
                 "tcgplayer_id": tcgplayer_id,
-                "market_price": float(market_price) if market_price else 0,
-                "variants": variants,
-                "image_url": card.get("imageCdnUrl800") or card.get("imageCdnUrl") or card.get("imageCdnUrl400"),
-                "price_source": card.get("_price_source"),
+                "market_price": float(market) if market else 0,
+                "variants": view.get("variants") or {},
+                "image_url": view.get("image_large") or view.get("image_medium") or view.get("image_small"),
             })
 
         # Try sealed
-        sealed = pricing.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
-        if sealed:
-            price = sealed.get("unopenedPrice") or sealed.get("marketPrice") or 0
+        sealed_price = pricing.get_sealed_market_price(tcgplayer_id)
+        if sealed_price is not None:
+            sealed_meta = None
+            if pricing.cache:
+                try:
+                    sealed_meta = pricing.cache.get_sealed_metadata(tcgplayer_id)
+                except Exception:
+                    pass
             return jsonify({
                 "found": True,
                 "type": "sealed",
-                "name": sealed.get("name") or sealed.get("productName", ""),
-                "set_name": sealed.get("setName") or sealed.get("set_name", ""),
+                "name": (sealed_meta or {}).get("name", "") if sealed_meta else "",
+                "set_name": (sealed_meta or {}).get("expansion_name", "") if sealed_meta else "",
                 "tcgplayer_id": tcgplayer_id,
-                "market_price": float(price),
-                "price_source": sealed.get("_price_source"),
+                "market_price": float(sealed_price),
             })
 
         return jsonify({"found": False, "tcgplayer_id": tcgplayer_id})
@@ -3250,47 +3265,58 @@ def price_compare(tcgplayer_id):
 
     result = {"tcgplayer_id": tcgplayer_id, "ppt": None, "scrydex": None}
 
-    # PPT lookup
+    def _serialize_view(client, ms):
+        meta = client.get_card_metadata(tcgplayer_id)
+        if not meta:
+            return None
+        variants_map = {}
+        for v in meta.get("variants") or []:
+            prices = client.get_condition_prices(tcgplayer_id, variant=v)
+            if prices:
+                variants_map[v] = {k: float(p) for k, p in prices.items()}
+        nm = None
+        for v in ("holofoil", "normal"):
+            if v in variants_map:
+                nm = variants_map[v].get("NM")
+                break
+        if nm is None and variants_map:
+            nm = next(iter(variants_map.values())).get("NM")
+        return {
+            "name": meta.get("name"),
+            "set": meta.get("expansion_name"),
+            "scrydex_id": meta.get("scrydex_id"),
+            "market": float(nm) if nm else 0,
+            "variants": variants_map,
+            "image": meta.get("image_large") or meta.get("image_medium"),
+            "ms": ms,
+        }
+
+    # PPT lookup (direct — no cache layer, hits PPT live)
     ppt_key = os.getenv("PPT_API_KEY", "")
     if ppt_key:
         try:
             ppt_direct = PPTClient(ppt_key)
             t0 = time.time()
-            card = ppt_direct.get_card_by_tcgplayer_id(tcgplayer_id)
+            view = _serialize_view(ppt_direct, None)
             ppt_ms = int((time.time() - t0) * 1000)
-            if card:
-                result["ppt"] = {
-                    "name": card.get("name"),
-                    "set": card.get("setName"),
-                    "market": float(PPTClient.extract_market_price(card) or 0),
-                    "variants": PPTClient.extract_variants(card),
-                    "graded": PPTClient.extract_graded_prices(card),
-                    "image": card.get("imageCdnUrl800") or card.get("imageCdnUrl"),
-                    "ms": ppt_ms,
-                }
+            if view:
+                view["ms"] = ppt_ms
+                result["ppt"] = view
         except Exception as e:
             result["ppt"] = {"error": str(e)}
 
-    # Scrydex lookup
+    # Scrydex lookup (direct — no cache layer, hits Scrydex live)
     sx_key = os.getenv("SCRYDEX_API_KEY", "")
     sx_team = os.getenv("SCRYDEX_TEAM_ID", "")
     if sx_key and sx_team:
         try:
             sx = ScrydexClient(sx_key, sx_team, db=db)
             t0 = time.time()
-            card = sx.get_card_by_tcgplayer_id(tcgplayer_id, include_history=True)
+            view = _serialize_view(sx, None)
             sx_ms = int((time.time() - t0) * 1000)
-            if card:
-                result["scrydex"] = {
-                    "name": card.get("name"),
-                    "set": card.get("setName"),
-                    "scrydex_id": card.get("scrydexId"),
-                    "market": float(ScrydexClient.extract_market_price(card) or 0),
-                    "variants": ScrydexClient.extract_variants(card),
-                    "graded": ScrydexClient.extract_graded_prices(card),
-                    "image": card.get("imageCdnUrl800") or card.get("imageCdnUrl"),
-                    "ms": sx_ms,
-                }
+            if view:
+                view["ms"] = sx_ms
+                result["scrydex"] = view
             else:
                 result["scrydex"] = {"error": "No mapping found", "ms": sx_ms}
         except Exception as e:
@@ -3379,17 +3405,19 @@ def price_compare_batch():
             "ppt": None,
         }
 
-        # Cache read (instant)
+        # Cache read (instant). Try card first, then sealed.
         try:
-            # Try card first, then sealed
-            cached = cache.get_card_by_tcgplayer_id(tcg_id)
-            if not cached:
-                cached = cache.get_sealed_product_by_tcgplayer_id(tcg_id)
-            if cached:
-                market = PriceProvider.extract_market_price(cached)
+            market = cache.get_raw_condition_price(
+                tcgplayer_id=tcg_id, condition="NM",
+            )
+            meta = cache.get_card_metadata(tcgplayer_id=tcg_id) if market else None
+            if not market:
+                market = cache.get_sealed_market_price(tcg_id)
+                meta = cache.get_sealed_metadata(tcg_id) if market else None
+            if market is not None:
                 row["cache"] = {
-                    "market": float(market) if market else None,
-                    "name": cached.get("name"),
+                    "market": float(market),
+                    "name": (meta or {}).get("name"),
                     "source": "scrydex_cache",
                 }
         except Exception:
@@ -3425,20 +3453,21 @@ def price_compare_enrich():
 
     try:
         ppt_direct = PPTClient(ppt_key)
-        card = ppt_direct.get_card_by_tcgplayer_id(int(tcg_id))
-        if card:
-            market = PPTClient.extract_market_price(card)
+        # Card market = NM of primary variant via the scalar API.
+        market = ppt_direct.get_raw_condition_price(int(tcg_id), condition="NM")
+        meta = ppt_direct.get_card_metadata(int(tcg_id)) if market else None
+        if market is not None:
             return jsonify({
-                "market": float(market) if market else None,
-                "name": card.get("name"),
+                "market": float(market),
+                "name": (meta or {}).get("name"),
                 "source": "ppt_live",
             })
-        sealed = ppt_direct.get_sealed_product_by_tcgplayer_id(int(tcg_id))
-        if sealed:
-            market = PPTClient.extract_market_price(sealed)
+        # Sealed fallback
+        sealed_market = ppt_direct.get_sealed_market_price(int(tcg_id))
+        if sealed_market is not None:
             return jsonify({
-                "market": float(market) if market else None,
-                "name": sealed.get("name"),
+                "market": float(sealed_market),
+                "name": None,
                 "source": "ppt_live",
             })
         return jsonify({"market": None, "source": "ppt_live", "error": "not found"})
@@ -3834,11 +3863,15 @@ def scrydex_search_for_link():
         where.append("game = %s")
         params.append(game_filter)
 
-    # Get each variant as a separate row so PC ETBs show both normal + pokemonCenter
+    # Get each variant as a separate row so PC ETBs show both normal + pokemonCenter.
+    # market_price / low_price are converted to USD inline so JP-marketplace JPY
+    # rows don't surface as their raw yen number.
     results = db.query(f"""
         SELECT DISTINCT ON (scrydex_id, variant)
             scrydex_id, product_name, expansion_name, product_type, variant,
-            market_price, low_price, image_medium, tcgplayer_id, game
+            {_USD_PRICE_SQL('market_price')} AS market_price,
+            {_USD_PRICE_SQL('low_price')} AS low_price,
+            image_medium, tcgplayer_id, game
         FROM scrydex_price_cache
         WHERE {' AND '.join(where)}
         AND condition IN ('NM', 'U') AND price_type = 'raw'
@@ -3903,9 +3936,12 @@ def scrydex_link():
     except Exception:
         pass
 
-    # Get the linked price from the specific variant to confirm
-    row = db.query_one("""
-        SELECT product_name, market_price FROM scrydex_price_cache
+    # Get the linked price from the specific variant to confirm. USD-converted
+    # inline so JP variants return a sensible number.
+    row = db.query_one(f"""
+        SELECT product_name,
+               {_USD_PRICE_SQL('market_price')} AS market_price
+        FROM scrydex_price_cache
         WHERE scrydex_id = %s AND variant = %s AND condition IN ('NM', 'U') AND price_type = 'raw'
         LIMIT 1
     """, (scrydex_id, variant))

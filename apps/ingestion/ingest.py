@@ -312,9 +312,7 @@ def update_item_condition(item_id: str, condition: str, price_provider=None, pri
         price_override > Scrydex cache per-condition > PPT per-condition
         > condition-multiplier fallback from the existing deal market price.
     """
-    from price_provider import PriceProvider, FALLBACK_MULTIPLIERS
     from price_cache import PriceCache
-    from scrydex_client import ScrydexClient
     import db as db_module
 
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
@@ -346,51 +344,46 @@ def update_item_condition(item_id: str, condition: str, price_provider=None, pri
     elif condition_changed:
         condition_market = None
 
-        # 1. Scrydex cache — lookup by scrydex_id first if present (truly
-        # primary), else fall through to tcgplayer_id resolution.
+        # 1. Scrydex cache — scalar USD lookup. Currency conversion is inside
+        # the cache accessor so JP cards come back as USD. Returns None if
+        # Scrydex genuinely has no row for this condition (JP cards commonly
+        # only have NM data) — we then fall through to PPT, then synthesis.
         try:
             cache = PriceCache(db_module)
-            card_data = None
-            if sid:
-                card_data = cache.get_card_by_scrydex_id(sid)
-            elif tcg_id:
-                card_data = cache.get_card_by_tcgplayer_id(int(tcg_id))
-            if card_data:
-                condition_market = ScrydexClient.extract_condition_price(
-                    card_data, condition, variant=variant)
-                if condition_market is not None:
-                    logger.info(f"Condition update price from Scrydex cache: "
-                                f"${condition_market} for {condition} "
-                                f"sid={sid} tcg={tcg_id}")
+            condition_market = cache.get_raw_condition_price(
+                scrydex_id=sid, tcgplayer_id=tcg_id,
+                condition=condition, variant=variant,
+            )
+            if condition_market is not None:
+                logger.info(f"Condition update price from Scrydex cache: "
+                            f"${condition_market} for {condition} "
+                            f"sid={sid} tcg={tcg_id}")
         except Exception as e:
             logger.warning(f"Scrydex cache condition lookup failed for sid={sid} tcg={tcg_id}: {e}")
 
-        # 2. PPT fallback — only makes sense when we have a TCG ID, since PPT
-        # is keyed on TCGplayer product IDs. Scrydex-only cards skip this.
+        # 2. PPT fallback — only for TCG-keyed cards. JP / Scrydex-only cards
+        # have no TCG ID, so this step is skipped.
         if condition_market is None and tcg_id and price_provider:
             try:
-                card_data = price_provider.get_card_by_tcgplayer_id(int(tcg_id))
-                if card_data:
-                    condition_market = PriceProvider.extract_condition_price(
-                        card_data, condition, variant=variant)
-                    if condition_market is not None:
-                        logger.info(f"Condition update price from PPT fallback: "
-                                    f"${condition_market} for {condition} TCG#{tcg_id}")
+                condition_market = price_provider.get_raw_condition_price(
+                    tcgplayer_id=int(tcg_id), condition=condition, variant=variant,
+                )
+                if condition_market is not None:
+                    logger.info(f"Condition update price from PPT fallback: "
+                                f"${condition_market} for {condition} TCG#{tcg_id}")
             except Exception as e:
                 logger.warning(f"PPT condition lookup failed for TCG#{tcg_id}: {e}")
 
         if condition_market is not None:
             new_market = condition_market
         else:
-            # 3. Multiplier fallback from deal-time price
-            deal_market = Decimal(str(item.get("market_price", 0)))
-            old_mult = FALLBACK_MULTIPLIERS.get(old_condition, Decimal("1.00"))
-            new_mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
-            if old_mult > 0:
-                nm_price = deal_market / old_mult
-            else:
-                nm_price = deal_market
-            new_market = (nm_price * new_mult).quantize(Decimal("0.01"))
+            # 3. Last-resort: retarget the deal-time price via condition
+            # multipliers. Uses the canonical synthesis helper so fallback
+            # math lives in exactly one place.
+            from price_synthesis import retarget_condition
+            new_market = retarget_condition(
+                item.get("market_price"), old_condition, condition,
+            ) or Decimal("0.00")
     else:
         # No change needed
         return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
@@ -477,16 +470,17 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
             except Exception as e:
                 logger.warning(f"Scrydex graded lookup failed for sid={sid} tcg={tcg_id}: {e}")
 
-        # PPT fallback
+        # PPT fallback (cache-first, then live PPT) via the scalar API
         if new_market is None and price_provider:
             try:
-                card_data = price_provider.get_card_by_tcgplayer_id(int(tcg_id))
-                if card_data:
-                    graded_price = PriceProvider.get_graded_price(card_data, company, grade)
-                    if graded_price is not None:
-                        new_market = graded_price
-                        logger.info(f"Grade update price from PPT fallback: ${new_market} "
-                                    f"for {company} {grade} TCG#{tcg_id}")
+                graded_price = price_provider.get_graded_price(
+                    scrydex_id=sid, tcgplayer_id=int(tcg_id) if tcg_id else None,
+                    company=company, grade=grade,
+                )
+                if graded_price is not None:
+                    new_market = graded_price
+                    logger.info(f"Grade update price from PPT fallback: ${new_market} "
+                                f"for {company} {grade} TCG#{tcg_id}")
             except Exception as e:
                 logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
 
@@ -526,8 +520,6 @@ def convert_item_type(item_id: str, to_graded: bool,
       → raw:    clears grade_company/grade_value/cert_number, sets condition,
                 looks up condition price or uses price_override
     """
-    from price_provider import PriceProvider, FALLBACK_MULTIPLIERS
-
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
         raise ValueError("Item not found")
@@ -568,16 +560,17 @@ def convert_item_type(item_id: str, to_graded: bool,
                 except Exception as e:
                     logger.warning(f"Scrydex graded lookup failed for TCG#{tcg_id}: {e}")
 
-            # PPT fallback
+            # PPT fallback via scalar API (cache-first, then live PPT)
             if new_market is None and price_provider:
                 try:
-                    card_data = price_provider.get_card_by_tcgplayer_id(int(tcg_id))
-                    if card_data:
-                        graded_price = PriceProvider.get_graded_price(card_data, company, grade)
-                        if graded_price is not None:
-                            new_market = graded_price
-                            logger.info(f"Graded price from PPT fallback: ${new_market} "
-                                        f"for {company} {grade} TCG#{tcg_id}")
+                    graded_price = price_provider.get_graded_price(
+                        scrydex_id=sid, tcgplayer_id=int(tcg_id) if tcg_id else None,
+                        company=company, grade=grade,
+                    )
+                    if graded_price is not None:
+                        new_market = graded_price
+                        logger.info(f"Graded price from PPT fallback: ${new_market} "
+                                    f"for {company} {grade} TCG#{tcg_id}")
                 except Exception as e:
                     logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
 
@@ -594,16 +587,16 @@ def convert_item_type(item_id: str, to_graded: bool,
         if cond not in valid:
             raise ValueError(f"Invalid condition: {cond}. Must be NM, LP, MP, HP, or DMG")
 
-        if new_market is None and tcg_id and price_provider:
+        if new_market is None and (tcg_id or sid) and price_provider:
             try:
-                card_data = price_provider.get_card_by_tcgplayer_id(int(tcg_id))
-                if card_data:
-                    cond_price = PriceProvider.extract_condition_price(
-                        card_data, cond, variant=item.get("variant"))
-                    if cond_price is not None:
-                        new_market = cond_price
+                cond_price = price_provider.get_raw_condition_price(
+                    scrydex_id=sid, tcgplayer_id=int(tcg_id) if tcg_id else None,
+                    condition=cond, variant=item.get("variant"),
+                )
+                if cond_price is not None:
+                    new_market = cond_price
             except Exception as e:
-                logger.warning(f"PPT condition lookup failed for TCG#{tcg_id}: {e}")
+                logger.warning(f"Condition price lookup failed for TCG#{tcg_id} sid={sid}: {e}")
 
         updates = [
             "is_graded = FALSE",

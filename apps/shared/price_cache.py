@@ -1,20 +1,28 @@
 """
 price_cache.py — Read pricing data from scrydex_price_cache (local DB).
 
-Returns data in the same PPT-normalized shape that all downstream code expects,
-so it's a drop-in replacement for live API calls. Zero credits, zero latency.
+Two APIs live here:
 
-Usage:
-    from price_cache import PriceCache
-    cache = PriceCache(db)
-    card = cache.get_card_by_tcgplayer_id(83472)
-    # Returns same dict shape as PPTClient.get_card_by_tcgplayer_id()
+1. Scalar API (current) — returns Decimal / dict of scalars in USD. Scrydex-
+   native naming (variants are 'holofoil', 'normal', 'altArt', etc.). JPY rows
+   are converted to USD via SCRYDEX_JPY_USD_RATE inside the accessor so callers
+   stay currency-blind.
+
+2. Legacy PPT-shaped API (`get_card_by_*`, `search_cards`, `_build_card_dict`)
+   — kept during migration so existing callers don't break. Do not add new
+   callers. Being ripped out once the last caller migrates.
 """
 
 import logging
+import os
 import re
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
+
+# Scrydex sends JP-marketplace rows in JPY and eBay graded rows in USD. Convert
+# inside every accessor so the scalar API always returns USD. Rate matches the
+# ingestion service's SCRYDEX_JPY_USD_RATE (same env var, same default).
+_JPY_USD_RATE = Decimal(os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
 
 _TOKEN_SPLIT = re.compile(r"[\s\-_/]+")
 
@@ -65,11 +73,469 @@ GRADE_TO_KEY = {
 }
 
 
+def _to_usd(price, currency: Optional[str]) -> Optional[Decimal]:
+    """Convert a cached price to USD based on its row currency.
+    NULL/USD pass through; JPY multiplied by the configured rate.
+    Quantized to 2 decimals — all downstream code expects cents precision."""
+    if price is None:
+        return None
+    dec = Decimal(str(price))
+    if (currency or "USD").upper() == "JPY":
+        dec = dec * _JPY_USD_RATE
+    return dec.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _normalize_condition(cond: str) -> str:
+    """Our canonical condition codes (NM/LP/MP/HP/DMG) → Scrydex cache form
+    (the cache stores Damaged as 'DM' because that's what Scrydex sends).
+    Case-insensitive; trimmed; unknown values pass through upper-cased."""
+    c = (cond or "").upper().strip()
+    if c == "DMG":
+        return "DM"
+    return c
+
+
+def _variant_ranking_case() -> str:
+    """ORDER BY fragment: prefer holofoil, then normal, then anything else.
+    Used when the caller hasn't specified a variant and we have to pick one."""
+    return ("CASE variant "
+            "WHEN 'holofoil' THEN 0 "
+            "WHEN 'normal' THEN 1 "
+            "ELSE 2 END")
+
+
 class PriceCache:
 
     def __init__(self, db, game: str = "pokemon"):
         self.db = db
         self.game = game
+
+    # ════════════════════════════════════════════════════════════════
+    # Scalar API — Scrydex-native, USD-converted, no PPT dict shape
+    # ════════════════════════════════════════════════════════════════
+
+    def get_raw_condition_price(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+        condition: str = "NM", variant: Optional[str] = None,
+    ) -> Optional[Decimal]:
+        """Return USD raw market price for a card at a given condition.
+
+        Args:
+            scrydex_id: Preferred key (more specific — tcg IDs can collide
+                across variants). Provide this when available.
+            tcgplayer_id: Alternative key.
+            condition: NM, LP, MP, HP, DMG. Case-insensitive. Cache stores
+                DMG as 'DM' (Scrydex-native); translation is internal.
+            variant: Scrydex-native variant name ('holofoil', 'normal',
+                'altArt', 'firstEditionHolofoil', etc.). None → whichever
+                variant has this condition, preferring holofoil > normal.
+
+        Returns Decimal USD price, or None if no matching row exists.
+        JPY rows converted to USD via SCRYDEX_JPY_USD_RATE.
+        """
+        if not scrydex_id and not tcgplayer_id:
+            return None
+        cache_cond = _normalize_condition(condition)
+
+        params: list = []
+        where_parts = ["product_type = 'card'", "price_type = 'raw'",
+                       "condition = %s", "market_price IS NOT NULL"]
+        params.append(cache_cond)
+
+        if scrydex_id:
+            where_parts.append("scrydex_id = %s")
+            params.append(scrydex_id)
+        else:
+            where_parts.append("tcgplayer_id = %s")
+            params.append(int(tcgplayer_id))
+
+        if variant is not None:
+            where_parts.append("variant = %s")
+            params.append(variant)
+
+        sql = f"""
+            SELECT market_price, currency
+            FROM scrydex_price_cache
+            WHERE {' AND '.join(where_parts)}
+            ORDER BY {_variant_ranking_case()}, fetched_at DESC NULLS LAST
+            LIMIT 1
+        """
+        rows = self.db.query(sql, tuple(params))
+        if not rows:
+            return None
+        return _to_usd(rows[0]["market_price"], rows[0].get("currency"))
+
+    def get_condition_prices(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+        variant: Optional[str] = None,
+    ) -> dict:
+        """Return {condition_code: USD Decimal} for every condition the cache
+        has for this card+variant. Condition codes are our canonical form
+        (NM/LP/MP/HP/DMG). Only populated conditions appear — callers that
+        need synthesized fallbacks should use `price_synthesis.synthesize_from_nm`.
+
+        If variant is None, picks the primary variant (holofoil > normal > other)
+        that has the most rows.
+        """
+        if not scrydex_id and not tcgplayer_id:
+            return {}
+
+        params: list = []
+        where_parts = ["product_type = 'card'", "price_type = 'raw'",
+                       "market_price IS NOT NULL"]
+        if scrydex_id:
+            where_parts.append("scrydex_id = %s")
+            params.append(scrydex_id)
+        else:
+            where_parts.append("tcgplayer_id = %s")
+            params.append(int(tcgplayer_id))
+
+        if variant is None:
+            # Resolve the primary variant first so the condition map is
+            # internally consistent (one variant, not a mix).
+            variant = self._primary_variant(scrydex_id=scrydex_id,
+                                            tcgplayer_id=tcgplayer_id)
+            if variant is None:
+                return {}
+        where_parts.append("variant = %s")
+        params.append(variant)
+
+        sql = f"""
+            SELECT condition, market_price, currency
+            FROM scrydex_price_cache
+            WHERE {' AND '.join(where_parts)}
+        """
+        rows = self.db.query(sql, tuple(params))
+        out: dict = {}
+        for r in rows:
+            cond = r.get("condition") or "NM"
+            canonical = "DMG" if cond == "DM" else cond
+            price = _to_usd(r["market_price"], r.get("currency"))
+            if price is not None:
+                out[canonical] = price
+        return out
+
+    def get_graded_price(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+        company: str, grade: str, variant: Optional[str] = None,
+    ) -> Optional[Decimal]:
+        """Return USD graded market price for (card, company, grade).
+        Graded rows come from eBay comps — they're already USD regardless of
+        the card's language, but _to_usd still honors the currency column
+        defensively."""
+        if not scrydex_id and not tcgplayer_id:
+            return None
+
+        params: list = []
+        where_parts = ["product_type = 'card'", "price_type = 'graded'",
+                       "market_price IS NOT NULL",
+                       "grade_company = %s", "grade_value = %s"]
+        params.extend([company.upper(), str(grade)])
+
+        if scrydex_id:
+            where_parts.append("scrydex_id = %s")
+            params.append(scrydex_id)
+        else:
+            where_parts.append("tcgplayer_id = %s")
+            params.append(int(tcgplayer_id))
+
+        if variant is not None:
+            where_parts.append("variant = %s")
+            params.append(variant)
+
+        sql = f"""
+            SELECT market_price, currency
+            FROM scrydex_price_cache
+            WHERE {' AND '.join(where_parts)}
+            ORDER BY {_variant_ranking_case()}, fetched_at DESC NULLS LAST
+            LIMIT 1
+        """
+        rows = self.db.query(sql, tuple(params))
+        if not rows:
+            return None
+        return _to_usd(rows[0]["market_price"], rows[0].get("currency"))
+
+    def get_graded_prices(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+        variant: Optional[str] = None,
+    ) -> dict:
+        """Return {(company, grade): {market, low, mid, high, trend}} for every
+        graded row the cache has for this card+variant. Prices are USD."""
+        if not scrydex_id and not tcgplayer_id:
+            return {}
+
+        params: list = []
+        where_parts = ["product_type = 'card'", "price_type = 'graded'",
+                       "market_price IS NOT NULL"]
+        if scrydex_id:
+            where_parts.append("scrydex_id = %s")
+            params.append(scrydex_id)
+        else:
+            where_parts.append("tcgplayer_id = %s")
+            params.append(int(tcgplayer_id))
+
+        if variant is None:
+            variant = self._primary_variant(scrydex_id=scrydex_id,
+                                            tcgplayer_id=tcgplayer_id)
+        if variant is not None:
+            where_parts.append("variant = %s")
+            params.append(variant)
+
+        sql = f"""
+            SELECT grade_company, grade_value,
+                   market_price, low_price, mid_price, high_price,
+                   trend_7d_pct, currency
+            FROM scrydex_price_cache
+            WHERE {' AND '.join(where_parts)}
+        """
+        rows = self.db.query(sql, tuple(params))
+        out: dict = {}
+        for r in rows:
+            company = (r.get("grade_company") or "").upper()
+            grade = r.get("grade_value") or ""
+            if not company or not grade:
+                continue
+            currency = r.get("currency")
+            out[(company, grade)] = {
+                "market": _to_usd(r.get("market_price"), currency),
+                "low":    _to_usd(r.get("low_price"), currency),
+                "mid":    _to_usd(r.get("mid_price"), currency),
+                "high":   _to_usd(r.get("high_price"), currency),
+                "trend_7d_pct": r.get("trend_7d_pct"),
+            }
+        return out
+
+    def get_card_metadata(
+        self, *, scrydex_id: str = None, tcgplayer_id=None,
+    ) -> Optional[dict]:
+        """Scrydex-native card metadata. No prices.
+
+        Returns {
+            scrydex_id, tcgplayer_id, name, expansion_id, expansion_name,
+            card_number, printed_number, rarity, game,
+            image_small, image_medium, image_large,
+            variants: [list of Scrydex-native variant names available],
+        } or None if the card isn't cached.
+        """
+        if not scrydex_id and not tcgplayer_id:
+            return None
+
+        if scrydex_id:
+            rows = self.db.query("""
+                SELECT * FROM scrydex_price_cache
+                WHERE scrydex_id = %s AND product_type = 'card'
+                ORDER BY variant, condition, price_type
+            """, (scrydex_id,))
+        else:
+            rows = self.db.query("""
+                SELECT * FROM scrydex_price_cache
+                WHERE tcgplayer_id = %s AND product_type = 'card'
+                ORDER BY variant, condition, price_type
+            """, (int(tcgplayer_id),))
+
+        if not rows:
+            return None
+
+        first = rows[0]
+        variants_seen = []
+        for r in rows:
+            v = r.get("variant") or "normal"
+            if v not in variants_seen:
+                variants_seen.append(v)
+
+        # Prefer the holofoil row for the top-level image (most JP/older cards
+        # have a holo printing). Falls back to first row.
+        img_row = next((r for r in rows if r.get("variant") == "holofoil"), first)
+        return {
+            "scrydex_id":     first.get("scrydex_id"),
+            "tcgplayer_id":   first.get("tcgplayer_id"),
+            "name":           first.get("product_name"),
+            "expansion_id":   first.get("expansion_id"),
+            "expansion_name": first.get("expansion_name"),
+            "card_number":    first.get("card_number"),
+            "printed_number": first.get("printed_number"),
+            "rarity":         first.get("rarity"),
+            "game":           first.get("game"),
+            "image_small":    img_row.get("image_small"),
+            "image_medium":   img_row.get("image_medium"),
+            "image_large":    img_row.get("image_large"),
+            "variants":       variants_seen,
+        }
+
+    def get_sealed_market_price(self, tcgplayer_id) -> Optional[Decimal]:
+        """Unopened (U) or NM market price for a sealed product. USD."""
+        rows = self.db.query("""
+            SELECT market_price, currency
+            FROM scrydex_price_cache
+            WHERE tcgplayer_id = %s AND product_type = 'sealed'
+              AND price_type = 'raw'
+              AND condition IN ('U', 'NM')
+              AND market_price IS NOT NULL
+            ORDER BY fetched_at DESC NULLS LAST
+            LIMIT 1
+        """, (int(tcgplayer_id),))
+        if not rows:
+            return None
+        return _to_usd(rows[0]["market_price"], rows[0].get("currency"))
+
+    def get_sealed_metadata(self, tcgplayer_id) -> Optional[dict]:
+        """Scrydex-native sealed metadata. No price."""
+        rows = self.db.query("""
+            SELECT * FROM scrydex_price_cache
+            WHERE tcgplayer_id = %s AND product_type = 'sealed'
+            ORDER BY condition
+        """, (int(tcgplayer_id),))
+        if not rows:
+            return None
+        scrydex_ids = set(r["scrydex_id"] for r in rows)
+        if len(scrydex_ids) > 1:
+            rows = self._prefer_base_product(rows)
+        first = rows[0]
+        return {
+            "scrydex_id":     first.get("scrydex_id"),
+            "tcgplayer_id":   first.get("tcgplayer_id"),
+            "name":           first.get("product_name"),
+            "expansion_id":   first.get("expansion_id"),
+            "expansion_name": first.get("expansion_name"),
+            "game":           first.get("game"),
+            "image_small":    first.get("image_small"),
+            "image_medium":   first.get("image_medium"),
+            "image_large":    first.get("image_large"),
+        }
+
+    def _primary_variant(self, *, scrydex_id=None, tcgplayer_id=None) -> Optional[str]:
+        """Pick the primary variant for a card: holofoil > normal > whichever
+        row comes first. Used when a caller doesn't specify a variant and we
+        need to anchor a multi-condition or multi-grade query on one."""
+        if scrydex_id:
+            rows = self.db.query(f"""
+                SELECT variant FROM scrydex_price_cache
+                WHERE scrydex_id = %s AND product_type = 'card' AND price_type = 'raw'
+                ORDER BY {_variant_ranking_case()}, fetched_at DESC NULLS LAST
+                LIMIT 1
+            """, (scrydex_id,))
+        else:
+            rows = self.db.query(f"""
+                SELECT variant FROM scrydex_price_cache
+                WHERE tcgplayer_id = %s AND product_type = 'card' AND price_type = 'raw'
+                ORDER BY {_variant_ranking_case()}, fetched_at DESC NULLS LAST
+                LIMIT 1
+            """, (int(tcgplayer_id),))
+        return rows[0]["variant"] if rows else None
+
+    def search_cards_native(
+        self, query: str, *, set_name: str = None, limit: int = 5,
+        all_games: bool = False,
+    ) -> list:
+        """Same search as `search_cards`, but returns Scrydex-native metadata
+        dicts (shape: same as `get_card_metadata`). No prices — callers who
+        need a price for a search hit should call `get_raw_condition_price`
+        / `get_condition_prices` on the returned scrydex_id."""
+        hits = self._search_card_ids(query, set_name=set_name, limit=limit,
+                                     all_games=all_games)
+        out = []
+        for h in hits:
+            meta = self.get_card_metadata(scrydex_id=h["scrydex_id"])
+            if meta:
+                out.append(meta)
+        return out
+
+    def search_sealed_native(
+        self, query: str, *, set_name: str = None, limit: int = 5,
+        all_games: bool = False,
+    ) -> list:
+        """Scrydex-native version of `search_sealed_products`."""
+        params: list = []
+        sql = """
+            SELECT DISTINCT ON (scrydex_id) scrydex_id, tcgplayer_id
+            FROM scrydex_price_cache
+            WHERE product_type = 'sealed'
+        """
+        if not all_games:
+            sql += " AND game = %s"
+            params.append(self.game)
+
+        for forms in self._tokenize(query):
+            ors = []
+            for f in forms:
+                ors.append("(product_name ILIKE %s OR expansion_id ILIKE %s "
+                           "OR expansion_name ILIKE %s)")
+                p = f"%{f}%"
+                params.extend([p, p, p])
+            sql += " AND (" + " OR ".join(ors) + ")"
+
+        if set_name:
+            sql += " AND expansion_name ILIKE %s"
+            params.append(f"%{set_name}%")
+        sql += " ORDER BY scrydex_id, condition LIMIT %s"
+        params.append(limit * 3)
+
+        hits = self.db.query(sql, tuple(params))
+        out = []
+        for h in hits:
+            meta = self.get_sealed_metadata(h["tcgplayer_id"]) if h.get("tcgplayer_id") else None
+            if meta:
+                out.append(meta)
+        # Base products first, bundles last
+        def _bundle_sort_key(item):
+            name = (item.get("name") or "").lower()
+            is_bundle = any(kw in name for kw in self._BUNDLE_KEYWORDS)
+            return (1 if is_bundle else 0, len(name))
+        out.sort(key=_bundle_sort_key)
+        return out[:limit]
+
+    def _search_card_ids(self, query: str, *, set_name=None, limit=5,
+                          all_games=False) -> list:
+        """Internal: run the card search query, return [{scrydex_id, tcgplayer_id}]."""
+        full_query = (query or "").strip()
+        where_parts: list = ["product_type = 'card'"]
+        params: list = []
+        if not all_games:
+            where_parts.append("game = %s")
+            params.append(self.game)
+
+        for forms in self._tokenize(query):
+            ors = []
+            for f in forms:
+                ors.append("(product_name ILIKE %s OR card_number ILIKE %s "
+                           "OR printed_number ILIKE %s "
+                           "OR expansion_id ILIKE %s OR expansion_name ILIKE %s)")
+                p = f"%{f}%"
+                params.extend([p, p, p, p, p])
+            where_parts.append("(" + " OR ".join(ors) + ")")
+
+        if set_name:
+            where_parts.append("expansion_name ILIKE %s")
+            params.append(f"%{set_name}%")
+
+        where_clause = " AND ".join(where_parts)
+
+        score_sql = "0"
+        score_params: list = []
+        if full_query:
+            score_sql = (
+                "(CASE WHEN LOWER(printed_number) = LOWER(%s) THEN 100 ELSE 0 END) + "
+                "(CASE WHEN printed_number ILIKE %s THEN 30 ELSE 0 END) + "
+                "(CASE WHEN printed_number ILIKE %s THEN 10 ELSE 0 END)"
+            )
+            score_params = [full_query, f"{full_query}%", f"%{full_query}%"]
+
+        sql = f"""
+            SELECT scrydex_id, tcgplayer_id, score FROM (
+                SELECT DISTINCT ON (scrydex_id) scrydex_id, tcgplayer_id,
+                       ({score_sql}) AS score
+                FROM scrydex_price_cache
+                WHERE {where_clause}
+                ORDER BY scrydex_id, condition, price_type
+            ) sub
+            ORDER BY score DESC, scrydex_id
+            LIMIT %s
+        """
+        return self.db.query(sql, tuple(score_params + params + [limit]))
+
+    # ════════════════════════════════════════════════════════════════
+    # Legacy PPT-shaped API — deprecated, removed once no callers remain
+    # ════════════════════════════════════════════════════════════════
 
     @staticmethod
     def _tokenize(query: str) -> list[list[str]]:
@@ -333,8 +799,9 @@ class PriceCache:
             variant = self._display_variant(r.get("variant", "normal"))
             condition = r.get("condition", "NM")
             price_type = r.get("price_type", "raw")
-            market = r.get("market_price")
-            low = r.get("low_price")
+            currency = r.get("currency")
+            market = _to_usd(r.get("market_price"), currency)
+            low = _to_usd(r.get("low_price"), currency)
 
             if price_type == "raw":
                 ppt_cond = CONDITION_DISPLAY.get(condition, condition)
@@ -362,14 +829,17 @@ class PriceCache:
                 grade = r.get("grade_value") or ""
                 key = GRADE_TO_KEY.get((company, grade))
                 if key and market is not None:
-                    mid_p = float(r.get("mid_price")) if r.get("mid_price") else float(market)
+                    mid_p = _to_usd(r.get("mid_price"), currency) or market
+                    high_p = _to_usd(r.get("high_price"), currency)
+                    mid_p = float(mid_p) if mid_p is not None else float(market)
                     low_p = float(low) if low else None
-                    high_p = float(r.get("high_price")) if r.get("high_price") else None
-                    confidence = self._graded_confidence(float(market), low_p, mid_p, high_p)
+                    high_p = float(high_p) if high_p is not None else None
+                    market_f = float(market)
+                    confidence = self._graded_confidence(market_f, low_p, mid_p, high_p)
                     graded_data[key] = {
-                        "smartMarketPrice": {"price": float(market), "method": "scrydex_cache",
+                        "smartMarketPrice": {"price": market_f, "method": "scrydex_cache",
                                              "confidence": confidence},
-                        "marketPrice7Day": float(market),
+                        "marketPrice7Day": market_f,
                         "medianPrice": mid_p,
                         "minPrice": low_p,
                         "maxPrice": high_p,
@@ -419,11 +889,12 @@ class PriceCache:
         """Assemble a PPT-shaped sealed product dict from cache rows."""
         first = rows[0]
 
-        # Find the unopened/NM market price
+        # Find the unopened/NM market price (USD — convert from JPY if needed)
         market_price = None
         for r in rows:
             if r.get("condition") in ("U", "NM") and r.get("price_type") == "raw":
-                market_price = float(r["market_price"]) if r.get("market_price") else None
+                usd = _to_usd(r.get("market_price"), r.get("currency"))
+                market_price = float(usd) if usd is not None else None
                 break
 
         return {

@@ -1,11 +1,26 @@
 """
-Scrydex API Client — drop-in replacement for PPTClient.
+Scrydex API Client — primary data source for card prices.
 
-Normalizes Scrydex responses to match PPT's data shape so downstream code
-works unchanged. The key difference: Scrydex uses its own IDs (e.g. "base1-4").
-TCGPlayer IDs are exposed inside variants[].marketplaces[] (one per variant),
-but there's no "search by TCGPlayer ID" endpoint — a mapping table
+Scrydex uses its own IDs (e.g. "base1-4"); TCGPlayer IDs are exposed inside
+variants[].marketplaces[] (one per variant) and a mapping table
 (scrydex_tcg_map) bridges the two ID systems for reverse lookups.
+
+There are two APIs here:
+
+1. **Scalar instance API** — `get_raw_condition_price`, `get_condition_prices`,
+   `get_graded_price_for`, `get_card_metadata`, `get_sealed_market_price`.
+   These read native Scrydex fields (variants[].prices[]) and return Decimal
+   prices in USD. JP-marketplace JPY rows are converted inline via
+   SCRYDEX_JPY_USD_RATE. This is the forward-going interface — callers should
+   use these (directly, or through PriceProvider which is cache-first).
+
+2. **Legacy PPT-shaped normalization** — `get_card_by_tcgplayer_id`,
+   `get_card_by_id`, `_normalize_card`, `_build_prices_object`. These emit a
+   dict matching PPTClient's shape so bulk comparison flows (intake session
+   compare) can share code. Prices are now USD-converted at build time
+   (historical bug fix — see _to_usd usage in _build_prices_object), so any
+   caller touching these dicts gets USD. New callers should use the scalar
+   API above instead.
 
 Scrydex response shape for cards:
     {"data": [{"id": "base1-4", "name": "Charizard", "number": "4",
@@ -29,6 +44,7 @@ Variant name mapping (Scrydex -> PPT display names):
     "reverseHolofoil"   -> "Reverse Holofoil"
 """
 
+import os
 import time
 import logging
 from decimal import Decimal, ROUND_HALF_UP
@@ -37,6 +53,21 @@ from typing import Optional
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Same env var / default as shared/price_cache.py and ingestion/app.py. Scrydex
+# sends JP-marketplace raw rows in JPY; convert inline so the scalar API always
+# returns USD. eBay-scraped graded rows already come back in USD.
+_JPY_USD_RATE = Decimal(os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
+
+
+def _to_usd(price, currency: Optional[str]) -> Optional[Decimal]:
+    """Convert a Scrydex price to USD based on its currency field."""
+    if price is None:
+        return None
+    dec = Decimal(str(price))
+    if (currency or "USD").upper() == "JPY":
+        dec = dec * _JPY_USD_RATE
+    return dec.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 UA = "pack-fresh/1.0"
 DEFAULT_HEADERS = {"Accept": "application/json", "User-Agent": UA}
@@ -72,11 +103,6 @@ VARIANT_DISPLAY = {
     "firstEditionHolofoil": "1st Edition Holofoil",
     "firstEditionShadowlessHolofoil": "1st Edition Shadowless Holofoil",
     "unlimitedShadowlessHolofoil": "Shadowless Holofoil",
-}
-
-FALLBACK_MULTIPLIERS = {
-    "NM": Decimal("1.00"), "LP": Decimal("0.80"), "MP": Decimal("0.65"),
-    "HP": Decimal("0.45"), "DMG": Decimal("0.25"),
 }
 
 # Reverse map: PPT grade keys -> (company, grade) for graded price normalization
@@ -289,8 +315,14 @@ class ScrydexClient:
                 if not cond_short:
                     continue
                 ppt_cond_name = CONDITION_TO_PPT.get(cond_short, p.get("condition"))
-                market = p.get("market")
-                low = p.get("low")
+                # Convert JPY → USD at build time so the normalized dict is
+                # always USD (eBay-sourced graded rows are already USD; this
+                # converter is a no-op for them).
+                currency = p.get("currency")
+                market_usd = _to_usd(p.get("market"), currency)
+                low_usd = _to_usd(p.get("low"), currency)
+                market = float(market_usd) if market_usd is not None else None
+                low = float(low_usd) if low_usd is not None else None
                 v_conditions[ppt_cond_name] = {"price": market, "low": low}
 
                 if cond_short == "NM" and market is not None:
@@ -364,10 +396,15 @@ class ScrydexClient:
                 if not key:
                     continue
 
-                market = p.get("market")
-                low = p.get("low")
-                mid = p.get("mid")
-                high = p.get("high")
+                currency = p.get("currency")
+                market_usd = _to_usd(p.get("market"), currency)
+                low_usd = _to_usd(p.get("low"), currency)
+                mid_usd = _to_usd(p.get("mid"), currency)
+                high_usd = _to_usd(p.get("high"), currency)
+                market = float(market_usd) if market_usd is not None else None
+                low = float(low_usd) if low_usd is not None else None
+                mid = float(mid_usd) if mid_usd is not None else None
+                high = float(high_usd) if high_usd is not None else None
 
                 if market is None and mid is None:
                     continue
@@ -520,12 +557,14 @@ class ScrydexClient:
         if scrydex_id and tcg_id:
             self._save_tcg_mapping(scrydex_id, tcg_id)
 
-        # Extract unopened price from variants
+        # Extract unopened price from variants. Convert JPY → USD inline so
+        # the normalized dict is always in USD regardless of the source row.
         market_price = None
         for v in variants:
             for p in (v.get("prices") or []):
                 if p.get("condition") == "U" and p.get("type") == "raw":
-                    market_price = p.get("market")
+                    usd = _to_usd(p.get("market"), p.get("currency"))
+                    market_price = float(usd) if usd is not None else None
                     break
             if market_price is not None:
                 break
@@ -535,7 +574,8 @@ class ScrydexClient:
             for v in variants:
                 for p in (v.get("prices") or []):
                     if p.get("type") == "raw" and p.get("market") is not None:
-                        market_price = p.get("market")
+                        usd = _to_usd(p.get("market"), p.get("currency"))
+                        market_price = float(usd) if usd is not None else None
                         break
                 if market_price is not None:
                     break
@@ -799,204 +839,175 @@ class ScrydexClient:
         """Check credit balance."""
         return self._get(f"{self.base_url}/account/v1/usage")
 
-    # ── static price extraction (PPT-compatible) ──────────────────
-    # These work on the normalized (PPT-shape) data returned by this client,
-    # so they're identical to PPTClient's implementations.
+    # ════════════════════════════════════════════════════════════════
+    # Scalar instance API — reads directly from the raw Scrydex response
+    # (preserved on normalized dicts as _scrydex_raw). Currency-aware at
+    # the row level so JP-marketplace JPY prices convert to USD natively.
+    # ════════════════════════════════════════════════════════════════
+
+    _CONDITION_TO_SCRYDEX = {
+        "NM": "NM", "LP": "LP", "MP": "MP", "HP": "HP",
+        "DMG": "DM",  # Scrydex uses DM for damaged
+    }
 
     @staticmethod
-    def extract_market_price(item_data) -> Optional[Decimal]:
-        """Extract market price — works on normalized data from either PPT or Scrydex."""
-        if not item_data:
+    def _get_raw(card_data):
+        """Return the raw Scrydex response stashed on normalized card dicts
+        by `_normalize_card`. Needed because `_build_prices_object` drops the
+        per-row currency field."""
+        if not card_data:
             return None
-        # Sealed: unopenedPrice
-        unopened = item_data.get("unopenedPrice")
-        if unopened is not None:
-            return Decimal(str(unopened))
-        # Cards: prices.market
-        prices = item_data.get("prices", {})
-        if isinstance(prices, dict):
-            market = prices.get("market") or prices.get("mid")
-            if market is not None:
-                return Decimal(str(market))
-        # Fallback flat fields
-        for key in ("market_price", "marketPrice", "price"):
-            val = item_data.get(key)
-            if val is not None:
-                return Decimal(str(val))
-        return None
+        return card_data.get("_scrydex_raw")
 
-    @staticmethod
-    def extract_variants(card_data) -> dict:
-        """Extract variant -> condition -> price map from normalized data."""
-        if not card_data:
-            return {}
-        prices = card_data.get("prices", {})
-        if not isinstance(prices, dict):
-            return {}
+    def get_raw_condition_price(
+        self, tcgplayer_id, condition: str = "NM",
+        variant: Optional[str] = None,
+    ) -> Optional[Decimal]:
+        """Live Scrydex lookup → USD raw market price or None."""
+        try:
+            data = self.get_card_by_tcgplayer_id(tcgplayer_id)
+        except ScrydexError:
+            return None
+        if not data:
+            return None
 
-        result = {}
-        primary = prices.get("primaryPrinting", "Default")
+        raw = self._get_raw(data)
+        target_cond = self._CONDITION_TO_SCRYDEX.get(
+            (condition or "").upper(), (condition or "NM").upper())
 
-        # Flat conditions -> primary variant
-        conditions = prices.get("conditions", {})
-        if conditions and isinstance(conditions, dict):
-            flat = {}
-            for ppt_cond, cond_data in conditions.items():
-                short_code = _match_condition(ppt_cond)
-                if short_code and isinstance(cond_data, dict):
-                    price = cond_data.get("price")
-                    flat[short_code] = float(price) if price is not None else None
-            if flat:
-                result[primary] = flat
-
-        # Per-variant conditions
-        variants = prices.get("variants", {})
-        if variants and isinstance(variants, dict):
-            for variant_name, vconditions in variants.items():
-                if not isinstance(vconditions, dict):
+        if raw:
+            # Read native Scrydex shape: variants[].prices[] with per-row currency
+            for v in raw.get("variants") or []:
+                if variant is not None and v.get("name") != variant:
                     continue
-                variant_prices = {}
-                for ppt_cond, cond_data in vconditions.items():
-                    short_code = _match_condition(ppt_cond)
-                    if short_code and isinstance(cond_data, dict):
-                        price = cond_data.get("price")
-                        variant_prices[short_code] = float(price) if price is not None else None
-                if variant_prices:
-                    if variant_name in result:
-                        result[variant_name].update(variant_prices)
-                    else:
-                        result[variant_name] = variant_prices
+                for p in v.get("prices") or []:
+                    if (p.get("type") == "raw"
+                            and (p.get("condition") or "").upper() == target_cond):
+                        return _to_usd(p.get("market"), p.get("currency"))
+            # Fallback: pick first variant that has this condition
+            if variant is None:
+                for v in raw.get("variants") or []:
+                    for p in v.get("prices") or []:
+                        if (p.get("type") == "raw"
+                                and (p.get("condition") or "").upper() == target_cond):
+                            return _to_usd(p.get("market"), p.get("currency"))
+            return None
 
-        # Fallback: market price with multipliers
-        if not result:
-            nm = ScrydexClient.extract_market_price(card_data)
-            if nm is not None:
-                result["Default"] = {
-                    code: float((nm * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                    for code, mult in FALLBACK_MULTIPLIERS.items()
-                }
-
-        # Fill missing conditions from NM
-        all_conditions = set(FALLBACK_MULTIPLIERS.keys())
-        for variant_name, variant_prices in result.items():
-            nm_price = variant_prices.get("NM")
-            if nm_price is None:
-                for code, mult in FALLBACK_MULTIPLIERS.items():
-                    if variant_prices.get(code) is not None and float(mult) > 0:
-                        nm_price = variant_prices[code] / float(mult)
-                        break
-            if nm_price is not None:
-                nm_dec = Decimal(str(nm_price))
-                for code in all_conditions:
-                    if variant_prices.get(code) is None:
-                        variant_prices[code] = float(
-                            (nm_dec * FALLBACK_MULTIPLIERS[code]).quantize(
-                                Decimal("0.01"), rounding=ROUND_HALF_UP
-                            )
-                        )
-
-        return result
-
-    @staticmethod
-    def get_primary_printing(card_data) -> str:
-        if not card_data:
-            return "Default"
-        prices = card_data.get("prices", {})
-        return prices.get("primaryPrinting", "Default") if isinstance(prices, dict) else "Default"
-
-    @staticmethod
-    def extract_graded_prices(card_data) -> dict:
-        """Extract graded prices from normalized data (same logic as PPTClient)."""
-        if not card_data:
-            return {}
-        sales_by_grade = card_data.get("ebay", {}).get("salesByGrade", {})
-        if not isinstance(sales_by_grade, dict):
-            return {}
-
-        result: dict = {}
-        for key, (company, grade) in GRADE_KEY_MAP.items():
-            entry = sales_by_grade.get(key)
-            if not isinstance(entry, dict):
+        # No raw response (shouldn't happen — _normalize_card always stamps
+        # _scrydex_raw). Fall through to the normalized dict's prices map.
+        prices = (data.get("prices") or {}).get("variants", {})
+        ppt_cond = CONDITION_TO_PPT.get(condition.upper(), condition)
+        for vname, conds in prices.items():
+            if variant is not None and vname.lower() != variant.lower():
                 continue
-
-            count = entry.get("count") or 0
-            vol7 = entry.get("dailyVolume7Day")
-            price7day = entry.get("marketPrice7Day")
-            median = entry.get("medianPrice")
-            smp = entry.get("smartMarketPrice") or {}
-            smp_price = smp.get("price")
-            min_p = entry.get("minPrice")
-            max_p = entry.get("maxPrice")
-
-            if price7day is not None and vol7 is not None and vol7 >= 1.0:
-                price, confidence, method, days_used = float(price7day), "high", "7day_market", 7
-            elif median is not None:
-                price = float(median)
-                confidence = "high" if count and count >= 10 else "medium" if count and count >= 4 else "low"
-                method = "median"
-                days_used = smp.get("daysUsed")
-            elif price7day is not None:
-                price = float(price7day)
-                confidence = "medium" if count and count >= 4 else "low"
-                method = "7day_market_sparse"
-                days_used = 7
-            elif smp_price is not None:
-                price = float(smp_price)
-                confidence = "low"
-                method = smp.get("method") or "smart_market"
-                days_used = smp.get("daysUsed")
-            else:
-                continue
-
-            result.setdefault(company, {})[grade] = {
-                "price": price,
-                "confidence": confidence,
-                "days_used": days_used,
-                "method": method,
-                "count": count,
-                "volume_7day": vol7,
-                "trend": entry.get("marketTrend"),
-                "min": min_p,
-                "max": max_p,
-                "median": median,
-                "price_7day": price7day,
-                "smp_price": smp_price,
-            }
-
-        return result
-
-    @staticmethod
-    def get_graded_price(card_data, grade_company: str, grade_value: str) -> Optional[Decimal]:
-        graded = ScrydexClient.extract_graded_prices(card_data)
-        grade_data = graded.get(grade_company.upper(), {}).get(str(grade_value), {})
-        price = grade_data.get("price")
-        if price is not None:
-            return Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            cd = conds.get(ppt_cond) if isinstance(conds, dict) else None
+            p = cd.get("price") if isinstance(cd, dict) else None
+            if p is not None:
+                return Decimal(str(p))
         return None
 
-    @staticmethod
-    def extract_condition_price(card_data, condition, variant=None):
-        variants = ScrydexClient.extract_variants(card_data)
-        if not variants:
-            nm = ScrydexClient.extract_market_price(card_data)
-            if nm is None:
-                return None
-            mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
-            return (nm * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    def get_condition_prices(
+        self, tcgplayer_id, variant: Optional[str] = None,
+    ) -> dict:
+        """Live Scrydex lookup → {our_code: Decimal USD} for the variant."""
+        try:
+            data = self.get_card_by_tcgplayer_id(tcgplayer_id)
+        except ScrydexError:
+            return {}
+        if not data:
+            return {}
 
-        if variant and variant in variants:
-            v = variants[variant]
-        else:
-            primary = ScrydexClient.get_primary_printing(card_data)
-            v = variants.get(primary) or next(iter(variants.values()))
+        raw = self._get_raw(data)
+        if not raw:
+            return {}
 
-        price = v.get(condition)
-        if price is not None:
-            return Decimal(str(price))
+        scrydex_to_ours = {v: k for k, v in self._CONDITION_TO_SCRYDEX.items()}
+        out: dict = {}
+        for v in raw.get("variants") or []:
+            if variant is not None and v.get("name") != variant:
+                continue
+            for p in v.get("prices") or []:
+                if p.get("type") != "raw":
+                    continue
+                sx_cond = (p.get("condition") or "").upper()
+                our_code = scrydex_to_ours.get(sx_cond, sx_cond)
+                usd = _to_usd(p.get("market"), p.get("currency"))
+                if usd is not None and our_code not in out:
+                    out[our_code] = usd
+            if variant is not None:
+                break  # only look at the matching variant
+        return out
 
-        nm = v.get("NM")
-        if nm is not None:
-            mult = FALLBACK_MULTIPLIERS.get(condition, Decimal("1.00"))
-            return (Decimal(str(nm)) * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    def get_graded_price_for(
+        self, tcgplayer_id, company: str, grade: str,
+    ) -> Optional[Decimal]:
+        """Live Scrydex lookup → single graded price in USD."""
+        try:
+            data = self.get_card_by_tcgplayer_id(tcgplayer_id)
+        except ScrydexError:
+            return None
+        if not data:
+            return None
 
-        return ScrydexClient.extract_market_price(card_data)
+        raw = self._get_raw(data)
+        if raw:
+            target_company = company.upper()
+            target_grade = str(grade)
+            for v in raw.get("variants") or []:
+                for p in v.get("prices") or []:
+                    if (p.get("type") == "graded"
+                            and (p.get("company") or "").upper() == target_company
+                            and str(p.get("grade") or "") == target_grade):
+                        return _to_usd(p.get("market"), p.get("currency"))
+        return None
+
+    def get_card_metadata(self, tcgplayer_id) -> Optional[dict]:
+        """Live Scrydex lookup → Scrydex-native metadata dict."""
+        try:
+            data = self.get_card_by_tcgplayer_id(tcgplayer_id)
+        except ScrydexError:
+            return None
+        if not data:
+            return None
+
+        raw = self._get_raw(data)
+        variants_seen = []
+        if raw:
+            for v in raw.get("variants") or []:
+                name = v.get("name") or "normal"
+                if name not in variants_seen:
+                    variants_seen.append(name)
+
+        return {
+            "scrydex_id":     data.get("scrydexId"),
+            "tcgplayer_id":   data.get("tcgPlayerId") or tcgplayer_id,
+            "name":           data.get("name"),
+            "expansion_id":   data.get("expansionId"),
+            "expansion_name": data.get("setName"),
+            "card_number":    data.get("cardNumber"),
+            "printed_number": data.get("printedNumber"),
+            "rarity":         data.get("rarity"),
+            "game":           data.get("game"),
+            "image_small":    data.get("imageCdnUrl400"),
+            "image_medium":   data.get("imageCdnUrl"),
+            "image_large":    data.get("imageCdnUrl800"),
+            "variants":       variants_seen,
+        }
+
+    def get_sealed_market_price(self, tcgplayer_id) -> Optional[Decimal]:
+        """Live Scrydex lookup → unopened price in USD."""
+        try:
+            data = self.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+        except ScrydexError:
+            return None
+        if not data:
+            return None
+        raw = data.get("_scrydex_raw")
+        if raw:
+            for v in raw.get("variants") or []:
+                for p in v.get("prices") or []:
+                    if p.get("type") == "raw" and p.get("condition") in ("U", "NM"):
+                        return _to_usd(p.get("market"), p.get("currency"))
+        # Fallback — normalized dict already has unopenedPrice as-is (assume USD)
+        up = data.get("unopenedPrice")
+        return Decimal(str(up)) if up is not None else None

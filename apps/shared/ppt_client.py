@@ -605,3 +605,117 @@ class PPTClient:
             return (Decimal(str(nm)) * mult).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         return PPTClient.extract_market_price(card_data)
+
+    # ════════════════════════════════════════════════════════════════
+    # Scalar instance API — mirrors PriceCache's shape so callers can
+    # use a consistent interface for cache-first vs live-fallback paths.
+    # Scrydex-native variant names ('holofoil', 'normal', 'altArt').
+    # ════════════════════════════════════════════════════════════════
+
+    _SCRYDEX_TO_PPT_VARIANT = {
+        "normal": "Normal",
+        "holofoil": "Holofoil",
+        "reverseHolofoil": "Reverse Holofoil",
+        "unlimitedHolofoil": "Holofoil",
+        "firstEditionHolofoil": "1st Edition Holofoil",
+        "firstEditionShadowlessHolofoil": "1st Edition Shadowless Holofoil",
+        "unlimitedShadowlessHolofoil": "Shadowless Holofoil",
+        "altArt": "Alt Art",
+        "foil": "Foil",
+    }
+
+    @staticmethod
+    def _ppt_variant_name(scrydex_name: Optional[str]) -> Optional[str]:
+        """Scrydex-native variant → PPT display name (for internal lookups)."""
+        if scrydex_name is None:
+            return None
+        return PPTClient._SCRYDEX_TO_PPT_VARIANT.get(
+            scrydex_name, scrydex_name.replace("_", " ").title()
+        )
+
+    def get_raw_condition_price(
+        self, tcgplayer_id, condition: str = "NM",
+        variant: Optional[str] = None,
+    ) -> Optional[Decimal]:
+        """Live PPT lookup — returns USD raw market price or None.
+        Accepts Scrydex-native variant names; translates internally."""
+        try:
+            data = self.get_card_by_tcgplayer_id(tcgplayer_id)
+        except PPTError:
+            return None
+        if not data:
+            return None
+        return PPTClient.extract_condition_price(
+            data, condition, variant=PPTClient._ppt_variant_name(variant),
+        )
+
+    def get_condition_prices(
+        self, tcgplayer_id, variant: Optional[str] = None,
+    ) -> dict:
+        """Live PPT lookup — returns {condition_code: Decimal USD} for the
+        requested variant (or primary if None)."""
+        try:
+            data = self.get_card_by_tcgplayer_id(tcgplayer_id)
+        except PPTError:
+            return {}
+        if not data:
+            return {}
+        variants = PPTClient.extract_variants(data)
+        if not variants:
+            return {}
+        ppt_variant = PPTClient._ppt_variant_name(variant)
+        if ppt_variant and ppt_variant in variants:
+            v = variants[ppt_variant]
+        else:
+            primary = PPTClient.get_primary_printing(data)
+            v = variants.get(primary) or next(iter(variants.values()))
+        return {code: Decimal(str(price)) for code, price in v.items()
+                if price is not None}
+
+    def get_graded_price_for(
+        self, tcgplayer_id, company: str, grade: str,
+    ) -> Optional[Decimal]:
+        """Live PPT lookup — single graded price. (Named _for to avoid
+        collision with the static extract helper `get_graded_price`.)"""
+        try:
+            data = self.get_card_by_tcgplayer_id(tcgplayer_id)
+        except PPTError:
+            return None
+        if not data:
+            return None
+        return PPTClient.get_graded_price(data, company, grade)
+
+    def get_card_metadata(self, tcgplayer_id) -> Optional[dict]:
+        """Live PPT lookup — Scrydex-native metadata shape.
+        Used as a fallback when the card isn't in the Scrydex cache."""
+        try:
+            data = self.get_card_by_tcgplayer_id(tcgplayer_id)
+        except PPTError:
+            return None
+        if not data:
+            return None
+        return {
+            "scrydex_id":     None,
+            "tcgplayer_id":   data.get("tcgPlayerId") or tcgplayer_id,
+            "name":           data.get("name"),
+            "expansion_id":   None,
+            "expansion_name": data.get("setName"),
+            "card_number":    data.get("cardNumber"),
+            "printed_number": data.get("cardNumber"),
+            "rarity":         data.get("rarity"),
+            "game":           "pokemon",
+            "image_small":    data.get("imageCdnUrl400"),
+            "image_medium":   data.get("imageCdnUrl"),
+            "image_large":    data.get("imageCdnUrl800"),
+            "variants":       list(PPTClient.extract_variants(data).keys()),
+        }
+
+    def get_sealed_market_price(self, tcgplayer_id) -> Optional[Decimal]:
+        """Live PPT lookup — unopened price for sealed products."""
+        try:
+            data = self.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+        except PPTError:
+            return None
+        if not data:
+            return None
+        return PPTClient.extract_market_price(data)

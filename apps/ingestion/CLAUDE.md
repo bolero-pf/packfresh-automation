@@ -44,15 +44,19 @@ All 3 stages support:
 
 ## Pricing: ALWAYS Scrydex-first, PPT fallback
 PPT is unreliable (graded data often 3× off). Scrydex has holes (Japanese, Scrydex-only),
-so PPT stays as a fallback — **never** as the primary source.
+so PPT stays as a fallback — **never** as the primary source. All prices returned by the
+scalar API are USD (JPY rows auto-converted via `SCRYDEX_JPY_USD_RATE`).
 
-- **Raw per-condition price:** `PriceCache.get_card_by_tcgplayer_id(tcg_id)` →
-  `ScrydexClient.extract_condition_price(card_data, condition, variant=...)`. On
-  miss, fall back to `ppt.get_card_by_tcgplayer_id()` + `PriceProvider.extract_condition_price()`.
+- **Raw per-condition price:** `pricing.get_raw_condition_price(scrydex_id=..., tcgplayer_id=..., condition=..., variant=...) → Decimal | None`.
+  Cache-first (Scrydex), PPT fallback, all in one call. If both return None, use
+  `price_synthesis.retarget_condition(deal_market, from_cond, to_cond)` for the last-resort multiplier fallback.
 - **Graded per-grade price:** `get_live_graded_comps(tcg_id, company, grade, db, ...)` from
-  `shared/graded_pricing.py` (live eBay comps → cache inside). On miss, `PriceProvider.get_graded_price(card_data, company, grade)` from PPT.
+  `shared/graded_pricing.py` first (live eBay comps). On miss,
+  `pricing.get_graded_price(scrydex_id=..., tcgplayer_id=..., company=..., grade=...)`.
+- **Card view (variants map + images + graded prices):** `pricing.get_card_view(scrydex_id=..., tcgplayer_id=...)`.
+  Scrydex-native shape, USD throughout. Use this for condition-picker endpoints.
 - Existing examples to copy from: `update_item_grade` (graded), `update_item_condition`
   (raw) in `ingest.py`.
-- **Self-check:** grep any pricing diff for `ppt_client.get_card_by_tcgplayer_id` —
-  if it's not preceded by a `PriceCache` / `get_live_graded_comps` call in the same
-  function, the change is wrong. Rewrite before committing.
+- **Self-check:** new pricing code should go through `pricing.get_raw_condition_price` /
+  `pricing.get_graded_price` / `pricing.get_card_view` — not `get_card_by_tcgplayer_id` +
+  `extract_*`. The extract helpers are legacy and scheduled to be removed.

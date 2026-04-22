@@ -1041,12 +1041,13 @@ def map_item():
         if item:
             try:
                 if item["product_type"] == "sealed":
-                    ppt_data = pricing.get_sealed_product_by_tcgplayer_id(tcgplayer_id)
+                    new_price = pricing.get_sealed_market_price(tcgplayer_id)
                 else:
-                    ppt_data = pricing.get_card_by_tcgplayer_id(tcgplayer_id)
-                new_price = PriceProvider.extract_market_price(ppt_data)
+                    new_price = pricing.get_raw_condition_price(
+                        tcgplayer_id=tcgplayer_id, condition="NM",
+                    )
             except PriceError as e:
-                app.logger.warning(f"PPT verification failed for {tcgplayer_id}: {e}")
+                app.logger.warning(f"Price verification failed for {tcgplayer_id}: {e}")
 
     try:
         updated = intake.map_item(
@@ -1232,54 +1233,62 @@ def add_raw_card():
     if tcgplayer_id is None and not data.get("market_price"):
         return jsonify({"error": "market_price is required when tcgplayer_id is not provided"}), 400
 
-    # Get price from PPT — only when we have a tcg_id to look up.
+    # Get price — only when we have a tcg_id to look up.
     market_price = None
     if pricing and tcgplayer_id is not None:
         try:
-            card_data = pricing.get_card_by_tcgplayer_id(tcgplayer_id)
-            if card_data:
-                is_graded = bool(data.get("is_graded", False))
-                grade_company = (data.get("grade_company") or "").strip()
-                grade_value = (data.get("grade_value") or "").strip()
+            is_graded = bool(data.get("is_graded", False))
+            grade_company = (data.get("grade_company") or "").strip()
+            grade_value = (data.get("grade_value") or "").strip()
 
-                if is_graded and grade_company and grade_value:
-                    # Live eBay comps via Scrydex listings — cache aggregates are unreliable
-                    try:
-                        from graded_pricing import get_live_graded_comps
-                        live = get_live_graded_comps(tcgplayer_id, grade_company, grade_value, db)
-                        if live and live.get("mid"):
-                            market_price = Decimal(str(live["mid"])).quantize(Decimal("0.01"))
-                            app.logger.info(
-                                f"Live graded comps for TCG#{tcgplayer_id} {grade_company} {grade_value}: "
-                                f"median ${live['mid']} ({live.get('comps_count', '?')} comps, {live.get('source')})"
-                            )
-                    except Exception as e:
-                        app.logger.warning(f"Live graded pricing failed for TCG#{tcgplayer_id}: {e}")
-                    # Fallback to PPT/cache aggregate if live didn't return anything
-                    if market_price is None:
-                        market_price = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
-                    if market_price is None:
-                        app.logger.warning(
-                            f"No graded price for {tcgplayer_id} {grade_company} {grade_value}, "
-                            "falling back to NM raw price"
+            if is_graded and grade_company and grade_value:
+                # Live eBay comps via Scrydex listings — cache aggregates are unreliable
+                try:
+                    from graded_pricing import get_live_graded_comps
+                    live = get_live_graded_comps(tcgplayer_id, grade_company, grade_value, db)
+                    if live and live.get("mid"):
+                        market_price = Decimal(str(live["mid"])).quantize(Decimal("0.01"))
+                        app.logger.info(
+                            f"Live graded comps for TCG#{tcgplayer_id} {grade_company} {grade_value}: "
+                            f"median ${live['mid']} ({live.get('comps_count', '?')} comps, {live.get('source')})"
                         )
-                        market_price = PriceProvider.extract_condition_price(card_data, "NM")
-                else:
-                    # Pass variance so non-Pokemon cards (One Piece Alt Art etc.)
-                    # get the variant-specific price, not the primary printing's
-                    variance_for_price = (data.get("variance") or "").strip() or None
-                    market_price = PriceProvider.extract_condition_price(
-                        card_data, data["condition"], variant=variance_for_price
+                except Exception as e:
+                    app.logger.warning(f"Live graded pricing failed for TCG#{tcgplayer_id}: {e}")
+                # Fallback to PPT/cache aggregate if live didn't return anything
+                if market_price is None:
+                    market_price = pricing.get_graded_price(
+                        tcgplayer_id=int(tcgplayer_id),
+                        company=grade_company, grade=grade_value,
                     )
-                # Enrich with data from PPT if not provided
-                if not data.get("set_name") and card_data.get("setName"):
-                    data["set_name"] = card_data["setName"]
-                if not data.get("card_number") and card_data.get("cardNumber"):
-                    data["card_number"] = card_data["cardNumber"]
-                if not data.get("rarity") and card_data.get("rarity"):
-                    data["rarity"] = card_data["rarity"]
-                if not data.get("card_name") and card_data.get("name"):
-                    data["card_name"] = card_data["name"]
+                if market_price is None:
+                    app.logger.warning(
+                        f"No graded price for {tcgplayer_id} {grade_company} {grade_value}, "
+                        "falling back to NM raw price"
+                    )
+                    market_price = pricing.get_raw_condition_price(
+                        tcgplayer_id=int(tcgplayer_id), condition="NM",
+                    )
+            else:
+                # Pass variance so non-Pokemon cards (One Piece Alt Art etc.)
+                # get the variant-specific price, not the primary printing's
+                variance_for_price = (data.get("variance") or "").strip() or None
+                market_price = pricing.get_raw_condition_price(
+                    tcgplayer_id=int(tcgplayer_id),
+                    condition=data["condition"],
+                    variant=variance_for_price,
+                )
+
+            # Enrich metadata fields the caller didn't provide.
+            meta = pricing.get_card_metadata(tcgplayer_id=int(tcgplayer_id))
+            if meta:
+                if not data.get("set_name") and meta.get("expansion_name"):
+                    data["set_name"] = meta["expansion_name"]
+                if not data.get("card_number") and meta.get("card_number"):
+                    data["card_number"] = meta["card_number"]
+                if not data.get("rarity") and meta.get("rarity"):
+                    data["rarity"] = meta["rarity"]
+                if not data.get("card_name") and meta.get("name"):
+                    data["card_name"] = meta["name"]
         except PriceError as e:
             app.logger.warning(f"PPT lookup failed for {tcgplayer_id}: {e}")
 
@@ -1552,33 +1561,23 @@ def update_condition(item_id):
         skip_reprice = data.get("skip_reprice", False)
         if tcg_id and pricing and not skip_reprice:
             try:
-                card_data = pricing.get_card_by_tcgplayer_id(int(tcg_id))
-                if card_data:
-                    variants = PriceProvider.extract_variants(card_data)
-                    # Use the item's variance to find the right printing, fall back to primary
-                    item_variance = item.get("variance") or ""
-                    primary = None
-                    if item_variance:
-                        for vname in variants:
-                            if vname.lower() == item_variance.lower():
-                                primary = vname
-                                break
-                    if not primary:
-                        primary = PriceProvider.get_primary_printing(card_data) or "Default"
-                    if primary not in variants and variants:
-                        primary = list(variants.keys())[0]
-                    variant_data = variants.get(primary, {})
-                    new_price = variant_data.get(new_condition)
-                    if new_price is not None:
-                        from decimal import Decimal
-                        item = intake.update_item_price(
-                            item_id, Decimal(str(new_price)), session_id
-                        )
-                        app.logger.info(
-                            f"Condition change {item_id}: {new_condition} -> ${new_price} (variant: {primary})"
-                        )
+                # Direct scalar lookup — cache-first (USD-correct for JP),
+                # PPT fallback. Variant in intake_items is stored as the
+                # Scrydex-native name ('holofoil', 'altArt') so we pass it
+                # straight through.
+                item_variance = (item.get("variance") or "").strip() or None
+                new_price = pricing.get_raw_condition_price(
+                    tcgplayer_id=int(tcg_id),
+                    condition=new_condition,
+                    variant=item_variance,
+                )
+                if new_price is not None:
+                    item = intake.update_item_price(item_id, new_price, session_id)
+                    app.logger.info(
+                        f"Condition change {item_id}: {new_condition} -> ${new_price}"
+                    )
             except Exception as e:
-                app.logger.warning(f"PPT re-price on condition change failed: {e}")
+                app.logger.warning(f"Re-price on condition change failed: {e}")
                 # Condition is still updated, just price stays the same
 
         return jsonify({"success": True, "item": _serialize(item)})
@@ -1629,18 +1628,19 @@ def mark_item_graded(item_id):
                                 f"({live.get('comps_count', '?')} comps)")
         except Exception as e:
             app.logger.warning(f"Live graded pricing failed: {e}")
-        # Fallback to cache/PPT aggregate
+        # Fallback to cache/PPT aggregate via scalar API
         if new_price is None and pricing:
             try:
-                card_data = pricing.get_card_by_tcgplayer_id(int(item["tcgplayer_id"]))
-                if card_data:
-                    new_price = PriceProvider.get_graded_price(card_data, grade_company, grade_value)
-                    if new_price is None:
-                        app.logger.warning(
-                            f"No graded price for {item['tcgplayer_id']} {grade_company} {grade_value}"
-                        )
+                new_price = pricing.get_graded_price(
+                    tcgplayer_id=int(item["tcgplayer_id"]),
+                    company=grade_company, grade=grade_value,
+                )
+                if new_price is None:
+                    app.logger.warning(
+                        f"No graded price for {item['tcgplayer_id']} {grade_company} {grade_value}"
+                    )
             except Exception as e:
-                app.logger.warning(f"PPT graded price fetch failed: {e}")
+                app.logger.warning(f"Graded price fetch failed: {e}")
 
     if new_price is not None:
         item = intake.update_item_price(item_id, new_price, session_id)
@@ -1887,44 +1887,20 @@ def lookup_card():
         return jsonify({"error": "tcgplayer_id required"}), 400
 
     try:
-        card_data = pricing.get_card_by_tcgplayer_id(int(tcgplayer_id))
-        if not card_data:
-            return jsonify({"error": "Card not found in PPT"}), 404
+        view = pricing.get_card_view(tcgplayer_id=int(tcgplayer_id))
+        if not view:
+            return jsonify({"error": "Card not found"}), 404
 
-        # Extract structured variant → condition → price data
-        variants = PriceProvider.extract_variants(card_data)
-        primary_printing = PriceProvider.get_primary_printing(card_data)
+        app.logger.info(f"CARD LOOKUP {tcgplayer_id}: "
+                         f"variants={list((view.get('variants') or {}).keys())} "
+                         f"primary={view.get('primary_variant')}")
 
-        # Debug logging
-        prices_raw = card_data.get("prices", {})
-        app.logger.info(f"CARD LOOKUP {tcgplayer_id}: prices keys={list(prices_raw.keys()) if isinstance(prices_raw, dict) else type(prices_raw)}")
-        if isinstance(prices_raw, dict):
-            # Log top-level conditions
-            raw_conditions = prices_raw.get("conditions", {})
-            if raw_conditions and isinstance(raw_conditions, dict):
-                app.logger.info(f"  TOP-LEVEL conditions keys={list(raw_conditions.keys())}")
-                for ck, cv in raw_conditions.items():
-                    app.logger.info(f"    condition '{ck}' -> price={cv.get('price') if isinstance(cv, dict) else cv}")
-            # Log variants
-            raw_variants = prices_raw.get("variants", {})
-            app.logger.info(f"  raw variants keys={list(raw_variants.keys()) if isinstance(raw_variants, dict) else type(raw_variants)}")
-            for vname, vconds in (raw_variants.items() if isinstance(raw_variants, dict) else []):
-                if isinstance(vconds, dict):
-                    app.logger.info(f"  variant '{vname}': cond keys={list(vconds.keys())}")
-                    for ck, cv in vconds.items():
-                        app.logger.info(f"    '{ck}' -> {cv if not isinstance(cv, dict) else {k: cv[k] for k in list(cv.keys())[:3]}}")
-        app.logger.info(f"  extract_variants result={variants}")
-        app.logger.info(f"  primary_printing={primary_printing}")
-
-        # Extract graded (PSA/BGS/CGC) prices — cache aggregates as fallback
-        graded_prices = PriceProvider.extract_graded_prices(card_data)
-
-        # Enrich with live comps for each grade that has cached data
-        # This replaces unreliable aggregates with real eBay sold data
+        # Enrich with live comps for each grade that has cached data — this
+        # replaces unreliable aggregates with real eBay sold data.
         live_graded = {}
         try:
             from graded_pricing import get_live_graded_comps
-            for company_name, grades in graded_prices.items():
+            for company_name, grades in (view.get("graded") or {}).items():
                 for grade_val in grades:
                     live = get_live_graded_comps(int(tcgplayer_id), company_name, grade_val, db)
                     if live:
@@ -1933,11 +1909,11 @@ def lookup_card():
             app.logger.warning(f"Live graded enrichment failed for TCG#{tcgplayer_id}: {e}")
 
         return jsonify({
-            "card": card_data,
-            "variants": variants,            # {"Holofoil": {"NM": 103.85, "LP": 87.80, ...}, ...}
-            "primary_printing": primary_printing,  # "Holofoil"
-            "graded_prices": graded_prices,  # {"PSA": {"10": {"avg": 450, ...}, "9": {...}}, ...}
-            "live_graded": live_graded,      # {"PSA": {"10": {market, mid, low, high, comps_count, sales, ...}}}
+            "card": view,
+            "variants": view.get("variants") or {},
+            "primary_printing": view.get("primary_variant"),
+            "graded_prices": view.get("graded") or {},
+            "live_graded": live_graded,
         })
     except PriceError as e:
         return jsonify({"error": str(e)}), 502

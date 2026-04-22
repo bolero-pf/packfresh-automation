@@ -63,11 +63,14 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
             logger.warning("PPT rate limit reached — stopping component price refresh")
             break
         try:
+            # Scalar API — cache-first (USD-converted), PPT fallback. Promo
+            # cards ask for NM primary-variant raw; sealed get unopened price.
             if comp_type == "promo":
-                data = ppt.get_card_by_tcgplayer_id(tcg_id)
+                price = ppt.get_raw_condition_price(
+                    tcgplayer_id=tcg_id, condition="NM",
+                )
             else:
-                data = ppt.get_sealed_product_by_tcgplayer_id(tcg_id)
-            price = ppt.extract_market_price(data)
+                price = ppt.get_sealed_market_price(tcg_id)
             if price is not None:
                 fresh_prices[tcg_id] = price
         except Exception as e:

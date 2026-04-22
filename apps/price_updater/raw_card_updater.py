@@ -109,8 +109,19 @@ def _record(db_module, run_id: str, started_at: datetime, entry: dict):
 # collapse to the same key ("altart") and match the camelCase convention
 # Scrydex uses in its cache. NULL/"normal"/"holofoil" all fold to the
 # default bucket so single-printing cards still match.
+#
+# `currency` column: Scrydex sends JP-marketplace raw prices in JPY; the
+# CASE expression converts to USD inline so the returned market_price is
+# always USD regardless of the source row's currency.
 _CACHE_LOOKUP_SQL = """
-    SELECT market_price, low_price, scrydex_id, variant
+    SELECT
+        CASE WHEN currency = 'JPY'
+             THEN ROUND(market_price::numeric * %s::numeric, 2)
+             ELSE market_price END AS market_price,
+        CASE WHEN currency = 'JPY'
+             THEN ROUND(low_price::numeric * %s::numeric, 2)
+             ELSE low_price END AS low_price,
+        scrydex_id, variant
     FROM scrydex_price_cache
     WHERE tcgplayer_id = %s
       AND product_type = 'card'
@@ -131,13 +142,18 @@ _CACHE_LOOKUP_SQL = """
     LIMIT 1
 """
 
+# Matches shared/price_cache.py and ingestion/app.py. Override via env var
+# when the yen moves materially.
+_JPY_USD_RATE = float(os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
+
 
 def _lookup_cache_price(db_module, tcgplayer_id, condition, variant) -> dict | None:
     if not tcgplayer_id or not condition:
         return None
     rows = db_module.query(
         _CACHE_LOOKUP_SQL,
-        (int(tcgplayer_id), condition, variant, variant, variant),
+        (_JPY_USD_RATE, _JPY_USD_RATE, int(tcgplayer_id),
+         condition, variant, variant, variant),
     )
     return rows[0] if rows else None
 
