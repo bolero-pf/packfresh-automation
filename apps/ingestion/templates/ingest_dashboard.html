@@ -1874,21 +1874,65 @@ async function _setRoute(sessionId, itemId, destination) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ item_id: itemId, destination }),
         });
-        // Update local data and re-render
-        if (_routeData) {
-            const item = _routeData.items.find(i => i.id === itemId);
-            if (item) {
-                const oldDest = item.routing_destination || 'storage';
-                const qty = item.quantity || 1;
-                item.routing_destination = destination;
-                // Update counts
-                _routeData.by_destination[oldDest] = (_routeData.by_destination[oldDest] || 0) - qty;
-                _routeData.by_destination[destination] = (_routeData.by_destination[destination] || 0) + qty;
-            }
-            _renderRouteCards(sessionId, _routeData);
-        }
+        if (!_routeData) return;
+        const item = _routeData.items.find(i => i.id === itemId);
+        if (!item) return;
+        const oldDest = item.routing_destination || 'storage';
+        const qty = item.quantity || 1;
+        const wasReviewed = !!item.routing_reviewed_at;
+        item.routing_destination = destination;
+        if (!wasReviewed) item.routing_reviewed_at = new Date().toISOString();
+        _routeData.by_destination[oldDest] = (_routeData.by_destination[oldDest] || 0) - qty;
+        _routeData.by_destination[destination] = (_routeData.by_destination[destination] || 0) + qty;
+
+        // Surgical DOM update — don't rebuild the whole list. innerHTML-ing
+        // the full card list on every radio click was forcing the browser
+        // to re-decode every image and re-lay out every row, which killed
+        // perf on 50+ card trades.
+        _patchRouteRadios(sessionId, item);
+        _patchRouteSummary(wasReviewed);
     } catch(e) {
         console.error('Route failed:', e);
+    }
+}
+
+function _patchRouteRadios(sessionId, item) {
+    const card = document.querySelector(`#route-card-list [data-item-id="${item.id}"]`);
+    if (!card) return;
+    const radios = card.querySelector('.route-radios');
+    if (!radios) return;
+    const dest = item.routing_destination || 'storage';
+    radios.innerHTML =
+        _routeRadio(sessionId, item.id, 'bulk',    'Bulk',    dest) +
+        _routeRadio(sessionId, item.id, 'display', 'Binder',  dest) +
+        _routeRadio(sessionId, item.id, 'storage', 'Storage', dest) +
+        _routeRadio(sessionId, item.id, 'grade',   'Grade',   dest);
+}
+
+function _patchRouteSummary(wasReviewed) {
+    // Update the 4 stat counters in-place. The stats bar DOM is stable so
+    // we can target each value by position in the same order as render.
+    if (!_routeData) return;
+    const byDest = _routeData.by_destination || {};
+    const values = document.querySelectorAll('#stage-content .stats .stat .stat-value');
+    // Render order is: Total, Storage, Binder, Grade, Bulk.
+    if (values.length >= 5) {
+        values[1].textContent = byDest.storage || 0;
+        values[2].textContent = byDest.display || 0;
+        values[3].textContent = byDest.grade   || 0;
+        values[4].textContent = byDest.bulk    || 0;
+    }
+    // Resume/Start button label — only refresh when reviewed-count changes.
+    if (!wasReviewed) {
+        const items = _routeData.items || [];
+        const reviewedCount = items.filter(i => i.routing_reviewed_at).length;
+        const totalCount = items.length;
+        const btn = document.querySelector('#stage-content button.btn-primary');
+        if (btn && btn.getAttribute('onclick')?.startsWith('startRouteSession')) {
+            btn.textContent = reviewedCount === 0 ? 'Start Session'
+                            : reviewedCount >= totalCount ? 'Review Session'
+                            : `Resume (${reviewedCount}/${totalCount})`;
+        }
     }
 }
 
