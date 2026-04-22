@@ -1069,7 +1069,18 @@ def relink_item(item_id: str, data: dict) -> dict:
     except Exception as e:
         logger.warning(f"Cache-backed price derivation failed for relink on {item_id}: {e}")
 
-    if derived is not None:
+    # Manual override — staff typed a price in the relink confirm modal
+    # (typically for JP raw, where Scrydex's JP-marketplace numbers don't
+    # reflect TCGplayer). Takes precedence over both the cache-derived
+    # value and any sanity checks below; staff knows what they're doing.
+    manual_override = data.get("market_price_override")
+    override_supplied = manual_override is not None
+    if override_supplied:
+        try:
+            market_price = Decimal(str(manual_override)).quantize(Decimal("0.01"))
+        except Exception:
+            raise ValueError(f"Invalid market_price_override: {manual_override!r}")
+    elif derived is not None:
         market_price = derived
     else:
         market_price = Decimal(str(data.get("market_price", item.get("market_price", 0))))
@@ -1080,7 +1091,8 @@ def relink_item(item_id: str, data: dict) -> dict:
     # Japanese marketplaces) or the data is otherwise bad. Reject the write so
     # staff see the issue instead of silently stamping an absurd price onto
     # the item. Raise ValueError so the API returns 400 with the message.
-    if not is_graded and derived is not None and derived > 0:
+    # Manual overrides skip this check — staff explicitly chose the value.
+    if not is_graded and not override_supplied and derived is not None and derived > 0:
         best_graded = query_one("""
             SELECT MAX(market_price) AS max_graded
             FROM scrydex_price_cache

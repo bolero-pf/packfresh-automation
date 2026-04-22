@@ -3166,6 +3166,13 @@ function _renderRelinkResults(results) {
             const langBadge = lang
                 ? `<span style="font-size:0.62rem; padding:1px 5px; border-radius:3px; margin-right:6px; background:${isJP?'rgba(255,170,0,0.18)':'rgba(124,147,245,0.15)'}; color:${isJP?'#e6a817':'var(--accent)'};">${lang}</span>`
                 : '';
+            // Scrydex's JP raw prices come from Japanese marketplaces (Cardrush,
+            // etc.) — they don't reflect TCGplayer comps, which is where we
+            // actually sell. Flag JP rows so staff know to manual-comp before
+            // accepting the auto price.
+            const jpWarnBadge = isJP
+                ? `<span style="font-size:0.62rem; padding:1px 5px; border-radius:3px; margin-left:4px; background:rgba(239,68,68,0.18); color:#f87171; font-weight:600;">MANUAL COMP</span>`
+                : '';
 
             const nameEsc = primaryName.replace(/'/g, "\\'");
             const setEsc  = setDisplay.replace(/'/g, "\\'");
@@ -3186,14 +3193,43 @@ function _renderRelinkResults(results) {
             const variantBadge = !isDefaultVariant
                 ? `<span style="font-size:0.62rem; padding:1px 5px; border-radius:3px; margin-left:4px; background:rgba(192,132,252,0.18); color:var(--accent2,#c084fc);">${variantLabel}</span>`
                 : '';
+            // JP cards route through a confirm modal that forces a manual
+            // comp entry before the relink fires. EN cards keep one-click.
+            const clickFn = isJP ? 'relinkConfirmJP' : 'relinkSelect';
             return `<div class="search-result" style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background 0.15s;"
                          onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'"
-                         onclick="relinkSelect(${tcgArg}, '${nameEsc}', ${price}, '${setEsc}', '${sidEsc}', '${varEsc}')">
-                <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}${variantBadge}</div>
+                         onclick="${clickFn}(${tcgArg}, '${nameEsc}', ${price}, '${setEsc}', '${sidEsc}', '${varEsc}')">
+                <div style="font-weight:600;">${langBadge}${primaryName} ${cardNum}${variantBadge}${jpWarnBadge}</div>
                 ${secondaryName ? `<div style="font-size:0.75rem; color:var(--text-dim);">${secondaryName}</div>` : ''}
                 <div style="font-size:0.8rem; color:var(--text-dim);">${setDisplay} · ${idHint}</div>
             </div>`;
     }).join('') + '</div>';
+}
+
+async function relinkConfirmJP(tcgId, name, price, setName, scrydexId, variant) {
+    // Japanese cards: Scrydex's JP-marketplace prices (Cardrush, etc.) don't
+    // reflect TCGplayer comps, which is where we actually sell. Force staff
+    // to either accept the Scrydex price explicitly or type a TCGplayer comp.
+    // The entered value is sent as market_price_override so the backend
+    // skips its cache-derivation and sanity checks — staff owns the number.
+    const msg =
+        'JAPANESE CARDS HAVE BAD COMPS — PLEASE MANUAL COMP.\n\n' +
+        'Scrydex pulls JP-marketplace prices for these, not TCGplayer. ' +
+        'Check TCGplayer comps and enter the actual price below.\n\n' +
+        'Scrydex value: $' + Number(price).toFixed(2);
+    const input = await themedPrompt(
+        'Manual Comp — Japanese Card',
+        msg,
+        Number(price).toFixed(2),
+        'number',
+    );
+    if (input === null) return;
+    const override = parseFloat(String(input).trim());
+    if (isNaN(override) || override < 0) {
+        alert('Enter a valid price.');
+        return;
+    }
+    return relinkSelect(tcgId, name, override, setName, scrydexId, variant, true);
 }
 
 async function relinkSearch() {
@@ -3233,19 +3269,23 @@ async function relinkPromptTcg(scrydexId, name, price, setName) {
     return relinkSelect(tcgId, name, price, setName, scrydexId);
 }
 
-async function relinkSelect(tcgId, name, price, setName, scrydexId, variant) {
+async function relinkSelect(tcgId, name, price, setName, scrydexId, variant, isManualOverride) {
     try {
+        const body = {
+            product_name: name,
+            tcgplayer_id: tcgId,
+            market_price: price,
+            set_name: setName || null,
+            scrydex_id: scrydexId || null,
+            variant: variant || null,
+        };
+        // Manual override bypasses the cache-derivation + raw-vs-graded sanity
+        // check on the server. Used for JP cards (see relinkConfirmJP).
+        if (isManualOverride) body.market_price_override = price;
         const r = await fetch(`/api/ingest/item/${_relinkItemId}/relink`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                product_name: name,
-                tcgplayer_id: tcgId,
-                market_price: price,
-                set_name: setName || null,
-                scrydex_id: scrydexId || null,
-                variant: variant || null,
-            }),
+            body: JSON.stringify(body),
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error); return; }
