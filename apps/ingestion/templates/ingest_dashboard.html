@@ -845,6 +845,37 @@ async function viewSession(sessionId, _preserveScroll) {
 // for the focus-slip view; this is the lightweight version for the stage
 // tables — just patches image_url, graded_prices, grading_economics into
 // _currentSessionData.items and re-renders the current stage.
+// Swap image placeholders for real <img> tags in place, without
+// rebuilding the card. Called from the enrichment polling loop as each
+// card's image URL arrives — avoids re-rendering the whole stage (which
+// on the Route tab = rebuilding 300+ cards via innerHTML).
+function _patchStageImages(itemIds, bySrc) {
+    for (const id of itemIds) {
+        const card = document.querySelector(`#stage-content [data-item-id="${id}"]`);
+        if (!card) continue;
+        const src = bySrc[id];
+        if (!src || !src.image_url) continue;
+        // Existing render is either an <img> (already done, skip) or a
+        // placeholder <div> sized 60×84 sitting right inside the row.
+        const existingImg = card.querySelector('img');
+        if (existingImg) {
+            if (!existingImg.getAttribute('src')) existingImg.setAttribute('src', src.image_url);
+            continue;
+        }
+        // Find a width:60px / height:84px sibling div placeholder and swap.
+        const placeholder = Array.from(card.querySelectorAll('div'))
+            .find(d => /width:\s*60px/i.test(d.getAttribute('style') || '')
+                    && /height:\s*84px/i.test(d.getAttribute('style') || ''));
+        if (placeholder) {
+            const img = document.createElement('img');
+            img.src = src.image_url;
+            img.loading = 'lazy';
+            img.style.cssText = 'width:60px; height:84px; object-fit:contain; border-radius:4px; flex-shrink:0; background:var(--surface-2);';
+            placeholder.replaceWith(img);
+        }
+    }
+}
+
 async function _enrichSessionImages(sessionId) {
     if (!_currentSessionData || _currentSessionData.session.id !== sessionId) return;
     const needsEnrichment = (_currentSessionData.items || []).some(i =>
@@ -867,26 +898,31 @@ async function _enrichSessionImages(sessionId) {
             const r = await fetch(`/api/ingest/session/${sessionId}/route-enriched`);
             if (!r.ok) return false;
             const data = await r.json();
-            let changed = false;
             const byId = {};
             for (const it of (data.items || [])) byId[it.id] = it;
+            const newImages = [];  // [itemId] that just got an image_url
             for (const item of _currentSessionData.items) {
                 const src = byId[item.id];
                 if (!src) continue;
-                // Images are joined from scrydex_price_cache server-side and
-                // come back on the first call, so merge them immediately —
-                // don't wait on the worker-driven _enriched flag.
                 if (src.image_url && !item.image_url) {
                     item.image_url = src.image_url;
-                    changed = true;
+                    newImages.push(item.id);
                 }
                 if (src._enriched && !item.graded_prices) {
                     item.graded_prices = src.graded_prices || {};
                     item.grading_economics = src.grading_economics || {};
-                    changed = true;
                 }
             }
-            if (changed) _rerenderStage();
+            // Previously: if anything changed, _rerenderStage() — which on
+            // the Route tab rebuilds every one of 300+ cards from scratch
+            // via innerHTML, re-runs auto-route + route-summary, and
+            // resets scroll. Running that every 1.5s during enrichment was
+            // the "keeps reloading, scrolls to top, drops keypresses" bug.
+            // Now we just swap in new image <img> tags on the cards that
+            // gained one — graded data is already merged into the in-memory
+            // items and will surface on the next natural render (tab
+            // switch, opening the route overlay, etc.).
+            if (newImages.length) _patchStageImages(newImages, byId);
             return true;
         };
 
@@ -896,13 +932,19 @@ async function _enrichSessionImages(sessionId) {
 
         if (ej.status === 'complete' && !ej.job_id) return;
         if (!ej.job_id) return;
-        // Poll until graded-comps worker finishes — doesn't block the image display.
+        // Poll the lightweight job-progress endpoint, only refetch the full
+        // route-enriched payload when progress actually advanced. Prevents
+        // the poll loop from starving the enrichment worker it's waiting on.
+        let lastProgress = -1;
         while (_currentSessionData && _currentSessionData.session.id === sessionId) {
             await new Promise(r => setTimeout(r, 1500));
-            await mergeOnce();
             const jr = await fetch(`/api/ingest/enrich-job/${ej.job_id}`);
             if (!jr.ok) break;
             const j = await jr.json();
+            if ((j.progress ?? 0) > lastProgress) {
+                await mergeOnce();
+                lastProgress = j.progress ?? lastProgress;
+            }
             if (j.status === 'complete') { await mergeOnce(); break; }
         }
     } catch(e) { /* silently ignore — images are optional */ }
