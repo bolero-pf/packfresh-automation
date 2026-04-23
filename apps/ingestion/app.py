@@ -2877,8 +2877,17 @@ def enrich_one(session_id):
     variant = item.get("variant") or ""
     base = str(tcg_id) if tcg_id else sid
     key = f"{base}|{variant}" if variant else base
-    key, result = _enrich_one_item(key, dict(item))
+    # Cache-first: if the background worker already enriched this key in
+    # this session, return the stored payload instead of re-running the
+    # whole fetch chain. The route-session frontend now calls enrich-one
+    # eagerly whenever the user navigates to a pending card, so without
+    # this short-circuit we'd duplicate Scrydex work for every card that
+    # was already in flight.
     cache = _enrich_cache.setdefault(session_id, {})
+    cached = cache.get(key)
+    if cached and "error" not in cached:
+        return jsonify({"success": True, "key": key, "result": _serialize(cached), "from_cache": True})
+    key, result = _enrich_one_item(key, dict(item))
     cache[key] = result
     return jsonify({
         "success": True,

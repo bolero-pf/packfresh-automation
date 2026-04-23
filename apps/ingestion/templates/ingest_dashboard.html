@@ -2075,6 +2075,7 @@ async function startRouteSession(sessionId) {
 
         // Start showing cards immediately
         _renderSessionCard();
+        if (_rsItems[_rsIndex]?._enrichLoading) _rsEnrichCurrent();
 
         // Kick off enrichment in background — reuses cache if the session was
         // already enriched in this process, so re-entering a session after a
@@ -2144,31 +2145,58 @@ async function _rsMergeEnrichment() {
         for (const item of (data.items || [])) {
             enrichedMap[item.id] = item;
         }
-        // Merge enrichment data into existing items. Image URLs now come back
-        // on the very first response (joined from scrydex_price_cache server-side)
-        // even when the background graded-comps worker hasn't finished, so we
-        // merge them eagerly. _enrichLoading only flips off once the full result
-        // with graded data is in.
-        let changed = false;
+        const currentId = _rsItems[_rsIndex]?.id;
+        let currentChanged = false;
         for (const item of _rsItems) {
             const enriched = enrichedMap[item.id];
             if (!enriched) continue;
+            let touched = false;
             if (enriched.image_url && !item.image_url) {
                 item.image_url = enriched.image_url;
-                changed = true;
+                touched = true;
             }
             if (item._enrichLoading && enriched._enriched) {
                 item.graded_prices = enriched.graded_prices || {};
                 item.grading_economics = enriched.grading_economics || {};
                 item._enrichLoading = false;
-                changed = true;
+                touched = true;
             }
+            if (touched && item.id === currentId) currentChanged = true;
         }
-        // Re-render current card if anything changed (current card may have gotten data)
-        if (changed) {
-            _renderSessionCard();
-        }
+        // Only re-render if the CURRENT card got new data. Previously we
+        // re-rendered on any change, which meant every poll cycle (even
+        // when new data landed on a card the user wasn't looking at)
+        // rebuilt the overlay HTML, blocked the main thread, and caused
+        // rapid Next clicks to coalesce into a single skipped-ahead paint.
+        if (currentChanged) _renderSessionCard();
     } catch(e) { /* silent */ }
+}
+
+// Targeted per-card enrichment — called when the user navigates to a
+// card that's still waiting on the background worker. Doesn't wait for
+// the batch poll cycle, doesn't fetch the full 326-item payload. If the
+// server already has this card cached, returns in a few ms.
+async function _rsEnrichCurrent() {
+    const item = _rsItems[_rsIndex];
+    if (!item || !item._enrichLoading || item._enrichInFlight) return;
+    item._enrichInFlight = true;
+    try {
+        const r = await fetch(`/api/ingest/session/${_rsSessionId}/enrich-one`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: item.id }),
+        });
+        const d = await r.json();
+        if (r.ok && d.result && !d.result.error) {
+            if (d.result.image_url && !item.image_url) item.image_url = d.result.image_url;
+            item.graded_prices = d.result.graded_prices || {};
+            item.grading_economics = d.result.grading_economics || {};
+            item._enrichLoading = false;
+        }
+    } catch(e) { /* silent — spinner remains, batch poll will try again */ }
+    item._enrichInFlight = false;
+    // Only re-render if we're still looking at the same card.
+    if (_rsItems[_rsIndex]?.id === item.id) _renderSessionCard();
 }
 
 function _renderSessionCard() {
@@ -2472,6 +2500,7 @@ async function _rsSetDest(destination) {
         if (_rsIndex < _rsItems.length - 1) {
             _rsIndex++;
             _renderSessionCard();
+            if (_rsItems[_rsIndex]?._enrichLoading) _rsEnrichCurrent();
         } else {
             _showSessionComplete();
         }
@@ -2726,6 +2755,12 @@ function _rsNav(delta) {
     if (newIdx < 0 || newIdx >= _rsItems.length) return;
     _rsIndex = newIdx;
     _renderSessionCard();
+    // If we landed on a card the background worker hasn't touched yet,
+    // fire a single-card enrich instead of waiting for the next batch
+    // poll (which can stall if a worker thread is stuck on a slow
+    // Scrydex call — that was the "spins at Loading grading data
+    // indefinitely when I go back" symptom).
+    if (_rsItems[_rsIndex]?._enrichLoading) _rsEnrichCurrent();
 }
 
 function _rsKeyHandler(e) {
@@ -2786,6 +2821,7 @@ async function _rsAccept() {
         if (_rsIndex < _rsItems.length - 1) {
             _rsIndex++;
             _renderSessionCard();
+            if (_rsItems[_rsIndex]?._enrichLoading) _rsEnrichCurrent();
         } else {
             _showSessionComplete();
         }
