@@ -38,7 +38,14 @@ def index():
 
 @app.route("/api/vip/set-tier", methods=["POST"])
 def api_set_tier():
-    """Manually set a customer's VIP tier + lock window."""
+    """Manually set a customer's VIP tier + lock window.
+
+    Routes through service.write_state so the full set of metafields
+    (loyalty_vip_tier, loyalty_lock_window, loyalty_rolling_spend_90d, vip_public,
+    loyalty_last_calc), tags, and Discord role all stay consistent. Then pushes
+    matching props to Klaviyo. Does NOT re-derive tier from spend — the tier
+    passed in is authoritative (supports partner/comp overrides).
+    """
     data = request.get_json(silent=True) or {}
     customer_gid = data.get("customer_id")
     new_tier = data.get("tier", "").upper()
@@ -47,47 +54,42 @@ def api_set_tier():
     if not customer_gid or new_tier not in ("VIP0", "VIP1", "VIP2", "VIP3"):
         return jsonify({"error": "customer_id and valid tier (VIP0-VIP3) required"}), 400
 
-    from service import shopify_gql, shopify_metafields_set
-    from shopify_graphql import gid_numeric
-    import json
+    if not customer_gid.startswith("gid://"):
+        customer_gid = f"gid://shopify/Customer/{customer_gid}"
+
+    from service import compute_rolling_90d_spend, write_state, _push_vip_klaviyo_props
     from datetime import date, timedelta
 
-    # Set tier metafield
-    lock_start = date.today().isoformat()
-    lock_end = (date.today() + timedelta(days=lock_days)).isoformat()
-    lock_obj = {"start": lock_start, "end": lock_end, "tier": new_tier}
+    lock_obj = {}
+    if new_tier != "VIP0" and lock_days > 0:
+        lock_obj = {
+            "start": date.today().isoformat(),
+            "end": (date.today() + timedelta(days=lock_days)).isoformat(),
+            "tier": new_tier,
+        }
 
     try:
-        shopify_metafields_set([
-            {"ownerId": customer_gid, "namespace": "custom", "key": "loyalty_vip_tier", "value": new_tier, "type": "single_line_text_field"},
-            {"ownerId": customer_gid, "namespace": "custom", "key": "loyalty_lock_window", "value": json.dumps(lock_obj), "type": "json"},
-        ])
+        rolling = compute_rolling_90d_spend(customer_gid)
     except Exception as e:
-        return jsonify({"error": f"Metafield update failed: {e}"}), 500
+        return jsonify({"error": f"Rolling spend lookup failed: {e}"}), 500
 
-    # Update tags — remove old VIP tags, add new one
     try:
-        old_tags = ["VIP0", "VIP1", "VIP2", "VIP3", "VIP1-risk", "VIP2-risk", "VIP3-risk", "VIP1-hopeful", "VIP2-hopeful", "VIP3-hopeful"]
-        shopify_gql("""
-            mutation($id:ID!,$tags:[String!]!) { tagsRemove(id:$id,tags:$tags) { userErrors{message} } }
-        """, {"id": customer_gid, "tags": old_tags})
-        shopify_gql("""
-            mutation($id:ID!,$tags:[String!]!) { tagsAdd(id:$id,tags:$tags) { userErrors{message} } }
-        """, {"id": customer_gid, "tags": [new_tier]})
+        write_state(
+            customer_gid,
+            rolling=rolling,
+            tier=new_tier,
+            lock=lock_obj,
+            prov={"source": "manual_set_tier"},
+        )
     except Exception as e:
-        return jsonify({"error": f"Tag update failed: {e}"}), 500
+        return jsonify({"error": f"State write failed: {e}"}), 500
 
-    # Sync Discord role
     try:
-        from discord import sync_discord_role
-        print(f"[vip] set-tier calling discord sync: {customer_gid} → {new_tier}", flush=True)
-        sync_discord_role(customer_gid, new_tier)
+        _push_vip_klaviyo_props(customer_gid, new_tier, lock_obj, rolling)
     except Exception as e:
-        print(f"[vip] Discord sync failed on set-tier: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
+        print(f"[vip] Klaviyo push failed on set-tier: {e}", flush=True)
 
-    return jsonify({"ok": True, "tier": new_tier, "lock": lock_obj})
+    return jsonify({"ok": True, "tier": new_tier, "lock": lock_obj, "rolling": rolling})
 
 
 @app.route("/api/vip/recalculate", methods=["POST"])

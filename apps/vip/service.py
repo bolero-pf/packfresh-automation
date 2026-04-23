@@ -737,29 +737,38 @@ def _push_vip_to_klaviyo(gid: str):
         from service import set_vip_tag
         set_vip_tag(gid, effective_tier)
 
-    # --- KLAVIYO PROPS ---
-    rolling_cents = int(round(spend * 100))
-    lock_until = _pick_lock_until(effective_lock)  # tolerate "end"/"until", strip time
+    _push_vip_klaviyo_props(gid, effective_tier, effective_lock, spend, email=state.get("email"), today=today, now=now)
+
+
+def _push_vip_klaviyo_props(gid: str, tier: str, lock: dict, rolling: float, *, email: Optional[str] = None, today=None, now: Optional[datetime] = None):
+    """Push Klaviyo profile props for an already-decided VIP state. Does not recompute tier."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if today is None:
+        today = now.date()
+    rolling_cents = int(round((rolling or 0.0) * 100))
+    lock_until = _pick_lock_until(lock or {})
     props = {
-        "vip_tier": effective_tier,
+        "vip_tier": tier,
         "vip_rolling_90d_cents": rolling_cents,
-        "vip_lock_start": (effective_lock or {}).get("start"),
+        "vip_lock_start": (lock or {}).get("start"),
         "vip_lock_until": lock_until,
-        "vip_lock_active": bool(inside_lock(effective_lock or {}, today)),
+        "vip_lock_active": bool(inside_lock(lock or {}, today)),
         "vip_days_to_expire": _days_to_date(lock_until, today),
-        "vip_requalify_gap_cents": _gap_to_requalify_cents(effective_tier, rolling_cents),
-        "vip_next_tier_gap_cents": _gap_to_next_tier_cents(effective_tier, rolling_cents),
+        "vip_requalify_gap_cents": _gap_to_requalify_cents(tier, rolling_cents),
+        "vip_next_tier_gap_cents": _gap_to_next_tier_cents(tier, rolling_cents),
         "vip_last_change": now.isoformat(),
     }
-
-    # Include Discord link URL so Klaviyo emails can link directly
     try:
         from discord import generate_link_url
         props["discord_link_url"] = generate_link_url(gid)
     except Exception:
         pass
-
-    email = state.get("email")
+    if email is None:
+        try:
+            email = get_customer_state(gid).get("email")
+        except Exception:
+            email = None
     external_id = gid.split("/")[-1]
     upsert_profile(email=email, external_id=external_id, properties=props)
 
