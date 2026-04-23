@@ -2060,9 +2060,30 @@ async function startRouteSession(sessionId) {
         // showed up as visible nav lag on big trades.
         _rsRebuildSiblingGroups();
 
-        // Resume: jump to first item that hasn't been reviewed yet
-        const firstUnreviewed = _rsItems.findIndex(i => !i.routing_reviewed_at);
-        _rsIndex = firstUnreviewed >= 0 ? firstUnreviewed : 0;
+        // Resume where the user actually stopped — i.e. the position right
+        // after the most-recently-reviewed item. Previously this was
+        // findIndex(!routing_reviewed_at), which drags you back to the
+        // first GAP in sort order (e.g. earlier items whose split-off
+        // copies inserted new unreviewed rows in the middle of the list).
+        // User intent: continue forward, don't re-enter to backfill gaps.
+        let lastReviewedIdx = -1;
+        let lastReviewedTs = '';
+        _rsItems.forEach((it, i) => {
+            const ts = it.routing_reviewed_at || '';
+            if (ts && ts > lastReviewedTs) { lastReviewedTs = ts; lastReviewedIdx = i; }
+        });
+        if (lastReviewedIdx < 0) {
+            _rsIndex = 0;  // nothing reviewed yet — start at the top
+        } else if (lastReviewedIdx + 1 < _rsItems.length) {
+            _rsIndex = lastReviewedIdx + 1;  // continue forward
+        } else {
+            // Most-recent was the final card. Fall back to earliest
+            // unreviewed so the user still gets a card to work on if
+            // there are back-gaps; otherwise the complete-screen will
+            // fire on the next accept.
+            const firstUnreviewed = _rsItems.findIndex(i => !i.routing_reviewed_at);
+            _rsIndex = firstUnreviewed >= 0 ? firstUnreviewed : _rsItems.length - 1;
+        }
 
         _rsCounts = { storage: 0, display: 0, grade: 0, bulk: 0 };
         for (const item of _rsItems) {
