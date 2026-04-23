@@ -169,15 +169,15 @@ def api_recalculate():
                     edges { node { createdAt currentTotalPriceSet { shopMoney { amount } } totalRefundedSet { shopMoney { amount } } } }
                   }
                 }
-            """, {"first": 100, "q": f'customer_id:{numeric_id} financial_status:paid created_at:>="{since}"'})
+            """, {"first": 100, "q": f'customer_id:{numeric_id} (financial_status:paid OR financial_status:partially_refunded OR financial_status:refunded) created_at:>="{since}"'})
 
             # Find the last order that was within the qualification window
             last_order_date = None
             for edge in order_data.get("data", {}).get("orders", {}).get("edges", []):
                 o = edge["node"]
+                # currentTotalPriceSet is already net of refunds — don't double-subtract.
                 amt = float(o.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
-                ref = float(o.get("totalRefundedSet", {}).get("shopMoney", {}).get("amount", 0))
-                if max(0, amt - ref) > 0:
+                if amt > 0:
                     last_order_date = o["createdAt"][:10]
                     break  # most recent paid order (reverse sorted)
 
@@ -540,6 +540,8 @@ CONSOLE_HTML = """
       <option value="lock_asc">Lock Expiry (soonest)</option>
       <option value="name_asc">Name A-Z</option>
     </select>
+    <input type="text" id="lookup-id" placeholder="Customer ID or URL..." style="flex:0 0 auto;width:240px;min-width:0;height:38px;background:var(--s2);border:1.5px solid var(--border);border-radius:8px;color:var(--text);padding:0 12px;font-size:0.85rem;font-family:inherit;" onkeydown="if(event.key==='Enter')lookupCustomer()">
+    <button class="btn" style="height:38px;padding:0 16px;" onclick="lookupCustomer()">Lookup</button>
   </div>
 
   <div id="list-view">
@@ -626,6 +628,15 @@ async function loadStats() {
 
 function filterTier(t) { _tier = t; loadStats(); loadCustomers(); }
 function debounce() { clearTimeout(_timer); _timer = setTimeout(loadCustomers, 400); }
+
+function lookupCustomer() {
+  const raw = (document.getElementById('lookup-id').value || '').trim();
+  if (!raw) return;
+  // Accept: raw numeric ID, full GID, or Shopify admin URL (/customers/<id>).
+  const m = raw.match(/(\d{6,})/);
+  if (!m) { alert('Paste a Shopify customer ID, GID, or admin URL.'); return; }
+  openDetail(m[1]);
+}
 
 async function loadCustomers(cursor, append) {
   const el = document.getElementById('customer-list');

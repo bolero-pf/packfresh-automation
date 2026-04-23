@@ -201,7 +201,9 @@ def compute_rolling_90d_spend(customer_gid: str, today: Optional[datetime]=None)
         today = datetime.now(timezone.utc)
     since = today - timedelta(days=90)
     cust_legacy_id = gid_numeric(customer_gid)
-    q = f'customer_id:{cust_legacy_id} financial_status:paid created_at:>="{iso_utc(since)}"'
+    # Shopify flips status from `paid` to `partially_refunded`/`refunded` on any refund;
+    # filtering solely on `paid` would silently drop the entire order's spend after a partial refund.
+    q = f'customer_id:{cust_legacy_id} (financial_status:paid OR financial_status:partially_refunded OR financial_status:refunded) created_at:>="{iso_utc(since)}"'
     first = 100
     after = None
     total = 0.0
@@ -211,9 +213,8 @@ def compute_rolling_90d_spend(customer_gid: str, today: Optional[datetime]=None)
         orders = data["data"]["orders"]
         for edge in orders["edges"]:
             node = edge["node"]
-            subtotal = float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
-            refunded = float(node["totalRefundedSet"]["shopMoney"]["amount"])
-            total += max(0.0, subtotal - refunded)
+            # currentTotalPriceSet is already net of refunds per Shopify — do NOT subtract totalRefundedSet again.
+            total += float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
         if not orders["pageInfo"]["hasNextPage"]:
             break
         after = orders["edges"][-1]["cursor"]
