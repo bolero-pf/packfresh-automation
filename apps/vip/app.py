@@ -475,6 +475,84 @@ def api_stats():
     return jsonify({"stats": stats, "total": sum(stats.values())})
 
 
+@app.route("/api/vip/refund-dropouts")
+def api_refund_dropouts():
+    """Scan for customers whose correct VIP tier is >= VIP1 but currently have no VIP tag,
+    restricted to customers with a refund event in the last 90 days — the population
+    that could have been wrongly downgraded by the partial-refund bug.
+    """
+    from service import compute_rolling_90d_spend, tier_from_spend
+    from shopify_graphql import shopify_gql, gid_numeric
+    from datetime import datetime, timezone, timedelta
+
+    since = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    q = f'(financial_status:partially_refunded OR financial_status:refunded) created_at:>="{since}"'
+
+    customers_seen = {}
+    after = None
+    # Cap the order scan to keep the request bounded
+    orders_scanned = 0
+    while True:
+        data = shopify_gql("""
+            query($first:Int!, $after:String, $q:String!){
+              orders(first:$first, after:$after, query:$q) {
+                edges {
+                  cursor
+                  node {
+                    customer { id firstName lastName email tags }
+                  }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+        """, {"first": 100, "after": after, "q": q})
+        orders = data.get("data", {}).get("orders", {})
+        edges = orders.get("edges", [])
+        for edge in edges:
+            c = edge["node"].get("customer")
+            if c and c.get("id"):
+                customers_seen[c["id"]] = c
+        orders_scanned += len(edges)
+        pi = orders.get("pageInfo", {})
+        if not pi.get("hasNextPage"):
+            break
+        after = pi.get("endCursor")
+        if orders_scanned > 2000:
+            break  # safety cap
+
+    candidates = []
+    examined = 0
+    for gid, c in customers_seen.items():
+        tags = set(c.get("tags") or [])
+        if any(t in tags for t in ("VIP1", "VIP2", "VIP3")):
+            continue  # still tagged — sweep will handle
+        try:
+            rolling = compute_rolling_90d_spend(gid)
+        except Exception:
+            continue
+        examined += 1
+        if rolling < 500:
+            continue  # not a VIP-qualifying dropout
+        candidates.append({
+            "id": gid,
+            "numeric_id": gid_numeric(gid),
+            "name": (f"{c.get('firstName','')} {c.get('lastName','')}").strip() or (c.get("email") or ""),
+            "email": c.get("email"),
+            "rolling_spend": round(rolling, 2),
+            "correct_tier": tier_from_spend(rolling),
+            "tags": list(tags),
+        })
+
+    candidates.sort(key=lambda x: -x["rolling_spend"])
+    return jsonify({
+        "candidates": candidates,
+        "count": len(candidates),
+        "scanned_orders": orders_scanned,
+        "scanned_customers": len(customers_seen),
+        "examined_untagged": examined,
+    })
+
+
 CONSOLE_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -544,6 +622,7 @@ CONSOLE_HTML = """
     </select>
     <input type="text" id="lookup-id" placeholder="Customer ID or URL..." style="flex:0 0 auto;width:240px;min-width:0;height:38px;background:var(--s2);border:1.5px solid var(--border);border-radius:8px;color:var(--text);padding:0 12px;font-size:0.85rem;font-family:inherit;" onkeydown="if(event.key==='Enter')lookupCustomer()">
     <button class="btn" style="height:38px;padding:0 16px;" onclick="lookupCustomer()">Lookup</button>
+    <button class="btn" style="height:38px;padding:0 16px;background:var(--amber, #c98f00);color:#fff;" onclick="scanRefundDropouts()" title="Find VIP0 customers with a recent refund whose correct tier is VIP1+">Scan Refund Dropouts</button>
   </div>
 
   <div id="list-view">
@@ -638,6 +717,43 @@ function lookupCustomer() {
   const m = raw.match(/(\d{6,})/);
   if (!m) { alert('Paste a Shopify customer ID, GID, or admin URL.'); return; }
   openDetail(m[1]);
+}
+
+async function scanRefundDropouts() {
+  const el = document.getElementById('customer-list');
+  document.getElementById('pagination').innerHTML = '';
+  el.innerHTML = '<div style="text-align:center;padding:30px;"><div class="spinner"></div><div style="color:var(--dim);font-size:0.85rem;margin-top:8px;">Scanning refunded orders in the last 90d — this may take a minute.</div></div>';
+  try {
+    const r = await fetch('/api/vip/refund-dropouts');
+    const d = await r.json();
+    if (!r.ok) { el.innerHTML = '<div style="color:var(--red);padding:20px;">' + (d.error||'Scan failed') + '</div>'; return; }
+    const cands = d.candidates || [];
+    const header = `<div style="margin-bottom:12px;font-size:0.82rem;color:var(--dim);">
+      Scanned ${d.scanned_orders} refunded orders, ${d.scanned_customers} unique customers,
+      ${d.examined_untagged} untagged examined, found <strong style="color:var(--text);">${cands.length}</strong> likely dropouts (correct tier VIP1+).
+    </div>`;
+    if (!cands.length) {
+      el.innerHTML = header + '<div style="color:var(--green);padding:20px;text-align:center;">✓ No dropout candidates found.</div>';
+      return;
+    }
+    el.innerHTML = header + `
+      <table>
+        <thead><tr><th>Customer</th><th>Email</th><th>90d Spend</th><th>Correct Tier</th><th>Current Tags</th><th></th></tr></thead>
+        <tbody>
+        ${cands.map(c => `
+          <tr>
+            <td><strong>${c.name || '—'}</strong></td>
+            <td style="color:var(--dim);">${c.email || '—'}</td>
+            <td><strong>$${c.rolling_spend.toFixed(2)}</strong></td>
+            <td><span class="badge badge-${c.correct_tier.toLowerCase()}">${TIER_NAMES[c.correct_tier]||c.correct_tier}</span></td>
+            <td style="color:var(--dim);font-size:0.78rem;">${(c.tags||[]).join(', ')||'none'}</td>
+            <td><button class="btn-action" style="width:auto;padding:0 12px;" onclick="openDetail('${c.numeric_id}')">View →</button></td>
+          </tr>
+        `).join('')}
+        </tbody>
+      </table>
+    `;
+  } catch(e) { el.innerHTML = '<div style="color:var(--red);padding:20px;">' + e.message + '</div>'; }
 }
 
 async function loadCustomers(cursor, append) {
