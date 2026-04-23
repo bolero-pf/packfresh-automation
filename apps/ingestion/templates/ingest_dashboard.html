@@ -1990,6 +1990,19 @@ let _rsEnrichJobId = null;
 let _rsEnrichDone = false;
 let _rsSiblingGroups = {};  // siblingKey -> [itemId, ...], filled once at load
 
+function _rsRebuildSiblingGroups() {
+    // Call after any mutation of _rsItems (split, split-singles, etc.) so
+    // the "Copy N of M" badge on qty=1 cards reflects the new layout.
+    // Cheap — only runs on explicit user split actions, not in the hot
+    // render path.
+    _rsSiblingGroups = {};
+    for (const it of _rsItems) {
+        if ((it.quantity || 1) !== 1) continue;
+        const k = _rsSiblingKeyOf(it);
+        (_rsSiblingGroups[k] = _rsSiblingGroups[k] || []).push(it.id);
+    }
+}
+
 function _rsSiblingKeyOf(i) {
     const parts = [];
     if (i.tcgplayer_id) {
@@ -2045,12 +2058,7 @@ async function startRouteSession(sessionId) {
         // on every card render. _renderSessionCard was calling
         // _rsItems.filter(...) inside a hot render path, an O(n²) scan that
         // showed up as visible nav lag on big trades.
-        _rsSiblingGroups = {};
-        for (const it of _rsItems) {
-            if ((it.quantity || 1) !== 1) continue;
-            const k = _rsSiblingKeyOf(it);
-            (_rsSiblingGroups[k] = _rsSiblingGroups[k] || []).push(it.id);
-        }
+        _rsRebuildSiblingGroups();
 
         // Resume: jump to first item that hasn't been reviewed yet
         const firstUnreviewed = _rsItems.findIndex(i => !i.routing_reviewed_at);
@@ -2567,6 +2575,7 @@ async function _rsDoSplit() {
             routing_destination: d.split.destination,
         };
         _rsItems.splice(_rsIndex + 1, 0, splitItem);
+        _rsRebuildSiblingGroups();
 
         // Update counts
         const splitDest = d.split.destination;
@@ -2746,6 +2755,7 @@ async function _rsSplitSingles() {
             });
         }
         _rsItems.splice(_rsIndex + 1, 0, ...newItems);
+        _rsRebuildSiblingGroups();
 
         _renderSessionCard();
     } catch(e) {
