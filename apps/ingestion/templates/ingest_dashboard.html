@@ -2271,8 +2271,11 @@ function _renderSessionCard() {
             copyLabel = `<span style="font-size:0.78rem; color:var(--accent2,#c084fc); font-weight:600; margin-left:6px;">Copy ${copyNum} of ${siblingIds.length}</span>`;
         }
     } else {
-        // Multi-qty item — show range of which copies this represents
-        const allSame = _rsItems.filter(i => _siblingKey(i) === itemKey);
+        // Multi-qty item — show range of which copies this represents.
+        // Uses the same sibling-key function as singles so a qty-2 Dracozolt
+        // VMAX and a split-off qty-1 sibling show consistent totals.
+        const itemKey = _rsSiblingKeyOf(item);
+        const allSame = _rsItems.filter(i => _rsSiblingKeyOf(i) === itemKey);
         const totalCopies = allSame.reduce((s, i) => s + (i.quantity || 1), 0);
         if (totalCopies > (item.quantity || 1)) {
             let before = 0;
