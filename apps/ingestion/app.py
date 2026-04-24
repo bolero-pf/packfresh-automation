@@ -1014,7 +1014,7 @@ def push_dry_run(session_id):
 
     items = ingest.get_session_items(session_id)
     active = [i for i in items if i.get("item_status") in ("good", "damaged")
-              and i.get("is_mapped") and not i.get("pushed_at")]
+              and i.get("is_mapped") and i.get("verified_at") and not i.get("pushed_at")]
 
     if requested_item_ids:
         active = [i for i in active if str(i["id"]) in requested_item_ids]
@@ -1369,7 +1369,7 @@ def push_session_live(session_id):
 
     items = ingest.get_session_items(session_id)
     active = [i for i in items if i.get("item_status") in ("good", "damaged")
-              and i.get("is_mapped") and not i.get("pushed_at")]
+              and i.get("is_mapped") and i.get("verified_at") and not i.get("pushed_at")]
 
     if requested_item_ids:
         active = [i for i in active if str(i["id"]) in requested_item_ids]

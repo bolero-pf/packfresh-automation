@@ -2911,7 +2911,9 @@ function _renderPushContent(data) {
     const isActive = ['received', 'verified', 'breakdown_complete', 'partially_ingested'].includes(s.status);
 
     // Show final state items (good + damaged, not broken_down parents)
-    const pushableItems = items.filter(i => ['good','damaged'].includes(i.item_status) && i.is_mapped && !i.pushed_at);
+    // Must be verified — unverified items (from boxes not yet received) stay out until staff marks them here/missing/damaged.
+    const pushableItems = items.filter(i => ['good','damaged'].includes(i.item_status) && i.is_mapped && i.verified_at && !i.pushed_at);
+    const unverifiedPending = items.filter(i => ['good','damaged'].includes(i.item_status) && i.is_mapped && !i.verified_at && !i.pushed_at);
     const pushedItems = items.filter(i => i.pushed_at);
 
     // Consolidate by product identity (tcgplayer_id + damaged status)
@@ -2943,7 +2945,7 @@ function _renderPushContent(data) {
     let html = `<div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
             <h2 style="margin:0;">Push Summary</h2>
-            <span style="color:var(--text-dim); font-size:0.82rem;">${consolidated.length} products · ${totalUnits} units · ${pushedItems.length} already pushed</span>
+            <span style="color:var(--text-dim); font-size:0.82rem;">${consolidated.length} products · ${totalUnits} units · ${pushedItems.length} already pushed${unverifiedPending.length ? ' · <span style="color:#f59e0b;">' + unverifiedPending.length + ' awaiting verify</span>' : ''}</span>
         </div>
         ${_renderSortToolbar()}
         <div style="overflow-x:auto;">
