@@ -699,8 +699,9 @@ def api_freshdesk_tickets():
             "has_customer_reply": any(c["incoming"] for c in convos),
         })
 
-    # Sort: tickets with customer replies first, then by updated_at desc
-    tickets.sort(key=lambda t: (not t["has_customer_reply"], t.get("updated_at", "")), reverse=False)
+    # Sort: tickets with customer replies first, newest-first within each group.
+    # The list API already returns newest-first; stable sort preserves that order.
+    tickets.sort(key=lambda t: not t["has_customer_reply"])
 
     return jsonify({"configured": True, "tickets": tickets})
 
@@ -1086,6 +1087,8 @@ CONSOLE_HTML = """
 .fd-convo-body { white-space:pre-wrap; word-break:break-word; }
 .fd-attach { font-size:0.72rem; margin-top:4px; }
 .fd-attach a { color:var(--accent); }
+.fd-images { margin-top:6px; display:flex; flex-wrap:wrap; gap:6px; }
+.fd-images img { max-width:120px; max-height:120px; border-radius:6px; border:1px solid var(--border); object-fit:cover; cursor:zoom-in; }
 .fd-badge { font-size:0.7rem; padding:1px 7px; border-radius:10px; font-weight:500; }
 .fd-badge.reply { background:rgba(0,180,100,0.15); color:var(--green); }
 .fd-badge.waiting { background:rgba(255,170,0,0.12); color:var(--amber); }
@@ -1378,6 +1381,10 @@ function _fdSectionHtml(email, orderId) {
       html += '<div class="fd-convo ' + dir + '">';
       html += '<div class="fd-convo-meta">' + who + ' · ' + date + '</div>';
       html += '<div class="fd-convo-body">' + _esc(c.body_text || '').substring(0, 500) + (c.body_text && c.body_text.length > 500 ? '...' : '') + '</div>';
+      const imgs = _extractImgUrls(c.body || '');
+      if (imgs.length) {
+        html += '<div class="fd-images">' + imgs.map(u => '<a href="' + _esc(u) + '" target="_blank"><img src="' + _esc(u) + '" loading="lazy"/></a>').join('') + '</div>';
+      }
       if (c.attachments && c.attachments.length) {
         html += '<div class="fd-attach">' + c.attachments.map(a => '<a href="' + a.url + '" target="_blank">' + _esc(a.name) + '</a>').join(' · ') + '</div>';
       }
@@ -1389,6 +1396,21 @@ function _fdSectionHtml(email, orderId) {
 }
 
 function _esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// Pull image URLs out of an HTML body. Skip social-icon noise from email signatures
+// (instagram/facebook/twitter/linkedin/youtube/etc) and Freshdesk's own button assets.
+function _extractImgUrls(html) {
+  if (!html) return [];
+  const urls = [];
+  const re = /<img[^>]*\bsrc=["']([^"']+)["']/gi;
+  let m;
+  const skip = /(instagram|facebook|twitter|linkedin|youtube|tiktok|pinterest|spacer|pixel\.gif|email\/buttons)/i;
+  while ((m = re.exec(html)) !== null) {
+    const u = m[1];
+    if (!skip.test(u) && !urls.includes(u)) urls.push(u);
+  }
+  return urls;
+}
 
 function toggleFdConvos(safeId) {
   const el = document.getElementById('fd-convos-' + safeId);
