@@ -112,6 +112,7 @@ def search_tickets_by_email(email, *, max_pages=3):
             "per_page": 100,
             "order_by": "updated_at",
             "order_type": "desc",
+            "include": "description",
         }, return_response=True)
     except FreshdeskError as e:
         # 400 "no contact matching email" is expected for fresh customers — silent empty.

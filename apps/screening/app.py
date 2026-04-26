@@ -647,6 +647,27 @@ def api_freshdesk_tickets():
         if status >= 5 and status != 4:  # 5=closed is ok to skip, but include 4=resolved
             continue
         convos = []
+
+        # The ticket's own description is the FIRST message — for email-created tickets
+        # (source=1), that's the customer's inbound text. Without this, customer replies
+        # that arrive as new tickets (because the verification email was sent via Shopify
+        # Flow, not Freshdesk, so there's no thread to attach to) look empty in the UI.
+        desc_text = t.get("description_text") or ""
+        desc_html = t.get("description") or ""
+        if desc_text or desc_html:
+            convos.append({
+                "id": f"desc-{tid}",
+                "body_text": desc_text,
+                "body": desc_html,
+                "from_email": (t.get("requester", {}) or {}).get("email", "") if isinstance(t.get("requester"), dict) else "",
+                "incoming": t.get("source") == 1,  # email source → customer authored
+                "created_at": t.get("created_at", ""),
+                "attachments": [
+                    {"name": a.get("name", ""), "url": a.get("attachment_url", "")}
+                    for a in (t.get("attachments") or [])
+                ],
+            })
+
         try:
             raw_convos = fd.get_ticket_conversations(tid)
         except Exception as e:
