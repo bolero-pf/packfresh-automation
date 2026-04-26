@@ -621,6 +621,14 @@ function _setSort(v) {
     try { localStorage.setItem('pf_sort_by', v); } catch(e) {}
 }
 let _currentGroupBy = 'none';    // 'none' | 'type' | 'set'
+// Push tab view mode — 'consolidated' (totals per product) or 'by_source'
+// (grouped under the original intake item / breakdown parent for provenance).
+let _pushViewMode = (typeof localStorage !== 'undefined' && localStorage.getItem('pf_push_view')) || 'consolidated';
+function setPushViewMode(mode) {
+    _pushViewMode = mode;
+    try { localStorage.setItem('pf_push_view', mode); } catch(e) {}
+    _rerenderStage();
+}
 
 function _classifyProductType(item) {
     // Product type first
@@ -954,8 +962,13 @@ async function _enrichSessionImages(sessionId) {
 function _renderVerifyContent(data) {
     const { session: s, items } = data;
     const sessionId = s.id;
-    // Show all items including missing for verify
-    const allItems = items.filter(i => i.item_status !== 'rejected' && !i.parent_item_id);
+    // Show all items including missing for verify.
+    // Children are normally hidden (they're breakdown components seen in the
+    // Breakdown tab), EXCEPT damage-split children — those are the damaged
+    // portion of a partial-damage split and need to stay visible here.
+    const allItems = items.filter(i =>
+        i.item_status !== 'rejected' &&
+        (!i.parent_item_id || i.item_status === 'damaged'));
     const sorted = _sortItems(allItems);
     const groups = _groupItems(sorted);
 
@@ -1568,37 +1581,24 @@ async function completeVerify(sessionId) {
 function _renderBreakdownContent(data) {
     const { session: s, items } = data;
     const sessionId = s.id;
-    // Show unpushed items only. For broken_down parents, check if all children are pushed.
-    const childrenByParent = {};
-    items.forEach(i => {
-        if (i.parent_item_id) {
-            if (!childrenByParent[i.parent_item_id]) childrenByParent[i.parent_item_id] = [];
-            childrenByParent[i.parent_item_id].push(i);
-        }
-    });
-    // Recursively check if a breakdown family is fully pushed
-    function _isFullyPushed(itemId) {
-        const kids = childrenByParent[itemId] || [];
-        if (kids.length === 0) return false;
-        return kids.every(k => k.pushed_at || (k.item_status === 'broken_down' && _isFullyPushed(k.id)));
-    }
-
+    // Keep broken_down parents (and their child trees) in view even after push —
+    // the tree IS the provenance trail. Pushed leaves are filtered out below.
     const activeItems = items.filter(i => {
         if (!['good','damaged','broken_down'].includes(i.item_status)) return false;
-        if (i.pushed_at) return false;
+        // Hide pushed leaves, but keep broken_down parents (their tree is the provenance)
+        if (i.pushed_at && i.item_status !== 'broken_down') return false;
         // Raw cards and graded slabs don't get broken down
         if (i.item_status !== 'broken_down' && (i.product_type === 'raw' || i.is_graded)) return false;
         // Must be verified (or broken_down which implies it was)
         if (i.item_status !== 'broken_down' && !i.verified_at) return false;
-        // Hide broken_down items whose entire tree is pushed
-        if (i.item_status === 'broken_down' && _isFullyPushed(i.id)) return false;
         return true;
     });
 
-    // Build child map
+    // Build child map from ALL items (not just activeItems) so pushed children
+    // remain visible under their broken_down parent — that's the provenance.
     const childrenOf = {};
-    activeItems.forEach(i => {
-        if (i.parent_item_id) {
+    items.forEach(i => {
+        if (i.parent_item_id && i.item_status !== 'rejected') {
             if (!childrenOf[i.parent_item_id]) childrenOf[i.parent_item_id] = [];
             childrenOf[i.parent_item_id].push(i);
         }
@@ -2905,6 +2905,45 @@ function exitRouteSession() {
 
 
 // ── PUSH STAGE ──────────────────────────────────────────────────────────
+// Renders a single row for the Push tab. `qty` and `cogs` are passed in
+// because in Consolidated mode they're sums across multiple items, while in
+// By Source mode they're the single leaf's own values.
+function _renderPushRow(item, qty, cogs, dataItemId, indented) {
+    const isDamaged = item.item_status === 'damaged';
+    const isPushed = !!item.pushed_at;
+    const name = item.product_name || 'Unknown';
+    const ptype = item.product_type || 'sealed';
+    const isRaw = ptype === 'raw';
+    let badges = '';
+    if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
+    if (isPushed) badges += ' <span class="badge" style="background:rgba(45,212,160,0.15);color:var(--green);font-size:0.65rem;">✓ PUSHED</span>';
+    const thumb = isRaw ? pfCardThumb(item.image_url) : '';
+    const variantStr = item.variant || item.variance || '';
+    const variantChip = isRaw && variantStr ? pfVariantLabel(variantStr) : '';
+    const printingBadges = isRaw ? pfCardPrintingBadges(item.set_name, item.expansion_id, variantStr) : '';
+    let rowStyle = '';
+    if (isPushed) rowStyle = 'opacity:0.7;';
+    else if (isDamaged) rowStyle = 'background:rgba(255,170,0,0.06);';
+    const indentMark = indented ? '<span style="color:var(--text-dim);">↳</span> ' : '';
+    return `<tr style="${rowStyle}" data-item-id="${dataItemId}" data-item-status="${item.item_status}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${name.replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
+        <td data-label="">
+            <div style="display:flex; gap:10px; align-items:flex-start; ${indented ? 'padding-left:20px;' : ''}">
+                ${thumb}
+                <div style="flex:1; min-width:0;">
+                    <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                        ${indentMark}<span style="font-weight:600;">${name}</span>${variantChip}${printingBadges}${badges}
+                    </div>
+                    ${item.set_name ? '<div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">' + item.set_name + (item.card_number ? ' #' + item.card_number : '') + '</div>' : ''}
+                </div>
+            </div>
+        </td>
+        <td data-label="Qty" style="font-weight:600;">${qty}</td>
+        <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype}</span></td>
+        <td data-label="Price">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);" title="Market price (not in store)">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
+        <td data-label="COGS">$${cogs.toFixed(2)}${qty > 1 ? '<br><small style="color:var(--text-dim);">$' + (cogs / qty).toFixed(2) + '/ea</small>' : ''}</td>
+    </tr>`;
+}
+
 function _renderPushContent(data) {
     const { session: s, items } = data;
     const sessionId = s.id;
@@ -2942,12 +2981,35 @@ function _renderPushContent(data) {
     const groups = _groupItems(sorted);
     const totalUnits = consolidated.reduce((s, c) => s + c.totalQty, 0);
 
+    // Build itemById for parent-chain walks (used by By Source view).
+    const _itemById = {};
+    items.forEach(i => { _itemById[i.id] = i; });
+    function _rootOf(item) {
+        let cur = item;
+        const seen = new Set();
+        while (cur && cur.parent_item_id && _itemById[cur.parent_item_id] && !seen.has(cur.id)) {
+            seen.add(cur.id);
+            cur = _itemById[cur.parent_item_id];
+        }
+        return cur || item;
+    }
+
+    const viewMode = _pushViewMode === 'by_source' ? 'by_source' : 'consolidated';
+    const toggleHtml = `<div style="display:inline-flex; gap:0; border:1px solid var(--border); border-radius:6px; overflow:hidden; font-size:0.78rem;">
+        <button onclick="setPushViewMode('consolidated')" style="padding:4px 12px; border:none; cursor:pointer; background:${viewMode==='consolidated'?'var(--accent)':'var(--surface-2)'}; color:${viewMode==='consolidated'?'#fff':'var(--text-dim)'};">Consolidated</button>
+        <button onclick="setPushViewMode('by_source')" style="padding:4px 12px; border:none; cursor:pointer; background:${viewMode==='by_source'?'var(--accent)':'var(--surface-2)'}; color:${viewMode==='by_source'?'#fff':'var(--text-dim)'};">By Source</button>
+    </div>`;
+
     let html = `<div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
             <h2 style="margin:0;">Push Summary</h2>
             <span style="color:var(--text-dim); font-size:0.82rem;">${consolidated.length} products · ${totalUnits} units · ${pushedItems.length} already pushed${unverifiedPending.length ? ' · <span style="color:#f59e0b;">' + unverifiedPending.length + ' awaiting verify</span>' : ''}</span>
         </div>
-        ${_renderSortToolbar()}
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+            ${toggleHtml}
+            <span style="color:var(--text-dim); font-size:0.72rem;">${viewMode==='by_source' ? 'Grouped under the original intake item' : 'Totals per product'}</span>
+        </div>
+        ${viewMode==='consolidated' ? _renderSortToolbar() : ''}
         <div style="overflow-x:auto;">
         <table class="responsive-cards">
             <thead><tr>
@@ -2955,47 +3017,54 @@ function _renderPushContent(data) {
             </tr></thead>
             <tbody>`;
 
-    for (const group of groups) {
-        if (group.label) {
-            html += `<tr><td colspan="5" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+    if (viewMode === 'consolidated') {
+        for (const group of groups) {
+            if (group.label) {
+                html += `<tr><td colspan="5" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+            }
+            for (const item of group.items) {
+                html += _renderPushRow(item, item.totalQty, item.totalCogs, item.itemIds[0], false);
+            }
         }
-        for (const item of group.items) {
-            const isDamaged = item.item_status === 'damaged';
-            const name = item.product_name || 'Unknown';
-            const ptype = item.product_type || 'sealed';
-            const isRaw = ptype === 'raw';
-            let badges = '';
-            if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
-            const thumb = isRaw ? pfCardThumb(item.image_url) : '';
-            const variantStr = item.variant || item.variance || '';
-            const variantChip = isRaw && variantStr ? pfVariantLabel(variantStr) : '';
-            const printingBadges = isRaw ? pfCardPrintingBadges(item.set_name, item.expansion_id, variantStr) : '';
-            // data attrs use first item's ID for pushLive DOM queries
-            html += `<tr style="${isDamaged ? 'background:rgba(255,170,0,0.06);' : ''}" data-item-id="${item.itemIds[0]}" data-item-status="${item.item_status}" data-is-graded="${!!item.is_graded}" data-grade-company="${item.grade_company||''}" data-grade-value="${item.grade_value||''}" data-product-name="${name.replace(/"/g,'&quot;')}" data-price="${item.market_price||0}">
-                <td data-label="">
-                    <div style="display:flex; gap:10px; align-items:flex-start;">
-                        ${thumb}
-                        <div style="flex:1; min-width:0;">
-                            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-                                <span style="font-weight:600;">${name}</span>${variantChip}${printingBadges}${badges}
-                            </div>
-                            ${item.set_name ? '<div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">' + item.set_name + (item.card_number ? ' #' + item.card_number : '') + '</div>' : ''}
-                        </div>
-                    </div>
-                </td>
-                <td data-label="Qty" style="font-weight:600;">${item.totalQty}</td>
-                <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype}</span></td>
-                <td data-label="Price">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);" title="Market price (not in store)">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
-                <td data-label="COGS">$${item.totalCogs.toFixed(2)}${item.totalQty > 1 ? '<br><small style="color:var(--text-dim);">$' + (item.totalCogs / item.totalQty).toFixed(2) + '/ea</small>' : ''}</td>
-            </tr>`;
+    } else {
+        // By Source: group pushable items under their root ancestor (original intake item)
+        const rootGroups = {};
+        for (const it of pushableItems) {
+            const root = _rootOf(it);
+            if (!rootGroups[root.id]) rootGroups[root.id] = { root, leaves: [] };
+            rootGroups[root.id].leaves.push(it);
+        }
+        // Sort root groups by root name for stable ordering
+        const sortedRoots = Object.values(rootGroups).sort((a, b) =>
+            (a.root.product_name || '').localeCompare(b.root.product_name || ''));
+        for (const grp of sortedRoots) {
+            const root = grp.root;
+            const wasBrokenDown = root.item_status === 'broken_down' || grp.leaves.some(l => l.id !== root.id);
+            // Direct (non-broken-down) push — render the row alone, no redundant header.
+            if (!wasBrokenDown) {
+                for (const leaf of grp.leaves) {
+                    html += _renderPushRow(leaf, leaf.quantity || 1, leaf.offer_price || 0, leaf.id, false);
+                }
+                continue;
+            }
+            const rootCogs = (root.offer_price || 0).toFixed(2);
+            const rootQty = root.quantity || 1;
+            html += `<tr><td colspan="5" style="font-weight:600;font-size:0.82rem;background:var(--surface-2);padding:8px 10px;border-bottom:2px solid var(--border);">
+                🔨 Broke down: <strong>${(root.product_name||'Unknown').replace(/</g,'&lt;')}</strong>
+                <span style="color:var(--text-dim); font-weight:400; font-size:0.78rem; margin-left:8px;">qty ${rootQty} · COGS $${rootCogs}${root.set_name ? ' · ' + root.set_name : ''}</span>
+            </td></tr>`;
+            for (const leaf of grp.leaves) {
+                html += _renderPushRow(leaf, leaf.quantity || 1, leaf.offer_price || 0, leaf.id, leaf.id !== root.id);
+            }
         }
     }
 
     html += `</tbody></table></div></div>`;
 
-    // Pushed items — collapsible history, consolidated
+    // Pushed items — collapsible history, follows the same view mode toggle.
     if (pushedItems.length > 0) {
-        const consolidatedPushed = _consolidateItems(pushedItems.filter(i => ['good','damaged'].includes(i.item_status)));
+        const pushedLeaves = pushedItems.filter(i => ['good','damaged'].includes(i.item_status));
+        const consolidatedPushed = _consolidateItems(pushedLeaves);
         const sortedPushed = _sortItems(consolidatedPushed);
         const pushedGroups = _groupItems(sortedPushed);
         const pushedUnits = consolidatedPushed.reduce((s, c) => s + c.totalQty, 0);
@@ -3010,38 +3079,43 @@ function _renderPushContent(data) {
                     <th>Product</th><th>Qty</th><th>Type</th><th>Price</th><th>COGS</th>
                 </tr></thead>
                 <tbody>`;
-        for (const group of pushedGroups) {
-            if (group.label) {
-                html += `<tr><td colspan="5" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+        if (viewMode === 'consolidated') {
+            for (const group of pushedGroups) {
+                if (group.label) {
+                    html += `<tr><td colspan="5" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+                }
+                for (const item of group.items) {
+                    html += _renderPushRow(item, item.totalQty, item.totalCogs, item.itemIds[0], false);
+                }
             }
-            for (const item of group.items) {
-                const isDamaged = item.item_status === 'damaged';
-                const name = item.product_name || 'Unknown';
-                const ptype = item.product_type || 'sealed';
-                const isRaw = ptype === 'raw';
-                let badges = '';
-                if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
-                const thumb = isRaw ? pfCardThumb(item.image_url) : '';
-                const variantStr = item.variant || item.variance || '';
-                const variantChip = isRaw && variantStr ? pfVariantLabel(variantStr) : '';
-                const printingBadges = isRaw ? pfCardPrintingBadges(item.set_name, item.expansion_id, variantStr) : '';
-                html += `<tr style="opacity:0.7;">
-                    <td data-label="">
-                        <div style="display:flex; gap:10px; align-items:flex-start;">
-                            ${thumb}
-                            <div style="flex:1; min-width:0;">
-                                <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-                                    <span style="font-weight:600;">${name}</span>${variantChip}${printingBadges}${badges}
-                                </div>
-                                ${item.set_name ? '<div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">' + item.set_name + (item.card_number ? ' #' + item.card_number : '') + '</div>' : ''}
-                            </div>
-                        </div>
-                    </td>
-                    <td data-label="Qty" style="font-weight:600;">${item.totalQty}</td>
-                    <td data-label="Type"><span class="badge badge-dim" style="font-size:0.65rem;">${ptype}</span></td>
-                    <td data-label="Price">${item.store_price != null ? '$' + item.store_price.toFixed(2) : '<span style="color:var(--text-dim);">$' + (item.market_price || 0).toFixed(2) + ' <small>mkt</small></span>'}</td>
-                    <td data-label="COGS">$${item.totalCogs.toFixed(2)}${item.totalQty > 1 ? '<br><small style="color:var(--text-dim);">$' + (item.totalCogs / item.totalQty).toFixed(2) + '/ea</small>' : ''}</td>
-                </tr>`;
+        } else {
+            // By Source — group pushed leaves under their original intake item
+            const rootGroups = {};
+            for (const it of pushedLeaves) {
+                const root = _rootOf(it);
+                if (!rootGroups[root.id]) rootGroups[root.id] = { root, leaves: [] };
+                rootGroups[root.id].leaves.push(it);
+            }
+            const sortedRoots = Object.values(rootGroups).sort((a, b) =>
+                (a.root.product_name || '').localeCompare(b.root.product_name || ''));
+            for (const grp of sortedRoots) {
+                const root = grp.root;
+                const wasBrokenDown = root.item_status === 'broken_down' || grp.leaves.some(l => l.id !== root.id);
+                if (!wasBrokenDown) {
+                    for (const leaf of grp.leaves) {
+                        html += _renderPushRow(leaf, leaf.quantity || 1, leaf.offer_price || 0, leaf.id, false);
+                    }
+                    continue;
+                }
+                const rootCogs = (root.offer_price || 0).toFixed(2);
+                const rootQty = root.quantity || 1;
+                html += `<tr><td colspan="5" style="font-weight:600;font-size:0.82rem;background:var(--surface-2);padding:8px 10px;border-bottom:2px solid var(--border);">
+                    🔨 Broke down: <strong>${(root.product_name||'Unknown').replace(/</g,'&lt;')}</strong>
+                    <span style="color:var(--text-dim); font-weight:400; font-size:0.78rem; margin-left:8px;">qty ${rootQty} · COGS $${rootCogs}${root.set_name ? ' · ' + root.set_name : ''}</span>
+                </td></tr>`;
+                for (const leaf of grp.leaves) {
+                    html += _renderPushRow(leaf, leaf.quantity || 1, leaf.offer_price || 0, leaf.id, leaf.id !== root.id);
+                }
             }
         }
         html += `</tbody></table></div>
@@ -3122,21 +3196,27 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     const st = item.item_status || 'good';
     const isBroken = st === 'broken_down';
     const isDamaged = st === 'damaged';
+    const isPushed = !!item.pushed_at;
     const name = item.product_name || 'Unknown';
     const escName = name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
 
     let rowStyle = '';
-    if (isBroken) rowStyle = 'opacity:0.35; text-decoration:line-through;';
+    if (isPushed) rowStyle = 'opacity:0.7; background:rgba(45,212,160,0.04);';
+    else if (isBroken) rowStyle = 'opacity:0.6; background:rgba(124,147,245,0.04);';
     else if (isDamaged) rowStyle = 'background:rgba(255,170,0,0.06);';
 
     let badges = '';
     if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
-    if (isBroken) badges += ' <span class="badge badge-dim" style="font-size:0.65rem;">BROKEN DOWN</span>';
+    if (isBroken) badges += ' <span class="badge" style="background:rgba(124,147,245,0.15);color:var(--accent);font-size:0.65rem;">🔨 BROKEN DOWN ✓</span>';
     if (isChild) badges += ' <span class="badge badge-blue" style="font-size:0.65rem;">FROM BREAKDOWN</span>';
-    if (!item.is_mapped) badges += ' <span class="badge badge-amber" style="font-size:0.65rem;">UNMAPPED</span>';
+    if (isPushed) badges += ' <span class="badge" style="background:rgba(45,212,160,0.15);color:var(--green);font-size:0.65rem;">✓ PUSHED</span>';
+    if (!item.is_mapped && !isPushed) badges += ' <span class="badge badge-amber" style="font-size:0.65rem;">UNMAPPED</span>';
 
     let actionCell = '';
-    if (isReceived && !isBroken && !isChild) {
+    if (isPushed) {
+        // Pushed items are immutable from the breakdown view — no actions
+        actionCell = '<span style="color:var(--text-dim);font-size:0.72rem;">—</span>';
+    } else if (isReceived && !isBroken && !isChild) {
         const damageToggle = isDamaged
             ? `<button onclick="markGood('${item.id}', '${sessionId}')">✅ Mark Good</button>`
             : `<button onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠️ Mark Damaged</button>`;
