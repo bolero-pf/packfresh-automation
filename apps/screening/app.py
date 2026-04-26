@@ -1084,11 +1084,13 @@ CONSOLE_HTML = """
 .fd-convo.incoming { background:rgba(0,180,100,0.08); border-left:3px solid var(--green); }
 .fd-convo.outgoing { background:var(--s2); border-left:3px solid var(--dim); }
 .fd-convo-meta { font-size:0.72rem; color:var(--dim); margin-bottom:4px; }
-.fd-convo-body { white-space:pre-wrap; word-break:break-word; }
+.fd-convo-body { word-break:break-word; max-height:280px; overflow-y:auto; background:rgba(0,0,0,0.15); border-radius:4px; padding:8px 10px; }
+.fd-convo-body img { max-width:160px; max-height:160px; border-radius:4px; border:1px solid var(--border); object-fit:contain; cursor:zoom-in; vertical-align:middle; margin:4px; display:inline-block; }
+.fd-convo-body img[width="1"], .fd-convo-body img[height="1"] { display:none; } /* hide tracking pixels */
+.fd-convo-body a { color:var(--accent); }
+.fd-convo-body-text { white-space:pre-wrap; }
 .fd-attach { font-size:0.72rem; margin-top:4px; }
 .fd-attach a { color:var(--accent); }
-.fd-images { margin-top:6px; display:flex; flex-wrap:wrap; gap:6px; }
-.fd-images img { max-width:120px; max-height:120px; border-radius:6px; border:1px solid var(--border); object-fit:cover; cursor:zoom-in; }
 .fd-badge { font-size:0.7rem; padding:1px 7px; border-radius:10px; font-weight:500; }
 .fd-badge.reply { background:rgba(0,180,100,0.15); color:var(--green); }
 .fd-badge.waiting { background:rgba(255,170,0,0.12); color:var(--amber); }
@@ -1380,10 +1382,13 @@ function _fdSectionHtml(email, orderId) {
       const date = c.created_at ? new Date(c.created_at).toLocaleString() : '';
       html += '<div class="fd-convo ' + dir + '">';
       html += '<div class="fd-convo-meta">' + who + ' · ' + date + '</div>';
-      html += '<div class="fd-convo-body">' + _esc(c.body_text || '').substring(0, 500) + (c.body_text && c.body_text.length > 500 ? '...' : '') + '</div>';
-      const imgs = _extractImgUrls(c.body || '');
-      if (imgs.length) {
-        html += '<div class="fd-images">' + imgs.map(u => '<a href="' + _esc(u) + '" target="_blank"><img src="' + _esc(u) + '" loading="lazy"/></a>').join('') + '</div>';
+      // Render the actual HTML body (inline images render in place, formatting preserved).
+      // Constrained to max-height with scroll so signatures don't dominate.
+      // Falls back to plain body_text if body is empty.
+      if (c.body) {
+        html += '<div class="fd-convo-body">' + c.body + '</div>';
+      } else {
+        html += '<div class="fd-convo-body fd-convo-body-text">' + _esc(c.body_text || '') + '</div>';
       }
       if (c.attachments && c.attachments.length) {
         html += '<div class="fd-attach">' + c.attachments.map(a => '<a href="' + a.url + '" target="_blank">' + _esc(a.name) + '</a>').join(' · ') + '</div>';
@@ -1396,21 +1401,6 @@ function _fdSectionHtml(email, orderId) {
 }
 
 function _esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-// Pull image URLs out of an HTML body. Skip social-icon noise from email signatures
-// (instagram/facebook/twitter/linkedin/youtube/etc) and Freshdesk's own button assets.
-function _extractImgUrls(html) {
-  if (!html) return [];
-  const urls = [];
-  const re = /<img[^>]*\bsrc=["']([^"']+)["']/gi;
-  let m;
-  const skip = /(instagram|facebook|twitter|linkedin|youtube|tiktok|pinterest|spacer|pixel\.gif|email\/buttons)/i;
-  while ((m = re.exec(html)) !== null) {
-    const u = m[1];
-    if (!skip.test(u) && !urls.includes(u)) urls.push(u);
-  }
-  return urls;
-}
 
 function toggleFdConvos(safeId) {
   const el = document.getElementById('fd-convos-' + safeId);
