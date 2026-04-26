@@ -82,10 +82,14 @@ def _request(method, endpoint, *, json_body=None, params=None, max_tries=3):
 # ---------------------------------------------------------------------------
 
 def search_tickets_by_email(email):
-    """Search for tickets from a customer email. Returns list of ticket dicts."""
-    query = f'"email:\'{email}\'"'
-    data = _request("GET", "/search/tickets", params={"query": query})
-    return data.get("results", [])
+    """List tickets where the requester matches the given email. Returns list of ticket dicts.
+
+    Uses /tickets?email= rather than /search/tickets — the search endpoint rejects
+    `email` as a filter field (only requester_id is searchable), and the simpler
+    list endpoint returns the same shape we need without a contact-lookup hop.
+    """
+    data = _request("GET", "/tickets", params={"email": email, "per_page": 30})
+    return data if isinstance(data, list) else []
 
 
 def get_ticket_conversations(ticket_id):
