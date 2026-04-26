@@ -1086,9 +1086,11 @@ CONSOLE_HTML = """
 .fd-convo.outgoing { background:var(--s2); border-left:3px solid var(--dim); }
 .fd-convo-meta { font-size:0.72rem; color:var(--dim); margin-bottom:4px; }
 .fd-convo-body { word-break:break-word; max-height:280px; overflow-y:auto; background:rgba(0,0,0,0.15); border-radius:4px; padding:8px 10px; }
+/* Force readable text — emails ship with inline color:#000 / background:#fff that breaks dark theme */
+.fd-convo-body, .fd-convo-body *:not(a) { color:var(--text) !important; background-color:transparent !important; }
+.fd-convo-body a, .fd-convo-body a * { color:var(--accent) !important; }
 .fd-convo-body img { max-width:160px; max-height:160px; border-radius:4px; border:1px solid var(--border); object-fit:contain; cursor:zoom-in; vertical-align:middle; margin:4px; display:inline-block; }
 .fd-convo-body img[width="1"], .fd-convo-body img[height="1"] { display:none; } /* hide tracking pixels */
-.fd-convo-body a { color:var(--accent); }
 .fd-convo-body-text { white-space:pre-wrap; }
 .fd-attach { font-size:0.72rem; margin-top:4px; }
 .fd-attach a { color:var(--accent); }
@@ -1402,6 +1404,12 @@ function _fdSectionHtml(email, orderId) {
 }
 
 function _esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// Click any image inside a Freshdesk convo to open it full-size in a new tab.
+document.addEventListener('click', (e) => {
+  const img = e.target.closest('.fd-convo-body img');
+  if (img && img.src) { e.preventDefault(); window.open(img.src, '_blank'); }
+});
 
 function toggleFdConvos(safeId) {
   const el = document.getElementById('fd-convos-' + safeId);
