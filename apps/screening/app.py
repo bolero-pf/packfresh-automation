@@ -715,6 +715,24 @@ def api_freshdesk_canned_responses():
     return jsonify({"configured": True, "folders": result})
 
 
+@app.route("/api/freshdesk-canned-response/<int:response_id>")
+def api_freshdesk_canned_response(response_id):
+    """Fetch a single canned response body for preview."""
+    import freshdesk as fd
+    if not fd.is_configured():
+        return jsonify({"error": "Freshdesk not configured"}), 400
+    try:
+        canned = fd.get_canned_response(response_id)
+        return jsonify({
+            "id": canned.get("id"),
+            "title": canned.get("title", ""),
+            "content": canned.get("content", canned.get("body", "")),
+        })
+    except Exception as e:
+        logging.warning("Freshdesk canned response %s fetch failed: %s", response_id, e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/freshdesk-reply", methods=["POST"])
 def api_freshdesk_reply():
     """Send a canned response reply on a Freshdesk ticket and resolve it."""
@@ -1690,16 +1708,26 @@ function showFdReplyModal(ticket, action, onConfirm) {
   window._fdModalOverlay = overlay;
 }
 
+const _fdCannedBodyCache = {};
 async function previewFdCanned(responseId) {
   const preview = document.getElementById('fd-canned-preview');
   if (!responseId) { preview.style.display = 'none'; return; }
   preview.style.display = 'block';
+  if (_fdCannedBodyCache[responseId]) {
+    preview.innerHTML = _fdCannedBodyCache[responseId];
+    return;
+  }
   preview.innerHTML = '<div class="spinner" style="margin:10px auto;"></div>';
   try {
-    const r = await fetch('/api/freshdesk-canned-responses');  // We already have this cached
-    // Fetch actual content for preview — need a dedicated endpoint or use the canned response API
-    // For now, show a placeholder indicating the selected response will be sent
-    preview.innerHTML = '<em>Response will be sent as the reply on this ticket.</em>';
+    const r = await fetch('/api/freshdesk-canned-response/' + responseId);
+    const d = await r.json();
+    if (!r.ok) {
+      preview.innerHTML = '<em style="color:var(--red);">' + _esc(d.error || 'Failed to load') + '</em>';
+      return;
+    }
+    const html = d.content || '<em>(empty)</em>';
+    _fdCannedBodyCache[responseId] = html;
+    preview.innerHTML = html;
   } catch(e) {
     preview.innerHTML = '<em style="color:var(--red);">Failed to load preview</em>';
   }
