@@ -39,12 +39,14 @@ def _auth_header():
     return f"Basic {token}"
 
 
-def _request(method, endpoint, *, json_body=None, params=None, max_tries=3):
-    """Low-level HTTP with retry on 429/5xx."""
+def _request(method, endpoint, *, json_body=None, params=None, max_tries=3, return_response=False):
+    """Low-level HTTP with retry on 429/5xx. Pass return_response=True to get the
+    full Response object (needed when callers must inspect headers e.g. Link)."""
     if not is_configured():
         raise FreshdeskError("Freshdesk not configured (missing FRESHDESK_API_KEY or FRESHDESK_DOMAIN)")
 
-    url = f"{_BASE}{endpoint}"
+    # Allow callers to pass a full URL (e.g. a Link-header next page) instead of an endpoint.
+    url = endpoint if endpoint.startswith("http") else f"{_BASE}{endpoint}"
     headers = {
         "Authorization": _auth_header(),
         "Content-Type": "application/json",
@@ -59,6 +61,8 @@ def _request(method, endpoint, *, json_body=None, params=None, max_tries=3):
             continue
 
         if resp.status_code < 400:
+            if return_response:
+                return resp
             return resp.json() if resp.text.strip() else {}
 
         if resp.status_code in (429, 500, 502, 503, 504):
@@ -77,19 +81,63 @@ def _request(method, endpoint, *, json_body=None, params=None, max_tries=3):
     raise FreshdeskError(f"Freshdesk {method} {endpoint} exhausted {max_tries} retries")
 
 
+def _parse_next_link(link_header):
+    """Parse a Link header and return the rel="next" URL, or None."""
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        segs = part.strip().split(";")
+        if len(segs) >= 2 and 'rel="next"' in segs[1]:
+            return segs[0].strip().strip("<>")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Tickets
 # ---------------------------------------------------------------------------
 
-def search_tickets_by_email(email):
-    """List tickets where the requester matches the given email. Returns list of ticket dicts.
+def search_tickets_by_email(email, *, max_pages=3):
+    """List tickets where the requester matches the given email, newest first.
+    Follows Link-header pagination up to max_pages (300 tickets at per_page=100).
+
+    Returns [] when the email has no matching contact (Freshdesk returns 400 in that case),
+    which is the common path for first-time customers who've never opened a ticket.
 
     Uses /tickets?email= rather than /search/tickets — the search endpoint rejects
-    `email` as a filter field (only requester_id is searchable), and the simpler
-    list endpoint returns the same shape we need without a contact-lookup hop.
+    `email` as a filter field, and the list endpoint returns the same shape.
     """
-    data = _request("GET", "/tickets", params={"email": email, "per_page": 30})
-    return data if isinstance(data, list) else []
+    try:
+        resp = _request("GET", "/tickets", params={
+            "email": email,
+            "per_page": 100,
+            "order_by": "updated_at",
+            "order_type": "desc",
+        }, return_response=True)
+    except FreshdeskError as e:
+        # 400 "no contact matching email" is expected for fresh customers — silent empty.
+        if "no contact matching" in str(e).lower():
+            return []
+        raise
+
+    tickets = resp.json() if resp.text.strip() else []
+    if not isinstance(tickets, list):
+        return []
+
+    next_url = _parse_next_link(resp.headers.get("Link"))
+    pages_fetched = 1
+    while next_url and pages_fetched < max_pages:
+        try:
+            resp = _request("GET", next_url, return_response=True)
+        except FreshdeskError as e:
+            logger.warning("Freshdesk pagination stopped early for %s: %s", email, e)
+            break
+        page = resp.json() if resp.text.strip() else []
+        if not isinstance(page, list):
+            break
+        tickets.extend(page)
+        next_url = _parse_next_link(resp.headers.get("Link"))
+        pages_fetched += 1
+    return tickets
 
 
 def get_ticket_conversations(ticket_id):
