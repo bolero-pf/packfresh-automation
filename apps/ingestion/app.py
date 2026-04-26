@@ -1595,6 +1595,7 @@ def _push_raw_item(item: dict) -> dict:
         raise RuntimeError("barcode_gen or storage module not available")
 
     tcg_id    = item.get("tcgplayer_id")
+    sx_id     = item.get("scrydex_id")
     card_name = item.get("product_name", "Unknown")
     set_name  = item.get("set_name", "")
     condition = item.get("condition") or "NM"
@@ -1624,6 +1625,10 @@ def _push_raw_item(item: dict) -> dict:
                     card_type = _canonical_card_type(card_data["game"])
         except Exception as e:
             logger.warning(f"PPT fetch for raw card TCG#{tcg_id} failed: {e}")
+
+    # Scrydex image fallback for JP / Scrydex-only cards (no TCG image, or no tcg_id at all)
+    if not image_url:
+        image_url = _scrydex_image_fallback(sx_id, tcg_id)
 
     # Last-resort game lookup if cache miss + PPT lookup failed: hit
     # scrydex_price_cache directly by tcgplayer_id (cross-game).
@@ -1658,7 +1663,7 @@ def _push_raw_item(item: dict) -> dict:
 
             db.execute("""
                 INSERT INTO raw_cards (
-                    barcode, tcgplayer_id, card_name, set_name,
+                    barcode, tcgplayer_id, scrydex_id, card_name, set_name,
                     card_number, condition, rarity,
                     state, cost_basis, current_price, last_price_update,
                     bin_id, image_url,
@@ -1666,7 +1671,7 @@ def _push_raw_item(item: dict) -> dict:
                     variant, language, game,
                     intake_session_id, stored_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
                     'STORED', %s, %s, CURRENT_TIMESTAMP,
                     %s, %s,
                     FALSE, NULL, NULL,
@@ -1674,7 +1679,7 @@ def _push_raw_item(item: dict) -> dict:
                     %s, CURRENT_TIMESTAMP
                 )
             """, (
-                barcode_id, tcg_id, card_name, set_name,
+                barcode_id, tcg_id, sx_id, card_name, set_name,
                 ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
                 cost, float(item.get("market_price", cost)),
                 bin_id, image_url,
@@ -1714,8 +1719,34 @@ def _push_raw_item(item: dict) -> dict:
     }
 
 
-def _fetch_ppt_data(tcg_id, card_name, set_name):
-    """Shared PPT lookup for raw card push functions."""
+def _scrydex_image_fallback(scrydex_id, tcg_id):
+    """Pull image_large/medium/small from scrydex_price_cache for JP/Scrydex-only
+    cards that PPT can't serve (no tcgplayer_id, or PPT lookup returned no image)."""
+    if not (scrydex_id or tcg_id):
+        return None
+    try:
+        if scrydex_id:
+            row = db.query_one("""
+                SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
+                       MAX(image_small) AS img_s
+                FROM scrydex_price_cache WHERE scrydex_id = %s
+            """, (scrydex_id,))
+        else:
+            row = db.query_one("""
+                SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
+                       MAX(image_small) AS img_s
+                FROM scrydex_price_cache WHERE tcgplayer_id = %s
+            """, (int(tcg_id),))
+        if row:
+            return row.get("img_l") or row.get("img_m") or row.get("img_s")
+    except Exception as e:
+        logger.debug(f"Scrydex image fallback failed (sid={scrydex_id}, tcg={tcg_id}): {e}")
+    return None
+
+
+def _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=None):
+    """Shared PPT lookup for raw card push functions. Falls back to
+    scrydex_price_cache for image when PPT can't help (JP / Scrydex-only)."""
     image_url = None
     ppt_card_number = None
     if tcg_id and pricing:
@@ -1730,6 +1761,8 @@ def _fetch_ppt_data(tcg_id, card_name, set_name):
                 ppt_card_number = card_data.get("cardNumber") or card_data.get("number")
         except Exception as e:
             logger.warning(f"PPT fetch for raw card TCG#{tcg_id} failed: {e}")
+    if not image_url:
+        image_url = _scrydex_image_fallback(scrydex_id, tcg_id)
     return card_name, set_name, image_url, ppt_card_number
 
 
@@ -1739,13 +1772,14 @@ def _push_raw_to_display(item: dict) -> dict:
         raise RuntimeError("barcode_gen or storage module not available")
 
     tcg_id    = item.get("tcgplayer_id")
+    sx_id     = item.get("scrydex_id")
     card_name = item.get("product_name", "Unknown")
     set_name  = item.get("set_name", "")
     condition = item.get("condition") or "NM"
     qty       = item.get("quantity", 1)
     cost      = float(item.get("offer_price", 0)) / max(qty, 1)
 
-    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name)
+    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
 
     assignments = assign_display(qty, db)
     if not assignments:
@@ -1765,7 +1799,7 @@ def _push_raw_to_display(item: dict) -> dict:
             barcode_id = generate_barcode_id()
             db.execute("""
                 INSERT INTO raw_cards (
-                    barcode, tcgplayer_id, card_name, set_name,
+                    barcode, tcgplayer_id, scrydex_id, card_name, set_name,
                     card_number, condition, rarity,
                     state, cost_basis, current_price, last_price_update,
                     bin_id, image_url,
@@ -1773,7 +1807,7 @@ def _push_raw_to_display(item: dict) -> dict:
                     variant, language,
                     intake_session_id, stored_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
                     'DISPLAY', %s, %s, CURRENT_TIMESTAMP,
                     %s, %s,
                     FALSE, NULL, NULL,
@@ -1781,7 +1815,7 @@ def _push_raw_to_display(item: dict) -> dict:
                     %s, CURRENT_TIMESTAMP
                 )
             """, (
-                barcode_id, tcg_id, card_name, set_name,
+                barcode_id, tcg_id, sx_id, card_name, set_name,
                 ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
                 cost, float(item.get("market_price", cost)),
                 bin_id, image_url,
@@ -1826,19 +1860,20 @@ def _push_raw_to_display(item: dict) -> dict:
 def _push_raw_to_grade(item: dict) -> dict:
     """Mark raw card as sent for grading. No barcode, no bin assignment."""
     tcg_id    = item.get("tcgplayer_id")
+    sx_id     = item.get("scrydex_id")
     card_name = item.get("product_name", "Unknown")
     set_name  = item.get("set_name", "")
     condition = item.get("condition") or "NM"
     qty       = item.get("quantity", 1)
     cost      = float(item.get("offer_price", 0)) / max(qty, 1)
 
-    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name)
+    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
 
     for _ in range(qty):
         barcode_id = generate_barcode_id() if generate_barcode_id else str(_uuid.uuid4())[:20]
         db.execute("""
             INSERT INTO raw_cards (
-                barcode, tcgplayer_id, card_name, set_name,
+                barcode, tcgplayer_id, scrydex_id, card_name, set_name,
                 card_number, condition, rarity,
                 state, cost_basis, current_price, last_price_update,
                 bin_id, image_url,
@@ -1846,7 +1881,7 @@ def _push_raw_to_grade(item: dict) -> dict:
                 variant, language,
                 intake_session_id, removal_reason, removal_date
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s,
                 'REMOVED', %s, %s, CURRENT_TIMESTAMP,
                 NULL, %s,
                 FALSE, NULL, NULL,
@@ -1854,7 +1889,7 @@ def _push_raw_to_grade(item: dict) -> dict:
                 %s, 'GRADING', CURRENT_TIMESTAMP
             )
         """, (
-            barcode_id, tcg_id, card_name, set_name,
+            barcode_id, tcg_id, sx_id, card_name, set_name,
             ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
             cost, float(item.get("market_price", cost)),
             image_url,
