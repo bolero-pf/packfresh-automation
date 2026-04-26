@@ -18,6 +18,8 @@ from flask import Flask, render_template, request, jsonify
 
 import db
 from storage import assign_bins
+from barcode_gen import generate_barcode_image
+from decimal import Decimal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -756,6 +758,459 @@ def recent_assignments():
             })
 
     return jsonify({"batches": result_batches})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Card Editor — search/inspect/repair raw_cards rows
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# JPY rate mirrors ingestion's relink path so cache prices land in USD on read.
+_JPY_USD_RATE = float(os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
+_USD_PRICE_EXPR = (
+    "CASE WHEN currency = 'JPY' "
+    f"THEN ROUND(market_price::numeric * {_JPY_USD_RATE}::numeric, 2) "
+    "ELSE market_price END"
+)
+
+
+@app.route("/api/editor/search")
+def editor_search():
+    """Aggregated search over raw_cards. Mirrors kiosk's /api/browse so the
+    grid layout/data shape can stay identical. Includes ALL states (not just
+    STORED) — the editor needs to repair PULLED/MISSING rows too."""
+    q          = (request.args.get("q") or "").strip()
+    page       = max(1, int(request.args.get("page", 1)))
+    page_size  = 24
+    offset     = (page - 1) * page_size
+
+    filters = []
+    params  = []
+    if q:
+        # Barcode is unique; if the query looks like one, do an exact match
+        # so a barcode scan jumps straight to the right copy.
+        filters.append("(card_name ILIKE %s OR set_name ILIKE %s OR card_number ILIKE %s OR barcode = %s)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%", q]
+
+    where = " AND ".join(filters) if filters else "TRUE"
+
+    group_key = ("card_name, set_name, tcgplayer_id, "
+                 "CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') "
+                 "THEN '' ELSE variant END")
+
+    count_row = db.query_one(f"""
+        SELECT COUNT(DISTINCT ({group_key})) AS total
+        FROM raw_cards
+        WHERE {where}
+    """, tuple(params))
+    total = count_row["total"] if count_row else 0
+
+    rows = db.query(f"""
+        SELECT
+            card_name,
+            set_name,
+            tcgplayer_id,
+            MAX(scrydex_id) AS scrydex_id,
+            MAX(variant) AS variant_raw,
+            CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
+                 THEN '' ELSE variant END AS variant_key,
+            MAX(image_url) AS image_url,
+            COUNT(*) AS total_qty,
+            MIN(current_price) AS min_price,
+            MAX(current_price) AS max_price,
+            jsonb_object_agg(condition, cond_qty) AS conditions
+        FROM (
+            SELECT card_name, set_name, tcgplayer_id, scrydex_id, variant,
+                   image_url, condition,
+                   COUNT(*) AS cond_qty,
+                   MIN(current_price) AS current_price
+            FROM raw_cards
+            WHERE {where}
+            GROUP BY card_name, set_name, tcgplayer_id, scrydex_id, variant, image_url, condition
+        ) sub
+        GROUP BY card_name, set_name, tcgplayer_id, variant_key
+        ORDER BY card_name ASC
+        LIMIT %s OFFSET %s
+    """, tuple(params) + (page_size, offset))
+
+    cards = []
+    for r in rows:
+        # Image fallback to scrydex cache (same as kiosk's logic) so legacy
+        # JP rows light up here even before they get backfilled.
+        image_url = r["image_url"]
+        sid = r["scrydex_id"]
+        tcg = r["tcgplayer_id"]
+        if not image_url and (sid or tcg):
+            if sid:
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+                    FROM scrydex_price_cache WHERE scrydex_id = %s
+                """, (sid,))
+            else:
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+                    FROM scrydex_price_cache WHERE tcgplayer_id = %s
+                """, (tcg,))
+            if sx:
+                image_url = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
+
+        variant_raw = (r.get("variant_raw") or "").strip()
+        variant_label = variant_raw if variant_raw and variant_raw.lower() not in ("normal", "holofoil") else None
+
+        cards.append({
+            "card_name":     r["card_name"],
+            "set_name":      r["set_name"],
+            "tcgplayer_id":  r["tcgplayer_id"],
+            "scrydex_id":    r["scrydex_id"],
+            "variant_key":   r["variant_key"] or "",
+            "variant_label": variant_label,
+            "image_url":     image_url,
+            "total_qty":     r["total_qty"],
+            "min_price":     float(r["min_price"]) if r["min_price"] else None,
+            "max_price":     float(r["max_price"]) if r["max_price"] else None,
+            "conditions":    r["conditions"] or {},
+        })
+
+    return jsonify({
+        "cards": cards,
+        "total": total,
+        "page":  page,
+        "pages": max(1, (total + page_size - 1) // page_size),
+    })
+
+
+@app.route("/api/editor/copies")
+def editor_copies():
+    """Individual raw_cards copies for a (name, set, variant_key) tile.
+    Returns every state (STORED, PULLED, MISSING, etc.) so the editor can
+    fix any row, not just available ones."""
+    card_name  = request.args.get("name", "")
+    set_name   = request.args.get("set", "")
+    variant_k  = request.args.get("variant", "")
+    tcg_id     = request.args.get("tcgplayer_id")
+    sx_id      = request.args.get("scrydex_id")
+
+    variant_filter = (
+        "AND (variant IS NULL OR LOWER(variant) IN ('normal','holofoil'))"
+        if variant_k == ""
+        else "AND variant = %s"
+    )
+    extra = []
+    if variant_k:
+        extra.append(variant_k)
+
+    id_filter = ""
+    if sx_id:
+        id_filter = "AND scrydex_id = %s"
+        extra.append(sx_id)
+    elif tcg_id:
+        id_filter = "AND tcgplayer_id = %s"
+        extra.append(tcg_id)
+
+    copies = db.query(f"""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.variant,
+               rc.tcgplayer_id, rc.scrydex_id, rc.state, rc.cost_basis,
+               rc.last_price_update, sl.bin_label
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.card_name = %s AND COALESCE(rc.set_name,'') = COALESCE(%s,'')
+          {variant_filter}
+          {id_filter}
+        ORDER BY
+            CASE rc.condition
+                WHEN 'NM'  THEN 1 WHEN 'LP'  THEN 2 WHEN 'MP' THEN 3
+                WHEN 'HP'  THEN 4 WHEN 'DMG' THEN 5 ELSE 9
+            END,
+            rc.current_price DESC
+    """, (card_name, set_name, *extra))
+
+    return jsonify({"copies": [_ser(dict(c)) for c in copies]})
+
+
+@app.route("/api/editor/scrydex-search", methods=["POST"])
+def editor_scrydex_search():
+    """Cache-first search of scrydex_price_cache for the relink modal.
+    Mirrors the ingest service's /api/ingest/search-cards but lives here
+    so card_manager can stay self-contained."""
+    data    = request.get_json(silent=True) or {}
+    query   = (data.get("query") or "").strip()
+    set_nm  = (data.get("set_name") or "").strip()
+    tcg_id  = data.get("tcgplayer_id")
+    limit   = min(int(data.get("limit") or 20), 50)
+
+    if not query and not set_nm and not tcg_id:
+        return jsonify({"error": "query, set_name, or tcgplayer_id required"}), 400
+
+    where  = ["product_type = 'card'", "price_type = 'raw'", "condition = 'NM'"]
+    params = []
+
+    SEARCH_EXPR = (
+        "(COALESCE(product_name, '') || ' ' || "
+        "COALESCE(product_name_en, '') || ' ' || "
+        "COALESCE(expansion_name, '') || ' ' || "
+        "COALESCE(expansion_name_en, '') || ' ' || "
+        "COALESCE(card_number, ''))"
+    )
+
+    if tcg_id:
+        try:
+            where.append("tcgplayer_id = %s")
+            params.append(int(tcg_id))
+        except (ValueError, TypeError):
+            return jsonify({"error": "tcgplayer_id must be numeric"}), 400
+
+    if query:
+        for tok in [t.lstrip("#").strip() for t in query.split() if t.strip().lstrip("#")]:
+            if tok.isdigit():
+                where.append(f"(card_number = %s OR {SEARCH_EXPR} ILIKE %s)")
+                params.extend([tok, f"%{tok}%"])
+            else:
+                where.append(f"{SEARCH_EXPR} ILIKE %s")
+                params.append(f"%{tok}%")
+    if set_nm:
+        where.append("(expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
+        params.extend([f"%{set_nm}%", f"%{set_nm}%"])
+
+    sql = f"""
+        SELECT DISTINCT ON (scrydex_id, variant)
+               scrydex_id, tcgplayer_id, product_name, product_name_en,
+               expansion_name, expansion_name_en, language_code,
+               card_number, rarity, variant, image_small, image_medium,
+               currency,
+               {_USD_PRICE_EXPR} AS market_price_usd
+        FROM scrydex_price_cache
+        WHERE {' AND '.join(where)}
+        ORDER BY scrydex_id, variant
+        LIMIT %s
+    """
+    params.append(limit)
+    rows = db.query(sql, tuple(params))
+
+    return jsonify({"results": [{
+        "scrydex_id":   r.get("scrydex_id"),
+        "tcgplayer_id": r.get("tcgplayer_id"),
+        "name":         r.get("product_name") or r.get("product_name_en"),
+        "set_name":     r.get("expansion_name") or r.get("expansion_name_en"),
+        "language_code": r.get("language_code"),
+        "card_number":  r.get("card_number"),
+        "rarity":       r.get("rarity"),
+        "variant":      r.get("variant"),
+        "image":        r.get("image_small") or r.get("image_medium"),
+        "market_price": float(r["market_price_usd"]) if r.get("market_price_usd") else None,
+    } for r in rows], "total": len(rows)})
+
+
+def _lookup_cache_image(scrydex_id, tcgplayer_id):
+    if scrydex_id:
+        row = db.query_one("""
+            SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+            FROM scrydex_price_cache WHERE scrydex_id = %s
+        """, (scrydex_id,))
+    elif tcgplayer_id:
+        row = db.query_one("""
+            SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+            FROM scrydex_price_cache WHERE tcgplayer_id = %s
+        """, (int(tcgplayer_id),))
+    else:
+        return None
+    if not row:
+        return None
+    return row.get("img_l") or row.get("img_m") or row.get("img_s")
+
+
+def _lookup_cache_price(scrydex_id, tcgplayer_id, condition, variant):
+    """Pull USD raw price from scrydex_price_cache for (id, condition, variant).
+    Falls back to NM if the requested condition has no row. Returns Decimal or None."""
+    cond_map = {"DMG": "DM"}  # Scrydex stores Damaged as 'DM'
+    cache_cond = cond_map.get((condition or "").upper(), (condition or "NM").upper())
+
+    base_where = ["product_type = 'card'", "price_type = 'raw'", "market_price IS NOT NULL"]
+    base_params = []
+    if scrydex_id:
+        base_where.append("scrydex_id = %s")
+        base_params.append(scrydex_id)
+    elif tcgplayer_id:
+        base_where.append("tcgplayer_id = %s")
+        base_params.append(int(tcgplayer_id))
+    else:
+        return None
+
+    if variant:
+        base_where.append("COALESCE(variant,'') = COALESCE(%s,'')")
+        base_params.append(variant)
+
+    for cond in (cache_cond, "NM") if cache_cond != "NM" else (cache_cond,):
+        sql = f"""
+            SELECT {_USD_PRICE_EXPR} AS price_usd
+            FROM scrydex_price_cache
+            WHERE {' AND '.join(base_where)} AND condition = %s
+            ORDER BY fetched_at DESC NULLS LAST
+            LIMIT 1
+        """
+        row = db.query_one(sql, tuple(base_params) + (cond,))
+        if row and row.get("price_usd") is not None:
+            return Decimal(str(row["price_usd"]))
+    return None
+
+
+@app.route("/api/editor/copies/<copy_id>/relink", methods=["POST"])
+def editor_relink(copy_id):
+    """Change identity (tcgplayer_id, scrydex_id, variant, name, set, card_number)
+    on a single raw_cards row. Refreshes image_url and current_price from the
+    Scrydex cache using the new identity + the row's existing condition."""
+    data = request.get_json() or {}
+    tcg_id     = data.get("tcgplayer_id")
+    sx_id      = data.get("scrydex_id")
+    variant    = data.get("variant")
+    card_name  = data.get("card_name")
+    set_name   = data.get("set_name")
+    card_num   = data.get("card_number")
+
+    if not tcg_id and not sx_id:
+        return jsonify({"error": "tcgplayer_id or scrydex_id required"}), 400
+
+    card = db.query_one("SELECT condition FROM raw_cards WHERE id::text = %s", (copy_id,))
+    if not card:
+        return jsonify({"error": "Copy not found"}), 404
+
+    new_image = _lookup_cache_image(sx_id, tcg_id)
+    new_price = _lookup_cache_price(sx_id, tcg_id, card["condition"], variant)
+
+    db.execute("""
+        UPDATE raw_cards
+        SET tcgplayer_id    = %s,
+            scrydex_id      = %s,
+            variant         = %s,
+            card_name       = COALESCE(%s, card_name),
+            set_name        = COALESCE(%s, set_name),
+            card_number     = COALESCE(%s, card_number),
+            image_url       = COALESCE(%s, image_url),
+            current_price   = COALESCE(%s, current_price),
+            last_price_update = CASE WHEN %s IS NOT NULL THEN CURRENT_TIMESTAMP ELSE last_price_update END,
+            updated_at      = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (tcg_id, sx_id, variant, card_name, set_name, card_num,
+          new_image, new_price, new_price, copy_id))
+
+    return jsonify({
+        "success":      True,
+        "image_url":    new_image,
+        "current_price": float(new_price) if new_price is not None else None,
+    })
+
+
+@app.route("/api/editor/copies/<copy_id>/condition", methods=["POST"])
+def editor_change_condition(copy_id):
+    """Change a copy's condition. Refreshes price from Scrydex cache for the
+    new condition since worse conditions trade lower."""
+    new_cond = (request.get_json() or {}).get("condition", "").upper()
+    if new_cond not in {"NM", "LP", "MP", "HP", "DMG"}:
+        return jsonify({"error": "condition must be NM/LP/MP/HP/DMG"}), 400
+
+    card = db.query_one("""
+        SELECT scrydex_id, tcgplayer_id, variant FROM raw_cards WHERE id::text = %s
+    """, (copy_id,))
+    if not card:
+        return jsonify({"error": "Copy not found"}), 404
+
+    new_price = _lookup_cache_price(card["scrydex_id"], card["tcgplayer_id"], new_cond, card.get("variant"))
+
+    db.execute("""
+        UPDATE raw_cards
+        SET condition = %s,
+            current_price = COALESCE(%s, current_price),
+            last_price_update = CASE WHEN %s IS NOT NULL THEN CURRENT_TIMESTAMP ELSE last_price_update END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (new_cond, new_price, new_price, copy_id))
+
+    return jsonify({
+        "success":       True,
+        "condition":     new_cond,
+        "current_price": float(new_price) if new_price is not None else None,
+    })
+
+
+@app.route("/api/editor/copies/<copy_id>/variant", methods=["POST"])
+def editor_change_variant(copy_id):
+    """Change a copy's variant (e.g. 'reverseHolofoil', 'firstEditionHolofoil').
+    Refreshes price for the new variant + current condition."""
+    new_variant = (request.get_json() or {}).get("variant")
+    new_variant = new_variant.strip() if isinstance(new_variant, str) else None
+
+    card = db.query_one("""
+        SELECT scrydex_id, tcgplayer_id, condition FROM raw_cards WHERE id::text = %s
+    """, (copy_id,))
+    if not card:
+        return jsonify({"error": "Copy not found"}), 404
+
+    new_price = _lookup_cache_price(card["scrydex_id"], card["tcgplayer_id"], card["condition"], new_variant)
+
+    db.execute("""
+        UPDATE raw_cards
+        SET variant = %s,
+            current_price = COALESCE(%s, current_price),
+            last_price_update = CASE WHEN %s IS NOT NULL THEN CURRENT_TIMESTAMP ELSE last_price_update END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (new_variant or None, new_price, new_price, copy_id))
+
+    return jsonify({
+        "success":       True,
+        "variant":       new_variant,
+        "current_price": float(new_price) if new_price is not None else None,
+    })
+
+
+@app.route("/api/editor/copies/<copy_id>/refresh-price", methods=["POST"])
+def editor_refresh_price(copy_id):
+    """Re-pull current_price from scrydex_price_cache for this copy's
+    (id, condition, variant)."""
+    card = db.query_one("""
+        SELECT scrydex_id, tcgplayer_id, condition, variant
+        FROM raw_cards WHERE id::text = %s
+    """, (copy_id,))
+    if not card:
+        return jsonify({"error": "Copy not found"}), 404
+
+    new_price = _lookup_cache_price(card["scrydex_id"], card["tcgplayer_id"], card["condition"], card.get("variant"))
+    if new_price is None:
+        return jsonify({"error": "No cached price found for this card+condition+variant"}), 404
+
+    db.execute("""
+        UPDATE raw_cards
+        SET current_price = %s, last_price_update = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (new_price, copy_id))
+
+    return jsonify({"success": True, "current_price": float(new_price)})
+
+
+@app.route("/api/editor/copies/<copy_id>/reprint", methods=["POST"])
+def editor_reprint(copy_id):
+    """Regenerate the barcode label PNG for an existing copy. Returns base64
+    so the browser can open it in a new tab for printing — same format the
+    ingest push step uses."""
+    import base64
+    card = db.query_one("""
+        SELECT barcode, card_name, set_name, condition, card_number
+        FROM raw_cards WHERE id::text = %s
+    """, (copy_id,))
+    if not card or not card.get("barcode"):
+        return jsonify({"error": "Copy not found or has no barcode"}), 404
+
+    png_bytes = generate_barcode_image(
+        card["barcode"],
+        card_name=card["card_name"] or "",
+        set_name=card.get("set_name") or "",
+        condition=card.get("condition") or "",
+        card_number=card.get("card_number") or "",
+    )
+    return jsonify({
+        "success": True,
+        "barcode": card["barcode"],
+        "png_b64": base64.b64encode(png_bytes).decode(),
+    })
 
 
 if __name__ == "__main__":

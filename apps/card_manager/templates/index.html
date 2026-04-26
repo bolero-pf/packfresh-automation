@@ -135,6 +135,137 @@
   border-top-color: var(--accent); border-radius: 50%;
   animation: spin 0.6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Card Editor ── */
+.editor-search { display: flex; gap: 10px; margin-bottom: 16px; }
+.editor-search input {
+  flex: 1; padding: 10px 14px; background: var(--surface-2);
+  border: 1.5px solid var(--border); border-radius: 8px;
+  color: var(--text); font-size: 0.95rem;
+}
+.editor-search input:focus { outline: none; border-color: var(--accent); }
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 14px;
+}
+.ec {
+  background: var(--surface); border: 1.5px solid var(--border);
+  border-radius: 10px; overflow: hidden; cursor: pointer;
+  transition: border-color 0.15s, transform 0.1s;
+  display: flex; flex-direction: column;
+}
+.ec:hover { border-color: var(--accent); }
+.ec:active { transform: scale(0.97); }
+.ec-img {
+  aspect-ratio: 2.5/3.5; background: var(--surface-2);
+  display: flex; align-items: center; justify-content: center;
+}
+.ec-img img { width: 100%; height: 100%; object-fit: contain; }
+.ec-img .no-img { font-size: 3rem; opacity: 0.15; }
+.ec-body { padding: 8px 10px 10px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.ec-name { font-size: 0.85rem; font-weight: 600; line-height: 1.3; }
+.ec-set  { font-size: 0.7rem; color: var(--dim); }
+.ec-pills { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
+.ec-pill {
+  font-size: 0.62rem; font-weight: 700; padding: 1px 6px;
+  border-radius: 10px; letter-spacing: 0.04em;
+}
+.ec-pill.NM  { background: rgba(74,222,128,0.15); color: var(--green); }
+.ec-pill.LP  { background: rgba(232,197,71,0.15); color: var(--accent); }
+.ec-pill.MP  { background: rgba(251,146,60,0.15); color: #fb923c; }
+.ec-pill.HP  { background: rgba(248,113,113,0.15); color: var(--red); }
+.ec-pill.DMG { background: rgba(248,113,113,0.25); color: var(--red); }
+.ec-vbadge {
+  display: inline-block; font-size: 0.58rem; font-weight: 700;
+  padding: 1px 5px; border-radius: 4px; margin-left: 5px;
+  background: rgba(192,132,252,0.18); color: #c084fc;
+}
+.ec-price { font-family: var(--mono); font-size: 0.82rem; color: var(--accent); margin-top: auto; padding-top: 4px; }
+
+/* Editor overlay (detail + relink) */
+.ed-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.75); z-index: 200;
+  align-items: center; justify-content: center;
+  backdrop-filter: blur(4px); padding: 20px;
+}
+.ed-overlay.active { display: flex; }
+.ed-panel {
+  background: var(--surface); border: 1.5px solid var(--border);
+  border-radius: 12px; width: 100%; max-width: 720px;
+  max-height: 90vh; overflow-y: auto; padding: 24px;
+  position: relative;
+}
+.ed-close {
+  position: absolute; top: 14px; right: 14px;
+  background: none; border: none; color: var(--dim);
+  font-size: 1.4rem; cursor: pointer;
+}
+.ed-close:hover { color: var(--text); }
+
+.ed-hero { display: flex; gap: 16px; margin-bottom: 18px; }
+.ed-img  { width: 100px; min-width: 100px; aspect-ratio: 2.5/3.5;
+  border-radius: 8px; overflow: hidden; background: var(--surface-2); }
+.ed-img img { width: 100%; height: 100%; object-fit: contain; }
+.ed-title { font-size: 1.2rem; font-weight: 700; margin-bottom: 4px; }
+.ed-sub   { font-size: 0.82rem; color: var(--dim); }
+
+.ed-copy {
+  background: var(--surface-2); border: 1.5px solid var(--border);
+  border-radius: 10px; padding: 12px 14px; margin-bottom: 8px;
+}
+.ed-copy.editing { border-color: var(--accent); }
+.ed-copy-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.ed-copy-bc { font-family: var(--mono); font-size: 0.72rem; color: var(--dim); }
+.ed-copy-cond { min-width: 36px; }
+.ed-copy-price { font-family: var(--mono); font-size: 0.95rem; color: var(--accent); margin-left: auto; }
+.ed-copy-state { font-size: 0.68rem; padding: 2px 7px; border-radius: 8px;
+  background: rgba(255,255,255,0.05); color: var(--dim); letter-spacing: 0.04em; }
+.ed-copy-state.PULLED { background: rgba(74,222,128,0.12); color: var(--green); }
+.ed-copy-state.MISSING { background: rgba(248,113,113,0.12); color: var(--red); }
+.ed-copy-state.PENDING_SALE,
+.ed-copy-state.PENDING_RETURN { background: rgba(232,197,71,0.12); color: var(--accent); }
+.ed-copy-state.GONE { background: rgba(248,113,113,0.25); color: var(--red); }
+
+.ed-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.ed-actions .btn-sm { font-size: 0.72rem; padding: 4px 10px; }
+
+.ed-edit-panel {
+  margin-top: 12px; padding: 12px; border-radius: 8px;
+  background: rgba(79,125,249,0.05); border: 1px dashed var(--accent);
+  display: none;
+}
+.ed-copy.editing .ed-edit-panel { display: block; }
+.ed-field { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.ed-field label { font-size: 0.72rem; color: var(--dim); min-width: 70px; }
+.ed-field select, .ed-field input {
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); padding: 5px 9px; border-radius: 6px;
+  font-size: 0.85rem; flex: 1;
+}
+.ed-field input { font-family: var(--mono); }
+
+/* Relink sub-modal results */
+.rl-results { max-height: 50vh; overflow-y: auto; margin-top: 10px; }
+.rl-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.rl-row:hover { background: var(--surface-2); border-color: var(--border); }
+.rl-img { width: 36px; aspect-ratio: 2.5/3.5; background: var(--surface-2);
+  border-radius: 4px; overflow: hidden; flex-shrink: 0; }
+.rl-img img { width: 100%; height: 100%; object-fit: contain; }
+.rl-info { flex: 1; min-width: 0; }
+.rl-name { font-size: 0.85rem; font-weight: 600; }
+.rl-meta { font-size: 0.7rem; color: var(--dim); }
+.rl-price { font-family: var(--mono); font-size: 0.78rem; color: var(--accent); }
+.rl-tag { font-size: 0.6rem; padding: 1px 5px; border-radius: 4px;
+  background: rgba(192,132,252,0.18); color: #c084fc; margin-left: 4px; }
 </style>
 </head>
 <body>
@@ -159,6 +290,9 @@
     <div class="nav-item" onclick="showView('missing')" id="nav-missing">
       ⚠ Missing Cards
       <span class="nav-badge" id="badge-missing"></span>
+    </div>
+    <div class="nav-item" onclick="showView('editor')" id="nav-editor">
+      ✎ Card Editor
     </div>
     <div class="scanner-status">
       <span class="scanner-dot" id="scanner-dot"></span>
@@ -202,6 +336,40 @@
       </div>
     </div>
 
+    <!-- Card Editor -->
+    <div class="view" id="view-editor">
+      <div class="page-title">Card Editor</div>
+      <div class="page-sub">Search any raw card in stock and repair its identity, condition, variant, or price.</div>
+      <div class="editor-search">
+        <input id="editor-q" placeholder="Search by name, set, card #, or barcode…" autocomplete="off">
+      </div>
+      <div id="editor-results">
+        <div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:40px;">Type to search.</div>
+      </div>
+      <div id="editor-pagination" style="display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap;"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Card Editor: copies overlay -->
+<div class="ed-overlay" id="ed-detail-overlay" onclick="if(event.target===this) closeEditorDetail()">
+  <div class="ed-panel">
+    <button class="ed-close" onclick="closeEditorDetail()">×</button>
+    <div id="ed-detail-content"><div class="empty"><div class="spinner"></div></div></div>
+  </div>
+</div>
+
+<!-- Card Editor: relink sub-overlay -->
+<div class="ed-overlay" id="ed-relink-overlay" onclick="if(event.target===this) closeRelink()" style="z-index:300;">
+  <div class="ed-panel" style="max-width:640px;">
+    <button class="ed-close" onclick="closeRelink()">×</button>
+    <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">Relink card</div>
+    <div style="font-size:0.78rem;color:var(--dim);margin-bottom:12px;">Search the Scrydex catalog and pick the correct printing. The barcode will keep the same physical label — reprint after if you want updated text.</div>
+    <input id="rl-query" placeholder="e.g. umbreon 32 neo discovery" autocomplete="off" style="width:100%;padding:10px 14px;background:var(--surface-2);border:1.5px solid var(--border);border-radius:8px;color:var(--text);font-size:0.95rem;">
+    <div class="rl-results" id="rl-results">
+      <div style="color:var(--dim);font-size:0.78rem;text-align:center;padding:20px;">Start typing.</div>
+    </div>
   </div>
 </div>
 
@@ -222,6 +390,7 @@ function showView(name) {
   if (name === 'holds')   loadHolds();
   if (name === 'returns') loadReturns();
   if (name === 'missing') loadMissing();
+  if (name === 'editor')  document.getElementById('editor-q').focus();
 }
 
 // ── Hold Queue ────────────────────────────────────────────────────────────────
@@ -712,6 +881,309 @@ async function reverseDecision(holdItemId, action) {
     await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/reverse`, { action });
     toast(action === 're-accept' ? 'Listing created!' : 'Card returned to queue', 'green');
     await refreshHoldDetail();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── Card Editor ───────────────────────────────────────────────────────────────
+let _editorPage = 1;
+let _editorQuery = '';
+let _editorSearchTimer = null;
+let _editorCardCache = {};
+let _editorCurrentCard = null;
+let _editorEditingCopyId = null;
+let _relinkSearchTimer = null;
+let _relinkTargetCopyId = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+  const qInput = document.getElementById('editor-q');
+  if (qInput) {
+    qInput.addEventListener('input', e => {
+      _editorQuery = e.target.value.trim();
+      _editorPage = 1;
+      clearTimeout(_editorSearchTimer);
+      _editorSearchTimer = setTimeout(runEditorSearch, 250);
+    });
+  }
+  const rlInput = document.getElementById('rl-query');
+  if (rlInput) {
+    rlInput.addEventListener('input', e => {
+      const q = e.target.value.trim();
+      clearTimeout(_relinkSearchTimer);
+      if (q.length < 2) {
+        document.getElementById('rl-results').innerHTML = '<div style="color:var(--dim);font-size:0.78rem;text-align:center;padding:20px;">Start typing.</div>';
+        return;
+      }
+      _relinkSearchTimer = setTimeout(() => runRelinkSearch(q), 250);
+    });
+  }
+});
+
+async function runEditorSearch() {
+  const el = document.getElementById('editor-results');
+  if (!_editorQuery) {
+    el.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:40px;">Type to search.</div>';
+    document.getElementById('editor-pagination').innerHTML = '';
+    return;
+  }
+  el.innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+  try {
+    const params = new URLSearchParams({ q: _editorQuery, page: String(_editorPage) });
+    const d = await get('/api/editor/search?' + params);
+    renderEditorGrid(d.cards || []);
+    renderEditorPagination(d.page, d.pages, d.total);
+  } catch(e) {
+    el.innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderEditorGrid(cards) {
+  const el = document.getElementById('editor-results');
+  if (!cards.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">🔎</div><p>No cards found</p></div>';
+    return;
+  }
+  _editorCardCache = {};
+  el.innerHTML = '<div class="editor-grid">' + cards.map((c, idx) => {
+    _editorCardCache[idx] = c;
+    const conds = Object.entries(c.conditions || {})
+      .sort(([a],[b]) => ['NM','LP','MP','HP','DMG'].indexOf(a) - ['NM','LP','MP','HP','DMG'].indexOf(b));
+    const pills = conds.map(([cond, qty]) => `<span class="ec-pill ${cond}">${cond} ×${qty}</span>`).join('');
+    const img = c.image_url
+      ? `<img src="${esc(c.image_url)}" alt="${esc(c.card_name)}" loading="lazy">`
+      : '<div class="no-img">🃏</div>';
+    const price = c.min_price !== null
+      ? (c.min_price === c.max_price
+          ? `$${c.min_price.toFixed(2)}`
+          : `$${c.min_price.toFixed(2)} – $${c.max_price.toFixed(2)}`)
+      : '';
+    const vbadge = c.variant_label ? `<span class="ec-vbadge">${esc(c.variant_label)}</span>` : '';
+    return `<div class="ec" onclick="openEditorDetail(${idx})">
+      <div class="ec-img">${img}</div>
+      <div class="ec-body">
+        <div class="ec-name">${esc(c.card_name)}${vbadge}</div>
+        <div class="ec-set">${esc(c.set_name||'')}</div>
+        <div class="ec-pills">${pills}</div>
+        ${price ? `<div class="ec-price">${price}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+function renderEditorPagination(page, pages, total) {
+  const el = document.getElementById('editor-pagination');
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  let h = `<button class="btn btn-sm" onclick="editorGoPage(${page-1})" ${page<=1?'disabled':''}>←</button>`;
+  h += `<span style="align-self:center;font-size:0.78rem;color:var(--dim);">Page ${page} of ${pages} · ${total} card${total!==1?'s':''}</span>`;
+  h += `<button class="btn btn-sm" onclick="editorGoPage(${page+1})" ${page>=pages?'disabled':''}>→</button>`;
+  el.innerHTML = h;
+}
+function editorGoPage(p) { _editorPage = p; runEditorSearch(); }
+
+async function openEditorDetail(idx) {
+  const card = _editorCardCache[idx];
+  if (!card) return;
+  _editorCurrentCard = card;
+  _editorEditingCopyId = null;
+  document.getElementById('ed-detail-overlay').classList.add('active');
+  document.getElementById('ed-detail-content').innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+  await refreshEditorDetail();
+}
+
+async function refreshEditorDetail() {
+  const card = _editorCurrentCard;
+  if (!card) return;
+  const params = new URLSearchParams({
+    name: card.card_name,
+    set: card.set_name || '',
+    variant: card.variant_key || '',
+  });
+  if (card.tcgplayer_id) params.set('tcgplayer_id', card.tcgplayer_id);
+  if (card.scrydex_id) params.set('scrydex_id', card.scrydex_id);
+  try {
+    const d = await get('/api/editor/copies?' + params);
+    renderEditorDetail(card, d.copies || []);
+  } catch(e) {
+    document.getElementById('ed-detail-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderEditorDetail(card, copies) {
+  const el = document.getElementById('ed-detail-content');
+  const img = card.image_url
+    ? `<img src="${esc(card.image_url)}" alt="">`
+    : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.5rem;opacity:0.2;">🃏</div>';
+  const idLine = [
+    card.tcgplayer_id ? `TCG #${card.tcgplayer_id}` : null,
+    card.scrydex_id ? `Scrydex ${esc(card.scrydex_id)}` : null,
+  ].filter(Boolean).join(' · ') || '<span style="color:var(--red);">unmapped</span>';
+
+  const condOpts = ['NM','LP','MP','HP','DMG'];
+
+  const copyHtml = copies.map(c => {
+    const isEditing = String(c.id) === String(_editorEditingCopyId);
+    const lastUpd = c.last_price_update ? _fmtTime(c.last_price_update) : 'never';
+    return `<div class="ed-copy ${isEditing?'editing':''}" id="ed-copy-${esc(String(c.id))}">
+      <div class="ed-copy-row">
+        <div class="ed-copy-cond"><span class="ec-pill ${esc(c.condition||'')}">${esc(c.condition||'')}</span></div>
+        <div style="display:flex;flex-direction:column;gap:2px;">
+          <div class="ed-copy-bc">${esc(c.barcode||'')}</div>
+          <div style="font-size:0.7rem;color:var(--dim);">${esc(c.bin_label||'no bin')} · variant: ${esc(c.variant||'(none)')} · price set ${lastUpd}</div>
+        </div>
+        <div class="ed-copy-state ${esc(c.state||'')}">${esc(c.state||'')}</div>
+        <div class="ed-copy-price">$${parseFloat(c.current_price||0).toFixed(2)}</div>
+      </div>
+      <div class="ed-actions">
+        <button class="btn btn-sm" onclick="toggleEditCopy('${esc(String(c.id))}')">${isEditing?'Done':'✎ Edit'}</button>
+        <button class="btn btn-sm" onclick="refreshCopyPrice('${esc(String(c.id))}')">↻ Refresh price</button>
+        <button class="btn btn-sm" onclick="openRelink('${esc(String(c.id))}')">🔗 Relink</button>
+        <button class="btn btn-sm" onclick="reprintCopy('${esc(String(c.id))}')">🖨 Reprint</button>
+      </div>
+      <div class="ed-edit-panel">
+        <div class="ed-field">
+          <label>Condition</label>
+          <select id="cond-${esc(String(c.id))}">
+            ${condOpts.map(o => `<option value="${o}" ${c.condition===o?'selected':''}>${o}</option>`).join('')}
+          </select>
+          <button class="btn btn-sm btn-green" onclick="saveCondition('${esc(String(c.id))}')">Save</button>
+        </div>
+        <div class="ed-field">
+          <label>Variant</label>
+          <input id="var-${esc(String(c.id))}" value="${esc(c.variant||'')}" placeholder="(none)">
+          <button class="btn btn-sm btn-green" onclick="saveVariant('${esc(String(c.id))}')">Save</button>
+        </div>
+        <div style="font-size:0.7rem;color:var(--dim);">Saving condition or variant re-fetches the price from Scrydex.</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="ed-hero">
+      <div class="ed-img">${img}</div>
+      <div style="flex:1;min-width:0;">
+        <div class="ed-title">${esc(card.card_name)}${card.variant_label?` <span class="ec-vbadge">${esc(card.variant_label)}</span>`:''}</div>
+        <div class="ed-sub">${esc(card.set_name||'')}</div>
+        <div class="ed-sub" style="margin-top:6px;">${idLine}</div>
+        <div class="ed-sub" style="margin-top:6px;">${copies.length} copy${copies.length!==1?'ies':''} in stock</div>
+      </div>
+    </div>
+    <div>${copyHtml || '<div class="empty">No individual copies found.</div>'}</div>
+  `;
+}
+
+function closeEditorDetail() {
+  document.getElementById('ed-detail-overlay').classList.remove('active');
+  _editorCurrentCard = null;
+  _editorEditingCopyId = null;
+}
+
+function toggleEditCopy(copyId) {
+  _editorEditingCopyId = (_editorEditingCopyId === copyId) ? null : copyId;
+  refreshEditorDetail();
+}
+
+async function saveCondition(copyId) {
+  const newCond = document.getElementById(`cond-${copyId}`).value;
+  try {
+    const d = await post(`/api/editor/copies/${copyId}/condition`, { condition: newCond });
+    toast(`Condition updated → ${newCond}${d.current_price !== null ? ` · $${d.current_price.toFixed(2)}` : ''}`, 'green');
+    await refreshEditorDetail();
+    runEditorSearch();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function saveVariant(copyId) {
+  const variant = document.getElementById(`var-${copyId}`).value.trim();
+  try {
+    const d = await post(`/api/editor/copies/${copyId}/variant`, { variant });
+    toast(`Variant updated${d.current_price !== null ? ` · $${d.current_price.toFixed(2)}` : ''}`, 'green');
+    await refreshEditorDetail();
+    runEditorSearch();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function refreshCopyPrice(copyId) {
+  try {
+    const d = await post(`/api/editor/copies/${copyId}/refresh-price`, {});
+    toast(`Price refreshed → $${d.current_price.toFixed(2)}`, 'green');
+    await refreshEditorDetail();
+    runEditorSearch();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function reprintCopy(copyId) {
+  try {
+    const d = await post(`/api/editor/copies/${copyId}/reprint`, {});
+    const w = window.open('');
+    w.document.write(`<title>Barcode ${d.barcode}</title><img src="data:image/png;base64,${d.png_b64}" style="max-width:100%;" onload="setTimeout(()=>window.print(),200);">`);
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── Relink sub-modal ──────────────────────────────────────────────────────────
+function openRelink(copyId) {
+  _relinkTargetCopyId = copyId;
+  document.getElementById('rl-query').value = '';
+  document.getElementById('rl-results').innerHTML = '<div style="color:var(--dim);font-size:0.78rem;text-align:center;padding:20px;">Start typing.</div>';
+  document.getElementById('ed-relink-overlay').classList.add('active');
+  setTimeout(() => document.getElementById('rl-query').focus(), 50);
+}
+function closeRelink() {
+  document.getElementById('ed-relink-overlay').classList.remove('active');
+  _relinkTargetCopyId = null;
+}
+
+async function runRelinkSearch(q) {
+  const el = document.getElementById('rl-results');
+  el.innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+  try {
+    const d = await post('/api/editor/scrydex-search', { query: q, limit: 25 });
+    renderRelinkResults(d.results || []);
+  } catch(e) {
+    el.innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderRelinkResults(results) {
+  const el = document.getElementById('rl-results');
+  if (!results.length) {
+    el.innerHTML = '<div style="color:var(--dim);font-size:0.78rem;text-align:center;padding:20px;">No matches.</div>';
+    return;
+  }
+  window._rlCache = {};
+  el.innerHTML = results.map((r, i) => {
+    window._rlCache[i] = r;
+    const img = r.image ? `<img src="${esc(r.image)}" alt="">` : '';
+    const tag = r.tcgplayer_id ? '' : '<span class="rl-tag">Scrydex-only</span>';
+    const variant = r.variant && !['normal','holofoil'].includes((r.variant||'').toLowerCase())
+      ? ` · ${esc(r.variant)}` : '';
+    return `<div class="rl-row" onclick="confirmRelink(${i})">
+      <div class="rl-img">${img}</div>
+      <div class="rl-info">
+        <div class="rl-name">${esc(r.name||'')}${tag}</div>
+        <div class="rl-meta">${esc(r.set_name||'')}${r.card_number?' · #'+esc(r.card_number):''}${variant}</div>
+      </div>
+      <div class="rl-price">${r.market_price !== null ? '$'+r.market_price.toFixed(2) : '—'}</div>
+    </div>`;
+  }).join('');
+}
+
+async function confirmRelink(idx) {
+  const r = window._rlCache?.[idx];
+  if (!r || !_relinkTargetCopyId) return;
+  if (!await themedConfirm('Relink this copy?',
+      `Set identity to "${r.name}" (${r.set_name||''})${r.tcgplayer_id?` · TCG #${r.tcgplayer_id}`:''}? Image and price will refresh from Scrydex.`)) return;
+  try {
+    const d = await post(`/api/editor/copies/${_relinkTargetCopyId}/relink`, {
+      tcgplayer_id: r.tcgplayer_id,
+      scrydex_id:   r.scrydex_id,
+      variant:      r.variant,
+      card_name:    r.name,
+      set_name:     r.set_name,
+      card_number:  r.card_number,
+    });
+    toast(`Relinked${d.current_price !== null ? ` · $${d.current_price.toFixed(2)}` : ''}`, 'green');
+    closeRelink();
+    await refreshEditorDetail();
+    runEditorSearch();
   } catch(e) { toast(e.message, 'red'); }
 }
 
