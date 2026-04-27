@@ -5150,7 +5150,8 @@ function _renderBarcodeSection(panel, sessionId) {
             <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
                 <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${total}) — grouped by bin</div>
                 <div style="display:flex; gap:8px;">
-                    <button class="btn btn-secondary btn-sm" onclick="rebinSession('${sessionId}')" style="font-size:0.78rem;" title="Re-assign bins for this session in intake order — fixes scattered bins from older pushes">↻ Re-bin in intake order</button>
+                    <button class="btn btn-secondary btn-sm" onclick="rebinSession('${sessionId}', 'alpha')" style="font-size:0.78rem;" title="Re-assign bins alphabetically — first 100 alpha-sorted cards go to the earliest bin, etc.">↻ Re-bin A→Z</button>
+                    <button class="btn btn-secondary btn-sm" onclick="rebinSession('${sessionId}', 'intake')" style="font-size:0.78rem;" title="Re-assign bins in intake (created_at) order — only useful if items were entered one at a time with staggered timestamps">↻ Re-bin (intake)</button>
                     <button class="btn btn-primary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All (${total})</button>
                 </div>
             </div>
@@ -5192,14 +5193,16 @@ function printSessionBin(binLabel) {
     win.document.close();
 }
 
-async function rebinSession(sessionId) {
-    if (!confirm("Re-assign every STORED + DISPLAY card in this session to bins in intake order?\n\nThis updates raw_cards.bin_id — only safe if you haven't physically filed cards yet.")) return;
+async function rebinSession(sessionId, order) {
+    order = order || 'alpha';
+    const label = order === 'alpha' ? 'alphabetically' : 'in intake order';
+    if (!confirm(`Re-assign every STORED + DISPLAY card in this session ${label}?\n\nThis updates raw_cards.bin_id — only safe if you haven't physically filed cards yet.`)) return;
     try {
-        const r = await fetch(`/api/raw-cards/session/${sessionId}/rebin`, { method: 'POST' });
+        const r = await fetch(`/api/raw-cards/session/${sessionId}/rebin?order=${order}`, { method: 'POST' });
         const d = await r.json();
         if (!r.ok) { alert(d.error || 'Rebin failed'); return; }
         await _loadSessionBarcodes(sessionId);
-        alert(`Re-binned ${d.rebinned} cards into ${(d.summary||[]).length} bin(s).`);
+        alert(`Re-binned ${d.rebinned} cards into ${(d.summary||[]).length} bin slot(s) (${d.order}).`);
     } catch (e) {
         alert('Rebin failed: ' + e.message);
     }

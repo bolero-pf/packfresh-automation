@@ -1418,6 +1418,17 @@ def _push_session_worker(job_id, session_id, active):
         graded_items = [i for i in active if i.get("is_graded")]
         sealed_items = [i for i in active if i.get("product_type") != "raw" and not i.get("is_graded")]
 
+        # Stable alpha sort for raw cards so bin assignments track alpha — id
+        # is the tiebreaker so bulk-imported sessions (where every item shares
+        # a single created_at) still come out in a deterministic order rather
+        # than whatever physical order Postgres happens to return.
+        raw_items.sort(key=lambda i: (
+            (i.get("product_name") or "").lower(),
+            (i.get("set_name") or "").lower(),
+            i.get("card_number") or "",
+            str(i.get("id") or ""),
+        ))
+
         # Graded slabs
         for item in graded_items:
             results.append({
@@ -3037,7 +3048,10 @@ def push_raw_items(session_id):
           AND item_status IN ('good', 'damaged')
           AND is_mapped = TRUE
           AND pushed_at IS NULL
-        ORDER BY created_at ASC
+        ORDER BY LOWER(product_name) ASC,
+                 LOWER(COALESCE(set_name, '')) ASC,
+                 card_number ASC NULLS LAST,
+                 id ASC
     """, (session_id,))
 
     if requested_ids:
@@ -3046,10 +3060,11 @@ def push_raw_items(session_id):
     if not items:
         return jsonify({"error": "No unmapped raw items to push"}), 400
 
-    # Push order = intake order (created_at). Items already arrive in some
-    # natural order at intake (the order Sean entered/scanned them). Bin
-    # assignments need to grow in THAT order so that when labels are printed
-    # in the same order, bins are contiguous batches — not alternating.
+    # Push order = alphabetical with id as a stable tiebreaker. Sean files
+    # cards alphabetically, so bin growth needs to track alpha — A-1 holds
+    # the first 100 alphabetically, A-2 the next 100, etc. The id tiebreaker
+    # matters for bulk-imported sessions where many items share the same
+    # created_at and any second-level sort key (alpha, set, number) collides.
 
     results = []
     errors  = []
@@ -3133,16 +3148,19 @@ def get_session_raw_cards(session_id):
 @app.route("/api/raw-cards/session/<session_id>/rebin", methods=["POST"])
 def rebin_session(session_id):
     """
-    Re-assign bins for STORED + DISPLAY cards in this session, walking them
-    in intake (created_at) order so bins grow in the same order labels print.
+    Re-assign bins for STORED + DISPLAY cards in this session.
 
-    Use case: a session was pushed before push_raw_items respected intake
-    order (or when items are dropped/edited mid-session), leaving bin
-    assignments interleaved (5 in A-4, 3 in A-3, 6 in A-4 ...) when sorted
-    in intake order.
+    Modes (?order= or JSON body):
+      - "alpha"  (default) — alphabetical by card_name → set_name → card_number → barcode
+      - "intake"            — created_at order (with barcode tiebreaker)
+
+    Alpha is the default because Sean files cards alphabetically; bulk-imported
+    sessions all share a single `created_at` so intake mode falls back to a
+    barcode tiebreaker (still better than scrambled, but alpha matches the
+    physical filing).
 
     Process per state group (STORED uses storage bins, DISPLAY uses binders):
-      1. Read cards in created_at order.
+      1. Read cards in chosen order.
       2. NULL out bin_id (trigger decrements old bin counts).
       3. assign_bins / assign_display for the group's count.
       4. Walk cards in order, applying new bin_id batch by batch.
@@ -3150,12 +3168,27 @@ def rebin_session(session_id):
     if not assign_bins or not assign_display:
         return jsonify({"error": "storage module not available"}), 503
 
-    cards = db.query("""
+    body = request.get_json(silent=True) or {}
+    order = (request.args.get("order") or body.get("order") or "alpha").lower()
+    if order not in ("alpha", "intake"):
+        return jsonify({"error": f"unknown order={order!r}"}), 400
+
+    if order == "alpha":
+        order_sql = """
+            ORDER BY LOWER(card_name) ASC,
+                     LOWER(COALESCE(set_name, '')) ASC,
+                     card_number ASC NULLS LAST,
+                     barcode ASC
+        """
+    else:
+        order_sql = "ORDER BY created_at ASC, barcode ASC"
+
+    cards = db.query(f"""
         SELECT id, card_type, state
         FROM raw_cards
         WHERE intake_session_id = %s
           AND state IN ('STORED', 'DISPLAY')
-        ORDER BY created_at ASC
+        {order_sql}
     """, (session_id,))
 
     if not cards:
@@ -3163,7 +3196,7 @@ def rebin_session(session_id):
 
     # Split into (state, card_type) groups. STORED of different card_types
     # can't share bins (Pokemon vs Magic vs OnePiece live in different rows),
-    # but within a state+type the order from created_at is what we preserve.
+    # but within a state+type the order from the chosen mode is preserved.
     groups: dict[tuple[str, str], list[str]] = {}
     for c in cards:
         ctype = (c.get("card_type") or "pokemon").lower()
@@ -3208,7 +3241,12 @@ def rebin_session(session_id):
                 "count":     a["count"],
             })
 
-    return jsonify({"success": True, "rebinned": len(all_ids), "summary": summary})
+    return jsonify({
+        "success":  True,
+        "rebinned": len(all_ids),
+        "order":    order,
+        "summary":  summary,
+    })
 
 
 # MANUAL OVERRIDES
