@@ -2815,6 +2815,26 @@ def route_batch(session_id):
     return jsonify({"success": True, "count": len(item_ids)})
 
 
+@app.route("/api/ingest/session/<session_id>/lookup-barcode/<barcode>")
+def lookup_session_barcode(session_id, barcode):
+    """Resolve a scanned barcode to an intake_item in this session.
+    Returns 404 if the barcode isn't in this session — caller treats that as
+    'reject the scan, no state change'. Used by scanner-driven Route to jump
+    the review cursor to whichever card the staffer is physically holding."""
+    row = db.query_one("""
+        SELECT rc.intake_item_id, ii.session_id
+          FROM raw_cards rc
+          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+         WHERE rc.barcode = %s
+         LIMIT 1
+    """, (barcode,))
+    if not row:
+        return jsonify({"error": "Barcode not found"}), 404
+    if str(row["session_id"]) != session_id:
+        return jsonify({"error": "Barcode not in this session"}), 404
+    return jsonify({"intake_item_id": row["intake_item_id"]})
+
+
 @app.route("/api/ingest/session/<session_id>/route-progress")
 def route_progress(session_id):
     """Return routing session progress (how many reviewed, total)."""

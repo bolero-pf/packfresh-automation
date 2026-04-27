@@ -2464,8 +2464,18 @@ function _renderSessionCard() {
     }
     html += `</div>`;
 
-    // ── Accept + Nav ──
-    html += `<div style="display:flex; justify-content:center; gap:12px; margin-top:16px; align-items:center;">
+    // ── Scan input + warning ──
+    html += `<form id="rs-scan-form" onsubmit="return _rsScanSubmit(event);" style="display:flex; justify-content:center; margin-top:20px;" autocomplete="off">
+        <input type="text" id="rs-scan-input" autocomplete="off" placeholder="📷 Scan next card to commit + advance"
+               style="width:100%; max-width:360px; padding:9px 14px; font-size:0.9rem;
+                      background:var(--surface-2); border:1px solid var(--border);
+                      border-radius:6px; color:var(--text); text-align:center;
+                      letter-spacing:0.05em;">
+    </form>
+    <div id="rs-scan-warning" style="text-align:center; min-height:28px; margin-top:8px; max-width:520px; margin-left:auto; margin-right:auto;"></div>`;
+
+    // ── Manual Accept + Nav (fallback when no scanner is attached) ──
+    html += `<div style="display:flex; justify-content:center; gap:12px; margin-top:8px; align-items:center;">
         <button class="btn btn-secondary" onclick="_rsNav(-1)" ${_rsIndex === 0 ? 'disabled' : ''} style="padding:8px 20px;">&larr; Prev</button>
         <button class="btn btn-success" onclick="_rsAccept()" style="padding:10px 36px; font-size:1.05rem; font-weight:700;">
             <span style="font-size:0.7rem; opacity:0.7; display:block; margin-bottom:1px;">[Space / Enter]</span>
@@ -2475,6 +2485,7 @@ function _renderSessionCard() {
     </div>`;
 
     overlay.innerHTML = html;
+    _rsFocusScan();
 }
 
 async function _rsSetDest(destination) {
@@ -2531,16 +2542,12 @@ async function _rsSetDest(destination) {
         return;
     }
 
-    // Auto-advance after brief pause
-    setTimeout(() => {
-        if (_rsIndex < _rsItems.length - 1) {
-            _rsIndex++;
-            _renderSessionCard();
-            if (_rsItems[_rsIndex]?._enrichLoading) _rsEnrichCurrent();
-        } else {
-            _showSessionComplete();
-        }
-    }, 200);
+    // Refresh button highlight + counts on the current card. We do NOT
+    // auto-advance — Scan (or Accept) is the advance gesture so the staffer
+    // can examine the card, change their mind, then scan the next card to
+    // commit + jump.
+    _renderSessionCard();
+    _rsFocusScan();
 }
 
 function _rsShowSplit() {
@@ -2817,43 +2824,52 @@ function _rsKeyHandler(e) {
     else if (key === 'escape') { e.preventDefault(); exitRouteSession(); }
 }
 
+async function _rsCommitCurrent() {
+    // Save the current card's destination if it hasn't been recorded yet.
+    // Returns true on success, false if save failed (caller should not advance).
+    // Necessary even if destination hasn't changed: otherwise "accepted defaults"
+    // look indistinguishable from "never reviewed" on resume.
+    const item = _rsItems[_rsIndex];
+    if (!item) return false;
+    if (item.routing_reviewed_at) return true;
+    const dest = item.routing_destination || 'storage';
+    try {
+        const r = await fetch(`/api/ingest/session/${_rsSessionId}/route-card`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: item.id, destination: dest }),
+        });
+        if (!r.ok) {
+            alert('Could not record decision — try again.');
+            return false;
+        }
+        item.routing_reviewed_at = new Date().toISOString();
+        if (_routeData) {
+            const ri = _routeData.items.find(i => i.id === item.id);
+            if (ri) ri.routing_reviewed_at = item.routing_reviewed_at;
+        }
+        return true;
+    } catch(e) {
+        alert('Save failed (network): ' + e.message);
+        return false;
+    }
+}
+
 async function _rsAccept() {
-    // Accept the current destination — saves to server to mark reviewed, then advances.
-    // Necessary even if destination hasn't changed: otherwise "accepted defaults" look
-    // indistinguishable from "never reviewed" on resume.
+    // Manual advance (Space/Enter or Accept button): commit current, advance by 1.
+    // Scanner-driven advance lives in _rsHandleScan and jumps to the scanned card.
     const item = _rsItems[_rsIndex];
     if (!item) return;
     const dest = item.routing_destination || 'storage';
 
-    // Flash the current button
     const btn = document.getElementById(`rs-btn-${dest}`);
     if (btn) {
         btn.style.transform = 'scale(1.08)';
         setTimeout(() => { if (btn) btn.style.transform = ''; }, 150);
     }
 
-    // Save (marks routing_reviewed_at) unless already reviewed recently
-    if (!item.routing_reviewed_at) {
-        try {
-            const r = await fetch(`/api/ingest/session/${_rsSessionId}/route-card`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ item_id: item.id, destination: dest }),
-            });
-            if (!r.ok) {
-                alert('Could not record decision — try again.');
-                return;
-            }
-            item.routing_reviewed_at = new Date().toISOString();
-            if (_routeData) {
-                const ri = _routeData.items.find(i => i.id === item.id);
-                if (ri) ri.routing_reviewed_at = item.routing_reviewed_at;
-            }
-        } catch(e) {
-            alert('Save failed (network): ' + e.message);
-            return;
-        }
-    }
+    const ok = await _rsCommitCurrent();
+    if (!ok) return;
 
     setTimeout(() => {
         if (_rsIndex < _rsItems.length - 1) {
@@ -2864,6 +2880,74 @@ async function _rsAccept() {
             _showSessionComplete();
         }
     }, 200);
+}
+
+function _rsFocusScan() {
+    const input = document.getElementById('rs-scan-input');
+    if (input) { input.focus(); input.value = ''; }
+}
+
+function _rsShowScanWarning(msg, kind) {
+    const slot = document.getElementById('rs-scan-warning');
+    if (!slot) return;
+    const isInfo = kind === 'info';
+    const color  = isInfo ? 'var(--text-dim)' : '#f59e0b';
+    const border = isInfo ? 'var(--border)'   : '#f59e0b';
+    slot.innerHTML = `<div style="border:1px solid ${border}; color:${color}; background:${isInfo?'transparent':'rgba(245,158,11,0.06)'}; border-radius:6px; padding:6px 10px; font-size:0.82rem; text-align:center;">${msg}</div>`;
+    clearTimeout(_rsShowScanWarning._t);
+    _rsShowScanWarning._t = setTimeout(() => { if (slot) slot.innerHTML = ''; }, 3500);
+}
+
+async function _rsHandleScan(rawBarcode) {
+    const barcode = (rawBarcode || '').trim();
+    if (!barcode) return;
+
+    // Look up first — invalid scans must NOT commit the current card.
+    let lookup;
+    try {
+        const r = await fetch(`/api/ingest/session/${_rsSessionId}/lookup-barcode/${encodeURIComponent(barcode)}`);
+        if (!r.ok) {
+            _rsShowScanWarning(`Barcode ${barcode} is not in this session — already processed or wrong session.`);
+            _rsFocusScan();
+            return;
+        }
+        lookup = await r.json();
+    } catch(e) {
+        _rsShowScanWarning(`Lookup failed: ${e.message}`);
+        _rsFocusScan();
+        return;
+    }
+
+    const targetIdx = _rsItems.findIndex(i => i.id === lookup.intake_item_id);
+    if (targetIdx < 0) {
+        _rsShowScanWarning(`Card ${barcode} is in this session but not in the current view.`);
+        _rsFocusScan();
+        return;
+    }
+    if (targetIdx === _rsIndex) {
+        _rsShowScanWarning(`Already on this card — change destination or scan a different card.`, 'info');
+        _rsFocusScan();
+        return;
+    }
+
+    // Commit current with whatever destination is selected, then jump to scanned.
+    const ok = await _rsCommitCurrent();
+    if (!ok) { _rsFocusScan(); return; }
+
+    _rsIndex = targetIdx;
+    _renderSessionCard();
+    if (_rsItems[_rsIndex]?._enrichLoading) _rsEnrichCurrent();
+    _rsFocusScan();
+}
+
+function _rsScanSubmit(e) {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    const input = document.getElementById('rs-scan-input');
+    if (!input) return false;
+    const v = input.value;
+    input.value = '';
+    _rsHandleScan(v);
+    return false;
 }
 
 function _showSessionComplete() {
