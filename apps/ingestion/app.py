@@ -3175,19 +3175,24 @@ def rebin_session(session_id):
 
     if order == "alpha":
         order_sql = """
-            ORDER BY LOWER(card_name) ASC,
-                     LOWER(COALESCE(set_name, '')) ASC,
-                     card_number ASC NULLS LAST,
-                     barcode ASC
+            ORDER BY LOWER(rc.card_name) ASC,
+                     LOWER(COALESCE(rc.set_name, '')) ASC,
+                     rc.card_number ASC NULLS LAST,
+                     rc.barcode ASC
         """
     else:
-        order_sql = "ORDER BY created_at ASC, barcode ASC"
+        order_sql = "ORDER BY rc.created_at ASC, rc.barcode ASC"
 
+    # raw_cards has no card_type column — pull it from the current bin
+    # (storage_locations.card_type), with raw_cards.game as fallback for any
+    # rows that already lost their bin.
     cards = db.query(f"""
-        SELECT id, card_type, state
-        FROM raw_cards
-        WHERE intake_session_id = %s
-          AND state IN ('STORED', 'DISPLAY')
+        SELECT rc.id, rc.state, rc.game,
+               sl.card_type AS bin_card_type
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.intake_session_id = %s
+          AND rc.state IN ('STORED', 'DISPLAY')
         {order_sql}
     """, (session_id,))
 
@@ -3197,9 +3202,12 @@ def rebin_session(session_id):
     # Split into (state, card_type) groups. STORED of different card_types
     # can't share bins (Pokemon vs Magic vs OnePiece live in different rows),
     # but within a state+type the order from the chosen mode is preserved.
+    # Use the existing bin's card_type first; fall back to raw_cards.game
+    # (Scrydex game id) and let _canonical_card_type normalize.
     groups: dict[tuple[str, str], list[str]] = {}
     for c in cards:
-        ctype = (c.get("card_type") or "pokemon").lower()
+        raw_type = c.get("bin_card_type") or c.get("game") or "pokemon"
+        ctype = _canonical_card_type(raw_type)
         groups.setdefault((c["state"], ctype), []).append(str(c["id"]))
 
     # Step 1: clear bin_id on every card we're about to re-assign. The trigger
