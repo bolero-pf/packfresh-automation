@@ -3,11 +3,15 @@ storage.py — Raw card bin placement logic.
 
 Rules:
   - Bins hold 100 cards each, organized by card_type (pokemon / magic / etc.)
-  - Always fill the earliest available bin first (lowest partition_num)
-  - If a whole collection fits in one bin with room, put it there
-  - If it needs to be split, fill sequentially — no gaps, no trying to restore original location
-  - Returning cards go to the earliest bin with room (same algorithm, no home tracking)
-  - Placement is easy: find earliest bin(s) with room, fill, done.
+  - Best-fit single-bin: if a single bin can hold the WHOLE batch, pick the
+    bin with the least free space that still fits — consolidates partial bins
+    rather than fragmenting.
+  - Otherwise distribute across bins, taking the bin with the most free space
+    first (worst-fit), then the next-most, until placed.
+  - Same algorithm for storage bins, binders, and display cases — anywhere
+    cards land.
+  - Returning cards (count=1) degenerate to "place into the most-full bin
+    with at least one slot," which is the consolidating behavior we want.
 
 Admin UI manages storage_rows (add new row, assign card_type).
 This module only handles assignment + release.
@@ -41,12 +45,59 @@ def _canonical_card_type(card_type: str) -> str:
     return CARD_TYPE_MAP.get((card_type or "pokemon").lower().strip(), "other")
 
 
+def _best_fit_assign(bins: list[dict], count: int) -> list[dict]:
+    """Place `count` cards across `bins`, preferring a single-bin best fit.
+
+    Algorithm:
+      1. If any single bin has enough room for the whole batch, pick the bin
+         with the LEAST free space that still holds it (best-fit). This tops
+         off partial bins instead of opening more empty space.
+      2. Otherwise distribute, taking the bin with the MOST free space first,
+         then the next-most, until the batch is placed (or bins exhausted —
+         caller should pre-check capacity).
+
+    `bins` rows must include id, bin_label, and an `available` field. Returns
+    a list of {bin_id, bin_label, count} dicts. May return less than `count`
+    in total if combined capacity is insufficient — caller handles that case.
+    """
+    if count <= 0 or not bins:
+        return []
+
+    fits = [b for b in bins if b["available"] >= count]
+    if fits:
+        chosen = min(fits, key=lambda b: b["available"])
+        return [{
+            "bin_id":    str(chosen["id"]),
+            "bin_label": chosen["bin_label"],
+            "count":     count,
+        }]
+
+    # Distribute: largest free-space first.
+    sorted_bins = sorted(bins, key=lambda b: b["available"], reverse=True)
+    assignments = []
+    remaining = count
+    for b in sorted_bins:
+        if remaining <= 0:
+            break
+        if b["available"] <= 0:
+            continue
+        take = min(remaining, b["available"])
+        assignments.append({
+            "bin_id":    str(b["id"]),
+            "bin_label": b["bin_label"],
+            "count":     take,
+        })
+        remaining -= take
+    return assignments
+
+
 def assign_bins(card_type: str, count: int, db) -> list[dict]:
     """
-    Assign bins for `count` cards of `card_type`.
+    Assign bins for `count` cards of `card_type`. Best-fit single-bin if
+    possible, otherwise distribute starting from the bin with the most free
+    space.
 
-    Returns a list of assignments:
-        [{"bin_id": UUID, "bin_label": "A-1", "count": 47}, ...]
+    Returns [{"bin_id": UUID, "bin_label": "A-1", "count": 47}, ...].
 
     Raises ValueError if no bins available with sufficient combined capacity.
     """
@@ -55,11 +106,9 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
 
     ctype = _canonical_card_type(card_type)
 
-    # Fetch all bins for this card_type ordered (row_label, partition_num).
     # storage_rows.active = FALSE excludes seeded-but-physically-absent rows
     # (e.g. C/D were seeded by the original migration but Sean only built A
-    # and B in the warehouse). Composite sort guarantees we exhaust A-1..A-50
-    # before any of row B's bins get touched.
+    # and B in the warehouse).
     bins = db.query("""
         SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
                (sl.capacity - sl.current_count) AS available
@@ -68,7 +117,6 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
         WHERE sl.card_type = %s
           AND sl.current_count < sl.capacity
           AND COALESCE(sr.active, TRUE) = TRUE
-        ORDER BY sr.row_label ASC, sl.partition_num ASC
     """, (ctype,))
 
     if not bins:
@@ -82,19 +130,7 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
             f"Available: {total_available}. Add more storage rows."
         )
 
-    assignments = []
-    remaining   = count
-
-    for b in bins:
-        if remaining <= 0:
-            break
-        take = min(remaining, b["available"])
-        assignments.append({
-            "bin_id":    str(b["id"]),
-            "bin_label": b["bin_label"],
-            "count":     take,
-        })
-        remaining -= take
+    assignments = _best_fit_assign(bins, count)
 
     # NOTE: current_count is maintained by the update_bin_count trigger on raw_cards.
     # Do NOT increment here — that would double-count.
@@ -107,9 +143,11 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
 def assign_display(count: int, db) -> list[dict]:
     """
     Assign cards to binder display locations (location_type='binder').
+    Same best-fit-then-most-free algorithm as assign_bins().
 
-    Fills earliest binder with room first, same sequential pattern as assign_bins().
-    Returns [] if no binder capacity available (caller should fall back to storage).
+    Returns [] if no binder capacity available (caller should fall back to
+    storage). Returns a partial assignment if combined binder capacity is
+    less than `count` — caller handles overflow.
     """
     if count <= 0:
         return []
@@ -121,33 +159,14 @@ def assign_display(count: int, db) -> list[dict]:
         JOIN storage_rows sr ON sl.row_id = sr.id
         WHERE sr.location_type = 'binder'
           AND sl.current_count < sl.capacity
-        ORDER BY sr.row_label ASC, sl.partition_num ASC
     """)
 
     if not binders:
         return []
 
-    total_available = sum(b["available"] for b in binders)
-    if total_available < count:
-        # Partial assignment: fill what we can, caller handles the rest
-        if total_available == 0:
-            return []
-
-    assignments = []
-    remaining = count
-
-    for b in binders:
-        if remaining <= 0:
-            break
-        take = min(remaining, b["available"])
-        assignments.append({
-            "bin_id":    str(b["id"]),
-            "bin_label": b["bin_label"],
-            "count":     take,
-        })
-        remaining -= take
-
-    logger.info(f"Assigned {count - remaining} cards to binder(s): "
+    assignments = _best_fit_assign(binders, count)
+    placed = sum(a["count"] for a in assignments)
+    logger.info(f"Assigned {placed} cards to binder(s): "
                 f"{[a['bin_label'] for a in assignments]}")
     return assignments
 
@@ -167,7 +186,7 @@ def get_binder_capacity(db) -> list[dict]:
 def assign_display_case(count: int, db) -> list[dict]:
     """Assign cards to display-case locations (location_type='display_case').
     Mirrors assign_display, but for the customer-facing glass cases out front.
-    Returns [] if no display capacity is available."""
+    Same best-fit-then-most-free algorithm. Returns [] if no display capacity."""
     if count <= 0:
         return []
 
@@ -178,26 +197,14 @@ def assign_display_case(count: int, db) -> list[dict]:
         JOIN storage_rows sr ON sl.row_id = sr.id
         WHERE sr.location_type = 'display_case'
           AND sl.current_count < sl.capacity
-        ORDER BY sr.row_label ASC, sl.partition_num ASC
     """)
 
     if not cases:
         return []
 
-    assignments = []
-    remaining = count
-    for c in cases:
-        if remaining <= 0:
-            break
-        take = min(remaining, c["available"])
-        assignments.append({
-            "bin_id":    str(c["id"]),
-            "bin_label": c["bin_label"],
-            "count":     take,
-        })
-        remaining -= take
-
-    logger.info(f"Assigned {count - remaining} cards to display case(s): "
+    assignments = _best_fit_assign(cases, count)
+    placed = sum(a["count"] for a in assignments)
+    logger.info(f"Assigned {placed} cards to display case(s): "
                 f"{[a['bin_label'] for a in assignments]}")
     return assignments
 
