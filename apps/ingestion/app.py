@@ -3037,10 +3037,7 @@ def push_raw_items(session_id):
           AND item_status IN ('good', 'damaged')
           AND is_mapped = TRUE
           AND pushed_at IS NULL
-        ORDER BY LOWER(product_name) ASC,
-                 LOWER(COALESCE(set_name, '')) ASC,
-                 card_number ASC NULLS LAST,
-                 created_at ASC
+        ORDER BY created_at ASC
     """, (session_id,))
 
     if requested_ids:
@@ -3049,11 +3046,10 @@ def push_raw_items(session_id):
     if not items:
         return jsonify({"error": "No unmapped raw items to push"}), 400
 
-    # Push order = alphabetical → cards land in bins in alphabetical order
-    # (A-1 holds the first 100 alphabetically, A-2 the next 100, etc.).
-    # Combined with the storage.assign_bins composite (row, partition) sort,
-    # this gives Sean A-1 → A-2 → ... contiguous, matching how he physically
-    # files the cards.
+    # Push order = intake order (created_at). Items already arrive in some
+    # natural order at intake (the order Sean entered/scanned them). Bin
+    # assignments need to grow in THAT order so that when labels are printed
+    # in the same order, bins are contiguous batches — not alternating.
 
     results = []
     errors  = []
@@ -3132,6 +3128,87 @@ def get_session_raw_cards(session_id):
         ORDER BY rc.created_at ASC
     """, (session_id,))
     return jsonify({"cards": [dict(c) for c in cards]})
+
+
+@app.route("/api/raw-cards/session/<session_id>/rebin", methods=["POST"])
+def rebin_session(session_id):
+    """
+    Re-assign bins for STORED + DISPLAY cards in this session, walking them
+    in intake (created_at) order so bins grow in the same order labels print.
+
+    Use case: a session was pushed before push_raw_items respected intake
+    order (or when items are dropped/edited mid-session), leaving bin
+    assignments interleaved (5 in A-4, 3 in A-3, 6 in A-4 ...) when sorted
+    in intake order.
+
+    Process per state group (STORED uses storage bins, DISPLAY uses binders):
+      1. Read cards in created_at order.
+      2. NULL out bin_id (trigger decrements old bin counts).
+      3. assign_bins / assign_display for the group's count.
+      4. Walk cards in order, applying new bin_id batch by batch.
+    """
+    if not assign_bins or not assign_display:
+        return jsonify({"error": "storage module not available"}), 503
+
+    cards = db.query("""
+        SELECT id, card_type, state
+        FROM raw_cards
+        WHERE intake_session_id = %s
+          AND state IN ('STORED', 'DISPLAY')
+        ORDER BY created_at ASC
+    """, (session_id,))
+
+    if not cards:
+        return jsonify({"error": "No STORED/DISPLAY cards for this session"}), 400
+
+    # Split into (state, card_type) groups. STORED of different card_types
+    # can't share bins (Pokemon vs Magic vs OnePiece live in different rows),
+    # but within a state+type the order from created_at is what we preserve.
+    groups: dict[tuple[str, str], list[str]] = {}
+    for c in cards:
+        ctype = (c.get("card_type") or "pokemon").lower()
+        groups.setdefault((c["state"], ctype), []).append(str(c["id"]))
+
+    # Step 1: clear bin_id on every card we're about to re-assign. The trigger
+    # recounts current_count on each bin we leave, so capacity becomes truthful
+    # before we ask assign_bins for new placements.
+    all_ids = [cid for ids in groups.values() for cid in ids]
+    db.execute("""
+        UPDATE raw_cards SET bin_id = NULL
+        WHERE id::text = ANY(%s)
+    """, (all_ids,))
+
+    # Step 2: re-assign each group in intake order.
+    summary: list[dict] = []
+    for (state, ctype), card_ids in groups.items():
+        try:
+            if state == 'DISPLAY':
+                assignments = assign_display(len(card_ids), db)
+                # If binders are full, fall back to storage for the rest.
+                placed = sum(a["count"] for a in assignments)
+                if placed < len(card_ids):
+                    overflow = assign_bins(ctype, len(card_ids) - placed, db)
+                    assignments = assignments + overflow
+            else:
+                assignments = assign_bins(ctype, len(card_ids), db)
+        except ValueError as e:
+            return jsonify({"error": f"{state}/{ctype}: {e}"}), 400
+
+        idx = 0
+        for a in assignments:
+            batch = card_ids[idx:idx + a["count"]]
+            idx += a["count"]
+            db.execute("""
+                UPDATE raw_cards SET bin_id = %s
+                WHERE id::text = ANY(%s)
+            """, (a["bin_id"], batch))
+            summary.append({
+                "state":     state,
+                "bin_label": a["bin_label"],
+                "count":     a["count"],
+            })
+
+    return jsonify({"success": True, "rebinned": len(all_ids), "summary": summary})
 
 
 # MANUAL OVERRIDES

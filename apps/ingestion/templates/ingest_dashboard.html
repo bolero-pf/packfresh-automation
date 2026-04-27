@@ -4990,18 +4990,24 @@ function _renderSealedRawResults(d, sessionId, panel) {
         html += '</tbody></table>';
     }
 
-    // ── Barcode labels for raw cards (grouped by destination) ──────────────
+    // ── Barcode labels for raw cards (grouped by bin) ──────────────────────
+    // Push order = intake order, assign_bins fills earliest bin first, so the
+    // barcodes array per-result is already contiguous within a bin. We flatten,
+    // then group by bin_label to give Sean a stack-per-bin to file in batches.
     const rawResults = (d.results||[]).filter(r => r.action === 'raw_card_ingested' && r.barcodes?.length);
     if (rawResults.length) {
-        // Group barcodes by destination (storage vs display/binder)
-        const storageBarcodes = _sortBarcodeCards(rawResults.filter(r => r.destination === 'storage').flatMap(r => r.barcodes || []));
-        const binderBarcodes = _sortBarcodeCards(rawResults.filter(r => r.destination === 'display').flatMap(r => r.barcodes || []));
-        const allBarcodes = [...storageBarcodes, ...binderBarcodes];
-
-        // Store for print functions
+        const allBarcodes = rawResults.flatMap(r => r.barcodes || []);
         window._lastBarcodes = allBarcodes;
-        window._storageBarcodes = storageBarcodes;
-        window._binderBarcodes = binderBarcodes;
+
+        // Group by bin_label, preserve push order within each bin
+        const binMap = new Map();
+        for (const b of allBarcodes) {
+            const key = b.bin_label || '— No bin';
+            if (!binMap.has(key)) binMap.set(key, []);
+            binMap.get(key).push(b);
+        }
+        const binEntries = Array.from(binMap.entries()).sort(([a], [b]) => _binCompare(a, b));
+        window._lastBarcodesByBin = Object.fromEntries(binEntries);
 
         function _barcodeGrid(barcodes) {
             return barcodes.map(b => `
@@ -5021,43 +5027,34 @@ function _renderSealedRawResults(d, sessionId, panel) {
             `).join('');
         }
 
-        const hasStacks = storageBarcodes.length > 0 && binderBarcodes.length > 0;
+        // Sticky toolbar with per-bin print buttons — top of the section so Sean
+        // doesn't scroll past hundreds of cards.
+        const toolbarButtons = binEntries.map(([bin, group]) =>
+            `<button class="btn btn-primary btn-sm" onclick="printPushBin('${bin.replace(/'/g, "\\'")}')" style="font-size:0.78rem; white-space:nowrap;">
+                🖨 ${bin} (${group.length})
+            </button>`
+        ).join('');
 
         html += `<div style="margin-top:16px; border-top:1px solid var(--border); padding-top:14px;">`;
-
-        if (hasStacks) {
-            // Both stacks present — group with per-stack print buttons
-            html += `<div style="margin-bottom:16px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-                    <div style="font-weight:700; font-size:0.95rem; color:var(--accent);">🏷 Storage Barcodes (${storageBarcodes.length})</div>
-                    <button class="btn btn-primary btn-sm" onclick="printBarcodeStack('storage')" style="font-size:0.78rem;">🖨 Print Storage</button>
-                </div>
-                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-                    ${_barcodeGrid(storageBarcodes)}
-                </div>
-            </div>`;
-            html += `<div style="margin-bottom:16px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-                    <div style="font-weight:700; font-size:0.95rem; color:var(--green);">🏷 Binder Barcodes (${binderBarcodes.length})</div>
-                    <button class="btn btn-primary btn-sm" onclick="printBarcodeStack('binder')" style="font-size:0.78rem;">🖨 Print Binder</button>
-                </div>
-                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-                    ${_barcodeGrid(binderBarcodes)}
-                </div>
-            </div>`;
-            html += `<div style="text-align:center; margin-top:8px;">
-                <button class="btn btn-secondary btn-sm" onclick="printAllBarcodes()" style="font-size:0.78rem;">🖨 Print All (${allBarcodes.length})</button>
-            </div>`;
-        } else {
-            // Single stack — show flat with one print button
-            html += `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-                <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${allBarcodes.length})</div>
-                <button class="btn btn-primary btn-sm" onclick="printAllBarcodes()" style="font-size:0.78rem;">🖨 Print All</button>
+        html += `<div style="position:sticky; top:0; z-index:5; background:var(--surface); padding:10px 0; margin-bottom:14px; border-bottom:1px solid var(--border);">
+            <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
+                <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${allBarcodes.length}) — grouped by bin</div>
+                <button class="btn btn-primary btn-sm" onclick="printAllBarcodes()" style="font-size:0.78rem;">🖨 Print All (${allBarcodes.length})</button>
             </div>
-            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-                ${_barcodeGrid(allBarcodes)}
-            </div>`;
-        }
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">${toolbarButtons}</div>
+        </div>`;
+
+        html += binEntries.map(([bin, group]) => `
+            <div style="margin-bottom:18px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                    <div style="font-weight:700; font-size:0.95rem; color:var(--accent); font-family:monospace;">${bin} (${group.length})</div>
+                    <button class="btn btn-primary btn-sm" onclick="printPushBin('${bin.replace(/'/g, "\\'")}')" style="font-size:0.78rem;">🖨 Print ${bin}</button>
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                    ${_barcodeGrid(group)}
+                </div>
+            </div>
+        `).join('');
 
         html += `</div>`;
     }
@@ -5065,16 +5062,7 @@ function _renderSealedRawResults(d, sessionId, panel) {
     panel.innerHTML = html;
 }
 
-// Sort barcode cards using the current sort preference
-function _sortBarcodeCards(cards) {
-    const sorted = [...cards];
-    if (_currentSortBy === 'alpha') sorted.sort((a, b) => (a.card_name || '').localeCompare(b.card_name || ''));
-    else if (_currentSortBy === 'price-high') sorted.sort((a, b) => (b.current_price || 0) - (a.current_price || 0));
-    else if (_currentSortBy === 'price-low') sorted.sort((a, b) => (a.current_price || 0) - (b.current_price || 0));
-    return sorted;
-}
-
-// Store cards for print-all (sorted)
+// Store cards for print-all (in intake order from the API)
 let _sessionBarcodeCards = [];
 
 async function _loadSessionBarcodes(sessionId) {
@@ -5094,16 +5082,48 @@ async function _loadSessionBarcodes(sessionId) {
     } catch(e) { /* silent — barcodes are bonus UI */ }
 }
 
+// Sort bin labels (e.g. "A-3", "A-10", "B-1") by row letter, then numeric partition
+function _binSortKey(label) {
+    if (!label) return [999, 999];
+    const m = String(label).match(/^([A-Za-z]+)-?(\d+)?/);
+    if (!m) return [999, 999, label];
+    return [m[1].toUpperCase(), parseInt(m[2] || 0, 10)];
+}
+function _binCompare(a, b) {
+    const [ar, an] = _binSortKey(a);
+    const [br, bn] = _binSortKey(b);
+    if (ar !== br) return ar < br ? -1 : 1;
+    return an - bn;
+}
+
+// Group session cards by bin_label. Within each bin, preserve intake (created_at)
+// order — that's the order the API already returns them in, so we just don't
+// re-sort. The "missing bin" group is for cards still pending (state=REMOVED for
+// graded, no bin yet).
+function _groupCardsByBin(cards) {
+    const groups = new Map();
+    for (const c of cards) {
+        const key = c.bin_label || (c.state === 'REMOVED' ? '— Grading' : '— No bin');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(c);
+    }
+    return Array.from(groups.entries())
+        .sort(([a], [b]) => _binCompare(a, b));
+}
+
 function _renderBarcodeSection(panel, sessionId) {
-    const sorted = _sortBarcodeCards(_sessionBarcodeCards);
+    // Cards from /api/raw-cards/session/* are already in created_at (intake) order.
+    // We DO NOT re-sort here — bin assignment is contiguous in intake order, so
+    // grouping by bin while preserving array order gives us alpha-or-whatever
+    // batches that match how Sean physically files them.
+    const cards = _sessionBarcodeCards.slice();
+    const binGroups = _groupCardsByBin(cards);
 
-    // Group by state: STORED = storage bins, DISPLAY = binder, REMOVED = grading (no barcode)
-    const storageCards = sorted.filter(c => c.state === 'STORED');
-    const binderCards = sorted.filter(c => c.state === 'DISPLAY');
-    const hasGroups = storageCards.length > 0 && binderCards.length > 0;
+    // Cache bin → cards on window so print buttons can read them
+    window._sessionBinGroups = Object.fromEntries(binGroups);
 
-    function _barcodeCardGrid(cards) {
-        return cards.map(c => `
+    function _barcodeCardGrid(group) {
+        return group.map(c => `
             <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px;">
                 <img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:100%; border-radius:4px; background:#fff;" alt="barcode" loading="lazy">
                 <div style="font-size:0.78rem; color:var(--text-dim);">
@@ -5115,64 +5135,44 @@ function _renderBarcodeSection(panel, sessionId) {
         `).join('');
     }
 
-    // Store for stack printing
-    window._sessionStorageCards = storageCards;
-    window._sessionBinderCards = binderCards;
+    const total = cards.length;
+
+    // Sticky toolbar at the top: every bin's print button right where you can
+    // see it, no scrolling past hundreds of cards.
+    const toolbarButtons = binGroups.map(([bin, group]) =>
+        `<button class="btn btn-primary btn-sm" onclick="printSessionBin('${bin.replace(/'/g, "\\'")}')" style="font-size:0.78rem; white-space:nowrap;">
+            🖨 ${bin} (${group.length})
+        </button>`
+    ).join('');
+
+    let sectionHtml = `
+        <div style="position:sticky; top:0; z-index:5; background:var(--surface); padding:10px 0; margin-bottom:14px; border-bottom:1px solid var(--border);">
+            <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
+                <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${total}) — grouped by bin</div>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn btn-secondary btn-sm" onclick="rebinSession('${sessionId}')" style="font-size:0.78rem;" title="Re-assign bins for this session in intake order — fixes scattered bins from older pushes">↻ Re-bin in intake order</button>
+                    <button class="btn btn-primary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All (${total})</button>
+                </div>
+            </div>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">${toolbarButtons}</div>
+        </div>`;
+
+    // Per-bin sections — each gets its own header + print button so verifying
+    // is straightforward: stand at the bin, count, file the printed batch.
+    sectionHtml += binGroups.map(([bin, group]) => `
+        <div style="margin-bottom:18px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <div style="font-weight:700; font-size:0.95rem; color:var(--accent); font-family:monospace;">${bin} (${group.length})</div>
+                <button class="btn btn-primary btn-sm" onclick="printSessionBin('${bin.replace(/'/g, "\\'")}')" style="font-size:0.78rem;">🖨 Print ${bin}</button>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
+                ${_barcodeCardGrid(group)}
+            </div>
+        </div>
+    `).join('');
 
     const barcodeSection = document.createElement('div');
     barcodeSection.className = 'card barcode-session-section';
-    let sectionHtml = `
-        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-            <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${sorted.length})</div>
-            <div style="display:flex; gap:8px; align-items:center;">
-                <select onchange="_setSort(this.value); _renderBarcodeSection(document.getElementById('session-barcode-section'), '${sessionId}');" style="font-size:0.82rem; padding:4px 8px;">
-                    <option value="default" ${_currentSortBy==='default'?'selected':''}>Default</option>
-                    <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>A→Z</option>
-                    <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price ↓</option>
-                    <option value="price-low" ${_currentSortBy==='price-low'?'selected':''}>Price ↑</option>
-                </select>
-            </div>
-        </div>`;
-
-    if (hasGroups) {
-        // Show grouped with per-stack print buttons
-        if (storageCards.length) {
-            sectionHtml += `<div style="margin-bottom:14px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                    <div style="font-weight:600; font-size:0.88rem; color:var(--accent);">Storage (${storageCards.length})</div>
-                    <button class="btn btn-primary btn-sm" onclick="printSessionStack('storage')" style="font-size:0.75rem;">🖨 Print Storage</button>
-                </div>
-                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-                    ${_barcodeCardGrid(storageCards)}
-                </div>
-            </div>`;
-        }
-        if (binderCards.length) {
-            sectionHtml += `<div style="margin-bottom:14px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                    <div style="font-weight:600; font-size:0.88rem; color:var(--green);">Binder (${binderCards.length})</div>
-                    <button class="btn btn-primary btn-sm" onclick="printSessionStack('binder')" style="font-size:0.75rem;">🖨 Print Binder</button>
-                </div>
-                <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-                    ${_barcodeCardGrid(binderCards)}
-                </div>
-            </div>`;
-        }
-        sectionHtml += `<div style="text-align:center; margin-top:8px;">
-            <button class="btn btn-secondary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All (${sorted.length})</button>
-        </div>`;
-    } else {
-        // Single group — just show them all with a print button
-        sectionHtml += `<div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px;">
-            ${_barcodeCardGrid(sorted)}
-        </div>`;
-        if (sorted.length > 1) {
-            sectionHtml += `<div style="text-align:center; margin-top:8px;">
-                <button class="btn btn-primary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All (${sorted.length})</button>
-            </div>`;
-        }
-    }
-
     barcodeSection.innerHTML = sectionHtml;
 
     const existing = panel.querySelector('.barcode-session-section');
@@ -5180,36 +5180,43 @@ function _renderBarcodeSection(panel, sessionId) {
     panel.appendChild(barcodeSection);
 }
 
-function printBarcodesInOrder() {
-    const sorted = _sortBarcodeCards(_sessionBarcodeCards);
-    if (!sorted.length) return;
+// Print every label in a single bin, in the order they were ingested.
+function printSessionBin(binLabel) {
+    const cards = (window._sessionBinGroups || {})[binLabel] || [];
+    if (!cards.length) return;
     const win = window.open('', '_blank');
-    const imgs = sorted.map(c =>
+    const imgs = cards.map(c =>
         `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
     ).join('');
     win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
     win.document.close();
 }
 
-async function printAllBarcodesFromSession(sessionId) {
-    // Legacy fallback — use sorted version if available
-    if (_sessionBarcodeCards.length) {
-        printBarcodesInOrder();
-        return;
-    }
+async function rebinSession(sessionId) {
+    if (!confirm("Re-assign every STORED + DISPLAY card in this session to bins in intake order?\n\nThis updates raw_cards.bin_id — only safe if you haven't physically filed cards yet.")) return;
     try {
-        const r = await fetch(`/api/raw-cards/session/${sessionId}`);
+        const r = await fetch(`/api/raw-cards/session/${sessionId}/rebin`, { method: 'POST' });
         const d = await r.json();
-        const cards = d.cards || [];
-        if (!cards.length) return;
-        const sorted = _sortBarcodeCards(cards);
-        const win = window.open('', '_blank');
-        const imgs = sorted.map(c =>
-            `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
-        ).join('');
-        win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
-        win.document.close();
-    } catch(e) { alert('Failed to load barcodes: ' + e.message); }
+        if (!r.ok) { alert(d.error || 'Rebin failed'); return; }
+        await _loadSessionBarcodes(sessionId);
+        alert(`Re-binned ${d.rebinned} cards into ${(d.summary||[]).length} bin(s).`);
+    } catch (e) {
+        alert('Rebin failed: ' + e.message);
+    }
+}
+
+function printBarcodesInOrder() {
+    // Print every label in bin-then-intake order — matches the on-screen layout
+    // and the way Sean files (one bin's stack at a time).
+    const groups = _groupCardsByBin(_sessionBarcodeCards);
+    const ordered = groups.flatMap(([, group]) => group);
+    if (!ordered.length) return;
+    const win = window.open('', '_blank');
+    const imgs = ordered.map(c =>
+        `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
+    ).join('');
+    win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
+    win.document.close();
 }
 
 function printOneBarcode(barcodeId) {
@@ -5225,36 +5232,27 @@ function printOneBarcode(barcodeId) {
 }
 
 function printAllBarcodes() {
-    const barcodes = _sortBarcodeCards(window._lastBarcodes || []);
-    if (!barcodes.length) return;
+    // Print every barcode in bin order (matches the on-screen layout). The
+    // _lastBarcodesByBin map preserves intake-order within each bin.
+    const byBin = window._lastBarcodesByBin;
+    const flat = byBin
+        ? Object.keys(byBin).sort(_binCompare).flatMap(k => byBin[k])
+        : (window._lastBarcodes || []);
+    if (!flat.length) return;
     const win = window.open('', '_blank');
-    const imgs = barcodes.map(b =>
-        `<img src="data:image/png;base64,${b.png_b64}" style="width:62mm; display:block; page-break-after:always;">`
+    const imgs = flat.map(b =>
+        `<img src="data:image/png;base64,${b.png_b64}" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
     ).join('');
     win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
     win.document.close();
 }
 
-function printSessionStack(stack) {
-    const cards = stack === 'storage' ? (window._sessionStorageCards || [])
-                : stack === 'binder' ? (window._sessionBinderCards || [])
-                : _sortBarcodeCards(_sessionBarcodeCards);
-    if (!cards.length) return;
+// Print all barcodes from a single bin in the just-pushed result panel.
+function printPushBin(binLabel) {
+    const group = (window._lastBarcodesByBin || {})[binLabel] || [];
+    if (!group.length) return;
     const win = window.open('', '_blank');
-    const imgs = cards.map(c =>
-        `<img src="/api/raw-cards/barcode/${c.barcode}.png" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
-    ).join('');
-    win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
-    win.document.close();
-}
-
-function printBarcodeStack(stack) {
-    const barcodes = stack === 'storage' ? (window._storageBarcodes || [])
-                   : stack === 'binder' ? (window._binderBarcodes || [])
-                   : (window._lastBarcodes || []);
-    if (!barcodes.length) return;
-    const win = window.open('', '_blank');
-    const imgs = barcodes.map(b =>
+    const imgs = group.map(b =>
         `<img src="data:image/png;base64,${b.png_b64}" style="width:89mm; height:28mm; display:block; page-break-after:always;">`
     ).join('');
     win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
