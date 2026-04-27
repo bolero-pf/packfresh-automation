@@ -5062,7 +5062,30 @@ function _renderSealedRawResults(d, sessionId, panel) {
     panel.innerHTML = html;
 }
 
-// Store cards for print-all (in intake order from the API)
+// Apply the staff sort dropdown (_currentSortBy) to a list of barcode cards.
+// Cards arrive from /api/raw-cards/session/<id> in alpha order; this respects
+// whatever the user picked in the sort selector at the top of the dashboard.
+//   alpha       — A→Z by card_name
+//   intake      — created_at ASC (only meaningful for sessions entered one at
+//                 a time with staggered timestamps; bulk imports collapse here)
+//   price-high  — current_price DESC
+//   price-low   — current_price ASC
+//   default     — leaves API order (alpha) intact
+function _sortBarcodeCards(cards) {
+    const sorted = [...cards];
+    if (_currentSortBy === 'alpha') {
+        sorted.sort((a, b) => (a.card_name || '').localeCompare(b.card_name || ''));
+    } else if (_currentSortBy === 'intake') {
+        sorted.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+    } else if (_currentSortBy === 'price-high') {
+        sorted.sort((a, b) => (b.current_price || 0) - (a.current_price || 0));
+    } else if (_currentSortBy === 'price-low') {
+        sorted.sort((a, b) => (a.current_price || 0) - (b.current_price || 0));
+    }
+    return sorted;
+}
+
+// Store cards for print-all (in API alpha order)
 let _sessionBarcodeCards = [];
 
 async function _loadSessionBarcodes(sessionId) {
@@ -5112,11 +5135,11 @@ function _groupCardsByBin(cards) {
 }
 
 function _renderBarcodeSection(panel, sessionId) {
-    // Cards from /api/raw-cards/session/* are already in created_at (intake) order.
-    // We DO NOT re-sort here — bin assignment is contiguous in intake order, so
-    // grouping by bin while preserving array order gives us alpha-or-whatever
-    // batches that match how Sean physically files them.
-    const cards = _sessionBarcodeCards.slice();
+    // Apply the staff sort selector. Cards arrive alpha-sorted from the API,
+    // but if the user picked intake/price/etc we re-sort here. Bin grouping
+    // then preserves whatever order this produced — labels read top-to-bottom
+    // in the user's chosen sort within each bin section.
+    const cards = _sortBarcodeCards(_sessionBarcodeCards);
     const binGroups = _groupCardsByBin(cards);
 
     // Cache bin → cards on window so print buttons can read them
@@ -5149,7 +5172,13 @@ function _renderBarcodeSection(panel, sessionId) {
         <div style="position:sticky; top:0; z-index:5; background:var(--surface); padding:10px 0; margin-bottom:14px; border-bottom:1px solid var(--border);">
             <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
                 <div style="font-weight:700; font-size:0.95rem;">🏷 Barcode Labels (${total}) — grouped by bin</div>
-                <div style="display:flex; gap:8px;">
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <select onchange="_setSort(this.value); _renderBarcodeSection(document.getElementById('session-barcode-section'), '${sessionId}');" style="font-size:0.82rem; padding:4px 8px;" title="Order cards within each bin. Pick the order matching how this session was rebinned.">
+                        <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>A→Z</option>
+                        <option value="intake" ${_currentSortBy==='intake'?'selected':''}>Intake order</option>
+                        <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price ↓</option>
+                        <option value="price-low" ${_currentSortBy==='price-low'?'selected':''}>Price ↑</option>
+                    </select>
                     <button class="btn btn-secondary btn-sm" onclick="rebinSession('${sessionId}', 'alpha')" style="font-size:0.78rem;" title="Re-assign bins alphabetically — first 100 alpha-sorted cards go to the earliest bin, etc.">↻ Re-bin A→Z</button>
                     <button class="btn btn-secondary btn-sm" onclick="rebinSession('${sessionId}', 'intake')" style="font-size:0.78rem;" title="Re-assign bins in intake (created_at) order — only useful if items were entered one at a time with staggered timestamps">↻ Re-bin (intake)</button>
                     <button class="btn btn-primary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All (${total})</button>
@@ -5209,9 +5238,9 @@ async function rebinSession(sessionId, order) {
 }
 
 function printBarcodesInOrder() {
-    // Print every label in bin-then-intake order — matches the on-screen layout
-    // and the way Sean files (one bin's stack at a time).
-    const groups = _groupCardsByBin(_sessionBarcodeCards);
+    // Print every label in bin-then-(current-sort) order — matches the
+    // on-screen layout exactly so Sean files in the same order he sees.
+    const groups = _groupCardsByBin(_sortBarcodeCards(_sessionBarcodeCards));
     const ordered = groups.flatMap(([, group]) => group);
     if (!ordered.length) return;
     const win = window.open('', '_blank');
