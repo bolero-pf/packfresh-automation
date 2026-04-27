@@ -1620,17 +1620,19 @@ def _resolve_storage_card_type(item: dict, tcg_id, scrydex_id) -> tuple[str, dic
 
 def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
     """
-    Generate barcodes + create raw_cards rows in BARCODED_STORAGE / BARCODED_DISPLAY
-    state. NO bin assigned — bin is decided opportunistically at push time so
-    multiple in-flight sessions don't double-reserve the same slot.
+    Generate barcodes + create raw_cards rows in the destination-agnostic
+    BARCODED state. NO bin assigned and NO destination committed in the row —
+    Route decides the destination later, Push assigns the bin opportunistically.
 
-    `destination` is "storage" or "display" — controls which BARCODED_* state
-    we write. The transition to STORED/DISPLAY happens later via _place_raw_item.
+    `destination` is preserved in the response dict for backward-compatible UI
+    rendering, but no longer affects the state we write. _place_pre_barcoded
+    matches BARCODED (agnostic), legacy BARCODED_STORAGE/BARCODED_DISPLAY rows,
+    and forward-compat ROUTED_STORAGE/ROUTED_BINDER rows.
     """
     if not generate_barcode_id:
         raise RuntimeError("barcode_gen module not available")
 
-    state = "BARCODED_DISPLAY" if destination == "display" else "BARCODED_STORAGE"
+    state = "BARCODED"
 
     tcg_id    = item.get("tcgplayer_id")
     sx_id     = item.get("scrydex_id")
@@ -1704,9 +1706,14 @@ def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
 
 
 def _place_pre_barcoded(item: dict, destination: str) -> dict | None:
-    """If this intake_item already has BARCODED_* raw_cards rows, assign bins now
+    """If this intake_item already has pre-push raw_cards rows, assign bins now
     and transition them to STORED/DISPLAY. Returns the result dict or None when
     there are no pre-barcoded rows (caller falls back to legacy inline path).
+
+    Matches three families of pre-push state per destination:
+      - BARCODED (destination-agnostic, written by current Barcode step)
+      - BARCODED_STORAGE / BARCODED_DISPLAY (legacy split-by-destination state)
+      - ROUTED_STORAGE / ROUTED_BINDER (forward-compat for scanner-driven Route)
 
     Bin assignment is opportunistic — fills earliest-available bin first via
     assign_bins / assign_display, same algorithm push has always used. The
@@ -1715,13 +1722,16 @@ def _place_pre_barcoded(item: dict, destination: str) -> dict | None:
     if not item_id:
         return None
 
-    target_state = "BARCODED_DISPLAY" if destination == "display" else "BARCODED_STORAGE"
+    if destination == "display":
+        candidate_states = ["BARCODED", "BARCODED_DISPLAY", "ROUTED_BINDER"]
+    else:
+        candidate_states = ["BARCODED", "BARCODED_STORAGE", "ROUTED_STORAGE"]
     rows = db.query("""
         SELECT id, barcode, card_name, set_name, condition, card_number, game
         FROM raw_cards
-        WHERE intake_item_id = %s AND state = %s
+        WHERE intake_item_id = %s AND state = ANY(%s)
         ORDER BY created_at ASC
-    """, (str(item_id), target_state))
+    """, (str(item_id), candidate_states))
     if not rows:
         return None
 
@@ -1729,7 +1739,8 @@ def _place_pre_barcoded(item: dict, destination: str) -> dict | None:
         assignments = assign_display(len(rows), db)
         if not assignments:
             # Binders are full — fall back to storage for the entire item.
-            # The pre-barcoded BARCODED_DISPLAY rows get rewritten to STORED.
+            # The pre-push rows (BARCODED / BARCODED_DISPLAY / ROUTED_BINDER)
+            # get rewritten to STORED.
             card_type = _canonical_card_type(rows[0].get("game") or "pokemon")
             assignments = assign_bins(card_type, len(rows), db)
             new_state = "STORED"
@@ -3259,12 +3270,12 @@ def barcode_raw_items(session_id):
     """
     Print barcodes for raw items WITHOUT placing them in bins yet.
 
-    Creates raw_cards rows in BARCODED_STORAGE / BARCODED_DISPLAY state with
-    bin_id=NULL. Bins get assigned later when the user clicks "Push Live"
-    (see push_raw_items, which detects pre-barcoded rows and just runs
-    assign_bins on them).
+    Creates raw_cards rows in destination-agnostic BARCODED state with
+    bin_id=NULL. Destination is decided later at Route; bins get assigned at
+    Push (see push_raw_items, which detects pre-push rows via _place_pre_barcoded
+    and just runs assign_bins on them).
 
-    Customer-facing queries filter on state='STORED' so BARCODED_* rows are
+    Customer-facing queries filter on state='STORED' so pre-push rows are
     invisible to the kiosk / card_browser / card_manager — staff can attach
     physical labels at their own pace before the items go live.
 
