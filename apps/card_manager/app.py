@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify
 
 import db
-from storage import assign_bins, assign_display_case, get_display_case_capacity
+from storage import assign_bins, assign_display_case, get_display_case_capacity, get_binder_capacity
 from barcode_gen import generate_barcode_image
 from decimal import Decimal
 
@@ -1003,6 +1003,282 @@ def display_finalize_return():
     """, (barcodes,))
     if not cards:
         return jsonify({"error": "None of the scanned cards are currently on display"}), 400
+
+    by_game = defaultdict(list)
+    for c in cards:
+        by_game[c["game"]].append(c)
+
+    bin_summary = []
+    errors = []
+    for game, gcards in by_game.items():
+        try:
+            assignments = assign_bins(game, len(gcards), db)
+        except ValueError as e:
+            errors.append({"game": game, "error": str(e)})
+            continue
+
+        idx = 0
+        for a in assignments:
+            slice_ids = [str(gcards[idx + i]["id"]) for i in range(a["count"])]
+            idx += a["count"]
+            db.execute("""
+                UPDATE raw_cards
+                SET state = 'STORED', bin_id = %s, current_hold_id = NULL,
+                    stored_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id::text = ANY(%s)
+            """, (a["bin_id"], slice_ids))
+            bin_summary.append({
+                "bin_label": a["bin_label"],
+                "count":     a["count"],
+                "game":      game,
+                "cards":     [c["card_name"] for c in gcards if str(c["id"]) in set(slice_ids)][:5],
+            })
+
+    return jsonify({
+        "success":     not errors,
+        "stored":      sum(b["count"] for b in bin_summary),
+        "assignments": bin_summary,
+        "errors":      errors,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Binders — list, fill (suggest+scan+finalize), pull (scan+batch-bin)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/binders")
+def list_binders():
+    """List every binder with its current contents and capacity meter."""
+    binders = get_binder_capacity(db)
+    out = []
+    for b in binders:
+        cards = db.query("""
+            SELECT id, barcode, card_name, set_name, card_number, condition,
+                   current_price, image_url, variant, tcgplayer_id, scrydex_id,
+                   game, stored_at
+            FROM raw_cards
+            WHERE state = 'DISPLAY' AND bin_id = %s
+            ORDER BY card_name ASC
+        """, (b["id"],))
+        out.append({
+            "id":            str(b["id"]),
+            "bin_label":     b["bin_label"],
+            "capacity":      b["capacity"],
+            "current_count": b["current_count"],
+            "available":     b["available"],
+            "cards":         [_ser(dict(r)) for r in cards],
+        })
+    return jsonify({"binders": out})
+
+
+@app.route("/api/binders/<binder_id>/fill-suggest")
+def binder_fill_suggest(binder_id):
+    """Suggest STORED cards to add to a specific binder. Same scoring as
+    set-out but with two binder-specific rules:
+      - Cap ≤2 per (name, variant) counting what's *already in this binder*
+        plus the suggestions, so a binder with 2 Charizards never gets a
+        third recommendation.
+      - Honors the 'how many' input but never exceeds the binder's slot count."""
+    try:
+        count = max(1, min(int(request.args.get("count", 50)), 480))
+    except (TypeError, ValueError):
+        return jsonify({"error": "count must be an integer"}), 400
+
+    binder = db.query_one("""
+        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
+               (sl.capacity - sl.current_count) AS available, sr.location_type
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.id::text = %s
+    """, (binder_id,))
+    if not binder or binder["location_type"] != "binder":
+        return jsonify({"error": "Binder not found"}), 404
+
+    count = min(count, binder["available"])
+    if count <= 0:
+        return jsonify({"suggestions": [], "total": 0, "binder": _ser(dict(binder))})
+
+    # Existing contents — used to seed the by_card cap and avoid re-suggesting
+    # cards that are already at quota in this binder.
+    existing = db.query("""
+        SELECT card_name, COALESCE(LOWER(variant), '') AS variant
+        FROM raw_cards WHERE state = 'DISPLAY' AND bin_id = %s
+    """, (binder_id,))
+
+    candidates = db.query("""
+        WITH base AS (
+            SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+                   rc.condition, rc.current_price, rc.image_url, rc.variant,
+                   rc.tcgplayer_id, rc.scrydex_id, rc.game, sl.bin_label,
+                   (SELECT MAX(rarity) FROM scrydex_price_cache spc
+                    WHERE (rc.scrydex_id IS NOT NULL AND spc.scrydex_id = rc.scrydex_id)
+                       OR (rc.tcgplayer_id IS NOT NULL AND spc.tcgplayer_id = rc.tcgplayer_id)
+                   ) AS rarity,
+                   (SELECT MAX(weight) FROM featured_cards fc
+                    WHERE rc.card_name ILIKE '%%' || fc.name_pattern || '%%'
+                      AND (fc.game = '*' OR fc.game = COALESCE(rc.game, 'pokemon'))
+                   ) AS featured_boost
+            FROM raw_cards rc
+            LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+            WHERE rc.state = 'STORED'
+              AND rc.current_hold_id IS NULL
+              AND rc.current_price IS NOT NULL
+              AND rc.current_price >= 1.0
+        )
+        SELECT *,
+               LN(GREATEST(1, current_price)) * 5 AS price_score,
+               CASE
+                   WHEN rarity IS NULL THEN 0
+                   WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
+                   WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
+                   WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
+                   WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
+                   WHEN rarity ILIKE '%%uncommon%%' THEN 2
+                   ELSE 0
+               END AS rarity_score,
+               COALESCE(featured_boost, 0) AS featured_score
+        FROM base
+        ORDER BY (LN(GREATEST(1, current_price)) * 5
+                  + COALESCE(featured_boost, 0)
+                  + CASE
+                      WHEN rarity IS NULL THEN 0
+                      WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
+                      WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
+                      WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
+                      WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
+                      WHEN rarity ILIKE '%%uncommon%%' THEN 2
+                      ELSE 0
+                  END
+                 ) DESC
+        LIMIT %s
+    """, (count * 5,))
+
+    by_card = {}
+    for e in existing:
+        cv = (e["card_name"], e["variant"] or "")
+        by_card[cv] = by_card.get(cv, 0) + 1
+
+    chosen = []
+    by_set = {}
+    for c in candidates:
+        if len(chosen) >= count:
+            break
+        if c.get("condition") not in ("NM", "LP", "MP"):
+            continue  # binders are customer-touch; keep DMG/HP out
+        cv = (c["card_name"], (c.get("variant") or "").lower())
+        if by_card.get(cv, 0) >= 2:
+            continue
+        if by_set.get(c.get("set_name") or "", 0) >= 30:
+            continue  # softer set cap than display case (binders hold more)
+        chosen.append(c)
+        by_card[cv] = by_card.get(cv, 0) + 1
+        by_set[c.get("set_name") or ""] = by_set.get(c.get("set_name") or "", 0) + 1
+
+    return jsonify({
+        "suggestions": [_ser(dict(c)) for c in chosen],
+        "total":       len(chosen),
+        "binder":      _ser(dict(binder)),
+    })
+
+
+@app.route("/api/binders/<binder_id>/fill/scan", methods=["POST"])
+def binder_fill_scan(binder_id):
+    """Same as display set-out/scan — validate the card is in storage and
+    available, return its row for the scan list."""
+    barcode = (request.get_json() or {}).get("barcode", "").strip()
+    if not barcode:
+        return jsonify({"error": "No barcode provided"}), 400
+
+    card = db.query_one("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.variant,
+               rc.state, rc.current_hold_id, sl.bin_label
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.barcode = %s
+    """, (barcode,))
+    if not card:
+        return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
+    if card["state"] != "STORED":
+        return jsonify({"error": f"Card is {card['state']}, not in storage", "barcode": barcode, "card_name": card["card_name"]}), 409
+    if card.get("current_hold_id"):
+        return jsonify({"error": "Card is on hold for a customer", "barcode": barcode, "card_name": card["card_name"]}), 409
+
+    return jsonify({"success": True, "card": _ser(dict(card))})
+
+
+@app.route("/api/binders/<binder_id>/fill/finalize", methods=["POST"])
+def binder_fill_finalize(binder_id):
+    """Move every scanned card into this binder. Capacity-guarded."""
+    barcodes = [b for b in ((request.get_json() or {}).get("barcodes") or []) if b]
+    if not barcodes:
+        return jsonify({"error": "No barcodes provided"}), 400
+
+    binder = db.query_one("""
+        SELECT sl.id, sl.capacity, sl.current_count, sr.location_type
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.id::text = %s
+    """, (binder_id,))
+    if not binder or binder["location_type"] != "binder":
+        return jsonify({"error": "Binder not found"}), 404
+
+    available = binder["capacity"] - binder["current_count"]
+    if len(barcodes) > available:
+        return jsonify({"error": f"Binder has only {available} slots free; you scanned {len(barcodes)}. Pull cards out first or pick a different binder."}), 409
+
+    moved = db.execute("""
+        UPDATE raw_cards
+        SET state = 'DISPLAY', bin_id = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE barcode = ANY(%s) AND state = 'STORED' AND current_hold_id IS NULL
+    """, (binder_id, barcodes))
+
+    return jsonify({"success": True, "moved": moved, "scanned": len(barcodes)})
+
+
+@app.route("/api/binders/pull/scan", methods=["POST"])
+def binder_pull_scan():
+    """Validate a barcode for the Pull-from-Binder flow. Card must currently
+    live in any binder (state=DISPLAY, location_type=binder)."""
+    barcode = (request.get_json() or {}).get("barcode", "").strip()
+    if not barcode:
+        return jsonify({"error": "No barcode provided"}), 400
+
+    card = db.query_one("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.variant,
+               rc.state, rc.game, sl.bin_label, sr.location_type
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE rc.barcode = %s
+    """, (barcode,))
+    if not card:
+        return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
+    if card["state"] != "DISPLAY" or card.get("location_type") != "binder":
+        return jsonify({"error": f"Card is not currently in a binder (state={card['state']})", "barcode": barcode, "card_name": card["card_name"]}), 409
+
+    return jsonify({"success": True, "card": _ser(dict(card))})
+
+
+@app.route("/api/binders/pull/finalize", methods=["POST"])
+def binder_pull_finalize():
+    """Batch-move scanned binder cards back to storage. Same group-by-game +
+    one-assign_bins-pass-per-type pattern as the display Return All flow."""
+    from collections import defaultdict
+    barcodes = [b for b in ((request.get_json() or {}).get("barcodes") or []) if b]
+    if not barcodes:
+        return jsonify({"error": "No barcodes provided"}), 400
+
+    cards = db.query("""
+        SELECT rc.id, rc.barcode, rc.card_name, COALESCE(rc.game, 'pokemon') AS game
+        FROM raw_cards rc
+        JOIN storage_locations sl ON rc.bin_id = sl.id
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE rc.barcode = ANY(%s) AND rc.state = 'DISPLAY' AND sr.location_type = 'binder'
+    """, (barcodes,))
+    if not cards:
+        return jsonify({"error": "None of the scanned cards are currently in a binder"}), 400
 
     by_game = defaultdict(list)
     for c in cards:
