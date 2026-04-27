@@ -3132,15 +3132,24 @@ def get_raw_barcode(barcode_id):
 
 @app.route("/api/raw-cards/session/<session_id>")
 def get_session_raw_cards(session_id):
-    """List all raw cards ingested from a session, with bin assignments."""
+    """List all raw cards ingested from a session, with bin assignments.
+
+    Sorted alphabetically (card_name → set_name → card_number → barcode) so
+    the barcoding UI's bin groups read top-to-bottom in alpha order. Bulk
+    imports give every row identical created_at, so created_at sort would
+    show non-deterministic order within each bin.
+    """
     cards = db.query("""
         SELECT rc.barcode, rc.card_name, rc.set_name, rc.condition,
-               rc.current_price, rc.state, rc.image_url,
+               rc.current_price, rc.state, rc.image_url, rc.card_number,
                sl.bin_label, sl.card_type
         FROM raw_cards rc
         LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
         WHERE rc.intake_session_id = %s
-        ORDER BY rc.created_at ASC
+        ORDER BY LOWER(rc.card_name) ASC,
+                 LOWER(COALESCE(rc.set_name, '')) ASC,
+                 rc.card_number ASC NULLS LAST,
+                 rc.barcode ASC
     """, (session_id,))
     return jsonify({"cards": [dict(c) for c in cards]})
 
