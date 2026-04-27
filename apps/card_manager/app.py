@@ -1043,6 +1043,102 @@ def display_finalize_return():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Sell (POS) — scan stream → batch Shopify draft listings → mark PENDING_SALE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/sell/scan", methods=["POST"])
+def sell_scan():
+    """Validate a barcode for the Sell flow. Card must be physically present
+    and not already committed elsewhere (no holds, not already mid-sale)."""
+    barcode = (request.get_json() or {}).get("barcode", "").strip()
+    if not barcode:
+        return jsonify({"error": "No barcode provided"}), 400
+
+    card = db.query_one("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.variant,
+               rc.tcgplayer_id, rc.state, rc.current_hold_id, sl.bin_label,
+               sr.location_type
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE rc.barcode = %s
+    """, (barcode,))
+    if not card:
+        return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
+    if card.get("current_hold_id"):
+        return jsonify({"error": "Card is on hold for a customer", "barcode": barcode, "card_name": card["card_name"]}), 409
+    # Sellable from anywhere physically in the store. PENDING_SALE means
+    # someone else already started ringing it up; PENDING_RETURN/MISSING/GONE
+    # are not currently holdable.
+    if card["state"] not in ("STORED", "DISPLAY"):
+        return jsonify({"error": f"Card is {card['state']}, can't ring up", "barcode": barcode, "card_name": card["card_name"]}), 409
+
+    return jsonify({"success": True, "card": _ser(dict(card))})
+
+
+@app.route("/api/sell/finalize", methods=["POST"])
+def sell_finalize():
+    """Finalize an in-store sale: for every scanned barcode, create a Shopify
+    draft listing (SKU = barcode) and mark the card PENDING_SALE. The Shopify
+    POS device then rings each card up by scanning the same SKU; the existing
+    orders/create webhook flips PENDING_SALE → SOLD on payment."""
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return jsonify({"error": "Shopify not configured"}), 503
+
+    barcodes = [b for b in ((request.get_json() or {}).get("barcodes") or []) if b]
+    if not barcodes:
+        return jsonify({"error": "No barcodes provided"}), 400
+
+    cards = db.query("""
+        SELECT id, barcode, card_name, set_name, card_number, condition,
+               current_price, image_url, tcgplayer_id, state, current_hold_id
+        FROM raw_cards
+        WHERE barcode = ANY(%s)
+    """, (barcodes,))
+
+    found_by_barcode = {c["barcode"]: c for c in cards}
+    listings = []
+    skipped  = []
+
+    for bc in barcodes:
+        card = found_by_barcode.get(bc)
+        if not card:
+            skipped.append({"barcode": bc, "reason": "not found"})
+            continue
+        if card.get("current_hold_id") or card["state"] not in ("STORED", "DISPLAY"):
+            skipped.append({"barcode": bc, "reason": f"state={card['state']}"})
+            continue
+
+        try:
+            listing = _create_raw_listing(dict(card))
+            db.execute("""
+                UPDATE raw_cards
+                SET state = 'PENDING_SALE', current_hold_id = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (str(card["id"]),))
+            listings.append({
+                "barcode":    bc,
+                "card_name":  card["card_name"],
+                "condition":  card["condition"],
+                "price":      float(card.get("current_price") or 0),
+                "product_id": listing["product_id"],
+                "variant_id": listing["variant_id"],
+                "title":      listing["title"],
+            })
+        except Exception as e:
+            logger.exception(f"Sell finalize failed for {bc}: {e}")
+            skipped.append({"barcode": bc, "reason": str(e)})
+
+    return jsonify({
+        "success":  bool(listings),
+        "listings": listings,
+        "skipped":  skipped,
+        "total":    sum(l["price"] for l in listings),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Binders — list, fill (suggest+scan+finalize), pull (scan+batch-bin)
 # ═══════════════════════════════════════════════════════════════════════════════
 

@@ -297,6 +297,9 @@
     <div class="nav-item" onclick="showView('binders')" id="nav-binders">
       📒 Binders
     </div>
+    <div class="nav-item" onclick="showView('sell')" id="nav-sell">
+      💵 Sell
+    </div>
     <div class="nav-item" onclick="showView('editor')" id="nav-editor">
       ✎ Card Editor
     </div>
@@ -357,6 +360,13 @@
       <div class="page-title">Binders</div>
       <div class="page-sub">Customer-browse binders. Fill from storage with the same scoring algorithm; pull cards out via scan flow.</div>
       <div id="binders-content"><div class="empty"><div class="spinner"></div></div></div>
+    </div>
+
+    <!-- Sell (POS) -->
+    <div class="view" id="view-sell">
+      <div class="page-title">Sell at Register</div>
+      <div class="page-sub">Scan cards from the binders or display case. We create a Shopify draft listing per card with the barcode as the SKU — the POS device then scans the same SKU to ring it up.</div>
+      <div id="sell-content"></div>
     </div>
 
     <!-- Featured Cards -->
@@ -431,6 +441,7 @@ function showView(name) {
   if (name === 'editor')   document.getElementById('editor-q').focus();
   if (name === 'display')  loadDisplay();
   if (name === 'binders')  loadBinders();
+  if (name === 'sell')     renderSell();
   if (name === 'featured') loadFeatured();
 }
 
@@ -671,6 +682,10 @@ async function handleScan(barcode) {
   if (_displayMode === 'binder-pull') { await handleBinderPullScan(barcode); return; }
 
   const activeView = document.querySelector('.view.active')?.id;
+
+  // Sell view doesn't use an overlay — scanner is "armed" whenever the view
+  // is active. Staff just walks up to the laptop and starts ringing things up.
+  if (activeView === 'view-sell') { await handleSellScan(barcode); return; }
 
   if (activeView === 'view-hold-detail' && _currentHoldId) {
     // Pull scan
@@ -1842,6 +1857,135 @@ async function handleBinderPullScan(barcode) {
 function undoBinderPullScan(idx) {
   _binderPullScanned.splice(idx, 1);
   renderBinderPullScanStep();
+}
+
+// ── Sell (POS) ────────────────────────────────────────────────────────────────
+let _sellCart = [];          // array of card objects (most recent first)
+let _sellLastResult = null;  // remembered after finalize so the success view sticks
+
+function renderSell() {
+  const el = document.getElementById('sell-content');
+  if (_sellLastResult) {
+    renderSellResult(_sellLastResult);
+    return;
+  }
+
+  const total = _sellCart.reduce((s, c) => s + parseFloat(c.current_price || 0), 0);
+  el.innerHTML = `
+    <div class="stats-bar" style="margin-bottom:14px;">
+      <div class="stat-box"><div class="stat-label">In Cart</div><div class="stat-val" style="color:var(--green);">${_sellCart.length}</div></div>
+      <div class="stat-box"><div class="stat-label">Subtotal</div><div class="stat-val" style="font-family:var(--mono);">$${total.toFixed(2)}</div></div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:var(--surface);border:1.5px dashed var(--accent);border-radius:10px;margin-bottom:14px;">
+      <span style="font-size:1.4rem;">🔍</span>
+      <div style="font-size:0.88rem;color:var(--dim);">Scanner is armed. Scan a card to add it to the cart.</div>
+    </div>
+
+    ${_sellCart.length === 0
+      ? '<div class="empty"><div class="empty-icon">💵</div><p>No cards in cart yet.</p></div>'
+      : `<div style="display:flex;flex-direction:column;gap:6px;">
+          ${_sellCart.map((c, i) => `
+            <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--surface);border:1.5px solid var(--border);border-radius:10px;">
+              ${c.image_url?`<img src="${esc(c.image_url)}" style="width:36px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">`:''}
+              <div style="flex:1;min-width:0;">
+                <div style="font-weight:600;">${esc(c.card_name)}</div>
+                <div style="font-size:0.75rem;color:var(--dim);">${esc(c.condition||'')} · ${esc(c.set_name||'')}${c.bin_label?` · from ${esc(c.bin_label)}`:''}</div>
+                <div style="font-family:var(--mono);font-size:0.7rem;color:var(--dim);">${esc(c.barcode)}</div>
+              </div>
+              <div class="ec-price" style="font-size:1.05rem;">$${parseFloat(c.current_price||0).toFixed(2)}</div>
+              <button class="btn btn-sm" style="color:var(--red);background:none;border:none;" onclick="removeFromSellCart(${i})">×</button>
+            </div>
+          `).join('')}
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
+          <button class="btn" onclick="clearSellCart()">Clear Cart</button>
+          <button class="btn btn-green" onclick="finalizeSell()">Send to POS · $${total.toFixed(2)}</button>
+        </div>`
+    }
+  `;
+}
+
+async function handleSellScan(barcode) {
+  if (_sellLastResult) {
+    // After finalizing, fresh scan starts a new cart.
+    _sellLastResult = null;
+    _sellCart = [];
+  }
+  if (_sellCart.some(c => c.barcode === barcode)) {
+    flash('green');
+    toast('Already in cart', 'amber');
+    return;
+  }
+  try {
+    const d = await post('/api/sell/scan', { barcode });
+    _sellCart.unshift(d.card);
+    flash('green');
+    toast(`+ ${d.card.card_name} · $${parseFloat(d.card.current_price||0).toFixed(2)}`, 'green');
+    renderSell();
+  } catch(e) {
+    flash('red');
+    toast(`✕ ${e.message}`, 'red');
+  }
+}
+
+function removeFromSellCart(idx) {
+  _sellCart.splice(idx, 1);
+  renderSell();
+}
+
+async function clearSellCart() {
+  if (!_sellCart.length) return;
+  if (!await themedConfirm('Clear cart', 'Remove all cards from the register cart? They stay in inventory — nothing is sold.')) return;
+  _sellCart = [];
+  renderSell();
+}
+
+async function finalizeSell() {
+  if (!_sellCart.length) return;
+  if (!await themedConfirm('Send to POS', `Create ${_sellCart.length} Shopify draft listing${_sellCart.length===1?'':'s'} so the register can ring them up?`)) return;
+  try {
+    const d = await post('/api/sell/finalize', {
+      barcodes: _sellCart.map(c => c.barcode),
+    });
+    _sellLastResult = d;
+    _sellCart = [];
+    renderSell();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+function renderSellResult(d) {
+  const el = document.getElementById('sell-content');
+  el.innerHTML = `
+    <div style="font-size:1.1rem;font-weight:700;color:var(--green);margin-bottom:6px;">
+      ✓ ${d.listings.length} listing${d.listings.length===1?'':'s'} sent to POS
+    </div>
+    <div style="font-size:0.85rem;color:var(--dim);margin-bottom:18px;">
+      Ring up at the register by scanning each barcode. Total: <strong style="color:var(--text);font-family:var(--mono);">$${parseFloat(d.total||0).toFixed(2)}</strong>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;">
+      ${(d.listings||[]).map(l => `
+        <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:rgba(74,222,128,0.06);border:1px solid var(--green);border-radius:10px;">
+          <div style="flex:1;">
+            <div style="font-weight:600;">${esc(l.title)}</div>
+            <div style="font-family:var(--mono);font-size:0.72rem;color:var(--dim);">${esc(l.barcode)}</div>
+          </div>
+          <div class="ec-price" style="font-size:1.05rem;">$${parseFloat(l.price||0).toFixed(2)}</div>
+        </div>
+      `).join('')}
+    </div>
+    ${(d.skipped||[]).length ? `
+      <div style="background:rgba(248,113,113,0.08);border:1px solid var(--red);border-radius:8px;padding:10px;margin-bottom:14px;font-size:0.82rem;">
+        ⚠ Skipped ${d.skipped.length}: ${d.skipped.map(s => `${esc(s.barcode)} (${esc(s.reason)})`).join(', ')}
+      </div>` : ''}
+    <button class="btn btn-ghost" style="width:100%;padding:12px;" onclick="newSale()">+ New Sale</button>
+  `;
+}
+
+function newSale() {
+  _sellLastResult = null;
+  _sellCart = [];
+  renderSell();
 }
 
 async function finalizeBinderPull() {
