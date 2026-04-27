@@ -1110,12 +1110,10 @@ async function refreshCopyPrice(copyId) {
   } catch(e) { toast(e.message, 'red'); }
 }
 
-async function reprintCopy(copyId) {
-  try {
-    const d = await post(`/api/editor/copies/${copyId}/reprint`, {});
-    const w = window.open('');
-    w.document.write(`<title>Barcode ${d.barcode}</title><img src="data:image/png;base64,${d.png_b64}" style="max-width:100%;" onload="setTimeout(()=>window.print(),200);">`);
-  } catch(e) { toast(e.message, 'red'); }
+function reprintCopy(copyId) {
+  // GET endpoint returns the PNG directly — open in a new tab so the
+  // browser can render + print it without us round-tripping base64 over JSON.
+  window.open(`/api/editor/copies/${copyId}/barcode-image`, '_blank');
 }
 
 // ── Relink sub-modal ──────────────────────────────────────────────────────────

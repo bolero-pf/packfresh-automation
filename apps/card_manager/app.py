@@ -783,7 +783,10 @@ def editor_search():
     page_size  = 24
     offset     = (page - 1) * page_size
 
-    filters = []
+    # Editor grid mirrors kiosk's view (state='STORED' AND current_hold_id IS NULL)
+    # so prices and counts reflect what's actually saleable. Repairs to non-saleable
+    # rows (PULLED/MISSING/PENDING_*) still happen via direct barcode search.
+    filters = ["state = 'STORED'", "current_hold_id IS NULL"]
     params  = []
     if q:
         # Barcode is unique; if the query looks like one, do an exact match
@@ -791,7 +794,7 @@ def editor_search():
         filters.append("(card_name ILIKE %s OR set_name ILIKE %s OR card_number ILIKE %s OR barcode = %s)")
         params += [f"%{q}%", f"%{q}%", f"%{q}%", q]
 
-    where = " AND ".join(filters) if filters else "TRUE"
+    where = " AND ".join(filters)
 
     group_key = ("card_name, set_name, tcgplayer_id, "
                  "CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') "
@@ -810,22 +813,26 @@ def editor_search():
             set_name,
             tcgplayer_id,
             MAX(scrydex_id) AS scrydex_id,
-            MAX(variant) AS variant_raw,
-            CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
-                 THEN '' ELSE variant END AS variant_key,
+            MAX(variant_raw) AS variant_raw,
+            variant_key,
             MAX(image_url) AS image_url,
-            COUNT(*) AS total_qty,
-            MIN(current_price) AS min_price,
-            MAX(current_price) AS max_price,
+            SUM(cond_qty) AS total_qty,
+            MIN(min_price) AS min_price,
+            MAX(max_price) AS max_price,
             jsonb_object_agg(condition, cond_qty) AS conditions
         FROM (
-            SELECT card_name, set_name, tcgplayer_id, scrydex_id, variant,
+            SELECT card_name, set_name, tcgplayer_id, scrydex_id,
+                   variant AS variant_raw,
+                   CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
+                        THEN '' ELSE variant END AS variant_key,
                    image_url, condition,
                    COUNT(*) AS cond_qty,
-                   MIN(current_price) AS current_price
+                   MIN(current_price) AS min_price,
+                   MAX(current_price) AS max_price
             FROM raw_cards
             WHERE {where}
-            GROUP BY card_name, set_name, tcgplayer_id, scrydex_id, variant, image_url, condition
+            GROUP BY card_name, set_name, tcgplayer_id, scrydex_id,
+                     variant_raw, variant_key, image_url, condition
         ) sub
         GROUP BY card_name, set_name, tcgplayer_id, variant_key
         ORDER BY card_name ASC
@@ -1020,36 +1027,43 @@ def _lookup_cache_image(scrydex_id, tcgplayer_id):
 
 def _lookup_cache_price(scrydex_id, tcgplayer_id, condition, variant):
     """Pull USD raw price from scrydex_price_cache for (id, condition, variant).
-    Falls back to NM if the requested condition has no row. Returns Decimal or None."""
+    Tries: (cond, variant) → (NM, variant) → (cond, no variant) → (NM, no variant).
+    Returns Decimal or None."""
     cond_map = {"DMG": "DM"}  # Scrydex stores Damaged as 'DM'
     cache_cond = cond_map.get((condition or "").upper(), (condition or "NM").upper())
 
-    base_where = ["product_type = 'card'", "price_type = 'raw'", "market_price IS NOT NULL"]
-    base_params = []
+    id_where = []
+    id_params = []
     if scrydex_id:
-        base_where.append("scrydex_id = %s")
-        base_params.append(scrydex_id)
+        id_where.append("scrydex_id = %s")
+        id_params.append(scrydex_id)
     elif tcgplayer_id:
-        base_where.append("tcgplayer_id = %s")
-        base_params.append(int(tcgplayer_id))
+        id_where.append("tcgplayer_id = %s")
+        id_params.append(int(tcgplayer_id))
     else:
         return None
 
-    if variant:
-        base_where.append("COALESCE(variant,'') = COALESCE(%s,'')")
-        base_params.append(variant)
+    cond_chain = [cache_cond] if cache_cond == "NM" else [cache_cond, "NM"]
+    variant_chain = [variant, None] if variant else [None]
 
-    for cond in (cache_cond, "NM") if cache_cond != "NM" else (cache_cond,):
-        sql = f"""
-            SELECT {_USD_PRICE_EXPR} AS price_usd
-            FROM scrydex_price_cache
-            WHERE {' AND '.join(base_where)} AND condition = %s
-            ORDER BY fetched_at DESC NULLS LAST
-            LIMIT 1
-        """
-        row = db.query_one(sql, tuple(base_params) + (cond,))
-        if row and row.get("price_usd") is not None:
-            return Decimal(str(row["price_usd"]))
+    for v in variant_chain:
+        for c in cond_chain:
+            where = list(id_where) + ["product_type = 'card'", "price_type = 'raw'",
+                                      "market_price IS NOT NULL", "condition = %s"]
+            params = list(id_params) + [c]
+            if v:
+                where.append("variant = %s")
+                params.append(v)
+            sql = f"""
+                SELECT {_USD_PRICE_EXPR} AS price_usd
+                FROM scrydex_price_cache
+                WHERE {' AND '.join(where)}
+                ORDER BY fetched_at DESC NULLS LAST
+                LIMIT 1
+            """
+            row = db.query_one(sql, tuple(params))
+            if row and row.get("price_usd") is not None:
+                return Decimal(str(row["price_usd"]))
     return None
 
 
@@ -1186,12 +1200,12 @@ def editor_refresh_price(copy_id):
     return jsonify({"success": True, "current_price": float(new_price)})
 
 
-@app.route("/api/editor/copies/<copy_id>/reprint", methods=["POST"])
-def editor_reprint(copy_id):
-    """Regenerate the barcode label PNG for an existing copy. Returns base64
-    so the browser can open it in a new tab for printing — same format the
-    ingest push step uses."""
-    import base64
+@app.route("/api/editor/copies/<copy_id>/barcode-image")
+def editor_barcode_image(copy_id):
+    """Regenerate the barcode label PNG for an existing copy and return it
+    as image/png. The frontend opens this URL directly so the browser can
+    print without round-tripping a base64 blob over HTTP/2."""
+    from flask import Response
     card = db.query_one("""
         SELECT barcode, card_name, set_name, condition, card_number
         FROM raw_cards WHERE id::text = %s
@@ -1206,10 +1220,8 @@ def editor_reprint(copy_id):
         condition=card.get("condition") or "",
         card_number=card.get("card_number") or "",
     )
-    return jsonify({
-        "success": True,
-        "barcode": card["barcode"],
-        "png_b64": base64.b64encode(png_bytes).decode(),
+    return Response(png_bytes, mimetype="image/png", headers={
+        "Content-Disposition": f'inline; filename="{card["barcode"]}.png"',
     })
 
 
