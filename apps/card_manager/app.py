@@ -931,7 +931,37 @@ def editor_copies():
             rc.current_price DESC
     """, (card_name, set_name, *extra))
 
-    return jsonify({"copies": [_ser(dict(c)) for c in copies]})
+    # Available variants from Scrydex for this card identity. Same scrydex_id
+    # can hold multiple printings (1st Ed vs Unlimited, reverseHolofoil, etc.)
+    # — staff needs a dropdown to swap a copy to the right one without
+    # memorizing Scrydex's variant strings.
+    available_variants = []
+    if copies:
+        first = copies[0]
+        sid = first.get("scrydex_id")
+        tcg = first.get("tcgplayer_id")
+        if sid:
+            rows = db.query("""
+                SELECT DISTINCT variant FROM scrydex_price_cache
+                WHERE scrydex_id = %s AND product_type = 'card'
+                  AND price_type = 'raw' AND variant IS NOT NULL
+                ORDER BY variant
+            """, (sid,))
+        elif tcg:
+            rows = db.query("""
+                SELECT DISTINCT variant FROM scrydex_price_cache
+                WHERE tcgplayer_id = %s AND product_type = 'card'
+                  AND price_type = 'raw' AND variant IS NOT NULL
+                ORDER BY variant
+            """, (int(tcg),))
+        else:
+            rows = []
+        available_variants = [r["variant"] for r in rows if r.get("variant")]
+
+    return jsonify({
+        "copies": [_ser(dict(c)) for c in copies],
+        "available_variants": available_variants,
+    })
 
 
 @app.route("/api/editor/scrydex-search", methods=["POST"])

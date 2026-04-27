@@ -1001,14 +1001,15 @@ async function refreshEditorDetail() {
   if (card.scrydex_id) params.set('scrydex_id', card.scrydex_id);
   try {
     const d = await get('/api/editor/copies?' + params);
-    renderEditorDetail(card, d.copies || []);
+    renderEditorDetail(card, d.copies || [], d.available_variants || []);
   } catch(e) {
     document.getElementById('ed-detail-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
   }
 }
 
-function renderEditorDetail(card, copies) {
+function renderEditorDetail(card, copies, availableVariants) {
   const el = document.getElementById('ed-detail-content');
+  availableVariants = availableVariants || [];
   const img = card.image_url
     ? `<img src="${esc(card.image_url)}" alt="">`
     : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.5rem;opacity:0.2;">🃏</div>';
@@ -1048,10 +1049,25 @@ function renderEditorDetail(card, copies) {
         </div>
         <div class="ed-field">
           <label>Variant</label>
-          <input id="var-${esc(String(c.id))}" value="${esc(c.variant||'')}" placeholder="(none)">
+          ${(() => {
+            // Dropdown of every variant Scrydex has for this card identity, plus
+            // the current value (in case it isn't in the cache) and an explicit
+            // "(none)" option. Falling back to a free-text input only when the
+            // card is unmapped (no scrydex_id/tcgplayer_id, so no known variants).
+            const opts = new Set(availableVariants);
+            if (c.variant) opts.add(c.variant);
+            if (opts.size === 0) {
+              return `<input id="var-${esc(String(c.id))}" value="${esc(c.variant||'')}" placeholder="(none — type a variant)">`;
+            }
+            const sorted = [...opts].sort();
+            return `<select id="var-${esc(String(c.id))}">
+              <option value="" ${!c.variant?'selected':''}>(none)</option>
+              ${sorted.map(v => `<option value="${esc(v)}" ${c.variant===v?'selected':''}>${esc(v)}</option>`).join('')}
+            </select>`;
+          })()}
           <button class="btn btn-sm btn-green" onclick="saveVariant('${esc(String(c.id))}')">Save</button>
         </div>
-        <div style="font-size:0.7rem;color:var(--dim);">Saving condition or variant re-fetches the price from Scrydex.</div>
+        <div style="font-size:0.7rem;color:var(--dim);">Saving condition or variant re-fetches the price from Scrydex.${availableVariants.length>1?` <strong>${availableVariants.length}</strong> printings exist for this card.`:''}</div>
       </div>
     </div>`;
   }).join('');
