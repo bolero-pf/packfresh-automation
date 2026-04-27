@@ -291,8 +291,14 @@
       ⚠ Missing Cards
       <span class="nav-badge" id="badge-missing"></span>
     </div>
+    <div class="nav-item" onclick="showView('display')" id="nav-display">
+      🪟 Display Case
+    </div>
     <div class="nav-item" onclick="showView('editor')" id="nav-editor">
       ✎ Card Editor
+    </div>
+    <div class="nav-item" onclick="showView('featured')" id="nav-featured">
+      ★ Featured Cards
     </div>
     <div class="scanner-status">
       <span class="scanner-dot" id="scanner-dot"></span>
@@ -334,6 +340,20 @@
       <div id="returns-content">
         <div class="empty"><div class="spinner"></div></div>
       </div>
+    </div>
+
+    <!-- Display Case -->
+    <div class="view" id="view-display">
+      <div class="page-title">Display Case</div>
+      <div class="page-sub">What's currently on the customer-facing glass. Phase-1 shell — Set Out / Return flows ship next.</div>
+      <div id="display-content"><div class="empty"><div class="spinner"></div></div></div>
+    </div>
+
+    <!-- Featured Cards -->
+    <div class="view" id="view-featured">
+      <div class="page-title">Featured Cards</div>
+      <div class="page-sub">Cards that get a scoring boost when picking what to put in the display case. Patterns are case-insensitive substrings — "Charizard" matches Dark / Shining / Reverse / etc.</div>
+      <div id="featured-content"><div class="empty"><div class="spinner"></div></div></div>
     </div>
 
     <!-- Card Editor -->
@@ -387,10 +407,12 @@ function showView(name) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('view-' + (name === 'hold-detail' ? 'hold-detail' : name)).classList.add('active');
   if (name !== 'hold-detail') document.getElementById('nav-' + name)?.classList.add('active');
-  if (name === 'holds')   loadHolds();
-  if (name === 'returns') loadReturns();
-  if (name === 'missing') loadMissing();
-  if (name === 'editor')  document.getElementById('editor-q').focus();
+  if (name === 'holds')    loadHolds();
+  if (name === 'returns')  loadReturns();
+  if (name === 'missing')  loadMissing();
+  if (name === 'editor')   document.getElementById('editor-q').focus();
+  if (name === 'display')  loadDisplay();
+  if (name === 'featured') loadFeatured();
 }
 
 // ── Hold Queue ────────────────────────────────────────────────────────────────
@@ -1198,6 +1220,143 @@ async function confirmRelink(idx) {
     closeRelink();
     await refreshEditorDetail();
     runEditorSearch();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── Display Case ──────────────────────────────────────────────────────────────
+async function loadDisplay() {
+  try {
+    const d = await get('/api/display/cases');
+    renderDisplay(d.cases || []);
+  } catch(e) {
+    document.getElementById('display-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderDisplay(cases) {
+  const el = document.getElementById('display-content');
+  if (!cases.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">🪟</div><p>No display cases configured yet — run the migration.</p></div>';
+    return;
+  }
+  el.innerHTML = cases.map(c => {
+    const pct = c.capacity ? Math.round(c.current_count / c.capacity * 100) : 0;
+    const cardsHtml = c.cards.length ? `
+      <div class="editor-grid" style="margin-top:14px;">
+        ${c.cards.map(card => {
+          const img = card.image_url
+            ? `<img src="${esc(card.image_url)}" alt="${esc(card.card_name)}" loading="lazy">`
+            : '<div class="no-img">🃏</div>';
+          return `<div class="ec" style="cursor:default;">
+            <div class="ec-img">${img}</div>
+            <div class="ec-body">
+              <div class="ec-name">${esc(card.card_name)}</div>
+              <div class="ec-set">${esc(card.set_name||'')}</div>
+              <div style="font-family:var(--mono);font-size:0.7rem;color:var(--dim);">${esc(card.barcode)}</div>
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
+                <span class="ec-pill ${esc(card.condition||'')}">${esc(card.condition||'')}</span>
+                <span class="ec-price">$${parseFloat(card.current_price||0).toFixed(2)}</span>
+              </div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    ` : '<div style="font-size:0.85rem;color:var(--dim);text-align:center;padding:30px;">Empty case — Set Out flow ships next.</div>';
+
+    return `
+      <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+          <div style="font-size:1.15rem;font-weight:700;">${esc(c.bin_label)}</div>
+          <div style="font-family:var(--mono);font-size:0.9rem;color:var(--dim);">
+            ${c.current_count} / ${c.capacity} cards
+          </div>
+          <div style="flex:1;min-width:120px;height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;">
+            <div style="height:100%;background:${pct>=100?'var(--red)':pct>=80?'var(--accent)':'var(--green)'};width:${Math.min(100,pct)}%;"></div>
+          </div>
+          <button class="btn btn-sm" onclick="editCaseCapacity('${esc(c.id)}', ${c.capacity})">Edit capacity</button>
+          <button class="btn btn-sm" disabled title="Phase 1 shell — Set Out flow ships next">+ Set Out</button>
+          <button class="btn btn-sm" disabled title="Phase 1 shell — Return flow ships next">↩ Return All</button>
+        </div>
+        ${cardsHtml}
+      </div>
+    `;
+  }).join('');
+}
+
+async function editCaseCapacity(caseId, current) {
+  const v = prompt('New capacity for this case:', String(current));
+  if (v === null) return;
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n) || n < 1) { toast('Capacity must be a positive integer', 'red'); return; }
+  try {
+    await post(`/api/display/cases/${caseId}/capacity`, { capacity: n });
+    toast(`Capacity updated → ${n}`, 'green');
+    loadDisplay();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── Featured Cards ────────────────────────────────────────────────────────────
+async function loadFeatured() {
+  try {
+    const d = await get('/api/featured-cards');
+    renderFeatured(d.cards || []);
+  } catch(e) {
+    document.getElementById('featured-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderFeatured(cards) {
+  const el = document.getElementById('featured-content');
+  const games = ['*', 'pokemon', 'mtg', 'onepiece', 'lorcana', 'riftbound'];
+  el.innerHTML = `
+    <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px;">
+      <div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--dim);margin-bottom:10px;">Add a feature</div>
+      <div style="display:grid;grid-template-columns:2fr 1fr 80px 2fr auto;gap:8px;align-items:center;">
+        <input id="ft-pattern" placeholder="e.g. Charizard, Black Lotus, Luffy">
+        <select id="ft-game">${games.map(g => `<option value="${g}">${g}</option>`).join('')}</select>
+        <input id="ft-weight" type="number" value="50" title="Higher = more boost">
+        <input id="ft-notes" placeholder="(optional notes)">
+        <button class="btn btn-green btn-sm" onclick="addFeatured()">Add</button>
+      </div>
+    </div>
+    ${cards.length === 0
+      ? '<div class="empty"><div class="empty-icon">★</div><p>No featured cards yet. Add Charizard, Pikachu, Black Lotus, Luffy, etc.</p></div>'
+      : `<table style="width:100%;border-collapse:collapse;">
+          <thead><tr style="text-align:left;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--dim);">
+            <th style="padding:8px 10px;">Pattern</th><th>Game</th><th>Weight</th><th>Notes</th><th></th>
+          </tr></thead>
+          <tbody>${cards.map(c => `
+            <tr style="border-top:1px solid var(--border);">
+              <td style="padding:8px 10px;font-weight:600;">${esc(c.name_pattern)}</td>
+              <td><span class="ec-vbadge">${esc(c.game)}</span></td>
+              <td style="font-family:var(--mono);">${c.weight}</td>
+              <td style="font-size:0.78rem;color:var(--dim);">${esc(c.notes||'')}</td>
+              <td><button class="btn btn-sm" style="color:var(--red);" onclick="removeFeatured(${c.id})">×</button></td>
+            </tr>
+          `).join('')}</tbody>
+        </table>`
+    }
+  `;
+}
+
+async function addFeatured() {
+  const pattern = document.getElementById('ft-pattern').value.trim();
+  const game    = document.getElementById('ft-game').value;
+  const weight  = parseInt(document.getElementById('ft-weight').value, 10) || 50;
+  const notes   = document.getElementById('ft-notes').value.trim();
+  if (!pattern) { toast('Enter a name pattern', 'red'); return; }
+  try {
+    await post('/api/featured-cards', { name_pattern: pattern, game, weight, notes });
+    toast('Featured card added', 'green');
+    loadFeatured();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function removeFeatured(id) {
+  if (!await themedConfirm('Remove featured card', 'This will stop boosting cards that match this pattern. Continue?')) return;
+  try {
+    await fetch(`/api/featured-cards/${id}`, { method: 'DELETE' });
+    loadFeatured();
   } catch(e) { toast(e.message, 'red'); }
 }
 

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify
 
 import db
-from storage import assign_bins
+from storage import assign_bins, assign_display_case, get_display_case_capacity
 from barcode_gen import generate_barcode_image
 from decimal import Decimal
 
@@ -758,6 +758,121 @@ def recent_assignments():
             })
 
     return jsonify({"batches": result_batches})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Display Case — Front Glass + capacity management
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/display/cases")
+def display_cases():
+    """List every display_case location + the cards currently in each."""
+    cases = get_display_case_capacity(db)
+    out = []
+    for c in cases:
+        cards = db.query("""
+            SELECT id, barcode, card_name, set_name, card_number, condition,
+                   current_price, image_url, variant, tcgplayer_id, scrydex_id,
+                   stored_at
+            FROM raw_cards
+            WHERE state = 'DISPLAY' AND bin_id = %s
+            ORDER BY current_price DESC NULLS LAST, card_name ASC
+        """, (c["id"],))
+        out.append({
+            "id":            str(c["id"]),
+            "bin_label":     c["bin_label"],
+            "capacity":      c["capacity"],
+            "current_count": c["current_count"],
+            "available":     c["available"],
+            "cards":         [_ser(dict(r)) for r in cards],
+        })
+    return jsonify({"cases": out})
+
+
+@app.route("/api/display/cases/<case_id>/capacity", methods=["POST"])
+def display_case_capacity(case_id):
+    """Edit a display case's capacity (Front Glass starts at 50; ops resize as
+    physical layout changes)."""
+    new_cap = (request.get_json() or {}).get("capacity")
+    try:
+        new_cap = int(new_cap)
+    except (TypeError, ValueError):
+        return jsonify({"error": "capacity must be an integer"}), 400
+    if new_cap < 1 or new_cap > 1000:
+        return jsonify({"error": "capacity must be between 1 and 1000"}), 400
+
+    row = db.query_one("""
+        SELECT sl.id, sl.current_count, sr.location_type
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.id::text = %s
+    """, (case_id,))
+    if not row or row["location_type"] != "display_case":
+        return jsonify({"error": "Display case not found"}), 404
+    if new_cap < row["current_count"]:
+        return jsonify({"error": f"Capacity {new_cap} is below current count {row['current_count']} — return cards first"}), 400
+
+    db.execute("UPDATE storage_locations SET capacity = %s WHERE id::text = %s", (new_cap, case_id))
+    return jsonify({"success": True, "capacity": new_cap})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Featured Cards — Set Out / Fill Binder scoring boost (multi-IP)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/featured-cards")
+def list_featured():
+    rows = db.query("""
+        SELECT id, name_pattern, game, weight, notes, created_at
+        FROM featured_cards
+        ORDER BY game, name_pattern
+    """)
+    return jsonify({"cards": [_ser(dict(r)) for r in rows]})
+
+
+@app.route("/api/featured-cards", methods=["POST"])
+def create_featured():
+    data = request.get_json() or {}
+    pattern = (data.get("name_pattern") or "").strip()
+    game    = (data.get("game") or "*").strip().lower()
+    weight  = data.get("weight", 50)
+    notes   = (data.get("notes") or "").strip() or None
+
+    if not pattern:
+        return jsonify({"error": "name_pattern is required"}), 400
+    try:
+        weight = int(weight)
+    except (TypeError, ValueError):
+        return jsonify({"error": "weight must be an integer"}), 400
+
+    row = db.query_one("""
+        INSERT INTO featured_cards (name_pattern, game, weight, notes)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id, name_pattern, game, weight, notes, created_at
+    """, (pattern, game, weight, notes))
+    return jsonify(_ser(dict(row)))
+
+
+@app.route("/api/featured-cards/<int:card_id>", methods=["DELETE"])
+def delete_featured(card_id):
+    db.execute("DELETE FROM featured_cards WHERE id = %s", (card_id,))
+    return jsonify({"success": True})
+
+
+@app.route("/api/featured-cards/<int:card_id>", methods=["POST"])
+def update_featured(card_id):
+    data = request.get_json() or {}
+    fields = []
+    params = []
+    for col in ("name_pattern", "game", "weight", "notes"):
+        if col in data:
+            fields.append(f"{col} = %s")
+            params.append(data[col])
+    if not fields:
+        return jsonify({"error": "No fields to update"}), 400
+    params.append(card_id)
+    db.execute(f"UPDATE featured_cards SET {', '.join(fields)} WHERE id = %s", tuple(params))
+    return jsonify({"success": True})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

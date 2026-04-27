@@ -164,6 +164,56 @@ def get_binder_capacity(db) -> list[dict]:
     """)]
 
 
+def assign_display_case(count: int, db) -> list[dict]:
+    """Assign cards to display-case locations (location_type='display_case').
+    Mirrors assign_display, but for the customer-facing glass cases out front.
+    Returns [] if no display capacity is available."""
+    if count <= 0:
+        return []
+
+    cases = db.query("""
+        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
+               (sl.capacity - sl.current_count) AS available
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sr.location_type = 'display_case'
+          AND sl.current_count < sl.capacity
+        ORDER BY sr.row_label ASC, sl.partition_num ASC
+    """)
+
+    if not cases:
+        return []
+
+    assignments = []
+    remaining = count
+    for c in cases:
+        if remaining <= 0:
+            break
+        take = min(remaining, c["available"])
+        assignments.append({
+            "bin_id":    str(c["id"]),
+            "bin_label": c["bin_label"],
+            "count":     take,
+        })
+        remaining -= take
+
+    logger.info(f"Assigned {count - remaining} cards to display case(s): "
+                f"{[a['bin_label'] for a in assignments]}")
+    return assignments
+
+
+def get_display_case_capacity(db) -> list[dict]:
+    """Return display-case locations with current capacity info."""
+    return [dict(r) for r in db.query("""
+        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
+               (sl.capacity - sl.current_count) AS available
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sr.location_type = 'display_case'
+        ORDER BY sl.bin_label ASC
+    """)]
+
+
 def release_bins(assignments: list[dict], db) -> None:
     """
     Return cards to bins (undo an assignment — e.g. on push-live rollback).
