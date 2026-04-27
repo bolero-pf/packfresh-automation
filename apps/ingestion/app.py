@@ -3285,6 +3285,217 @@ def route_enriched(session_id):
     }))
 
 
+@app.route("/api/ingest/session/<session_id>/push-plan")
+def push_plan(session_id):
+    """Compute the bin-by-bin Push plan for raw cards routed to storage and
+    display in this session. Read-only — does not change state.
+
+    Best-fits each card_type group into bins, slices the cards (in scan order
+    by routing_reviewed_at) according to those assignments, and returns the
+    sequence of (bin, expected barcodes) pairs the staffer will walk through.
+
+    Bulk + grade + sealed are reported as counts only — those go through the
+    legacy auto-push (no per-bin scanning needed)."""
+    if not assign_bins or not assign_display:
+        return jsonify({"error": "storage module not loaded"}), 500
+
+    plan = []
+
+    # ── Storage destination ──
+    storage_cards = db.query("""
+        SELECT rc.id, rc.barcode, rc.game,
+               ii.routing_reviewed_at
+          FROM raw_cards rc
+          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+         WHERE ii.session_id = %s
+           AND ii.routing_destination = 'storage'
+           AND rc.bin_id IS NULL
+           AND rc.state IN ('BARCODED', 'BARCODED_STORAGE', 'ROUTED_STORAGE')
+         ORDER BY ii.routing_reviewed_at ASC NULLS LAST, rc.created_at ASC
+    """, (session_id,))
+
+    by_type = {}
+    for c in storage_cards:
+        ct = _canonical_card_type(c.get("game") or "pokemon")
+        by_type.setdefault(ct, []).append(c)
+
+    for ctype, cards in by_type.items():
+        try:
+            assignments = assign_bins(ctype, len(cards), db)
+        except ValueError as e:
+            return jsonify({"error": f"Cannot plan storage for {ctype}: {e}"}), 400
+
+        idx = 0
+        for a in assignments:
+            slice_cards = cards[idx:idx + a["count"]]
+            idx += a["count"]
+            plan.append({
+                "destination": "storage",
+                "bin_id": a["bin_id"],
+                "bin_label": a["bin_label"],
+                "card_type": ctype,
+                "count": a["count"],
+                "expected_barcodes": [c["barcode"] for c in slice_cards],
+                "raw_card_ids": [str(c["id"]) for c in slice_cards],
+            })
+
+    # ── Display destination (binders) ──
+    display_cards = db.query("""
+        SELECT rc.id, rc.barcode, rc.game,
+               ii.routing_reviewed_at
+          FROM raw_cards rc
+          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+         WHERE ii.session_id = %s
+           AND ii.routing_destination = 'display'
+           AND rc.bin_id IS NULL
+           AND rc.state IN ('BARCODED', 'BARCODED_DISPLAY', 'ROUTED_BINDER')
+         ORDER BY ii.routing_reviewed_at ASC NULLS LAST, rc.created_at ASC
+    """, (session_id,))
+
+    if display_cards:
+        try:
+            assignments = assign_display(len(display_cards), db)
+        except Exception as e:
+            return jsonify({"error": f"Cannot plan binder: {e}"}), 400
+
+        idx = 0
+        for a in assignments:
+            slice_cards = display_cards[idx:idx + a["count"]]
+            idx += a["count"]
+            plan.append({
+                "destination": "display",
+                "bin_id": a["bin_id"],
+                "bin_label": a["bin_label"],
+                "card_type": "binder",
+                "count": a["count"],
+                "expected_barcodes": [c["barcode"] for c in slice_cards],
+                "raw_card_ids": [str(c["id"]) for c in slice_cards],
+            })
+
+    # ── Bulk / grade / sealed counts (auto-push, no scanning) ──
+    other = db.query_one("""
+        SELECT
+            COUNT(*) FILTER (WHERE ii.routing_destination = 'bulk'  AND rc.bin_id IS NULL) AS bulk_count,
+            COUNT(*) FILTER (WHERE ii.routing_destination = 'grade' AND rc.bin_id IS NULL) AS grade_count
+          FROM raw_cards rc
+          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+         WHERE ii.session_id = %s
+    """, (session_id,)) or {}
+
+    sealed = db.query_one("""
+        SELECT COUNT(*) AS n
+          FROM intake_items
+         WHERE session_id = %s
+           AND product_type != 'raw'
+           AND item_status IN ('good','damaged')
+           AND verified_at IS NOT NULL
+           AND pushed_at IS NULL
+    """, (session_id,)) or {}
+
+    return jsonify({
+        "plan": plan,
+        "bulk_count":   int(other.get("bulk_count")  or 0),
+        "grade_count":  int(other.get("grade_count") or 0),
+        "sealed_count": int(sealed.get("n")          or 0),
+    })
+
+
+@app.route("/api/ingest/session/<session_id>/push-batch", methods=["POST"])
+def push_batch(session_id):
+    """Commit a scanned batch of raw_cards to a target bin.
+
+    Body: {bin_id, barcodes: [...]}
+    Strict validation per scan — every barcode must be (a) found, (b) in this
+    session, (c) routed to a destination matching the bin's location_type,
+    and (d) not yet placed. Any failure → 400 with details, NO state change.
+
+    On success: state → STORED/DISPLAY, bin_id stamped, intake_items.pushed_at
+    set whenever an item's last unplaced raw_card lands."""
+    data = request.get_json(silent=True) or {}
+    bin_id = data.get("bin_id")
+    barcodes = data.get("barcodes", [])
+    if not bin_id or not isinstance(barcodes, list) or not barcodes:
+        return jsonify({"error": "bin_id and non-empty barcodes required"}), 400
+
+    bin_row = db.query_one("""
+        SELECT sl.id, sl.bin_label, sl.card_type, sl.capacity, sl.current_count,
+               sr.location_type
+          FROM storage_locations sl
+          JOIN storage_rows sr ON sl.row_id = sr.id
+         WHERE sl.id = %s
+    """, (bin_id,))
+    if not bin_row:
+        return jsonify({"error": "bin not found"}), 404
+
+    available = (bin_row["capacity"] or 0) - (bin_row["current_count"] or 0)
+    if len(barcodes) > available:
+        return jsonify({
+            "error": f"Bin {bin_row['bin_label']} has {available} free slots, "
+                     f"but {len(barcodes)} were scanned"
+        }), 400
+
+    loc_type = bin_row["location_type"]
+    if loc_type == "binder":
+        expected_dest = "display"
+        new_state = "DISPLAY"
+    else:
+        expected_dest = "storage"
+        new_state = "STORED"
+
+    cards = db.query("""
+        SELECT rc.id, rc.barcode, rc.state, rc.bin_id, rc.intake_item_id,
+               ii.session_id, ii.routing_destination
+          FROM raw_cards rc
+          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+         WHERE rc.barcode = ANY(%s)
+    """, (barcodes,))
+
+    by_bc = {c["barcode"]: c for c in cards}
+    errors = []
+    for bc in barcodes:
+        c = by_bc.get(bc)
+        if not c:
+            errors.append(f"{bc}: not found")
+        elif str(c["session_id"]) != session_id:
+            errors.append(f"{bc}: not in this session")
+        elif c["routing_destination"] != expected_dest:
+            errors.append(f"{bc}: routed '{c['routing_destination']}', "
+                          f"bin {bin_row['bin_label']} expects '{expected_dest}'")
+        elif c["bin_id"]:
+            errors.append(f"{bc}: already placed")
+    if errors:
+        return jsonify({"error": "Validation failed", "details": errors}), 400
+
+    db.execute("""
+        UPDATE raw_cards
+           SET state = %s,
+               bin_id = %s,
+               stored_at = CURRENT_TIMESTAMP
+         WHERE barcode = ANY(%s)
+    """, (new_state, bin_id, barcodes))
+
+    # Mark intake_items.pushed_at when their last unplaced raw_card lands.
+    item_ids = list({c["intake_item_id"] for c in cards if c.get("intake_item_id")})
+    for iid in item_ids:
+        unplaced = db.query_one("""
+            SELECT COUNT(*) AS n FROM raw_cards
+             WHERE intake_item_id = %s AND bin_id IS NULL
+        """, (iid,))
+        if unplaced and (unplaced.get("n") or 0) == 0:
+            db.execute("""
+                UPDATE intake_items
+                   SET pushed_at = COALESCE(pushed_at, CURRENT_TIMESTAMP)
+                 WHERE id::text = %s
+            """, (iid,))
+
+    return jsonify({
+        "success": True,
+        "count": len(barcodes),
+        "bin_label": bin_row["bin_label"],
+        "new_state": new_state,
+    })
+
+
 @app.route("/api/ingest/session/<session_id>/barcode-raw", methods=["POST"])
 def barcode_raw_items(session_id):
     """

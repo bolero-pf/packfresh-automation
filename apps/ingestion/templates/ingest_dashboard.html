@@ -710,6 +710,9 @@ function _postRenderStage() {
     if (_currentStage === 'barcode' || _currentStage === 'push') {
         _loadSessionBarcodes(sessionId);
     }
+    if (_currentStage === 'push') {
+        _loadPushPlan(sessionId);
+    }
 }
 
 function switchStage(stage) {
@@ -3139,7 +3142,10 @@ function _renderPushContent(data) {
         <button onclick="setPushViewMode('by_source')" style="padding:4px 12px; border:none; cursor:pointer; background:${viewMode==='by_source'?'var(--accent)':'var(--surface-2)'}; color:${viewMode==='by_source'?'#fff':'var(--text-dim)'};">By Source</button>
     </div>`;
 
-    let html = `<div class="card">
+    // Scan-driven place-into-bin walkthrough — rendered into this slot by
+    // _loadPushPlan() (kicked off in _postRenderStage).
+    let html = `<div id="push-scan-section"></div>`;
+    html += `<div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
             <h2 style="margin:0;">Push Summary</h2>
             <span style="color:var(--text-dim); font-size:0.82rem;">${consolidated.length} products · ${totalUnits} units · ${pushedItems.length} already pushed${unverifiedPending.length ? ' · <span style="color:#f59e0b;">' + unverifiedPending.length + ' awaiting verify</span>' : ''}</span>
@@ -3304,6 +3310,193 @@ function _renderPushContent(data) {
 
 // ── PUSHED ITEMS TRACKING ────────────────────────────────────────────────────
 let _pushedItemIds = new Set();
+
+// ── PUSH SCAN WIDGET ─────────────────────────────────────────────────────────
+// Scan-driven place-into-bin walkthrough: server best-fits routed-but-not-
+// pushed cards into bins, returns a sequence of (bin, expected_barcodes)
+// targets, and staff scans each card going into the current bin's pile.
+// SEND commits the batch + advances. Strict validation rejects wrong-bin
+// scans (e.g. binder card while filling storage A4).
+let _pushPlan       = [];
+let _pushPlanMeta   = { bulk_count: 0, grade_count: 0, sealed_count: 0 };
+let _pushIndex      = 0;
+let _pushPending    = [];
+let _pushSessionId  = null;
+
+async function _loadPushPlan(sessionId) {
+    _pushSessionId = sessionId;
+    _pushPending   = [];
+    _pushIndex     = 0;
+    const slot = document.getElementById('push-scan-section');
+    if (!slot) return;
+    slot.innerHTML = `<div class="card"><div class="loading"><span class="spinner"></span> Loading push plan...</div></div>`;
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/push-plan`);
+        const d = await r.json();
+        if (!r.ok) {
+            slot.innerHTML = `<div class="card"><div class="alert alert-warning">${d.error || 'Plan failed'}</div></div>`;
+            return;
+        }
+        _pushPlan = d.plan || [];
+        _pushPlanMeta = {
+            bulk_count:   d.bulk_count   || 0,
+            grade_count:  d.grade_count  || 0,
+            sealed_count: d.sealed_count || 0,
+        };
+        _renderPushScanWidget();
+    } catch(e) {
+        slot.innerHTML = `<div class="card"><div class="alert alert-warning">Plan failed: ${e.message}</div></div>`;
+    }
+}
+
+function _renderPushScanWidget() {
+    const slot = document.getElementById('push-scan-section');
+    if (!slot || !_pushSessionId) return;
+
+    const meta = _pushPlanMeta || {};
+    const otherSummary = (meta.bulk_count || meta.grade_count || meta.sealed_count)
+        ? `<div style="font-size:0.78rem; color:var(--text-dim); margin-top:8px;">
+              Auto-push (no scan): <strong>${meta.bulk_count || 0}</strong> bulk · <strong>${meta.grade_count || 0}</strong> grade · <strong>${meta.sealed_count || 0}</strong> sealed → use the <strong>Push Session</strong> button below.
+           </div>`
+        : '';
+
+    if (_pushPlan.length === 0) {
+        slot.innerHTML = `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
+            <h2 style="margin:0;">📦 No bins to scan into</h2>
+            <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">No raw cards routed to storage/binder are pending placement.</p>
+            ${otherSummary}
+        </div>`;
+        return;
+    }
+
+    if (_pushIndex >= _pushPlan.length) {
+        slot.innerHTML = `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
+            <h2 style="margin:0; color:var(--green);">✓ All bins placed</h2>
+            <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">Storage + binder cards are placed. Click <strong>Push Session</strong> below to send bulk/grade/sealed.</p>
+            ${otherSummary}
+        </div>`;
+        return;
+    }
+
+    const target = _pushPlan[_pushIndex];
+    const remaining = target.expected_barcodes.filter(bc => !_pushPending.includes(bc));
+    const pendingHtml = _pushPending.length
+        ? `<div style="margin-top:10px; font-size:0.78rem;">
+              <span style="color:var(--text-dim);">Pending in this batch:</span><br>
+              ${_pushPending.map(bc => `<code style="background:var(--surface-2); padding:2px 6px; border-radius:3px; margin:2px 4px 2px 0; display:inline-block; font-size:0.74rem;">${bc}</code>`).join('')}
+           </div>`
+        : '';
+    const ready = _pushPending.length === target.count;
+    const sendBtn = `<button class="btn btn-success" onclick="_pushSendBatch()"
+        ${_pushPending.length === 0 ? 'disabled' : ''}
+        style="font-size:1rem; padding:10px 22px; font-weight:700;${ready ? '' : ' opacity:0.85;'}">
+        ✓ SEND ${_pushPending.length} TO ${target.bin_label}${ready ? '' : ` (expected ${target.count})`}
+    </button>`;
+    const destLabel = target.destination === 'display' ? 'Binder' : 'Storage';
+
+    slot.innerHTML = `<div class="card" style="border-color: var(--accent); background: rgba(99,102,241,0.04);">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
+            <div>
+                <h2 style="margin:0;">📦 Place into ${target.bin_label}</h2>
+                <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
+                    Bin ${_pushIndex + 1} of ${_pushPlan.length} · ${destLabel} (${target.card_type}) ·
+                    expecting <strong>${target.count}</strong> card${target.count === 1 ? '' : 's'}
+                </p>
+                <div style="margin-top:8px; font-size:0.85rem;">
+                    Scanned: <strong>${_pushPending.length} / ${target.count}</strong>${remaining.length ? `, remaining: ${remaining.length}` : ''}
+                </div>
+            </div>
+        </div>
+        <form id="push-scan-form" onsubmit="return _pushScanSubmit(event);" autocomplete="off" style="display:flex; justify-content:center; margin-top:14px;">
+            <input type="text" id="push-scan-input" autocomplete="off"
+                placeholder="📷 Scan card going into ${target.bin_label}"
+                style="width:100%; max-width:380px; padding:9px 14px; font-size:0.9rem;
+                       background:var(--surface-2); border:1px solid var(--border);
+                       border-radius:6px; color:var(--text); text-align:center; letter-spacing:0.05em;">
+        </form>
+        <div id="push-scan-warning" style="text-align:center; min-height:28px; margin-top:6px;"></div>
+        ${pendingHtml}
+        <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
+            ${sendBtn}
+            <button class="btn btn-secondary" onclick="_pushSkipBin()" style="font-size:0.85rem; padding:8px 14px;" title="Skip this bin (cards stay routed-but-unplaced, plan will recompute next time you open Push).">
+                Skip bin
+            </button>
+        </div>
+        ${otherSummary}
+    </div>`;
+
+    document.getElementById('push-scan-input')?.focus();
+}
+
+function _pushScanSubmit(e) {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    const input = document.getElementById('push-scan-input');
+    if (!input) return false;
+    const v = input.value.trim();
+    input.value = '';
+    if (v) _pushHandleScan(v);
+    return false;
+}
+
+function _pushHandleScan(barcode) {
+    if (_pushIndex >= _pushPlan.length) return;
+    const target = _pushPlan[_pushIndex];
+    if (_pushPending.includes(barcode)) {
+        _pushShowWarning(`${barcode} already scanned for this bin.`, 'info');
+        return;
+    }
+    if (!target.expected_barcodes.includes(barcode)) {
+        _pushShowWarning(`✗ ${barcode} doesn't belong in ${target.bin_label}. Wrong pile, or routed elsewhere.`);
+        return;
+    }
+    _pushPending.push(barcode);
+    _renderPushScanWidget();
+}
+
+function _pushShowWarning(msg, kind) {
+    const slot = document.getElementById('push-scan-warning');
+    if (!slot) return;
+    const isInfo = kind === 'info';
+    const color  = isInfo ? 'var(--text-dim)' : '#f59e0b';
+    const border = isInfo ? 'var(--border)'   : '#f59e0b';
+    slot.innerHTML = `<div style="border:1px solid ${border}; color:${color}; background:${isInfo?'transparent':'rgba(245,158,11,0.06)'}; border-radius:6px; padding:6px 10px; font-size:0.82rem; text-align:center;">${msg}</div>`;
+    clearTimeout(_pushShowWarning._t);
+    _pushShowWarning._t = setTimeout(() => { if (slot) slot.innerHTML = ''; }, 3500);
+}
+
+async function _pushSendBatch() {
+    if (_pushPending.length === 0) return;
+    const target = _pushPlan[_pushIndex];
+    if (_pushPending.length < target.count) {
+        if (!confirm(`Only ${_pushPending.length} of ${target.count} expected cards scanned. Send partial batch? Remaining cards will reappear in a recomputed plan.`)) return;
+    }
+    try {
+        const r = await fetch(`/api/ingest/session/${_pushSessionId}/push-batch`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ bin_id: target.bin_id, barcodes: _pushPending }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            _pushShowWarning(`SEND failed: ${d.error || 'unknown'}${d.details ? ' — ' + d.details.slice(0,3).join('; ') : ''}`);
+            return;
+        }
+    } catch(e) {
+        _pushShowWarning(`SEND failed: ${e.message}`);
+        return;
+    }
+    // Re-fetch plan: committed cards drop out, plan adjusts naturally.
+    await _loadPushPlan(_pushSessionId);
+}
+
+function _pushSkipBin() {
+    if (_pushPending.length > 0) {
+        if (!confirm('You have scanned cards in this batch. Skip the bin anyway? Pending scans will be discarded (cards stay routed but unplaced).')) return;
+    }
+    _pushPending = [];
+    _pushIndex++;
+    _renderPushScanWidget();
+}
 
 // ── BREAKDOWN SUMMARY ENRICHMENT (uses shared breakdown_inline.js) ──────────
 async function _enrichBreakdownSummaries(items, sessionId, isReceived) {
