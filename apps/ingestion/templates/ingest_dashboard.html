@@ -2953,18 +2953,26 @@ function _renderBarcodeContent(data) {
     const sessionId = s.id;
     const isActive = ['received', 'verified', 'breakdown_complete', 'partially_ingested'].includes(s.status);
 
-    // Mirrors the server filter on /barcode-raw: raw items routed to storage/display,
-    // verified + mapped, not yet barcoded.
-    const eligible = items.filter(i =>
+    // Raw items still in the pipeline (verified, mapped, not yet pushed)
+    const inflight = items.filter(i =>
+        i.product_type === 'raw' &&
         ['good','damaged'].includes(i.item_status) &&
         i.is_mapped &&
         i.verified_at &&
-        !i.barcoded_at &&
-        ['storage','display'].includes(i.routing_destination || 'storage')
+        !i.pushed_at
     );
-    const alreadyBarcoded = items.filter(i => i.barcoded_at && !i.pushed_at);
-    const eligibleUnits = eligible.reduce((sum, i) => sum + (i.quantity || 1), 0);
-    const barcodedUnits = alreadyBarcoded.reduce((sum, i) => sum + (i.quantity || 1), 0);
+    const eligible = inflight.filter(i =>
+        !i.barcoded_at && ['storage','display'].includes(i.routing_destination || 'storage')
+    );
+    const alreadyBarcoded = inflight.filter(i => i.barcoded_at);
+    const routedElsewhere = inflight.filter(i =>
+        ['grade','bulk'].includes(i.routing_destination || '')
+    );
+
+    const sumQty = arr => arr.reduce((sum, i) => sum + (i.quantity || 1), 0);
+    const eligibleUnits = sumQty(eligible);
+    const barcodedUnits = sumQty(alreadyBarcoded);
+    const skippedUnits  = sumQty(routedElsewhere);
 
     let html = `<div class="card" style="border-color: var(--accent); background: rgba(99,102,241,0.04);">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
@@ -2975,9 +2983,10 @@ function _renderBarcodeContent(data) {
                     physically attach barcodes while inventory stays customer-invisible. Destinations are
                     decided in <strong>Route</strong>, bins are assigned at <strong>Push</strong>.
                 </p>
-                <div style="margin-top:8px; font-size:0.82rem;">
-                    <span style="color:var(--text-dim);">Awaiting barcode:</span> <strong>${eligible.length} products · ${eligibleUnits} units</strong>
-                    ${alreadyBarcoded.length ? `<span style="color:var(--text-dim); margin-left:16px;">Already barcoded:</span> <strong>${alreadyBarcoded.length} products · ${barcodedUnits} units</strong>` : ''}
+                <div style="margin-top:8px; font-size:0.82rem; display:flex; flex-wrap:wrap; gap:18px;">
+                    <span><span style="color:var(--text-dim);">Awaiting barcode:</span> <strong>${eligible.length} products · ${eligibleUnits} units</strong></span>
+                    ${alreadyBarcoded.length ? `<span><span style="color:var(--text-dim);">Already barcoded:</span> <strong>${alreadyBarcoded.length} products · ${barcodedUnits} units</strong></span>` : ''}
+                    ${routedElsewhere.length ? `<span title="Items routed to grade or bulk are skipped at this step — graded slabs get a PSA cert, bulk is counted not labeled."><span style="color:var(--text-dim);">Routed to grade/bulk (skipped):</span> <strong>${routedElsewhere.length} products · ${skippedUnits} units</strong></span>` : ''}
                 </div>
             </div>
             ${isActive ? `<button class="btn btn-primary" id="barcode-raw-btn" onclick="barcodeRawCards('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;" title="Generate barcodes + print labels for raw cards. Bins are NOT assigned yet — that happens at Push.">
@@ -4811,15 +4820,16 @@ async function barcodeRawCards(sessionId) {
             panel.innerHTML = `<div class="alert alert-warning">${d.error || 'Barcode failed'}</div>`;
             return;
         }
-        // The barcode response shape mirrors the push response (results[] with
-        // action='raw_card_barcoded' + barcodes[]), so the existing renderer
-        // works once we relabel the action — bin_label is null on each barcode
-        // since placement happens at push.
-        d.results = (d.results || []).map(r => Object.assign({}, r, { action: 'raw_card_ingested' }));
-        _renderSealedRawResults(d, sessionId, panel);
-        // Also reload the on-page session barcode panel below so other staff
-        // can see what's queued (even via simple refresh)
-        await _loadSessionBarcodes(sessionId);
+        const generated = (d.results || []).reduce((sum, r) => sum + ((r.barcodes && r.barcodes.length) || 0), 0);
+        // Refresh session data first so the count strip + label panel reflect the new state.
+        // Then drop the success banner into the freshly-rendered Barcode panel.
+        await viewSession(sessionId, true);
+        const refreshed = document.getElementById('barcode-raw-results');
+        if (refreshed) {
+            refreshed.innerHTML = `<div class="alert" style="background: rgba(45,212,160,0.08); border:1px solid var(--green); color: var(--text); padding:10px 14px; border-radius:6px;">
+                ✓ Generated <strong>${generated}</strong> barcode${generated === 1 ? '' : 's'}. Labels are in the panel below — print, attach, then move to Route.
+            </div>`;
+        }
     } catch (e) {
         panel.innerHTML = `<div class="alert alert-warning">Barcode failed: ${e.message}</div>`;
     } finally {
