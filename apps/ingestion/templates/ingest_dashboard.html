@@ -690,6 +690,7 @@ function _rerenderStage() {
     if (!container) return;
     if (_currentStage === 'verify') container.innerHTML = _renderVerifyContent(_currentSessionData);
     else if (_currentStage === 'breakdown') container.innerHTML = _renderBreakdownContent(_currentSessionData);
+    else if (_currentStage === 'barcode') container.innerHTML = _renderBarcodeContent(_currentSessionData);
     else if (_currentStage === 'route') container.innerHTML = _renderRouteContent(_currentSessionData);
     else if (_currentStage === 'push') container.innerHTML = _renderPushContent(_currentSessionData);
     _postRenderStage();
@@ -706,7 +707,7 @@ function _postRenderStage() {
     if (_currentStage === 'route') {
         _loadRouteData(s.id);
     }
-    if (_currentStage === 'push') {
+    if (_currentStage === 'barcode' || _currentStage === 'push') {
         _loadSessionBarcodes(sessionId);
     }
 }
@@ -722,9 +723,9 @@ function switchStage(stage) {
 function _updateStageTabs() {
     if (!_currentSessionData) return;
     const s = _currentSessionData.session;
-    const statusToStage = { received: 0, verified: 1, breakdown_complete: 2, partially_ingested: 3, ingested: 3 };
+    const statusToStage = { received: 0, verified: 1, breakdown_complete: 2, partially_ingested: 4, ingested: 4 };
     const maxStage = statusToStage[s.status] ?? 0;
-    const stageOrder = { verify: 0, breakdown: 1, route: 2, push: 3 };
+    const stageOrder = { verify: 0, breakdown: 1, barcode: 2, route: 3, push: 4 };
 
     document.querySelectorAll('.stage-tab').forEach(tab => {
         const stage = tab.dataset.stage;
@@ -820,11 +821,14 @@ async function viewSession(sessionId, _preserveScroll) {
                 <button class="stage-tab" data-stage="breakdown" onclick="switchStage('breakdown')">
                     <span class="stage-num">2</span> Breakdown
                 </button>
+                <button class="stage-tab" data-stage="barcode" onclick="switchStage('barcode')">
+                    <span class="stage-num">3</span> Barcode
+                </button>
                 <button class="stage-tab" data-stage="route" onclick="switchStage('route')">
-                    <span class="stage-num">3</span> Route
+                    <span class="stage-num">4</span> Route
                 </button>
                 <button class="stage-tab" data-stage="push" onclick="switchStage('push')">
-                    <span class="stage-num">4</span> Push
+                    <span class="stage-num">5</span> Push
                 </button>
             </div>
 
@@ -2944,6 +2948,48 @@ function _renderPushRow(item, qty, cogs, dataItemId, indented) {
     </tr>`;
 }
 
+function _renderBarcodeContent(data) {
+    const { session: s, items } = data;
+    const sessionId = s.id;
+    const isActive = ['received', 'verified', 'breakdown_complete', 'partially_ingested'].includes(s.status);
+
+    // Mirrors the server filter on /barcode-raw: raw items routed to storage/display,
+    // verified + mapped, not yet barcoded.
+    const eligible = items.filter(i =>
+        ['good','damaged'].includes(i.item_status) &&
+        i.is_mapped &&
+        i.verified_at &&
+        !i.barcoded_at &&
+        ['storage','display'].includes(i.routing_destination || 'storage')
+    );
+    const alreadyBarcoded = items.filter(i => i.barcoded_at && !i.pushed_at);
+    const eligibleUnits = eligible.reduce((sum, i) => sum + (i.quantity || 1), 0);
+    const barcodedUnits = alreadyBarcoded.reduce((sum, i) => sum + (i.quantity || 1), 0);
+
+    let html = `<div class="card" style="border-color: var(--accent); background: rgba(99,102,241,0.04);">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
+            <div>
+                <h2 style="margin:0;">🏷 Barcode Raw Cards</h2>
+                <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px; max-width:640px;">
+                    Print labels for raw cards <strong>without</strong> committing destination or bin —
+                    physically attach barcodes while inventory stays customer-invisible. Destinations are
+                    decided in <strong>Route</strong>, bins are assigned at <strong>Push</strong>.
+                </p>
+                <div style="margin-top:8px; font-size:0.82rem;">
+                    <span style="color:var(--text-dim);">Awaiting barcode:</span> <strong>${eligible.length} products · ${eligibleUnits} units</strong>
+                    ${alreadyBarcoded.length ? `<span style="color:var(--text-dim); margin-left:16px;">Already barcoded:</span> <strong>${alreadyBarcoded.length} products · ${barcodedUnits} units</strong>` : ''}
+                </div>
+            </div>
+            ${isActive ? `<button class="btn btn-primary" id="barcode-raw-btn" onclick="barcodeRawCards('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;" title="Generate barcodes + print labels for raw cards. Bins are NOT assigned yet — that happens at Push.">
+                🏷 Barcode Raw Cards Now
+            </button>` : ''}
+        </div>
+        <div id="barcode-raw-results" style="margin-top:16px;"></div>
+    </div>`;
+
+    return html;
+}
+
 function _renderPushContent(data) {
     const { session: s, items } = data;
     const sessionId = s.id;
@@ -3138,16 +3184,13 @@ function _renderPushContent(data) {
         html += `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
                 <div>
-                    <h2 style="margin:0; color:var(--green);">🚀 Barcode &amp; Push</h2>
+                    <h2 style="margin:0; color:var(--green);">🚀 Push Live</h2>
                     <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
-                        <strong>Barcode Raw Cards Now</strong> prints labels without committing bin placement — staff can attach barcodes physically while inventory stays customer-invisible.
-                        <strong>Push Session</strong> assigns bins (opportunistically — earliest with room) and goes live to kiosk + card_manager.
+                        Assigns bins (opportunistically — earliest with room) and goes live to kiosk + card_manager.
+                        Pre-barcoded rows just get their bin_id filled in. Print labels in the <strong>Barcode</strong> stage first.
                     </p>
                 </div>
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-                    <button class="btn btn-primary" id="barcode-raw-btn" onclick="barcodeRawCards('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;" title="Generate barcodes + print labels for raw cards. Bins are NOT assigned yet — that happens at Push Session.">
-                        🏷 Barcode Raw Cards Now
-                    </button>
                     <button class="btn btn-secondary" onclick="pushDryRun('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;">
                         🔍 Debug Dry Run
                     </button>
@@ -3159,7 +3202,6 @@ function _renderPushContent(data) {
                     </button>
                 </div>
             </div>
-            <div id="barcode-raw-results" style="margin-top:16px;"></div>
             <div id="push-live-results" style="margin-top:16px;"></div>
         </div>`;
     }
