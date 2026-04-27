@@ -1591,19 +1591,239 @@ def _compute_weighted_cost(current_cost, current_qty, our_unit_cost, adding_qty)
     return (current_cost * current_qty + our_unit_cost * adding_qty) / (current_qty + adding_qty)
 
 
+def _resolve_storage_card_type(item: dict, tcg_id, scrydex_id) -> tuple[str, dict | None]:
+    """Return (canonical_card_type, card_data_or_None) using PPT then Scrydex.
+    Falls back to 'pokemon' if both miss. Shared between barcode + push paths."""
+    card_type = None
+    card_data = None
+    if tcg_id and pricing:
+        try:
+            card_data = pricing.get_card_by_tcgplayer_id(int(tcg_id))
+            if card_data and card_data.get("game"):
+                card_type = _canonical_card_type(card_data["game"])
+        except Exception as e:
+            logger.warning(f"PPT fetch for raw card TCG#{tcg_id} failed: {e}")
+    if not card_type and tcg_id:
+        try:
+            row = db.query_one(
+                "SELECT game FROM scrydex_price_cache WHERE tcgplayer_id = %s LIMIT 1",
+                (int(tcg_id),),
+            )
+            if row and row.get("game"):
+                card_type = _canonical_card_type(row["game"])
+        except Exception as e:
+            logger.debug(f"scrydex game lookup for TCG#{tcg_id} failed: {e}")
+    if not card_type:
+        card_type = "pokemon"
+    return card_type, card_data
+
+
+def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
+    """
+    Generate barcodes + create raw_cards rows in BARCODED_STORAGE / BARCODED_DISPLAY
+    state. NO bin assigned — bin is decided opportunistically at push time so
+    multiple in-flight sessions don't double-reserve the same slot.
+
+    `destination` is "storage" or "display" — controls which BARCODED_* state
+    we write. The transition to STORED/DISPLAY happens later via _place_raw_item.
+    """
+    if not generate_barcode_id:
+        raise RuntimeError("barcode_gen module not available")
+
+    state = "BARCODED_DISPLAY" if destination == "display" else "BARCODED_STORAGE"
+
+    tcg_id    = item.get("tcgplayer_id")
+    sx_id     = item.get("scrydex_id")
+    card_name = item.get("product_name", "Unknown")
+    set_name  = item.get("set_name", "")
+    condition = item.get("condition") or "NM"
+    qty       = item.get("quantity", 1)
+    cost      = float(item.get("offer_price", 0)) / max(qty, 1)
+    item_id   = item.get("id")
+
+    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(
+        tcg_id, card_name, set_name, scrydex_id=sx_id
+    )
+    card_type, _ = _resolve_storage_card_type(item, tcg_id, sx_id)
+
+    results = []
+    for _ in range(qty):
+        barcode_id = generate_barcode_id()
+        db.execute("""
+            INSERT INTO raw_cards (
+                barcode, tcgplayer_id, scrydex_id, card_name, set_name,
+                card_number, condition, rarity,
+                state, cost_basis, current_price, last_price_update,
+                bin_id, image_url,
+                is_graded, grade_company, grade_value,
+                variant, language, game,
+                intake_session_id, intake_item_id, stored_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, CURRENT_TIMESTAMP,
+                NULL, %s,
+                FALSE, NULL, NULL,
+                %s, 'EN', %s,
+                %s, %s, NULL
+            )
+        """, (
+            barcode_id, tcg_id, sx_id, card_name, set_name,
+            ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
+            state, cost, float(item.get("market_price", cost)),
+            image_url,
+            item.get("variance") or item.get("variant"), card_type,
+            item.get("session_id"),
+            str(item_id) if item_id else None,
+        ))
+
+        png_bytes = generate_barcode_image(
+            barcode_id,
+            card_name=card_name,
+            set_name=set_name,
+            condition=condition,
+            card_number=ppt_card_number or item.get("card_number") or "",
+        )
+
+        results.append({
+            "barcode":    barcode_id,
+            "bin_label":  None,  # placement happens at push, not here
+            "card_name":  card_name,
+            "set_name":   set_name,
+            "condition":  condition,
+            "png_b64":    __import__("base64").b64encode(png_bytes).decode(),
+        })
+
+    return {
+        "action":       "raw_card_barcoded",
+        "destination":  destination,
+        "product_name": card_name,
+        "quantity":     qty,
+        "barcodes":     results,
+        "bins":         [],
+    }
+
+
+def _place_pre_barcoded(item: dict, destination: str) -> dict | None:
+    """If this intake_item already has BARCODED_* raw_cards rows, assign bins now
+    and transition them to STORED/DISPLAY. Returns the result dict or None when
+    there are no pre-barcoded rows (caller falls back to legacy inline path).
+
+    Bin assignment is opportunistic — fills earliest-available bin first via
+    assign_bins / assign_display, same algorithm push has always used. The
+    difference is just that we're updating existing rows instead of inserting."""
+    item_id = item.get("id")
+    if not item_id:
+        return None
+
+    target_state = "BARCODED_DISPLAY" if destination == "display" else "BARCODED_STORAGE"
+    rows = db.query("""
+        SELECT id, barcode, card_name, set_name, condition, card_number, game
+        FROM raw_cards
+        WHERE intake_item_id = %s AND state = %s
+        ORDER BY created_at ASC
+    """, (str(item_id), target_state))
+    if not rows:
+        return None
+
+    if destination == "display":
+        assignments = assign_display(len(rows), db)
+        if not assignments:
+            # Binders are full — fall back to storage for the entire item.
+            # The pre-barcoded BARCODED_DISPLAY rows get rewritten to STORED.
+            card_type = _canonical_card_type(rows[0].get("game") or "pokemon")
+            assignments = assign_bins(card_type, len(rows), db)
+            new_state = "STORED"
+            actual_dest = "storage"
+        else:
+            assigned_qty = sum(a["count"] for a in assignments)
+            if assigned_qty < len(rows):
+                # Partial binder fit — overflow goes to storage bins.
+                card_type = _canonical_card_type(rows[0].get("game") or "pokemon")
+                overflow = assign_bins(card_type, len(rows) - assigned_qty, db)
+                # Mark which slice of `rows` becomes which state. We'll handle
+                # the binder slice as DISPLAY and the storage slice as STORED.
+                new_state = None  # decided per-slice below
+                actual_dest = "display"
+            else:
+                new_state = "DISPLAY"
+                actual_dest = "display"
+    else:
+        card_type = _canonical_card_type(rows[0].get("game") or "pokemon")
+        assignments = assign_bins(card_type, len(rows), db)
+        new_state = "STORED"
+        actual_dest = "storage"
+
+    results = []
+    bin_labels = []
+    idx = 0
+    overflow_assignments = []  # for the display→storage overflow case
+    if destination == "display" and new_state is None:
+        binder_qty = sum(a["count"] for a in assignments)
+        overflow_assignments = locals().get("overflow", [])
+        primary_assignments = assignments
+        all_assignments = [(a, "DISPLAY") for a in primary_assignments] + \
+                          [(a, "STORED")  for a in overflow_assignments]
+    else:
+        all_assignments = [(a, new_state) for a in assignments]
+
+    for a, state in all_assignments:
+        batch = rows[idx:idx + a["count"]]
+        idx += a["count"]
+        if not batch:
+            continue
+        ids = [str(r["id"]) for r in batch]
+        db.execute("""
+            UPDATE raw_cards
+            SET state = %s, bin_id = %s, stored_at = CURRENT_TIMESTAMP
+            WHERE id::text = ANY(%s)
+        """, (state, a["bin_id"], ids))
+        bin_labels.append(a["bin_label"])
+        for r in batch:
+            png_bytes = generate_barcode_image(
+                r["barcode"],
+                card_name=r["card_name"] or "",
+                set_name=r["set_name"] or "",
+                condition=r["condition"] or "",
+                card_number=r["card_number"] or "",
+            )
+            results.append({
+                "barcode":    r["barcode"],
+                "bin_label":  a["bin_label"],
+                "card_name":  r["card_name"],
+                "set_name":   r["set_name"],
+                "condition":  r["condition"],
+                "png_b64":    __import__("base64").b64encode(png_bytes).decode(),
+            })
+
+    return {
+        "action":       "raw_card_ingested",
+        "destination":  actual_dest,
+        "product_name": rows[0]["card_name"],
+        "quantity":     len(rows),
+        "barcodes":     results,
+        "bins":         bin_labels,
+    }
+
+
 def _push_raw_item(item: dict) -> dict:
     """
-    Push a raw (ungraded) card to internal inventory:
-      1. Generate barcode
-      2. Fetch PPT card data for image URL + clean name
-      3. Assign bin location
-      4. Insert into raw_cards table
-      5. Return barcode PNG bytes (base64) for immediate printing
+    Push a raw (ungraded) card to internal inventory.
+
+    Two paths:
+      - Pre-barcoded fast path: if the intake_item already has BARCODED_STORAGE
+        raw_cards rows (created earlier via _barcode_raw_item), just assign bins
+        and flip them to STORED. No PPT lookup, no INSERT.
+      - Legacy inline path: generate barcodes + assign bins + insert in one shot.
+        Used when staff skips the explicit barcoding stage.
 
     Returns entry dict with action, barcode, bin assignments.
     """
     if not generate_barcode_id or not assign_bins:
         raise RuntimeError("barcode_gen or storage module not available")
+
+    pre = _place_pre_barcoded(item, destination="storage")
+    if pre is not None:
+        return pre
 
     tcg_id    = item.get("tcgplayer_id")
     sx_id     = item.get("scrydex_id")
@@ -1680,14 +1900,14 @@ def _push_raw_item(item: dict) -> dict:
                     bin_id, image_url,
                     is_graded, grade_company, grade_value,
                     variant, language, game,
-                    intake_session_id, stored_at
+                    intake_session_id, intake_item_id, stored_at
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s,
                     'STORED', %s, %s, CURRENT_TIMESTAMP,
                     %s, %s,
                     FALSE, NULL, NULL,
                     %s, 'EN', %s,
-                    %s, CURRENT_TIMESTAMP
+                    %s, %s, CURRENT_TIMESTAMP
                 )
             """, (
                 barcode_id, tcg_id, sx_id, card_name, set_name,
@@ -1699,6 +1919,7 @@ def _push_raw_item(item: dict) -> dict:
                 # land on the physical card record.
                 item.get("variance") or item.get("variant"), card_type,
                 item.get("session_id"),
+                str(item.get("id")) if item.get("id") else None,
             ))
 
             # Generate barcode PNG
@@ -1778,9 +1999,17 @@ def _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=None):
 
 
 def _push_raw_to_display(item: dict) -> dict:
-    """Push raw card to a binder display location. Barcode + label generated."""
+    """Push raw card to a binder display location. Barcode + label generated.
+
+    Pre-barcoded fast path: if the intake_item has BARCODED_DISPLAY rows
+    already, _place_pre_barcoded handles binder assignment + storage overflow.
+    """
     if not generate_barcode_id or not assign_display:
         raise RuntimeError("barcode_gen or storage module not available")
+
+    pre = _place_pre_barcoded(item, destination="display")
+    if pre is not None:
+        return pre
 
     tcg_id    = item.get("tcgplayer_id")
     sx_id     = item.get("scrydex_id")
@@ -1816,14 +2045,14 @@ def _push_raw_to_display(item: dict) -> dict:
                     bin_id, image_url,
                     is_graded, grade_company, grade_value,
                     variant, language,
-                    intake_session_id, stored_at
+                    intake_session_id, intake_item_id, stored_at
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s,
                     'DISPLAY', %s, %s, CURRENT_TIMESTAMP,
                     %s, %s,
                     FALSE, NULL, NULL,
                     %s, 'EN',
-                    %s, CURRENT_TIMESTAMP
+                    %s, %s, CURRENT_TIMESTAMP
                 )
             """, (
                 barcode_id, tcg_id, sx_id, card_name, set_name,
@@ -1832,6 +2061,7 @@ def _push_raw_to_display(item: dict) -> dict:
                 bin_id, image_url,
                 item.get("variance") or item.get("variant"),
                 item.get("session_id"),
+                str(item.get("id")) if item.get("id") else None,
             ))
 
             png_bytes = generate_barcode_image(
@@ -1890,14 +2120,14 @@ def _push_raw_to_grade(item: dict) -> dict:
                 bin_id, image_url,
                 is_graded, grade_company, grade_value,
                 variant, language,
-                intake_session_id, removal_reason, removal_date
+                intake_session_id, intake_item_id, removal_reason, removal_date
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s,
                 'REMOVED', %s, %s, CURRENT_TIMESTAMP,
                 NULL, %s,
                 FALSE, NULL, NULL,
                 %s, 'EN',
-                %s, 'GRADING', CURRENT_TIMESTAMP
+                %s, %s, 'GRADING', CURRENT_TIMESTAMP
             )
         """, (
             barcode_id, tcg_id, sx_id, card_name, set_name,
@@ -1906,6 +2136,7 @@ def _push_raw_to_grade(item: dict) -> dict:
             image_url,
             item.get("variance") or item.get("variant"),
             item.get("session_id"),
+            str(item.get("id")) if item.get("id") else None,
         ))
 
     return {
@@ -3021,6 +3252,80 @@ def route_enriched(session_id):
         "total_qty": sum(i.get("quantity", 1) for i in enriched),
         "by_destination": by_dest,
     }))
+
+
+@app.route("/api/ingest/session/<session_id>/barcode-raw", methods=["POST"])
+def barcode_raw_items(session_id):
+    """
+    Print barcodes for raw items WITHOUT placing them in bins yet.
+
+    Creates raw_cards rows in BARCODED_STORAGE / BARCODED_DISPLAY state with
+    bin_id=NULL. Bins get assigned later when the user clicks "Push Live"
+    (see push_raw_items, which detects pre-barcoded rows and just runs
+    assign_bins on them).
+
+    Customer-facing queries filter on state='STORED' so BARCODED_* rows are
+    invisible to the kiosk / card_browser / card_manager — staff can attach
+    physical labels at their own pace before the items go live.
+
+    POST body (optional): { "item_ids": [...] } — subset to barcode.
+    Skips items that are already barcoded (intake_items.barcoded_at IS NOT NULL).
+    Routing destinations 'grade' and 'bulk' are ignored — they don't get
+    pre-barcoded since they're handled differently at push time.
+    """
+    session = ingest.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    requested_ids = set(str(x) for x in (data.get("item_ids") or []))
+
+    items = db.query("""
+        SELECT * FROM intake_items
+        WHERE session_id = %s
+          AND product_type = 'raw'
+          AND is_graded IS NOT TRUE
+          AND item_status IN ('good', 'damaged')
+          AND is_mapped = TRUE
+          AND pushed_at IS NULL
+          AND barcoded_at IS NULL
+          AND COALESCE(routing_destination, 'storage') IN ('storage', 'display')
+        ORDER BY LOWER(product_name) ASC,
+                 LOWER(COALESCE(set_name, '')) ASC,
+                 card_number ASC NULLS LAST,
+                 id ASC
+    """, (session_id,))
+
+    if requested_ids:
+        items = [i for i in items if str(i["id"]) in requested_ids]
+
+    if not items:
+        return jsonify({"error": "No raw items waiting to be barcoded"}), 400
+
+    results = []
+    errors  = []
+    for item in items:
+        item_dict = dict(item)
+        item_dict["session_id"] = session_id
+        dest = item.get("routing_destination") or "storage"
+        try:
+            r = _barcode_raw_item(item_dict, destination=dest)
+            results.append(r)
+            db.execute(
+                "UPDATE intake_items SET barcoded_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (item["id"],)
+            )
+        except Exception as e:
+            logger.exception(f"barcode_raw_item failed for {item['id']}: {e}")
+            errors.append({"item_id": str(item["id"]),
+                           "product_name": item.get("product_name"), "error": str(e)})
+
+    return jsonify({
+        "success":  True,
+        "barcoded": len(results),
+        "errors":   errors,
+        "results":  results,
+    })
 
 
 @app.route("/api/ingest/session/<session_id>/push-raw", methods=["POST"])

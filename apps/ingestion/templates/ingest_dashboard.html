@@ -3138,16 +3138,20 @@ function _renderPushContent(data) {
         html += `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
                 <div>
-                    <h2 style="margin:0; color:var(--green);">🚀 Push</h2>
+                    <h2 style="margin:0; color:var(--green);">🚀 Barcode &amp; Push</h2>
                     <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
-                        Update Shopify inventory for sealed items, route raw cards to storage/binder/bulk, and queue graded slabs for cert entry.
+                        <strong>Barcode Raw Cards Now</strong> prints labels without committing bin placement — staff can attach barcodes physically while inventory stays customer-invisible.
+                        <strong>Push Session</strong> assigns bins (opportunistically — earliest with room) and goes live to kiosk + card_manager.
                     </p>
                 </div>
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <button class="btn btn-primary" id="barcode-raw-btn" onclick="barcodeRawCards('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;" title="Generate barcodes + print labels for raw cards. Bins are NOT assigned yet — that happens at Push Session.">
+                        🏷 Barcode Raw Cards Now
+                    </button>
                     <button class="btn btn-secondary" onclick="pushDryRun('${sessionId}')" style="font-size:0.95rem; padding:10px 20px;">
                         🔍 Debug Dry Run
                     </button>
-                    <button class="btn btn-success" id="push-live-btn" onclick="pushLive('${sessionId}')" style="font-size:1.05rem; padding:12px 28px;">
+                    <button class="btn btn-success" id="push-live-btn" onclick="pushLive('${sessionId}')" style="font-size:1.05rem; padding:12px 28px;" title="Assign placement & push live. Bins get assigned now (earliest with room). Pre-barcoded rows just get their bin_id filled in.">
                         🚀 Push Session
                     </button>
                     <button class="btn btn-sm" style="font-size:0.75rem; padding:6px 12px; background:var(--surface-2); color:var(--text-dim); border:1px solid var(--border);" onclick="forceIngested('${sessionId}')">
@@ -3155,6 +3159,7 @@ function _renderPushContent(data) {
                     </button>
                 </div>
             </div>
+            <div id="barcode-raw-results" style="margin-top:16px;"></div>
             <div id="push-live-results" style="margin-top:16px;"></div>
         </div>`;
     }
@@ -4743,6 +4748,40 @@ async function runStoreCheck(sessionId) {
         el.innerHTML = html;
     } catch(err) {
         el.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// BARCODE RAW CARDS (pre-push) — generates labels with no bin assigned
+// ═══════════════════════════════════════════════════════════════════
+
+async function barcodeRawCards(sessionId) {
+    const panel = document.getElementById('barcode-raw-results');
+    if (!panel) return;
+    const btn = document.getElementById('barcode-raw-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '🏷 Barcoding…'; }
+    panel.innerHTML = '<div class="loading"><span class="spinner"></span> Generating barcodes…</div>';
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/barcode-raw`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) {
+            panel.innerHTML = `<div class="alert alert-warning">${d.error || 'Barcode failed'}</div>`;
+            return;
+        }
+        // The barcode response shape mirrors the push response (results[] with
+        // action='raw_card_barcoded' + barcodes[]), so the existing renderer
+        // works once we relabel the action — bin_label is null on each barcode
+        // since placement happens at push.
+        d.results = (d.results || []).map(r => Object.assign({}, r, { action: 'raw_card_ingested' }));
+        _renderSealedRawResults(d, sessionId, panel);
+        // Also reload the on-page session barcode panel below so other staff
+        // can see what's queued (even via simple refresh)
+        await _loadSessionBarcodes(sessionId);
+    } catch (e) {
+        panel.innerHTML = `<div class="alert alert-warning">Barcode failed: ${e.message}</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '🏷 Barcode Raw Cards Now'; }
     }
 }
 
