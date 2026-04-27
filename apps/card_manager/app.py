@@ -845,7 +845,7 @@ def create_featured():
     except (TypeError, ValueError):
         return jsonify({"error": "weight must be an integer"}), 400
 
-    row = db.query_one("""
+    row = db.execute_returning("""
         INSERT INTO featured_cards (name_pattern, game, weight, notes)
         VALUES (%s, %s, %s, %s)
         RETURNING id, name_pattern, game, weight, notes, created_at
