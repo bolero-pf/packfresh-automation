@@ -372,6 +372,14 @@
   </div>
 </div>
 
+<!-- Display: Set Out / Return overlay -->
+<div class="ed-overlay" id="display-overlay" onclick="if(event.target===this) closeDisplayOverlay()">
+  <div class="ed-panel" style="max-width:880px;">
+    <button class="ed-close" onclick="closeDisplayOverlay()">×</button>
+    <div id="display-overlay-content"></div>
+  </div>
+</div>
+
 <!-- Card Editor: copies overlay -->
 <div class="ed-overlay" id="ed-detail-overlay" onclick="if(event.target===this) closeEditorDetail()">
   <div class="ed-panel">
@@ -644,6 +652,11 @@ document.addEventListener('keydown', e => {
 });
 
 async function handleScan(barcode) {
+  // Display flows take priority while their overlay is open — staff is mid-scan
+  // and shouldn't have scanner input bleed into the underlying view.
+  if (_displayMode === 'set-out')  { await handleSetOutScan(barcode);  return; }
+  if (_displayMode === 'return')   { await handleReturnScan(barcode);  return; }
+
   const activeView = document.querySelector('.view.active')?.id;
 
   if (activeView === 'view-hold-detail' && _currentHoldId) {
@@ -1274,8 +1287,8 @@ function renderDisplay(cases) {
             <div style="height:100%;background:${pct>=100?'var(--red)':pct>=80?'var(--accent)':'var(--green)'};width:${Math.min(100,pct)}%;"></div>
           </div>
           <button class="btn btn-sm" onclick="editCaseCapacity('${esc(c.id)}', ${c.capacity})">Edit capacity</button>
-          <button class="btn btn-sm" disabled title="Phase 1 shell — Set Out flow ships next">+ Set Out</button>
-          <button class="btn btn-sm" disabled title="Phase 1 shell — Return flow ships next">↩ Return All</button>
+          <button class="btn btn-sm btn-green" onclick="openSetOut('${esc(c.id)}', ${c.available})">+ Set Out</button>
+          <button class="btn btn-sm" onclick="openReturnAll('${esc(c.id)}')" ${c.current_count===0?'disabled':''}>↩ Return cards</button>
         </div>
         ${cardsHtml}
       </div>
@@ -1293,6 +1306,259 @@ async function editCaseCapacity(caseId, current) {
     toast(`Capacity updated → ${n}`, 'green');
     loadDisplay();
   } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── Display: Set Out flow ─────────────────────────────────────────────────────
+let _displayMode = null;          // null | 'set-out' | 'return'
+let _setOutCaseId = null;
+let _setOutSuggestions = [];      // array of suggested barcodes (lookup map)
+let _setOutScanned = [];          // array of card objects, in scan order
+
+async function openSetOut(caseId, available) {
+  _displayMode = 'set-out';
+  _setOutCaseId = caseId;
+  _setOutScanned = [];
+  _setOutSuggestions = [];
+  document.getElementById('display-overlay').classList.add('active');
+  renderSetOutCountStep(available);
+}
+
+function renderSetOutCountStep(available) {
+  document.getElementById('display-overlay-content').innerHTML = `
+    <div style="font-size:1.2rem;font-weight:700;margin-bottom:6px;">Set Out for Front Glass</div>
+    <div style="font-size:0.82rem;color:var(--dim);margin-bottom:18px;">${available} slot${available!==1?'s':''} available. We'll generate a shopping list — staff scans each card as they pull it from the bins.</div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <label style="font-size:0.85rem;">How many to set out?</label>
+      <input id="set-out-count" type="number" value="${available}" min="1" max="${available}" style="width:80px;background:var(--surface-2);border:1.5px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--mono);">
+      <button class="btn btn-green" onclick="generateSuggestions()">Generate Shopping List →</button>
+    </div>
+  `;
+}
+
+async function generateSuggestions() {
+  const count = parseInt(document.getElementById('set-out-count').value, 10);
+  if (!Number.isFinite(count) || count < 1) { toast('Enter a positive number', 'red'); return; }
+  document.getElementById('display-overlay-content').innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+  try {
+    const d = await get(`/api/display/set-out/suggest?count=${count}`);
+    _setOutSuggestions = d.suggestions || [];
+    renderSetOutScanStep();
+  } catch(e) {
+    document.getElementById('display-overlay-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderSetOutScanStep() {
+  const scannedSet = new Set(_setOutScanned.map(c => c.barcode));
+  // Group suggestions by bin so staff can sweep through bins efficiently
+  const byBin = {};
+  for (const s of _setOutSuggestions) {
+    const k = s.bin_label || '(no bin)';
+    (byBin[k] = byBin[k] || []).push(s);
+  }
+  const binLabels = Object.keys(byBin).sort();
+
+  const onListBarcodes = new Set(_setOutSuggestions.map(s => s.barcode));
+  const offList = _setOutScanned.filter(c => !onListBarcodes.has(c.barcode));
+
+  document.getElementById('display-overlay-content').innerHTML = `
+    <div style="font-size:1.2rem;font-weight:700;margin-bottom:6px;">Pulling for Front Glass</div>
+    <div style="font-size:0.82rem;color:var(--dim);margin-bottom:14px;">
+      Walk the bins, grab the cards on the list, scan each one. Off-list scans are accepted — your eye beats the algorithm sometimes.
+    </div>
+
+    <div class="stats-bar" style="margin-bottom:14px;">
+      <div class="stat-box"><div class="stat-label">On Shopping List</div><div class="stat-val">${_setOutSuggestions.length}</div></div>
+      <div class="stat-box"><div class="stat-label">Scanned</div><div class="stat-val" style="color:var(--green);">${_setOutScanned.length}</div></div>
+      <div class="stat-box"><div class="stat-label">Off-list</div><div class="stat-val" style="color:#c084fc;">${offList.length}</div></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+      <div>
+        <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Shopping List (by bin)</div>
+        <div style="max-height:380px;overflow-y:auto;">
+          ${binLabels.map(bin => `
+            <div style="margin-bottom:10px;">
+              <div style="font-family:var(--mono);font-size:0.72rem;color:var(--accent);margin-bottom:4px;">${esc(bin)} · ${byBin[bin].length}</div>
+              ${byBin[bin].map(s => {
+                const got = scannedSet.has(s.barcode);
+                return `<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;background:${got?'rgba(74,222,128,0.08)':'var(--surface-2)'};border:1px solid ${got?'var(--green)':'var(--border)'};border-radius:6px;margin-bottom:3px;font-size:0.78rem;">
+                  <div style="width:14px;flex-shrink:0;color:var(--green);">${got?'✓':''}</div>
+                  ${s.image_url?`<img src="${esc(s.image_url)}" style="width:24px;aspect-ratio:2.5/3.5;object-fit:contain;">`:''}
+                  <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;">${esc(s.card_name)}</div>
+                    <div style="font-size:0.68rem;color:var(--dim);">${esc(s.condition||'')} · ${esc(s.set_name||'')}</div>
+                  </div>
+                  <div style="font-family:var(--mono);font-size:0.72rem;color:var(--accent);">$${parseFloat(s.current_price||0).toFixed(2)}</div>
+                </div>`;
+              }).join('')}
+            </div>
+          `).join('') || '<div style="color:var(--dim);font-size:0.78rem;">No suggestions — featured table empty?</div>'}
+        </div>
+      </div>
+
+      <div>
+        <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Scanned (${_setOutScanned.length})</div>
+        <div style="max-height:380px;overflow-y:auto;">
+          ${_setOutScanned.length === 0
+            ? '<div style="color:var(--dim);font-size:0.78rem;text-align:center;padding:30px;">Scan a card to begin.</div>'
+            : _setOutScanned.map((c,i) => {
+                const isOff = !onListBarcodes.has(c.barcode);
+                return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:rgba(74,222,128,0.06);border:1px solid var(--green);border-radius:6px;margin-bottom:4px;font-size:0.8rem;">
+                  ${c.image_url?`<img src="${esc(c.image_url)}" style="width:26px;aspect-ratio:2.5/3.5;object-fit:contain;">`:''}
+                  <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;">${esc(c.card_name)}${isOff?' <span class="ec-vbadge">off-list</span>':''}</div>
+                    <div style="font-size:0.7rem;color:var(--dim);">${esc(c.condition||'')} · $${parseFloat(c.current_price||0).toFixed(2)}</div>
+                  </div>
+                  <button class="btn btn-sm" style="font-size:0.68rem;color:var(--red);background:none;border:none;" onclick="undoSetOutScan(${i})">×</button>
+                </div>`;
+              }).join('')
+          }
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
+      <button class="btn" onclick="closeDisplayOverlay()">Cancel</button>
+      <button class="btn btn-green" onclick="finalizeSetOut()" ${_setOutScanned.length===0?'disabled':''}>Set Out ${_setOutScanned.length} Card${_setOutScanned.length===1?'':'s'}</button>
+    </div>
+  `;
+}
+
+async function handleSetOutScan(barcode) {
+  // Skip duplicate scans of the same card silently
+  if (_setOutScanned.some(c => c.barcode === barcode)) {
+    flash('green');
+    return;
+  }
+  try {
+    const d = await post('/api/display/set-out/scan', { barcode });
+    _setOutScanned.push(d.card);
+    flash('green');
+    toast(`✓ ${d.card.card_name} [${d.card.condition}]`, 'green');
+    renderSetOutScanStep();
+  } catch(e) {
+    flash('red');
+    toast(`✕ ${e.message}`, 'red');
+  }
+}
+
+function undoSetOutScan(idx) {
+  _setOutScanned.splice(idx, 1);
+  renderSetOutScanStep();
+}
+
+async function finalizeSetOut() {
+  if (!_setOutScanned.length) return;
+  try {
+    const d = await post('/api/display/set-out/finalize', {
+      barcodes: _setOutScanned.map(c => c.barcode),
+      case_id:  _setOutCaseId,
+    });
+    toast(`✓ Set out ${d.moved} card${d.moved===1?'':'s'}`, 'green');
+    closeDisplayOverlay();
+    loadDisplay();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── Display: Return All flow ──────────────────────────────────────────────────
+let _returnScannedDisplay = [];
+
+async function openReturnAll(caseId) {
+  _displayMode = 'return';
+  _returnScannedDisplay = [];
+  document.getElementById('display-overlay').classList.add('active');
+  renderReturnScanStep();
+}
+
+function renderReturnScanStep() {
+  document.getElementById('display-overlay-content').innerHTML = `
+    <div style="font-size:1.2rem;font-weight:700;margin-bottom:6px;">Return Display Cards to Storage</div>
+    <div style="font-size:0.82rem;color:var(--dim);margin-bottom:14px;">
+      Scan every card you're pulling off display. When you're done, we'll batch-assign them to storage bins in one shot.
+    </div>
+    <div class="stats-bar" style="margin-bottom:14px;">
+      <div class="stat-box"><div class="stat-label">Scanned</div><div class="stat-val" style="color:var(--green);">${_returnScannedDisplay.length}</div></div>
+    </div>
+    <div style="max-height:420px;overflow-y:auto;">
+      ${_returnScannedDisplay.length === 0
+        ? '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:30px;">Scan a card to begin.</div>'
+        : _returnScannedDisplay.map((c,i) => `
+            <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(74,222,128,0.06);border:1px solid var(--green);border-radius:6px;margin-bottom:5px;">
+              ${c.image_url?`<img src="${esc(c.image_url)}" style="width:30px;aspect-ratio:2.5/3.5;object-fit:contain;">`:''}
+              <div style="flex:1;">
+                <div style="font-weight:600;font-size:0.88rem;">${esc(c.card_name)}</div>
+                <div style="font-size:0.72rem;color:var(--dim);">${esc(c.condition||'')} · ${esc(c.set_name||'')} · $${parseFloat(c.current_price||0).toFixed(2)}</div>
+              </div>
+              <button class="btn btn-sm" style="color:var(--red);background:none;border:none;" onclick="undoReturnScan(${i})">×</button>
+            </div>
+          `).join('')}
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
+      <button class="btn" onclick="closeDisplayOverlay()">Cancel</button>
+      <button class="btn btn-green" onclick="finalizeReturn()" ${_returnScannedDisplay.length===0?'disabled':''}>Store ${_returnScannedDisplay.length} Card${_returnScannedDisplay.length===1?'':'s'}</button>
+    </div>
+  `;
+}
+
+async function handleReturnScan(barcode) {
+  if (_returnScannedDisplay.some(c => c.barcode === barcode)) {
+    flash('green');
+    return;
+  }
+  try {
+    const d = await post('/api/display/return/scan', { barcode });
+    _returnScannedDisplay.push(d.card);
+    flash('green');
+    toast(`↩ ${d.card.card_name}`, 'green');
+    renderReturnScanStep();
+  } catch(e) {
+    flash('red');
+    toast(`✕ ${e.message}`, 'red');
+  }
+}
+
+function undoReturnScan(idx) {
+  _returnScannedDisplay.splice(idx, 1);
+  renderReturnScanStep();
+}
+
+async function finalizeReturn() {
+  if (!_returnScannedDisplay.length) return;
+  try {
+    const d = await post('/api/display/return/finalize', {
+      barcodes: _returnScannedDisplay.map(c => c.barcode),
+    });
+    // Show full-screen result (mirrors the existing Return Queue store result)
+    document.getElementById('display-overlay-content').innerHTML = `
+      <div style="font-size:1.1rem;font-weight:700;color:var(--green);margin-bottom:18px;">
+        ✓ ${d.stored} card${d.stored!==1?'s':''} stored — put them here:
+      </div>
+      ${(d.assignments||[]).map(a => `
+        <div style="display:flex;align-items:center;gap:16px;padding:14px 18px;background:var(--s1);border:1px solid var(--green);border-radius:10px;margin-bottom:8px;">
+          <div style="font-family:var(--mono);font-size:2.2rem;font-weight:700;color:var(--green);min-width:80px;">${esc(a.bin_label)}</div>
+          <div>
+            <div style="font-weight:700;">${a.count} card${a.count!==1?'s':''} <span style="font-size:0.7rem;color:var(--dim);font-weight:400;">(${esc(a.game)})</span></div>
+            <div style="font-size:0.78rem;color:var(--dim);margin-top:2px;">${(a.cards||[]).join(', ')}${a.count > (a.cards||[]).length ? ' +more' : ''}</div>
+          </div>
+        </div>
+      `).join('')}
+      ${(d.errors||[]).length ? `<div style="background:rgba(248,113,113,0.08);border:1px solid var(--red);border-radius:8px;padding:10px;margin-top:10px;font-size:0.82rem;">
+        ${d.errors.map(e => `<div>⚠ ${esc(e.game)}: ${esc(e.error)}</div>`).join('')}
+      </div>` : ''}
+      <button class="btn btn-ghost" style="margin-top:16px;width:100%;padding:12px;" onclick="closeDisplayOverlay()">Done, cards are away</button>
+    `;
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+function closeDisplayOverlay() {
+  document.getElementById('display-overlay').classList.remove('active');
+  _displayMode = null;
+  _setOutScanned = [];
+  _setOutSuggestions = [];
+  _setOutCaseId = null;
+  _returnScannedDisplay = [];
+  loadDisplay();
 }
 
 // ── Featured Cards ────────────────────────────────────────────────────────────

@@ -817,6 +817,232 @@ def display_case_capacity(case_id):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Display Case — Set Out (suggest + scan + finalize) and Return All
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/display/set-out/suggest")
+def display_suggest():
+    """Score cards in storage and return the top-N as a shopping list with bin
+    labels. Staff uses this as guidance, not gospel — the actual transition is
+    driven by what they scan, not by this list."""
+    try:
+        count = max(1, min(int(request.args.get("count", 50)), 200))
+    except (TypeError, ValueError):
+        return jsonify({"error": "count must be an integer"}), 400
+
+    # Pull 5x candidates so the diversity-cap pass below has room to work with.
+    candidates = db.query("""
+        WITH base AS (
+            SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+                   rc.condition, rc.current_price, rc.image_url, rc.variant,
+                   rc.tcgplayer_id, rc.scrydex_id, rc.game, sl.bin_label,
+                   (SELECT MAX(rarity) FROM scrydex_price_cache spc
+                    WHERE (rc.scrydex_id IS NOT NULL AND spc.scrydex_id = rc.scrydex_id)
+                       OR (rc.tcgplayer_id IS NOT NULL AND spc.tcgplayer_id = rc.tcgplayer_id)
+                   ) AS rarity,
+                   (SELECT MAX(weight) FROM featured_cards fc
+                    WHERE rc.card_name ILIKE '%%' || fc.name_pattern || '%%'
+                      AND (fc.game = '*' OR fc.game = COALESCE(rc.game, 'pokemon'))
+                   ) AS featured_boost
+            FROM raw_cards rc
+            LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+            WHERE rc.state = 'STORED'
+              AND rc.current_hold_id IS NULL
+              AND rc.current_price IS NOT NULL
+              AND rc.current_price >= 1.0
+        )
+        SELECT *,
+               LN(GREATEST(1, current_price)) * 5 AS price_score,
+               CASE
+                   WHEN rarity IS NULL THEN 0
+                   WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
+                   WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
+                   WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
+                   WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
+                   WHEN rarity ILIKE '%%uncommon%%' THEN 2
+                   ELSE 0
+               END AS rarity_score,
+               COALESCE(featured_boost, 0) AS featured_score
+        FROM base
+        ORDER BY (LN(GREATEST(1, current_price)) * 5
+                  + COALESCE(featured_boost, 0)
+                  + CASE
+                      WHEN rarity IS NULL THEN 0
+                      WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
+                      WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
+                      WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
+                      WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
+                      WHEN rarity ILIKE '%%uncommon%%' THEN 2
+                      ELSE 0
+                  END
+                 ) DESC
+        LIMIT %s
+    """, (count * 5,))
+
+    # Greedy diversity pass: ≤2 per (name, variant), ≤10 per set, condition NM/LP only.
+    # Strong condition filter keeps damaged stuff out of the front glass — staff
+    # can manually scan an off-list MP card if they really want one.
+    chosen = []
+    by_card = {}
+    by_set  = {}
+    for c in candidates:
+        if len(chosen) >= count:
+            break
+        if c.get("condition") not in ("NM", "LP"):
+            continue
+        cv = (c["card_name"], (c.get("variant") or "").lower())
+        if by_card.get(cv, 0) >= 2:
+            continue
+        if by_set.get(c.get("set_name") or "", 0) >= 10:
+            continue
+        chosen.append(c)
+        by_card[cv] = by_card.get(cv, 0) + 1
+        by_set[c.get("set_name") or ""] = by_set.get(c.get("set_name") or "", 0) + 1
+
+    return jsonify({"suggestions": [_ser(dict(c)) for c in chosen], "total": len(chosen)})
+
+
+@app.route("/api/display/set-out/scan", methods=["POST"])
+def display_scan_set_out():
+    """Validate a barcode for the Set Out flow. Card must be in storage and
+    not held. Returns its current row so the UI can render it in the scan list."""
+    barcode = (request.get_json() or {}).get("barcode", "").strip()
+    if not barcode:
+        return jsonify({"error": "No barcode provided"}), 400
+
+    card = db.query_one("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.variant,
+               rc.state, rc.current_hold_id, sl.bin_label
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.barcode = %s
+    """, (barcode,))
+    if not card:
+        return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
+    if card["state"] != "STORED":
+        return jsonify({"error": f"Card is {card['state']}, not in storage", "barcode": barcode, "card_name": card["card_name"]}), 409
+    if card.get("current_hold_id"):
+        return jsonify({"error": "Card is on hold for a customer", "barcode": barcode, "card_name": card["card_name"]}), 409
+
+    return jsonify({"success": True, "card": _ser(dict(card))})
+
+
+@app.route("/api/display/set-out/finalize", methods=["POST"])
+def display_finalize_set_out():
+    """Move every scanned card from STORED to DISPLAY at the chosen case.
+    Only commits the move for cards that are still in a valid pre-state when
+    the request arrives — anything that drifted (e.g. someone else placed a
+    hold mid-scan) is reported back so staff can re-shelve."""
+    data    = request.get_json() or {}
+    barcodes = [b for b in (data.get("barcodes") or []) if b]
+    case_id  = data.get("case_id")
+    if not barcodes or not case_id:
+        return jsonify({"error": "barcodes and case_id required"}), 400
+
+    case = db.query_one("""
+        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count, sr.location_type
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.id::text = %s
+    """, (case_id,))
+    if not case or case["location_type"] != "display_case":
+        return jsonify({"error": "Display case not found"}), 404
+
+    available = case["capacity"] - case["current_count"]
+    if len(barcodes) > available:
+        return jsonify({"error": f"Case has only {available} slots free; you scanned {len(barcodes)} cards. Increase capacity or set out fewer."}), 409
+
+    # Atomic-ish: only update rows still STORED & unhel
+    moved = db.execute("""
+        UPDATE raw_cards
+        SET state = 'DISPLAY', bin_id = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE barcode = ANY(%s) AND state = 'STORED' AND current_hold_id IS NULL
+    """, (case_id, barcodes))
+
+    return jsonify({"success": True, "moved": moved, "scanned": len(barcodes)})
+
+
+@app.route("/api/display/return/scan", methods=["POST"])
+def display_scan_return():
+    """Validate a barcode for the Return-to-Storage flow. Card must be in DISPLAY."""
+    barcode = (request.get_json() or {}).get("barcode", "").strip()
+    if not barcode:
+        return jsonify({"error": "No barcode provided"}), 400
+
+    card = db.query_one("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.variant,
+               rc.state, rc.game, sl.bin_label
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.barcode = %s
+    """, (barcode,))
+    if not card:
+        return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
+    if card["state"] != "DISPLAY":
+        return jsonify({"error": f"Card is {card['state']}, not on display", "barcode": barcode, "card_name": card["card_name"]}), 409
+
+    return jsonify({"success": True, "card": _ser(dict(card))})
+
+
+@app.route("/api/display/return/finalize", methods=["POST"])
+def display_finalize_return():
+    """Batch-assign scanned display cards back to storage bins.
+    Groups by card_type so MTG cards land in MTG rows, Pokemon in Pokemon rows.
+    The whole pull goes in one assignment pass per type — no A1/A2/A1 ping-pong."""
+    from collections import defaultdict
+    barcodes = [b for b in ((request.get_json() or {}).get("barcodes") or []) if b]
+    if not barcodes:
+        return jsonify({"error": "No barcodes provided"}), 400
+
+    cards = db.query("""
+        SELECT id, barcode, card_name, COALESCE(game, 'pokemon') AS game
+        FROM raw_cards
+        WHERE barcode = ANY(%s) AND state = 'DISPLAY'
+    """, (barcodes,))
+    if not cards:
+        return jsonify({"error": "None of the scanned cards are currently on display"}), 400
+
+    by_game = defaultdict(list)
+    for c in cards:
+        by_game[c["game"]].append(c)
+
+    bin_summary = []
+    errors = []
+    for game, gcards in by_game.items():
+        try:
+            assignments = assign_bins(game, len(gcards), db)
+        except ValueError as e:
+            errors.append({"game": game, "error": str(e)})
+            continue
+
+        idx = 0
+        for a in assignments:
+            slice_ids = [str(gcards[idx + i]["id"]) for i in range(a["count"])]
+            idx += a["count"]
+            db.execute("""
+                UPDATE raw_cards
+                SET state = 'STORED', bin_id = %s, current_hold_id = NULL,
+                    stored_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id::text = ANY(%s)
+            """, (a["bin_id"], slice_ids))
+            bin_summary.append({
+                "bin_label": a["bin_label"],
+                "count":     a["count"],
+                "game":      game,
+                "cards":     [c["card_name"] for c in gcards if str(c["id"]) in set(slice_ids)][:5],
+            })
+
+    return jsonify({
+        "success":     not errors,
+        "stored":      sum(b["count"] for b in bin_summary),
+        "assignments": bin_summary,
+        "errors":      errors,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Featured Cards — Set Out / Fill Binder scoring boost (multi-IP)
 # ═══════════════════════════════════════════════════════════════════════════════
 
