@@ -1705,12 +1705,25 @@
                         }
                         if (showRaw) {
                             addHtml += '<div id="session-add-card" style="display:none;">';
+                            // Graded toggle — mirrors the New Intake form so users can enter
+                            // a PSA/BGS/CGC/SGC card directly without the "add raw → change to graded" detour.
+                            addHtml += '<div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; padding:8px 12px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">';
+                            addHtml += '<label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9rem;">';
+                            addHtml += '<input type="checkbox" id="session-is-graded" onchange="toggleSessionGraded()" style="width:16px; height:16px;">';
+                            addHtml += '<span style="font-weight:600;">Graded Card</span></label>';
+                            addHtml += '<span id="session-graded-fields" style="display:none; align-items:center; gap:8px;">';
+                            addHtml += '<select id="session-grade-company" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">';
+                            addHtml += '<option value="PSA">PSA</option><option value="BGS">BGS</option><option value="CGC">CGC</option><option value="SGC">SGC</option></select>';
+                            addHtml += '<select id="session-grade-value" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">';
+                            addHtml += '<option value="10">10</option><option value="9.5">9.5</option><option value="9">9</option><option value="8.5">8.5</option><option value="8">8</option><option value="7">7</option></select></span>';
+                            addHtml += '<span id="session-graded-hint" style="color:var(--text-dim); font-size:0.8rem;">Toggle for PSA/BGS/CGC graded cards — uses eBay market data</span>';
+                            addHtml += '</div>';
                             addHtml += '<div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">';
                             addHtml += '<div class="form-group" style="flex:2; min-width:160px; margin:0;"><label>Card Search</label>';
                             addHtml += '<input type="text" id="session-raw-search" placeholder="e.g. Charizard ex" onkeydown="if(event.key===\'Enter\') smartCardSearch(\'' + _sid + '\', ' + _opct + ', \'session\')"></div>';
                             addHtml += '<div class="form-group" style="flex:1; min-width:120px; margin:0;"><label>Set</label><input type="text" id="session-raw-set" placeholder="optional"></div>';
                             addHtml += '<div class="form-group" style="width:90px; margin:0;"><label>TCG ID</label><input type="number" id="session-raw-tcgid" placeholder="optional" onkeydown="if(event.key===\'Enter\') smartCardSearch(\'' + _sid + '\', ' + _opct + ', \'session\')"></div>';
-                            addHtml += '<div class="form-group" style="width:70px; margin:0;"><label>Cond</label><select id="session-raw-condition"><option value="NM">NM</option><option value="LP">LP</option><option value="MP">MP</option><option value="HP">HP</option><option value="DMG">DMG</option></select></div>';
+                            addHtml += '<div class="form-group" style="width:70px; margin:0;" id="session-raw-cond-group"><label>Cond</label><select id="session-raw-condition"><option value="NM">NM</option><option value="LP">LP</option><option value="MP">MP</option><option value="HP">HP</option><option value="DMG">DMG</option></select></div>';
                             addHtml += '<div class="form-group" style="width:50px; margin:0;"><label>Qty</label><input type="number" id="session-raw-qty" value="1" min="1"></div>';
                             addHtml += '<button class="btn btn-primary btn-sm" onclick="smartCardSearch(\'' + _sid + '\', ' + _opct + ', \'session\')">Search</button>';
                             addHtml += '<button class="btn btn-secondary btn-sm" onclick="toggleManualCardAdd(\'' + _sid + '\', ' + _opct + ')">Manual</button>';
@@ -4045,7 +4058,7 @@
     // ═══════════════════════════════ MARK AS GRADED ═══════════════════════════════
 
     async function openMarkGraded(itemId, sessionId, cardName, tcgplayerId, isGraded, gradeCompany, gradeValue) {
-        window._mgState = { itemId, sessionId, cardName, tcgplayerId, gradedPrices: null };
+        window._mgState = { itemId, sessionId, cardName, tcgplayerId, cachedGraded: null };
         document.getElementById('mark-graded-title').textContent = isGraded ? '🏅 Change Grade' : '🏅 Mark as Graded';
         document.getElementById('mark-graded-card-info').textContent = cardName;
         document.getElementById('mg-company').value = gradeCompany || 'PSA';
@@ -4055,81 +4068,71 @@
         if (_mgBtn) { _mgBtn.disabled = false; _mgBtn.textContent = 'Save Grade'; }
         openModal('mark-graded-modal');
 
-        // Pre-load graded prices from PPT if we have a tcgplayer_id
-        if (tcgplayerId) {
-            try {
-                const r = await fetch('/api/lookup/card', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ tcgplayer_id: tcgplayerId }),
-                });
-                const d = await r.json();
-                window._mgState.gradedPrices = d.graded_prices || null;
-            } catch(e) {}
-        }
-        onMarkGradedChange();
+        await onMarkGradedChange();
     }
 
-    function onMarkGradedChange() {
+    // Fetch live eBay comps + cached graded aggregates for the currently
+    // selected (company, grade) and render. Re-runs whenever the user changes
+    // either dropdown — the cache shape is just {company:{grade:price}}, so
+    // we hit the lookup endpoint with the grade params to get the rich
+    // live_graded payload (mid/low/high/comps_count/source).
+    async function onMarkGradedChange() {
         const st = window._mgState;
         if (!st) return;
         const company = document.getElementById('mg-company').value;
         const grade = document.getElementById('mg-grade').value;
         const priceInfo = document.getElementById('mg-price-info');
 
-        if (!st.gradedPrices) {
+        if (!st.tcgplayerId) {
             priceInfo.innerHTML = '<span style="color:var(--text-dim);">No TCGPlayer ID linked — price will need manual override after saving.</span>';
+            st._selectedPrice = null;
             return;
         }
-        const gradeData = (st.gradedPrices[company] || {})[grade] || {};
-        const price      = gradeData.price;
-        const confidence = gradeData.confidence;
-        const method     = gradeData.method || '';
-        const daysUsed   = gradeData.days_used;
-        const count      = gradeData.count || 0;
-        const vol7       = gradeData.volume_7day;
-        const trend      = gradeData.trend;
-        const median     = gradeData.median;
-        const min_p      = gradeData.min;
-        const max_p      = gradeData.max;
-        const price7day  = gradeData.price_7day;
-        const smpPrice   = gradeData.smp_price;
 
-        if (price == null) {
-            priceInfo.innerHTML = `<span style="color:var(--text-dim);">No eBay data for ${company} ${grade}</span>`;
-        } else {
-            const confColor = confidence === 'high' ? '#22c55e' : confidence === 'medium' ? '#f59e0b' : '#ef4444';
-            const confLabel = confidence
-                ? `<span style="color:${confColor};font-size:0.72rem;font-weight:600;text-transform:uppercase;">${confidence}</span>`
-                : '';
-            const methodLabel = method
-                ? `<span style="color:var(--text-dim);font-size:0.7rem;">${method.replace(/_/g,' ')}</span>`
-                : '';
-            const trendIcon = trend === 'up' ? '↑' : trend === 'down' ? '↓' : trend === 'stable' ? '→' : '';
-            const trendColor = trend === 'up' ? '#22c55e' : trend === 'down' ? '#ef4444' : 'var(--text-dim)';
+        priceInfo.innerHTML = '<span style="color:var(--text-dim);">Loading prices...</span>';
 
-            // Signal lines — show what we have so you can judge the price
-            const signals = [];
-            if (count) signals.push(`${count} sales`);
-            if (vol7) signals.push(`${vol7.toFixed(1)}/day`);
-            if (trendIcon) signals.push(`<span style="color:${trendColor}">${trendIcon}</span>`);
-            const statsLine = signals.join(' · ');
+        let cachedPrice = null;
+        let live = null;
+        try {
+            const r = await fetch('/api/lookup/card', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    tcgplayer_id: st.tcgplayerId,
+                    grade_company: company,
+                    grade_value: grade,
+                }),
+            });
+            const d = await r.json();
+            const graded = d.graded_prices || {};
+            cachedPrice = (graded[company] || {})[grade];
+            const liveCo = d.live_graded || {};
+            live = (liveCo[company] || {})[grade] || null;
+        } catch(e) { /* fall through to no-data state */ }
 
-            // Price breakdown — show the raw signals vs what we picked
-            const breakdown = [];
-            if (price7day != null) breakdown.push(`7d avg $${price7day.toFixed(2)}`);
-            if (median != null)    breakdown.push(`median $${median.toFixed(2)}`);
-            if (smpPrice != null && method !== 'smart_market') breakdown.push(`smp $${smpPrice.toFixed(2)}`);
-            if (min_p != null && max_p != null) breakdown.push(`range $${min_p.toFixed(0)}–$${max_p.toFixed(0)}`);
-            const breakdownLine = breakdown.join(' · ');
+        // Live (real eBay comps) wins over the cache aggregate.
+        const price = (live && live.mid != null) ? live.mid : cachedPrice;
+        st._selectedPrice = price != null ? Number(price) : null;
 
-            priceInfo.innerHTML =
-                `<strong style="font-size:1.2rem;">$${price.toFixed(2)}</strong> ` +
-                `${confLabel} ${methodLabel}` +
-                (statsLine ? `<br><span style="color:var(--text-dim);font-size:0.72rem;">${statsLine}</span>` : '') +
-                (breakdownLine ? `<br><span style="color:var(--text-dim);font-size:0.68rem;opacity:0.8;">${breakdownLine}</span>` : '');
+        if (st._selectedPrice == null) {
+            priceInfo.innerHTML = `<span style="color:var(--text-dim);">No eBay data for ${company} ${grade} — backend will retry on save.</span>`;
+            return;
         }
-        st._selectedPrice = price;
+
+        const sourceLabel = live
+            ? `<span style="color:#22c55e;font-size:0.72rem;font-weight:600;">live</span>`
+            : `<span style="color:#f59e0b;font-size:0.72rem;font-weight:600;">cache</span>`;
+
+        const stats = [];
+        if (live && live.comps_count) stats.push(`${live.comps_count} comps`);
+        if (live && live.low != null && live.high != null) {
+            stats.push(`range $${Number(live.low).toFixed(0)}–$${Number(live.high).toFixed(0)}`);
+        }
+        const statsLine = stats.join(' · ');
+
+        priceInfo.innerHTML =
+            `<strong style="font-size:1.2rem;">$${Number(price).toFixed(2)}</strong> ${sourceLabel}` +
+            (statsLine ? `<br><span style="color:var(--text-dim);font-size:0.72rem;">${statsLine}</span>` : '');
     }
 
     async function confirmMarkGraded() {
@@ -4412,12 +4415,27 @@
     function _isGradedContext(context) {
         if (context === 'intake') return document.getElementById('intake-is-graded')?.checked || false;
         if (context === 'raw') return document.getElementById('raw-is-graded')?.checked || false;
+        if (context === 'session') return document.getElementById('session-is-graded')?.checked || false;
         return false;
     }
 
     function _getGradeFields(context) {
         if (context === 'intake') return { company: document.getElementById('intake-grade-company')?.value || 'PSA', value: document.getElementById('intake-grade-value')?.value || '10', badge: document.getElementById('intake-graded-badge') };
+        if (context === 'session') return { company: document.getElementById('session-grade-company')?.value || 'PSA', value: document.getElementById('session-grade-value')?.value || '10', badge: null };
         return { company: document.getElementById('raw-grade-company')?.value || 'PSA', value: document.getElementById('raw-grade-value')?.value || '10', badge: document.getElementById('raw-graded-market-badge') };
+    }
+
+    function toggleSessionGraded() {
+        const cb = document.getElementById('session-is-graded');
+        const fields = document.getElementById('session-graded-fields');
+        const hint = document.getElementById('session-graded-hint');
+        const condGroup = document.getElementById('session-raw-cond-group');
+        if (!cb || !fields) return;
+        const on = cb.checked;
+        fields.style.display = on ? 'inline-flex' : 'none';
+        if (hint) hint.style.display = on ? 'none' : '';
+        // Hide the raw condition picker when graded — graded slabs lock to NM
+        if (condGroup) condGroup.style.display = on ? 'none' : '';
     }
 
     function smartCardSearch(sessionId, offerPct, context) {
