@@ -249,17 +249,22 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
         else:
             # component_type not set — detect from name
             child_product_type = "raw" if _looks_like_single_card(comp_name) else "sealed"
+        # Inherit parent's verified state — opening a verified sealed product
+        # doesn't require re-verifying its known contents. Without this, children
+        # land at verified_at=NULL and the push filter excludes them.
         execute("""
             INSERT INTO intake_items (
                 id, session_id, product_name, set_name, tcgplayer_id,
                 quantity, market_price, offer_price, product_type,
-                is_mapped, item_status, parent_item_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                is_mapped, item_status, parent_item_id,
+                verified_at, verified_by
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             child_id, session_id, comp["product_name"], comp.get("set_name"),
             comp.get("tcgplayer_id"), child_qty, market_price,
             comp_offer, child_product_type,
             comp.get("tcgplayer_id") is not None, "good", item_id,
+            item.get("verified_at"), item.get("verified_by"),
         ))
 
         child = query_one("SELECT * FROM intake_items WHERE id = %s", (child_id,))
@@ -1859,15 +1864,19 @@ def split_then_break_down(item_id: str, qty_to_break: int,
 
         from uuid import uuid4
         new_id = str(uuid4())
+        # Carry verified state onto the split row so break_down_item below
+        # propagates it to the breakdown children.
         execute("""
             INSERT INTO intake_items
                 (id, session_id, product_name, tcgplayer_id, product_type, set_name,
-                 quantity, market_price, offer_price, unit_cost_basis, is_mapped, item_status, parent_item_id)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 quantity, market_price, offer_price, unit_cost_basis, is_mapped,
+                 item_status, parent_item_id, verified_at, verified_by)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (new_id, item["session_id"], item["product_name"], item.get("tcgplayer_id"),
               item.get("product_type", "sealed"), item.get("set_name"),
               qty_to_break, item["market_price"], break_offer,
-              item.get("unit_cost_basis"), item.get("is_mapped"), "good", item_id))
+              item.get("unit_cost_basis"), item.get("is_mapped"), "good", item_id,
+              item.get("verified_at"), item.get("verified_by")))
 
         target_item_id = new_id
         remainder_item = query_one("SELECT * FROM intake_items WHERE id=%s", (item_id,))
