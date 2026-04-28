@@ -85,15 +85,16 @@ def generate_barcode_image(barcode_id: str, *,
     width_px  = int(width_mm  / 25.4 * dpi)   # 602px for 51mm
     height_px = int(height_mm / 25.4 * dpi)   # 224px for 19mm
 
-    V_PAD     = 6          # ~0.5mm top/bottom padding
-    RIGHT_PAD = 18         # ~1.5mm right margin — barcode width was fine here per Sean
-    LEFT_PAD  = 80         # ~6.7mm left margin — Dymo 30330 unprintable left zone clips ~6mm
+    V_PAD       = 6        # ~0.5mm top padding
+    BOTTOM_PAD  = 32       # ~2.7mm bottom margin — Dymo 30330 unprintable bottom zone
+    RIGHT_PAD   = 35       # ~3mm right margin — Dymo 30330 unprintable right zone
+    LEFT_PAD    = 80       # ~6.7mm left margin — Dymo 30330 unprintable left zone clips ~6mm
 
-    # 28mm tall is a strip — tight layout
-    # Text (name + detail) across the top ~35%, barcode ~50%, ID text ~15%
-    text_zone_h    = int(height_px * 0.35)   # ~116px
-    barcode_zone_h = int(height_px * 0.50)   # ~166px
-    code_zone_h    = height_px - text_zone_h - barcode_zone_h
+    # Layout zones fit within a reduced usable height so nothing sits in the bottom clip zone
+    usable_h = height_px - BOTTOM_PAD
+    text_zone_h    = int(usable_h * 0.35)
+    barcode_zone_h = int(usable_h * 0.50)
+    code_zone_h    = usable_h - text_zone_h - barcode_zone_h
 
     # At 300dpi: 1pt physical = ~11.8px
     # name_size 46px ≈ 3.9pt physical — readable on 28mm label
