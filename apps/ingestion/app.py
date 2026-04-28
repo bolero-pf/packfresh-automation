@@ -2824,7 +2824,7 @@ def lookup_session_barcode(session_id, barcode):
     row = db.query_one("""
         SELECT rc.intake_item_id, ii.session_id
           FROM raw_cards rc
-          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+          JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE rc.barcode = %s
          LIMIT 1
     """, (barcode,))
@@ -3306,7 +3306,7 @@ def push_plan(session_id):
         SELECT rc.id, rc.barcode, rc.game,
                ii.routing_reviewed_at
           FROM raw_cards rc
-          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+          JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE ii.session_id = %s
            AND ii.routing_destination = 'storage'
            AND rc.bin_id IS NULL
@@ -3344,7 +3344,7 @@ def push_plan(session_id):
         SELECT rc.id, rc.barcode, rc.game,
                ii.routing_reviewed_at
           FROM raw_cards rc
-          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+          JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE ii.session_id = %s
            AND ii.routing_destination = 'display'
            AND rc.bin_id IS NULL
@@ -3378,7 +3378,7 @@ def push_plan(session_id):
             COUNT(*) FILTER (WHERE ii.routing_destination = 'bulk'  AND rc.bin_id IS NULL) AS bulk_count,
             COUNT(*) FILTER (WHERE ii.routing_destination = 'grade' AND rc.bin_id IS NULL) AS grade_count
           FROM raw_cards rc
-          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+          JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE ii.session_id = %s
     """, (session_id,)) or {}
 
@@ -3446,7 +3446,7 @@ def push_batch(session_id):
         SELECT rc.id, rc.barcode, rc.state, rc.bin_id, rc.intake_item_id,
                ii.session_id, ii.routing_destination
           FROM raw_cards rc
-          JOIN intake_items ii ON ii.id::text = rc.intake_item_id
+          JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE rc.barcode = ANY(%s)
     """, (barcodes,))
 
