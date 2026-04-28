@@ -623,6 +623,19 @@ def api_cancel_order():
 # Freshdesk integration — tickets, conversations, canned responses
 # ---------------------------------------------------------------------------
 
+def _fd_attachment(a):
+    """Normalize a Freshdesk attachment dict for the UI. Keeps id + content_type
+    so the frontend can rewrite non-image inline <img data-id="..."> tags
+    (e.g. PDFs the customer attached) into clickable links instead of broken images."""
+    return {
+        "id": a.get("id"),
+        "name": a.get("name", ""),
+        "url": a.get("attachment_url") or a.get("url", ""),
+        "content_type": a.get("content_type", ""),
+        "inline": bool(a.get("inline", False)),
+    }
+
+
 @app.route("/api/freshdesk-tickets")
 def api_freshdesk_tickets():
     """Fetch Freshdesk tickets + conversations for a customer email."""
@@ -663,10 +676,7 @@ def api_freshdesk_tickets():
                 "from_email": (t.get("requester", {}) or {}).get("email", "") if isinstance(t.get("requester"), dict) else "",
                 "incoming": t.get("source") == 1,  # email source → customer authored
                 "created_at": t.get("created_at", ""),
-                "attachments": [
-                    {"name": a.get("name", ""), "url": a.get("attachment_url", "")}
-                    for a in (t.get("attachments") or [])
-                ],
+                "attachments": [_fd_attachment(a) for a in (t.get("attachments") or [])],
             })
 
         try:
@@ -683,10 +693,7 @@ def api_freshdesk_tickets():
                 "from_email": c.get("from_email", ""),
                 "incoming": c.get("incoming", False),
                 "created_at": c.get("created_at", ""),
-                "attachments": [
-                    {"name": a.get("name", ""), "url": a.get("attachment_url", "")}
-                    for a in (c.get("attachments") or [])
-                ],
+                "attachments": [_fd_attachment(a) for a in (c.get("attachments") or [])],
             })
 
         tickets.append({
@@ -1385,16 +1392,21 @@ function _fdSectionHtml(email, orderId) {
       const date = c.created_at ? new Date(c.created_at).toLocaleString() : '';
       html += '<div class="fd-convo ' + dir + '">';
       html += '<div class="fd-convo-meta">' + who + ' · ' + date + '</div>';
-      // Render the actual HTML body (inline images render in place, formatting preserved).
-      // Constrained to max-height with scroll so signatures don't dominate.
-      // Falls back to plain body_text if body is empty.
+      // Render the actual HTML body. Inline images render in place; non-image
+      // inline attachments (e.g. PDFs Freshdesk dropped in as <img> tags) get
+      // rewritten to clickable links so they aren't broken thumbnails.
+      const atts = c.attachments || [];
       if (c.body) {
-        html += '<div class="fd-convo-body">' + c.body + '</div>';
+        html += '<div class="fd-convo-body">' + _fdRewriteInlineNonImages(c.body, atts) + '</div>';
       } else {
         html += '<div class="fd-convo-body fd-convo-body-text">' + _esc(c.body_text || '') + '</div>';
       }
-      if (c.attachments && c.attachments.length) {
-        html += '<div class="fd-attach">' + c.attachments.map(a => '<a href="' + a.url + '" target="_blank">' + _esc(a.name) + '</a>').join(' · ') + '</div>';
+      if (atts.length) {
+        html += '<div class="fd-attach">' + atts.map(a => {
+          const isImg = (a.content_type || '').startsWith('image/');
+          const icon = isImg ? '🖼️' : ((a.content_type || '').includes('pdf') ? '📄' : '📎');
+          return '<a href="' + a.url + '" target="_blank">' + icon + ' ' + _esc(a.name) + '</a>';
+        }).join(' · ') + '</div>';
       }
       html += '</div>';
     }
@@ -1404,6 +1416,31 @@ function _fdSectionHtml(email, orderId) {
 }
 
 function _esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// Freshdesk delivers every email attachment as <img data-id="..."> in the body
+// HTML. For PDFs (and anything non-image) the browser renders that as a broken
+// thumbnail. Match each <img> against the conversation's attachment list by
+// data-id and swap non-images for a clickable file link.
+function _fdRewriteInlineNonImages(bodyHtml, attachments) {
+  if (!bodyHtml || !attachments || !attachments.length) return bodyHtml;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = bodyHtml;
+  tmp.querySelectorAll('img[data-id]').forEach(img => {
+    const id = img.getAttribute('data-id');
+    const att = attachments.find(a => String(a.id) === String(id));
+    if (!att) return;
+    const ct = (att.content_type || '').toLowerCase();
+    if (ct.startsWith('image/')) return;
+    const link = document.createElement('a');
+    link.href = att.url || img.getAttribute('src') || '#';
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    link.textContent = (ct.includes('pdf') ? '📄 ' : '📎 ') + (att.name || 'attachment');
+    link.style.cssText = 'display:inline-block;padding:6px 10px;margin:4px 0;background:rgba(255,255,255,0.06);border-radius:6px;color:var(--accent);text-decoration:none;font-weight:500;';
+    img.replaceWith(link);
+  });
+  return tmp.innerHTML;
+}
 
 // Click any image inside a Freshdesk convo to open it full-size in a new tab.
 document.addEventListener('click', (e) => {
