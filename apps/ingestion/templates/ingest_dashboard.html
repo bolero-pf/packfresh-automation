@@ -5549,6 +5549,7 @@ function _renderBarcodeSection(panel, sessionId) {
                     </select>
                     <button class="btn btn-secondary btn-sm" onclick="rebinSession('${sessionId}', 'alpha')" style="font-size:0.78rem;" title="Re-assign bins alphabetically — first 100 alpha-sorted cards go to the earliest bin, etc.">↻ Re-bin A→Z</button>
                     <button class="btn btn-secondary btn-sm" onclick="rebinSession('${sessionId}', 'intake')" style="font-size:0.78rem;" title="Re-assign bins in intake (created_at) order — only useful if items were entered one at a time with staggered timestamps">↻ Re-bin (intake)</button>
+                    <button class="btn btn-secondary btn-sm" onclick="regenerateSessionBarcodes('${sessionId}')" style="font-size:0.78rem;" title="Reissue short-format IDs for any legacy long-format barcodes in this session. ONLY run if you haven't physically printed/applied any labels yet — printed labels will no longer match the DB.">↻ Regenerate Barcodes</button>
                     <button class="btn btn-primary btn-sm" onclick="printBarcodesInOrder()" style="font-size:0.78rem;">🖨 Print All (${total})</button>
                 </div>
             </div>
@@ -5588,6 +5589,21 @@ function printSessionBin(binLabel) {
     ).join('');
     win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
     win.document.close();
+}
+
+async function regenerateSessionBarcodes(sessionId) {
+    if (!confirm(`Reissue short-format barcode IDs for any legacy (PF-YYYYMMDD-XXXXXX) barcodes in this session?\n\nONLY run if you haven't physically printed or applied labels yet for this session — already-printed labels will no longer match the DB.`)) return;
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/regenerate-barcodes`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Regenerate failed'); return; }
+        await _loadSessionBarcodes(sessionId);
+        const errMsg = (d.errors && d.errors.length) ? `\n\n${d.errors.length} error(s) — check console.` : '';
+        if (d.errors && d.errors.length) console.warn('Regen errors:', d.errors);
+        alert(`Regenerated ${d.regenerated} barcode(s).${errMsg}`);
+    } catch (e) {
+        alert('Regenerate failed: ' + e.message);
+    }
 }
 
 async function rebinSession(sessionId, order) {

@@ -3570,6 +3570,50 @@ def barcode_raw_items(session_id):
     })
 
 
+@app.route("/api/ingest/session/<session_id>/regenerate-barcodes", methods=["POST"])
+def regenerate_session_barcodes(session_id):
+    """Reissue new short-format barcode IDs for any raw_cards in this session
+    that still have the legacy long format (PF-YYYYMMDD-XXXXXX) and haven't
+    been pushed yet. Only run on sessions where physical labels have NOT been
+    printed/applied — once paper labels exist, the DB ID and the label diverge.
+    """
+    if not generate_barcode_id:
+        return jsonify({"error": "barcode_gen not available"}), 503
+
+    session = ingest.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    rows = db.query("""
+        SELECT id, barcode FROM raw_cards
+        WHERE intake_session_id = %s
+          AND state = ANY(%s)
+          AND barcode ~ '^PF-[0-9]{8}-'
+    """, (session_id, [
+        'BARCODED', 'BARCODED_STORAGE', 'BARCODED_DISPLAY',
+        'ROUTED_STORAGE', 'ROUTED_BINDER',
+    ]))
+
+    updated = 0
+    errors = []
+    for r in rows:
+        try:
+            db.execute(
+                "UPDATE raw_cards SET barcode = %s WHERE id = %s",
+                (generate_barcode_id(), r["id"]),
+            )
+            updated += 1
+        except Exception as e:
+            errors.append({"id": str(r["id"]), "old_barcode": r["barcode"], "error": str(e)})
+
+    return jsonify({
+        "success":     True,
+        "regenerated": updated,
+        "skipped":     0,
+        "errors":      errors,
+    })
+
+
 @app.route("/api/ingest/session/<session_id>/push-raw", methods=["POST"])
 def push_raw_items(session_id):
     """
