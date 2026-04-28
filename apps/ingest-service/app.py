@@ -1886,6 +1886,12 @@ def lookup_card():
     if not tcgplayer_id:
         return jsonify({"error": "tcgplayer_id required"}), 400
 
+    # Only fetch live eBay comps for the specific (company, grade) the caller
+    # asks about. Enriching every grade is a 20+ paginated Scrydex calls and
+    # blocks the lookup spinner indefinitely.
+    req_company = (data.get("grade_company") or "").strip().upper() or None
+    req_grade   = (data.get("grade_value")   or "").strip() or None
+
     try:
         view = pricing.get_card_view(tcgplayer_id=int(tcgplayer_id))
         if not view:
@@ -1895,18 +1901,15 @@ def lookup_card():
                          f"variants={list((view.get('variants') or {}).keys())} "
                          f"primary={view.get('primary_variant')}")
 
-        # Enrich with live comps for each grade that has cached data — this
-        # replaces unreliable aggregates with real eBay sold data.
         live_graded = {}
-        try:
-            from graded_pricing import get_live_graded_comps
-            for company_name, grades in (view.get("graded") or {}).items():
-                for grade_val in grades:
-                    live = get_live_graded_comps(int(tcgplayer_id), company_name, grade_val, db)
-                    if live:
-                        live_graded.setdefault(company_name, {})[grade_val] = live
-        except Exception as e:
-            app.logger.warning(f"Live graded enrichment failed for TCG#{tcgplayer_id}: {e}")
+        if req_company and req_grade:
+            try:
+                from graded_pricing import get_live_graded_comps
+                live = get_live_graded_comps(int(tcgplayer_id), req_company, req_grade, db)
+                if live:
+                    live_graded[req_company] = {req_grade: live}
+            except Exception as e:
+                app.logger.warning(f"Live graded enrichment failed for TCG#{tcgplayer_id} {req_company} {req_grade}: {e}")
 
         return jsonify({
             "card": view,

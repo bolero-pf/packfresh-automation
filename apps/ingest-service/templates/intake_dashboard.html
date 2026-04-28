@@ -4444,10 +4444,16 @@
         const qty = parseInt(document.getElementById(ids.qty).value) || 1;
 
         try {
+            const lookupBody = { tcgplayer_id: parseInt(tcgId) };
+            if (_isGradedContext(context)) {
+                const _gf = _getGradeFields(context);
+                lookupBody.grade_company = _gf.company;
+                lookupBody.grade_value = _gf.value;
+            }
             const r = await fetch('/api/lookup/card', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+                body: JSON.stringify(lookupBody),
             });
             const contentType = r.headers.get('content-type') || '';
             if (!contentType.includes('application/json')) {
