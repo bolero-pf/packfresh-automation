@@ -64,6 +64,18 @@ import intake
 app = Flask(__name__)
 CORS(app)
 
+# Flask 3 serializes Decimal to a string by default ("518.83"), which breaks
+# every frontend `.toFixed()` call on a price. Coerce Decimal → float once so
+# any endpoint that returns nested price dicts (lookup_card, etc.) emits real
+# JSON numbers without each call site needing to walk the tree itself.
+from flask.json.provider import DefaultJSONProvider as _DefaultJSONProvider
+class _DecimalJSONProvider(_DefaultJSONProvider):
+    def default(self, o):
+        if isinstance(o, Decimal):
+            return float(o)
+        return super().default(o)
+app.json = _DecimalJSONProvider(app)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
