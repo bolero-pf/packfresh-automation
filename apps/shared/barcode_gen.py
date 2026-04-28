@@ -1,6 +1,6 @@
 """
 Barcode generation for raw card inventory.
-Label: 89mm x 28mm at 300 DPI = 1051 x 331 px (landscape)
+Label: 51mm x 19mm at 300 DPI = 602 x 224 px (landscape)
 
 Requires fonts-dejavu-core installed in the container:
     apt-get install -y fonts-dejavu-core
@@ -65,10 +65,10 @@ def generate_barcode_image(barcode_id: str, *,
                            condition: str = "",
                            card_number: str = "",
                            price: str = "",        # ignored
-                           width_mm: float = 89,
-                           height_mm: float = 28) -> bytes:
+                           width_mm: float = 51,
+                           height_mm: float = 19) -> bytes:
     """
-    89mm x 28mm landscape at 300 DPI.
+    51mm x 19mm landscape at 300 DPI (~2" x 0.75").
 
     Fixed layout — text zone gets top 40%, barcode gets bottom 60%.
     This prevents the barcode from swallowing everything when fonts are large.
@@ -82,11 +82,11 @@ def generate_barcode_image(barcode_id: str, *,
       └──────────────────────────────────┘
     """
     dpi       = 300
-    width_px  = int(width_mm  / 25.4 * dpi)   # 1051px for 89mm
-    height_px = int(height_mm / 25.4 * dpi)   # 331px for 28mm
+    width_px  = int(width_mm  / 25.4 * dpi)   # 602px for 51mm
+    height_px = int(height_mm / 25.4 * dpi)   # 224px for 19mm
 
-    PAD      = 10          # vertical / right padding
-    LEFT_PAD = 90          # ~7.5mm left margin — Dymo clips the first ~5-6mm
+    PAD      = 6           # vertical / right padding (~0.5mm)
+    LEFT_PAD = 55          # ~4.6mm left margin — Dymo clips the first ~4-5mm
 
     # 28mm tall is a strip — tight layout
     # Text (name + detail) across the top ~35%, barcode ~50%, ID text ~15%
