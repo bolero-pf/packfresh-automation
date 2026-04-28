@@ -757,25 +757,77 @@ def api_freshdesk_canned_responses():
 
 @app.route("/api/freshdesk-debug")
 def api_freshdesk_debug():
-    """Dump the raw Freshdesk JSON for a given email so we can inspect what
-    the API actually returns (e.g. when an attachment isn't surfacing).
-    Usage: /api/freshdesk-debug?email=customer@example.com
-    Returns the raw ticket list + every conversation's raw JSON."""
+    """Inspect what Freshdesk actually returns for a given email or ticket.
+    Usage:
+      /api/freshdesk-debug?email=customer@example.com  → all tickets, summary
+      /api/freshdesk-debug?ticket_id=2252              → one ticket, full detail
+
+    Returns a focused summary (just attachment-related fields) so the result
+    fits in a paste, plus a list of all keys present so we can spot fields we
+    aren't reading (e.g. cloud_files, support_attachments, etc.)."""
     import freshdesk as fd
     if not fd.is_configured():
         return jsonify({"error": "Freshdesk not configured"}), 400
+
+    def summarize(t, *, full=False):
+        out = {
+            "id": t.get("id"),
+            "subject": t.get("subject"),
+            "status": t.get("status"),
+            "source": t.get("source"),
+            "all_keys": sorted(t.keys()),
+            "attachments": t.get("attachments") or [],
+            "cloud_files": t.get("cloud_files") or [],
+        }
+        if full:
+            out["description_html_excerpt"] = (t.get("description") or "")[:500]
+        return out
+
+    ticket_id = request.args.get("ticket_id")
+    if ticket_id:
+        try:
+            t_list = fd._request("GET", f"/tickets/{ticket_id}")
+            t_full = fd.get_ticket(int(ticket_id))
+            convos = fd.get_ticket_conversations(int(ticket_id))
+            return jsonify({
+                "ticket_id": ticket_id,
+                "list_endpoint_keys": sorted(t_list.keys()),
+                "list_endpoint_attachments": t_list.get("attachments") or [],
+                "list_endpoint_cloud_files": t_list.get("cloud_files") or [],
+                "single_ticket_with_include": summarize(t_full, full=True),
+                "conversations_count": len(convos),
+                "conversations": [
+                    {
+                        "id": c.get("id"),
+                        "incoming": c.get("incoming"),
+                        "all_keys": sorted(c.keys()),
+                        "attachments": c.get("attachments") or [],
+                        "cloud_files": c.get("cloud_files") or [],
+                    }
+                    for c in convos
+                ],
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
     email = (request.args.get("email") or "").strip().lower()
     if not email:
-        return jsonify({"error": "email param required"}), 400
+        return jsonify({"error": "email or ticket_id param required"}), 400
     try:
         tickets = fd.search_tickets_by_email(email)
+        summaries = []
         for t in tickets:
             tid = t.get("id")
+            s = summarize(t)
             try:
-                t["_raw_conversations"] = fd.get_ticket_conversations(tid)
+                t_full = fd.get_ticket(tid)
+                s["single_ticket_attachments"] = t_full.get("attachments") or []
+                s["single_ticket_cloud_files"] = t_full.get("cloud_files") or []
+                s["single_ticket_keys"] = sorted(t_full.keys())
             except Exception as e:
-                t["_raw_conversations_error"] = str(e)
-        return jsonify({"email": email, "tickets": tickets})
+                s["single_ticket_error"] = str(e)
+            summaries.append(s)
+        return jsonify({"email": email, "tickets": summaries})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
