@@ -771,12 +771,19 @@ class ScrydexClient:
         items = resp.get("data", []) if isinstance(resp, dict) else []
         return [self._normalize_sealed(item) for item in items]
 
+    # The Scrydex listings endpoint has no grade filter, so we fetch every
+    # listing for the card and filter to the requested grade in Python. Cap
+    # pagination so a single hot card (1000+ listings) can't burn through
+    # Railway's 30s gateway timeout — 5 pages = 500 listings is plenty for a
+    # median.
+    LISTINGS_MAX_PAGES = 5
+
     def _get_card_listings_raw(self, scrydex_card_id: str, *,
                                days: int = 30, source: str = "ebay") -> list[dict]:
         """Fetch raw eBay listings for a card (for graded pricing)."""
         all_listings = []
         page = 1
-        while True:
+        while page <= self.LISTINGS_MAX_PAGES:
             params = {
                 "days": days,
                 "source": source,
