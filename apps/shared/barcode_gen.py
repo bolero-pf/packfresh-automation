@@ -11,7 +11,6 @@ import os
 import string
 import random
 import logging
-from datetime import datetime
 
 import barcode
 from barcode.writer import ImageWriter
@@ -54,9 +53,8 @@ def _font(size):
 
 
 def generate_barcode_id(prefix: str = "PF") -> str:
-    date_str = datetime.now().strftime("%Y%m%d")
     suffix = "".join(random.choices(SUFFIX_CHARS, k=6))
-    return f"{prefix}-{date_str}-{suffix}"
+    return f"{prefix}-{suffix}"
 
 
 def generate_barcode_image(barcode_id: str, *,
