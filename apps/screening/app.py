@@ -745,6 +745,31 @@ def api_freshdesk_canned_responses():
     return jsonify({"configured": True, "folders": result})
 
 
+@app.route("/api/freshdesk-debug")
+def api_freshdesk_debug():
+    """Dump the raw Freshdesk JSON for a given email so we can inspect what
+    the API actually returns (e.g. when an attachment isn't surfacing).
+    Usage: /api/freshdesk-debug?email=customer@example.com
+    Returns the raw ticket list + every conversation's raw JSON."""
+    import freshdesk as fd
+    if not fd.is_configured():
+        return jsonify({"error": "Freshdesk not configured"}), 400
+    email = (request.args.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "email param required"}), 400
+    try:
+        tickets = fd.search_tickets_by_email(email)
+        for t in tickets:
+            tid = t.get("id")
+            try:
+                t["_raw_conversations"] = fd.get_ticket_conversations(tid)
+            except Exception as e:
+                t["_raw_conversations_error"] = str(e)
+        return jsonify({"email": email, "tickets": tickets})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/freshdesk-canned-response/<int:response_id>")
 def api_freshdesk_canned_response(response_id):
     """Fetch a single canned response body for preview."""
