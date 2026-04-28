@@ -141,10 +141,12 @@ def search_tickets_by_email(email, *, max_pages=3):
     return tickets
 
 
-def get_ticket(ticket_id, *, include="description"):
-    """Fetch a single ticket. Unlike the list endpoint, this returns the
-    `attachments` field — needed to surface customer-uploaded files (PDFs, IDs)
-    on email-source tickets where the attachment lives at the ticket level."""
+def get_ticket(ticket_id, *, include=None):
+    """Fetch a single ticket. Returns the `attachments` field by default — the
+    list endpoint omits it, so this is how we surface customer-uploaded files
+    (PDFs, IDs) on email-source tickets.
+    Note: single-ticket GET only accepts include values
+    'conversations, requester, company, stats, sla_policy' — NOT 'description'."""
     params = {"include": include} if include else None
     return _request("GET", f"/tickets/{ticket_id}", params=params)
 
