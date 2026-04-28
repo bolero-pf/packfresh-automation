@@ -662,6 +662,16 @@ def api_freshdesk_tickets():
             continue
         convos = []
 
+        # Freshdesk's list-by-email endpoint omits the `attachments` field.
+        # Re-fetch each ticket individually so customer-uploaded files (PDFs of
+        # IDs, etc.) on email-source tickets actually surface in the console.
+        try:
+            t_full = fd.get_ticket(tid)
+            ticket_attachments = t_full.get("attachments") or []
+        except Exception as e:
+            logging.warning("Freshdesk single-ticket fetch failed for %s: %s", tid, e)
+            ticket_attachments = t.get("attachments") or []
+
         # The ticket's own description is the FIRST message — for email-created tickets
         # (source=1), that's the customer's inbound text. Without this, customer replies
         # that arrive as new tickets (because the verification email was sent via Shopify
@@ -676,7 +686,7 @@ def api_freshdesk_tickets():
                 "from_email": (t.get("requester", {}) or {}).get("email", "") if isinstance(t.get("requester"), dict) else "",
                 "incoming": t.get("source") == 1,  # email source → customer authored
                 "created_at": t.get("created_at", ""),
-                "attachments": [_fd_attachment(a) for a in (t.get("attachments") or [])],
+                "attachments": [_fd_attachment(a) for a in ticket_attachments],
             })
 
         try:

@@ -141,6 +141,14 @@ def search_tickets_by_email(email, *, max_pages=3):
     return tickets
 
 
+def get_ticket(ticket_id, *, include="description"):
+    """Fetch a single ticket. Unlike the list endpoint, this returns the
+    `attachments` field — needed to surface customer-uploaded files (PDFs, IDs)
+    on email-source tickets where the attachment lives at the ticket level."""
+    params = {"include": include} if include else None
+    return _request("GET", f"/tickets/{ticket_id}", params=params)
+
+
 def get_ticket_conversations(ticket_id):
     """Get all conversations (replies) on a ticket. Returns list of conversation dicts."""
     return _request("GET", f"/tickets/{ticket_id}/conversations")
