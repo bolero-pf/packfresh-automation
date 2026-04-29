@@ -1,7 +1,9 @@
 """
 raw_card_updater — nightly raw-card price refresh.
 
-For every raw card in stock (state='STORED', not on hold):
+For every raw card in stock (state IN ('STORED','DISPLAY'), not on hold):
+DISPLAY cards (binders) need nightly repricing too — they're customer-
+facing via kiosk and POS rings them up at current_price just like STORED.
   1. Look up market price in scrydex_price_cache by
      (tcgplayer_id, variant, condition, price_type='raw').
   2. Floor at cost_basis (never sell below cost).
@@ -189,9 +191,10 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
 
     cards = db_module.query("""
         SELECT id, barcode, tcgplayer_id, scrydex_id, card_name, set_name,
-               card_number, condition, variant, current_price, cost_basis
+               card_number, condition, variant, current_price, cost_basis,
+               state
         FROM raw_cards
-        WHERE state = 'STORED' AND current_hold_id IS NULL
+        WHERE state IN ('STORED', 'DISPLAY') AND current_hold_id IS NULL
           AND is_graded = FALSE
         ORDER BY card_name, set_name
     """)
