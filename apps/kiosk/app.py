@@ -559,13 +559,49 @@ def card_detail():
         """, (_sx_id,))
         if meta_row:
             m = dict(meta_row)
-            # Extract back-face image from raw Scrydex response (double-faced cards)
             raw_data = m.pop("raw", None) or {}
+
+            # ── Double-faced cards (MTG MDFCs, transform, etc.) ──
+            # Promoted columns are empty because Scrydex nests data under faces[].
+            # Fall back to faces[0] (front face) for display fields.
+            faces = raw_data.get("faces") or []
+            if faces and not m.get("types") and not m.get("rules"):
+                front = faces[0]
+                if not m.get("types"):
+                    m["types"] = front.get("types")
+                if not m.get("subtypes"):
+                    m["subtypes"] = front.get("subtypes")
+                if not m.get("rules"):
+                    m["rules"] = front.get("rules")
+                if not m.get("flavor_text"):
+                    m["flavor_text"] = front.get("flavor_text")
+                if not m.get("supertype"):
+                    st = front.get("supertypes") or []
+                    m["supertype"] = " ".join(st) if st else None
+                m["mana_cost"] = front.get("mana_cost")
+                # Include back face info so frontend can show both
+                if len(faces) > 1:
+                    back = faces[1]
+                    m["back_face"] = {
+                        "name": back.get("name"),
+                        "types": back.get("types"),
+                        "subtypes": back.get("subtypes"),
+                        "rules": back.get("rules"),
+                        "flavor_text": back.get("flavor_text"),
+                        "mana_cost": back.get("mana_cost"),
+                    }
+
+            # Extract back-face image from raw Scrydex images array
             images = raw_data.get("images") or []
             for img in images:
                 if img.get("type") == "back":
                     m["image_back"] = img.get("large") or img.get("medium") or img.get("small")
                     break
+
+            # Top-level artist fallback (sometimes only at raw level for MTG)
+            if not m.get("artist"):
+                m["artist"] = raw_data.get("artist")
+
             # Strip nulls to keep payload lean
             meta = {k: v for k, v in m.items() if v is not None}
 

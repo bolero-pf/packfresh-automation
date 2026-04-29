@@ -1329,6 +1329,7 @@ function renderDetail(card, copies, meta) {
     if (m.colors && m.colors.length) infoRows.push(['Color', m.colors.join(' / ')]);
   } else {
     // Magic / Lorcana / other: types + subtypes form the type line
+    if (m.mana_cost) infoRows.push(['Cost', m.mana_cost]);
     const typeLine = [];
     if (m.supertype) typeLine.push(m.supertype);
     if (m.types && m.types.length) typeLine.push(...m.types);
@@ -1382,6 +1383,17 @@ function renderDetail(card, copies, meta) {
   }
   if (m.flavor_text) {
     metaHtml += `<div class="meta-block"><div class="meta-text meta-flavor">${esc(m.flavor_text)}</div></div>`;
+  }
+  // Back face for double-faced cards (MTG MDFCs, transform)
+  if (m.back_face) {
+    const bf = m.back_face;
+    const bfType = (bf.types || []).join(' ') + ((bf.subtypes && bf.subtypes.length) ? ' — ' + bf.subtypes.join(' ') : '');
+    metaHtml += `<div class="meta-block" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
+      <div class="meta-heading">↻ ${esc(bf.name || 'Back Face')}</div>
+      ${bfType ? `<div class="meta-text" style="color:var(--dim);margin-bottom:4px;">${esc(bfType)}</div>` : ''}
+      ${(bf.rules||[]).map(r => `<div class="meta-text">${esc(r)}</div>`).join('')}
+      ${bf.flavor_text ? `<div class="meta-text meta-flavor">${esc(bf.flavor_text)}</div>` : ''}
+    </div>`;
   }
 
   const cartTotal = cartCount();
