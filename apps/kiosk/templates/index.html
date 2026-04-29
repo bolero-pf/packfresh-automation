@@ -175,6 +175,12 @@ header {
 .detail-info-row { display: flex; align-items: center; gap: 8px; font-size: 0.88rem; }
 .detail-info-label { color: var(--dim); min-width: 60px; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
 .detail-info-val { color: var(--text); font-weight: 500; }
+.meta-section { margin-bottom: 14px; padding: 10px 12px; background: var(--surface2); border-radius: 8px; border: 1px solid var(--border); }
+.meta-block { margin-bottom: 8px; }
+.meta-block:last-child { margin-bottom: 0; }
+.meta-heading { font-weight: 700; font-size: 0.85rem; color: var(--accent); margin-bottom: 2px; }
+.meta-text { font-size: 0.82rem; color: var(--text); line-height: 1.5; }
+.meta-flavor { font-style: italic; color: var(--dim); margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
 @media (max-width: 480px) {
   .detail-hero { flex-direction: column; align-items: center; }
   .detail-img { width: 180px; min-width: unset; }
@@ -1154,7 +1160,7 @@ async function openDetail(card) {
     if (card.tcgplayer_id) _params.set('tcgplayer_id', card.tcgplayer_id);
     if (card.scrydex_id)   _params.set('scrydex_id',   card.scrydex_id);
     const d = await get('/api/card?' + _params);
-    renderDetail(card, d.copies || []);
+    renderDetail(card, d.copies || [], d.meta || null);
   } catch(e) {
     panel.innerHTML = `<div class="empty"><p>${e.message}</p></div>`;
   }
@@ -1169,7 +1175,7 @@ function closeLightbox() {
   document.getElementById('lightbox').classList.remove('active');
 }
 
-function renderDetail(card, copies) {
+function renderDetail(card, copies, meta) {
   const panel = document.getElementById('detail-panel');
   const imgUrl = card.image_url || '';
   const img = imgUrl
@@ -1216,19 +1222,70 @@ function renderDetail(card, copies) {
       </div>`;
     }).join('');
 
-  // Build card info rows from available data
+  // Build card info rows from available data + scrydex meta
   const firstCopy = copies[0] || {};
+  const m = meta || {};
   const infoRows = [];
-  if (firstCopy.card_number) infoRows.push(['Number', '#' + firstCopy.card_number]);
-  if (card.set_name)         infoRows.push(['Set', card.set_name]);
-  if (firstCopy.rarity)      infoRows.push(['Rarity', firstCopy.rarity]);
-  if (card.variant_label)    infoRows.push(['Variant', card.variant_label]);
+  // Card number (prefer printed_number from meta)
+  const num = m.printed_number || firstCopy.card_number;
+  if (num) infoRows.push(['Number', '#' + num]);
+  if (card.set_name) infoRows.push(['Set', card.set_name]);
+  if (firstCopy.rarity) infoRows.push(['Rarity', firstCopy.rarity]);
+  if (card.variant_label) infoRows.push(['Variant', card.variant_label]);
+  // Pokemon fields
+  if (m.supertype) infoRows.push(['Type', m.supertype]);
+  if (m.hp) infoRows.push(['HP', String(m.hp)]);
+  if (m.types && m.types.length) infoRows.push(['Energy', m.types.join(' / ')]);
+  if (m.evolves_from) {
+    const ef = Array.isArray(m.evolves_from) ? m.evolves_from.join(', ') : m.evolves_from;
+    if (ef) infoRows.push(['Evolves', 'From ' + ef]);
+  }
+  // One Piece fields
+  if (m.card_type) infoRows.push(['Type', m.card_type]);
+  if (m.attribute) infoRows.push(['Attr', m.attribute]);
+  if (m.power) infoRows.push(['Power', String(m.power)]);
+  if (m.life) infoRows.push(['Life', String(m.life)]);
+  if (m.colors && m.colors.length) infoRows.push(['Color', m.colors.join(' / ')]);
+  // Universal
+  if (m.artist) infoRows.push(['Artist', m.artist]);
   const totalAvail = copies.length;
   infoRows.push(['In Stock', totalAvail + ' cop' + (totalAvail === 1 ? 'y' : 'ies')]);
 
   const infoHtml = infoRows.map(([label, val]) =>
     `<div class="detail-info-row"><span class="detail-info-label">${label}</span><span class="detail-info-val">${esc(val)}</span></div>`
   ).join('');
+
+  // Build attacks / abilities / rules section
+  let metaHtml = '';
+  if (m.abilities && m.abilities.length) {
+    metaHtml += m.abilities.map(a =>
+      `<div class="meta-block"><div class="meta-heading">Ability: ${esc(a.name || '')}</div><div class="meta-text">${esc(a.text || '')}</div></div>`
+    ).join('');
+  }
+  if (m.attacks && m.attacks.length) {
+    metaHtml += m.attacks.map(a => {
+      const cost = (a.cost || []).join('');
+      const dmg = a.damage || '';
+      return `<div class="meta-block"><div class="meta-heading">${esc(cost ? cost + ' ' : '')}${esc(a.name || '')}${dmg ? ' — ' + esc(dmg) : ''}</div>${a.text ? `<div class="meta-text">${esc(a.text)}</div>` : ''}</div>`;
+    }).join('');
+  }
+  if (m.rules && m.rules.length) {
+    metaHtml += m.rules.map(r => `<div class="meta-block"><div class="meta-text" style="font-style:italic;">${esc(r)}</div></div>`).join('');
+  }
+  if (m.weaknesses && m.weaknesses.length) {
+    const w = m.weaknesses.map(w => (w.type || '') + ' ' + (w.value || '')).join(', ');
+    if (w.trim()) metaHtml += `<div class="meta-block"><div class="meta-text">Weakness: ${esc(w.trim())}</div></div>`;
+  }
+  if (m.resistances && m.resistances.length) {
+    const r = m.resistances.map(r => (r.type || '') + ' ' + (r.value || '')).join(', ');
+    if (r.trim()) metaHtml += `<div class="meta-block"><div class="meta-text">Resistance: ${esc(r.trim())}</div></div>`;
+  }
+  if (m.converted_retreat_cost != null) {
+    metaHtml += `<div class="meta-block"><div class="meta-text">Retreat: ${m.converted_retreat_cost}</div></div>`;
+  }
+  if (m.flavor_text) {
+    metaHtml += `<div class="meta-block"><div class="meta-text meta-flavor">${esc(m.flavor_text)}</div></div>`;
+  }
 
   const cartTotal = cartCount();
   panel.innerHTML = `
@@ -1243,6 +1300,7 @@ function renderDetail(card, copies) {
       <div class="detail-img" ${imgUrl ? `onclick="openLightbox('${esc(imgUrl)}')" title="Tap to enlarge"` : ''}>${img}</div>
       <div style="flex:1;">
         <div class="detail-info">${infoHtml}</div>
+        ${metaHtml ? `<div class="meta-section">${metaHtml}</div>` : ''}
         <div style="font-size:0.82rem;color:var(--dim);margin-bottom:10px;">Select condition(s) to add to your picks:</div>
         <div class="copy-list" id="copy-list">${condRows}</div>
       </div>

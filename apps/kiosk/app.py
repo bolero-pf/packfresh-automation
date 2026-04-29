@@ -534,7 +534,33 @@ def card_detail():
                 d["image_url"] = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
         out.append(d)
 
-    return jsonify({"copies": out})
+    # ── Card metadata from scrydex_card_meta (static, not nightly prices) ──
+    meta = None
+    # Resolve scrydex_id: prefer from copies, fall back to price_cache lookup
+    _sx_id = scrydex_id
+    if not _sx_id and out:
+        _sx_id = out[0].get("scrydex_id") or ""
+    if not _sx_id and tcgplayer_id:
+        row = db.query_one(
+            "SELECT scrydex_id FROM scrydex_price_cache WHERE tcgplayer_id = %s LIMIT 1",
+            (tcgplayer_id,),
+        )
+        if row:
+            _sx_id = row["scrydex_id"]
+    if _sx_id:
+        meta_row = db.query_one("""
+            SELECT hp, supertype, types, attacks, abilities, weaknesses,
+                   resistances, retreat_cost, converted_retreat_cost,
+                   artist, flavor_text, rules, subtypes,
+                   card_type, attribute, colors, life, power, printed_number
+            FROM scrydex_card_meta WHERE scrydex_id = %s
+        """, (_sx_id,))
+        if meta_row:
+            m = dict(meta_row)
+            # Strip nulls to keep payload lean
+            meta = {k: v for k, v in m.items() if v is not None}
+
+    return jsonify({"copies": out, "meta": meta})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
