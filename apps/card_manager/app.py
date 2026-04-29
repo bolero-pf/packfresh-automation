@@ -653,52 +653,55 @@ def store_returns():
         return jsonify({"error": "No barcodes provided — scan cards before storing"}), 400
 
     cards = db.query("""
-        SELECT id, barcode, card_name
+        SELECT id, barcode, card_name, COALESCE(game, 'pokemon') AS game
         FROM raw_cards WHERE barcode = ANY(%s) AND state IN ('PENDING_RETURN', 'MISSING')
     """, (list(barcodes),))
 
     if not cards:
         return jsonify({"error": "No scanned cards found in PENDING_RETURN state"}), 400
 
-    # Group by card_type (pokemon / magic / etc.) for bin assignment
-    # Default to 'pokemon' since that's what we have; card_type_hint would help here
-    card_type = "pokemon"
-    count     = len(cards)
-    card_ids  = [str(c["id"]) for c in cards]
+    # Group by game (pokemon / magic / etc.) and run one assign_bins pass per
+    # type so MTG cards land in MTG rows, not Pokemon bins.
+    from collections import defaultdict
+    by_game = defaultdict(list)
+    for c in cards:
+        by_game[c["game"]].append(c)
 
-    try:
-        assignments = assign_bins(card_type, count, db)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    # Assign cards to bins in order
-    card_idx = 0
     bin_summary = []
-    for assignment in assignments:
-        bin_id    = assignment["bin_id"]
-        bin_label = assignment["bin_label"]
-        take      = assignment["count"]
-        batch_ids = card_ids[card_idx:card_idx + take]
-        card_idx += take
+    errors      = []
+    for game, gcards in by_game.items():
+        try:
+            assignments = assign_bins(game, len(gcards), db)
+        except ValueError as e:
+            errors.append({"game": game, "error": str(e)})
+            continue
 
-        db.execute("""
-            UPDATE raw_cards
-            SET state = 'STORED', bin_id = %s, current_hold_id = NULL,
-                stored_at = CURRENT_TIMESTAMP
-            WHERE id::text = ANY(%s)
-        """, (bin_id, batch_ids))
+        idx = 0
+        for a in assignments:
+            take      = a["count"]
+            batch     = gcards[idx:idx + take]
+            batch_ids = [str(c["id"]) for c in batch]
+            idx += take
 
-        bin_summary.append({
-            "bin_label": bin_label,
-            "count":     take,
-            "cards":     [c["card_name"] for c in cards
-                         if str(c["id"]) in set(batch_ids)][:5],
-        })
+            db.execute("""
+                UPDATE raw_cards
+                SET state = 'STORED', bin_id = %s, current_hold_id = NULL,
+                    stored_at = CURRENT_TIMESTAMP
+                WHERE id::text = ANY(%s)
+            """, (a["bin_id"], batch_ids))
+
+            bin_summary.append({
+                "bin_label": a["bin_label"],
+                "count":     take,
+                "game":      game,
+                "cards":     [c["card_name"] for c in batch][:5],
+            })
 
     return jsonify({
-        "success":     True,
-        "stored":      count,
+        "success":     not errors,
+        "stored":      sum(b["count"] for b in bin_summary),
         "assignments": bin_summary,
+        "errors":      errors,
     })
 
 
