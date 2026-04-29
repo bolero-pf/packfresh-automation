@@ -1838,7 +1838,8 @@ def editor_relink(copy_id):
         return jsonify({"error": "Copy not found"}), 404
 
     new_image = _lookup_cache_image(sx_id, tcg_id)
-    new_price = _lookup_cache_price(sx_id, tcg_id, card["condition"], variant)
+    raw_market = _lookup_cache_price(sx_id, tcg_id, card["condition"], variant)
+    new_price  = charm_ceil_raw(raw_market) if raw_market is not None else None
 
     db.execute("""
         UPDATE raw_cards
@@ -1877,7 +1878,8 @@ def editor_change_condition(copy_id):
     if not card:
         return jsonify({"error": "Copy not found"}), 404
 
-    new_price = _lookup_cache_price(card["scrydex_id"], card["tcgplayer_id"], new_cond, card.get("variant"))
+    raw_market = _lookup_cache_price(card["scrydex_id"], card["tcgplayer_id"], new_cond, card.get("variant"))
+    new_price  = charm_ceil_raw(raw_market) if raw_market is not None else None
 
     db.execute("""
         UPDATE raw_cards
@@ -1908,7 +1910,8 @@ def editor_change_variant(copy_id):
     if not card:
         return jsonify({"error": "Copy not found"}), 404
 
-    new_price = _lookup_cache_price(card["scrydex_id"], card["tcgplayer_id"], card["condition"], new_variant)
+    raw_market = _lookup_cache_price(card["scrydex_id"], card["tcgplayer_id"], card["condition"], new_variant)
+    new_price  = charm_ceil_raw(raw_market) if raw_market is not None else None
 
     db.execute("""
         UPDATE raw_cards
@@ -1937,9 +1940,10 @@ def editor_refresh_price(copy_id):
     if not card:
         return jsonify({"error": "Copy not found"}), 404
 
-    new_price = _lookup_cache_price(card["scrydex_id"], card["tcgplayer_id"], card["condition"], card.get("variant"))
-    if new_price is None:
+    raw_market = _lookup_cache_price(card["scrydex_id"], card["tcgplayer_id"], card["condition"], card.get("variant"))
+    if raw_market is None:
         return jsonify({"error": "No cached price found for this card+condition+variant"}), 404
+    new_price = charm_ceil_raw(raw_market)
 
     db.execute("""
         UPDATE raw_cards

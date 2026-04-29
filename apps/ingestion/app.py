@@ -41,6 +41,7 @@ try:
 except ImportError as e:
     logger.error(f"barcode_gen import failed: {e} — raw card push will not work")
     generate_barcode_id = generate_barcode_image = None
+from price_rounding import charm_ceil_raw
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -1671,7 +1672,7 @@ def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
         """, (
             barcode_id, tcg_id, sx_id, card_name, set_name,
             ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
-            state, cost, float(item.get("market_price", cost)),
+            state, cost, charm_ceil_raw(item.get("market_price", cost)),
             image_url,
             item.get("variance") or item.get("variant"), card_type,
             item.get("session_id"),
@@ -1923,7 +1924,7 @@ def _push_raw_item(item: dict) -> dict:
             """, (
                 barcode_id, tcg_id, sx_id, card_name, set_name,
                 ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
-                cost, float(item.get("market_price", cost)),
+                cost, charm_ceil_raw(item.get("market_price", cost)),
                 bin_id, image_url,
                 # intake_items stores it as 'variance', raw_cards as 'variant';
                 # accept either so MTG Foil/etched picks made at intake actually
@@ -2068,7 +2069,7 @@ def _push_raw_to_display(item: dict) -> dict:
             """, (
                 barcode_id, tcg_id, sx_id, card_name, set_name,
                 ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
-                cost, float(item.get("market_price", cost)),
+                cost, charm_ceil_raw(item.get("market_price", cost)),
                 bin_id, image_url,
                 item.get("variance") or item.get("variant"),
                 item.get("session_id"),
@@ -2143,7 +2144,7 @@ def _push_raw_to_grade(item: dict) -> dict:
         """, (
             barcode_id, tcg_id, sx_id, card_name, set_name,
             ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
-            cost, float(item.get("market_price", cost)),
+            cost, charm_ceil_raw(item.get("market_price", cost)),
             image_url,
             item.get("variance") or item.get("variant"),
             item.get("session_id"),
