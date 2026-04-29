@@ -143,11 +143,11 @@ def generate_barcode_image(barcode_id: str, *,
     code128 = barcode.get("code128", barcode_id, writer=ImageWriter())
     buf = io.BytesIO()
     code128.write(buf, options={
-        "module_width":  0.30,    # mm per bar — readable on 19mm-tall labels
+        "module_width":  0.25,    # mm per bar — minimum GS1, but Dymo printable zone is narrow
         "module_height": 10.0,    # mm
         "font_size":     0,
         "text_distance": 0,
-        "quiet_zone":    1.0,     # mm
+        "quiet_zone":    0,       # rely on LEFT_PAD/RIGHT_PAD whitespace as the natural quiet zone
         "write_text":    False,
         "dpi":           300,
     })
