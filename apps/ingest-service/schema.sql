@@ -46,7 +46,12 @@ CREATE TABLE intake_sessions (
     
     -- Pricing
     total_market_value DECIMAL(10, 2),
-    offer_percentage DECIMAL(5, 2), -- e.g., 75.00 for 75%
+    offer_percentage DECIMAL(5, 2), -- LEGACY: pre-split single offer. Kept for
+                                    -- backwards-compat during Phase 2 rollout;
+                                    -- new code uses cash_percentage instead.
+    cash_percentage DECIMAL(5, 2),     -- e.g., 65.00 for 65% cash offer
+    credit_percentage DECIMAL(5, 2),   -- e.g., 75.00 for 75% store-credit offer
+    accepted_offer_type VARCHAR(10),   -- 'cash' or 'credit' once customer accepts
     total_offer_amount DECIMAL(10, 2),
     
     -- Metadata
@@ -295,13 +300,16 @@ ORDER BY r.stored_at ASC;
 
 -- View: Intake session summary
 CREATE VIEW intake_session_summary AS
-SELECT 
+SELECT
     s.id,
     s.customer_name,
     s.session_type,
     s.status,
     s.total_market_value,
     s.offer_percentage,
+    s.cash_percentage,
+    s.credit_percentage,
+    s.accepted_offer_type,
     s.total_offer_amount,
     s.created_at,
     s.finalized_at,
