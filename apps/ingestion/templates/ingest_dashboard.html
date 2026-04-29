@@ -1992,6 +1992,7 @@ let _rsItems = [];       // enriched items array
 let _rsIndex = 0;        // current card position
 let _rsSessionId = null;
 let _rsCounts = { storage: 0, display: 0, grade: 0, bulk: 0 };
+let _rsScannedYet = false;  // first scan after stage entry just navigates — doesn't commit the auto-positioned card
 
 let _rsEnrichJobId = null;
 let _rsEnrichDone = false;
@@ -2028,6 +2029,7 @@ function _rsSiblingKeyOf(i) {
 async function startRouteSession(sessionId) {
     _rsSessionId = sessionId;
     _rsEnrichDone = false;
+    _rsScannedYet = false;
 
     // Create overlay if it doesn't exist
     let overlay = document.getElementById('route-session-overlay');
@@ -2933,10 +2935,15 @@ async function _rsHandleScan(rawBarcode) {
         return;
     }
 
-    // Commit current with whatever destination is selected, then jump to scanned.
-    const ok = await _rsCommitCurrent();
-    if (!ok) { _rsFocusScan(); return; }
+    // First scan after entering the stage just navigates — the auto-positioned
+    // card was never physically scanned, so committing its default destination
+    // would silently route it. Subsequent scans commit-and-jump as normal.
+    if (_rsScannedYet) {
+        const ok = await _rsCommitCurrent();
+        if (!ok) { _rsFocusScan(); return; }
+    }
 
+    _rsScannedYet = true;
     _rsIndex = targetIdx;
     _renderSessionCard();
     if (_rsItems[_rsIndex]?._enrichLoading) _rsEnrichCurrent();

@@ -2711,16 +2711,11 @@ def auto_route_session(session_id):
         return jsonify({"success": True, "routed": {"storage": 0, "display": 0, "grade": 0, "bulk": 0},
                         "skipped_reviewed": True})
 
-    # Idempotency short-circuit — if every unreviewed item already has a
-    # destination set, the previous auto-route run's answer still applies
-    # and we don't need to re-compute + re-UPDATE anything. Frontend calls
-    # this on every Route-tab load; without this we pay 300+ UPDATEs per
-    # load for a session that never changed.
-    if all(it.get("routing_destination") for it in items):
-        routed = {"storage": 0, "display": 0, "grade": 0, "bulk": 0}
-        for it in items:
-            routed[it["routing_destination"]] = routed.get(it["routing_destination"], 0) + (it.get("quantity") or 1)
-        return jsonify(_serialize({"success": True, "routed": routed, "skipped_noop": True}))
+    # No idempotency short-circuit — the intake_items.routing_destination
+    # column has DEFAULT 'storage', so every unreviewed row already has a
+    # destination set, which made the old short-circuit always trigger and
+    # auto-route never actually re-applied price rules. The bulk UPDATE
+    # below is one round-trip and idempotent on its own.
 
     # Get total binder capacity, accounting for items already routed to display
     binder_remaining = 0
