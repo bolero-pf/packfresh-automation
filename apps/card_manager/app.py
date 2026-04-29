@@ -19,6 +19,7 @@ from flask import Flask, render_template, request, jsonify
 import db
 from storage import assign_bins, assign_display_case, get_display_case_capacity, get_binder_capacity
 from barcode_gen import generate_barcode_image
+from price_rounding import charm_ceil_raw
 from decimal import Decimal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -482,7 +483,10 @@ def _create_raw_listing(item: dict) -> dict:
                   f"<p>Set: {item.get('set_name','')}</p>"
                   f"<p>Condition: {cond_label}</p>"
                   f"<p>Barcode: {item['barcode']}</p>")
-    price      = float(item.get("current_price") or 0)
+    # Always charm-ceil to a .99 price so POS listings match what the kiosk
+    # would have shown — current_price for DISPLAY/recently-edited cards can
+    # be raw market until the nightly raw_card_updater rounds it.
+    price      = charm_ceil_raw(item.get("current_price") or 0)
 
     payload = {
         "product": {
@@ -493,7 +497,7 @@ def _create_raw_listing(item: dict) -> dict:
             "vendor":      "Pack Fresh",
             "images":      [{"src": item["image_url"]}] if item.get("image_url") else [],
             "variants": [{
-                "price":                str(round(price, 2)),
+                "price":                str(price),
                 "sku":                  item["barcode"],
                 "barcode":              item["barcode"],
                 "inventory_management": "shopify",
@@ -1124,7 +1128,7 @@ def sell_finalize():
                 "barcode":    bc,
                 "card_name":  card["card_name"],
                 "condition":  card["condition"],
-                "price":      float(card.get("current_price") or 0),
+                "price":      charm_ceil_raw(card.get("current_price") or 0),
                 "product_id": listing["product_id"],
                 "variant_id": listing["variant_id"],
                 "title":      listing["title"],
