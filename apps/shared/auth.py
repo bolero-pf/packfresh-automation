@@ -159,6 +159,7 @@ try {
   const t = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('pf_auth='));
   if (t) {
     const p = JSON.parse(atob(t.split('.')[1]));
+    window._pfUser = { name: p.name, role: p.role, email: p.email, user_id: p.user_id };
     const el = document.getElementById('pf-admin-user');
     if (el) el.textContent = p.name + ' (' + p.role + ')';
   }

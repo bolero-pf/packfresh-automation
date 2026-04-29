@@ -122,10 +122,11 @@ def require_auth():
         return None
     if request.path.startswith(("/static", "/pf-static")):
         return None
-    # Try JWT auth first (from admin portal)
+    # Try JWT auth first (from admin portal). Associates have access to ingest
+    # for the in-store receiving / barcoding workflow.
     try:
         from auth import require_auth as jwt_auth
-        result = jwt_auth(roles=["manager", "owner"])
+        result = jwt_auth(roles=["manager", "owner", "associate"])
         if result is None:
             return None  # JWT valid — authenticated
     except Exception:

@@ -6,7 +6,7 @@ Order screening + review console: verification queue, combine shipping queue.
 
 import os
 import logging
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, g
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -97,7 +97,32 @@ db.execute("CREATE INDEX IF NOT EXISTS idx_screening_log_type ON screening_log(e
 db.execute("CREATE INDEX IF NOT EXISTS idx_screening_log_created ON screening_log(created_at DESC)")
 
 from auth import register_auth_hooks
-register_auth_hooks(app, roles=["owner", "manager"], public_prefixes=('/screening/',))
+register_auth_hooks(app, roles=["owner", "manager", "associate"], public_prefixes=('/screening/',))
+
+
+# Associates only get the Combine tab. Owner + manager see everything.
+# Routes not in this allow-list 403 for associates.
+_ASSOCIATE_ALLOWED_PATHS = {
+    "/",                       # console index — JS hides non-combine tabs
+    "/api/held-orders",        # combine cards + verification empty for associate
+    "/api/uncombine-order",    # combine action
+    "/health", "/ping", "/favicon.ico",
+}
+_ASSOCIATE_ALLOWED_PREFIXES = ("/screening/", "/static", "/pf-static")
+
+
+@app.before_request
+def _gate_associate_routes():
+    user = getattr(g, "user", None)
+    if not user or user.get("role") != "associate":
+        return None
+    path = request.path
+    if path in _ASSOCIATE_ALLOWED_PATHS:
+        return None
+    for prefix in _ASSOCIATE_ALLOWED_PREFIXES:
+        if path.startswith(prefix):
+            return None
+    return jsonify({"error": "Not authorized"}), 403
 
 
 @app.route("/")
@@ -323,6 +348,16 @@ def api_held_orders():
                 existing["qty"] += item["qty"]
             else:
                 combine_groups[key]["all_items"].append({**item})
+
+    # Associates only get combine — strip verification data so the JSON
+    # can't leak PII even if an associate hits this URL directly.
+    user = getattr(g, "user", None) or {}
+    if user.get("role") == "associate":
+        return jsonify({
+            "verification": [],
+            "verification_groups": [],
+            "combine_groups": list(combine_groups.values()),
+        })
 
     return jsonify({
         "verification": standalone_verification,
@@ -1228,7 +1263,7 @@ CONSOLE_HTML = """
 </div>
 
 <div class="main">
-  <div style="display:flex;gap:2px;margin-bottom:20px;border-bottom:1px solid var(--border);">
+  <div id="screening-tabs" style="display:flex;gap:2px;margin-bottom:20px;border-bottom:1px solid var(--border);">
     <button class="tab active" id="tab-verify" onclick="switchTab('verify')">🔍 Verification Queue</button>
     <button class="tab" id="tab-combine" onclick="switchTab('combine')">📦 Combine Shipping</button>
     <button class="tab" id="tab-notes" onclick="switchTab('notes')">👤 Customer Notes</button>
@@ -1241,6 +1276,23 @@ CONSOLE_HTML = """
   <div id="pane-egg" class="pane"></div>
   <div id="pane-history" class="pane"></div>
 </div>
+<script>
+// Associates only see the Combine tab. window._pfUser is set by the shared
+// admin bar (shared/auth.py::ADMIN_BAR_HTML).
+(function () {
+  const role = (window._pfUser || {}).role;
+  if (role !== 'associate') return;
+  ['tab-verify', 'tab-notes', 'tab-egg', 'tab-history'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  // Default to combine pane since verify is hidden.
+  document.getElementById('tab-verify').classList.remove('active');
+  document.getElementById('pane-verify').classList.remove('active');
+  document.getElementById('tab-combine').classList.add('active');
+  document.getElementById('pane-combine').classList.add('active');
+})();
+</script>
 
 <script>
 let _data = null;

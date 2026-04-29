@@ -79,7 +79,6 @@ header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex;
         <div class="app-desc">Collection offers & pricing</div>
       </div>
     </a>
-    {% if user.role in ('owner', 'manager') %}
     <a class="app-card" href="https://ingest.pack-fresh.com">
       <div class="app-icon">📦</div>
       <div class="app-info">
@@ -87,7 +86,6 @@ header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex;
         <div class="app-desc">Warehouse processing, approve & push to Shopify</div>
       </div>
     </a>
-    {% endif %}
   </div>
 
   {% if user.role in ('owner', 'manager') %}
@@ -133,30 +131,25 @@ header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex;
         <div class="app-desc">Customer card browser & hold requests</div>
       </div>
     </a>
-  </div>
-
-  {% if user.role == 'owner' %}
-  <div class="section-title">Operations</div>
-  <div class="grid">
-    <a class="app-card" href="https://prices.pack-fresh.com">
-      <div class="app-icon">💰</div>
+    {% if user.role == 'associate' %}
+    <a class="app-card" href="https://screening.pack-fresh.com">
+      <div class="app-icon">📦</div>
       <div class="app-info">
-        <div class="app-name">Price Updater</div>
-        <div class="app-desc">Nightly price sync dashboard & review</div>
+        <div class="app-name">Combine Shipping</div>
+        <div class="app-desc">Group customer orders that ship together</div>
       </div>
     </a>
+    {% endif %}
+  </div>
+
+  {% if user.role in ('owner', 'manager') %}
+  <div class="section-title">Operations</div>
+  <div class="grid">
     <a class="app-card" href="https://screening.pack-fresh.com">
       <div class="app-icon">🛡️</div>
       <div class="app-info">
         <div class="app-name">Screening</div>
         <div class="app-desc">Order fraud detection & verification status</div>
-      </div>
-    </a>
-    <a class="app-card" href="https://vip.pack-fresh.com">
-      <div class="app-icon">⭐</div>
-      <div class="app-info">
-        <div class="app-name">VIP</div>
-        <div class="app-desc">Customer tier management & Klaviyo sync</div>
       </div>
     </a>
     <a class="app-card" href="https://drops.pack-fresh.com">
@@ -166,6 +159,21 @@ header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex;
         <div class="app-desc">Schedule weekly + VIP drops, manage releases, backfill history</div>
       </div>
     </a>
+    {% if user.role == 'owner' %}
+    <a class="app-card" href="https://prices.pack-fresh.com">
+      <div class="app-icon">💰</div>
+      <div class="app-info">
+        <div class="app-name">Price Updater</div>
+        <div class="app-desc">Nightly price sync dashboard & review</div>
+      </div>
+    </a>
+    <a class="app-card" href="https://vip.pack-fresh.com">
+      <div class="app-icon">⭐</div>
+      <div class="app-info">
+        <div class="app-name">VIP</div>
+        <div class="app-desc">Customer tier management & Klaviyo sync</div>
+      </div>
+    </a>
     <a class="app-card" href="https://analytics.pack-fresh.com">
       <div class="app-icon">📊</div>
       <div class="app-info">
@@ -173,6 +181,7 @@ header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex;
         <div class="app-desc">SKU sell-through velocity, demand signals, offer intelligence</div>
       </div>
     </a>
+    {% endif %}
   </div>
   {% endif %}
 

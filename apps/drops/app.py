@@ -25,7 +25,7 @@ except Exception:
 
 
 from auth import register_auth_hooks
-register_auth_hooks(app, roles=["owner"], public_prefixes=('/static', '/api/'),
+register_auth_hooks(app, roles=["owner", "manager"], public_prefixes=('/static', '/api/'),
                     skip_jwt_prefixes=('/release',))
 
 
