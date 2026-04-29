@@ -552,11 +552,19 @@ def card_detail():
             SELECT hp, supertype, types, attacks, abilities, weaknesses,
                    resistances, retreat_cost, converted_retreat_cost,
                    artist, flavor_text, rules, subtypes,
-                   card_type, attribute, colors, life, power, printed_number
+                   card_type, attribute, colors, life, power, printed_number,
+                   raw
             FROM scrydex_card_meta WHERE scrydex_id = %s
         """, (_sx_id,))
         if meta_row:
             m = dict(meta_row)
+            # Extract back-face image from raw Scrydex response (double-faced cards)
+            raw_data = m.pop("raw", None) or {}
+            images = raw_data.get("images") or []
+            for img in images:
+                if img.get("type") == "back":
+                    m["image_back"] = img.get("large") or img.get("medium") or img.get("small")
+                    break
             # Strip nulls to keep payload lean
             meta = {k: v for k, v in m.items() if v is not None}
 

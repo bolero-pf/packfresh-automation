@@ -194,15 +194,23 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .lightbox {
   display: none; position: fixed; inset: 0; z-index: 500;
   background: rgba(0,0,0,0.92); backdrop-filter: blur(8px);
-  align-items: center; justify-content: center;
-  cursor: zoom-out; padding: 20px;
+  align-items: center; justify-content: center; flex-direction: column;
+  cursor: zoom-out; padding: 20px; gap: 16px;
 }
 .lightbox.active { display: flex; }
 .lightbox img {
-  max-width: 90vw; max-height: 90vh; object-fit: contain;
+  max-width: 90vw; max-height: 80vh; object-fit: contain;
   border-radius: 12px; box-shadow: 0 8px 40px rgba(0,0,0,0.6);
   animation: fadeScale 0.2s ease;
 }
+.lightbox-flip {
+  display: none; cursor: pointer; background: var(--accent); color: #000;
+  border: none; border-radius: var(--r); padding: 10px 24px;
+  font-family: var(--sans); font-weight: 700; font-size: 0.9rem;
+  transition: transform 0.1s;
+}
+.lightbox-flip:active { transform: scale(0.95); }
+.lightbox-flip.visible { display: inline-flex; align-items: center; gap: 8px; }
 
 .copy-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
 .copy-row {
@@ -1171,12 +1179,29 @@ async function openDetail(card) {
   }
 }
 
-function openLightbox(url) {
+let _lightboxFront = '';
+let _lightboxBack = '';
+let _lightboxShowingFront = true;
+
+function openLightbox(frontUrl, backUrl) {
+  _lightboxFront = frontUrl;
+  _lightboxBack = backUrl || '';
+  _lightboxShowingFront = true;
   const lb = document.getElementById('lightbox');
-  document.getElementById('lightbox-img').src = url;
+  document.getElementById('lightbox-img').src = frontUrl;
+  const flipBtn = document.getElementById('lightbox-flip');
+  flipBtn.classList.toggle('visible', !!_lightboxBack);
+  flipBtn.textContent = '↻ Show Back';
   lb.classList.add('active');
 }
-function closeLightbox() {
+function flipLightbox(e) {
+  e.stopPropagation();
+  _lightboxShowingFront = !_lightboxShowingFront;
+  document.getElementById('lightbox-img').src = _lightboxShowingFront ? _lightboxFront : _lightboxBack;
+  document.getElementById('lightbox-flip').textContent = _lightboxShowingFront ? '↻ Show Back' : '↻ Show Front';
+}
+function closeLightbox(e) {
+  if (e && e.target.closest('.lightbox-flip')) return;
   document.getElementById('lightbox').classList.remove('active');
 }
 
@@ -1355,7 +1380,7 @@ function renderDetail(card, copies, meta) {
     </div>
     <div class="detail-hero">
       <div class="detail-img-wrap">
-        <div class="detail-img" ${imgUrl ? `onclick="openLightbox('${esc(imgUrl)}')"` : ''}>${img}</div>
+        <div class="detail-img" ${imgUrl ? `onclick="openLightbox('${esc(imgUrl)}', '${esc(m.image_back || '')}')"` : ''}>${img}</div>
         ${imgUrl ? '<div class="detail-img-hint">Tap to enlarge</div>' : ''}
       </div>
       <div style="flex:1;">
@@ -1853,7 +1878,7 @@ function esc(s) {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('lightbox').classList.contains('active')) {
-      closeLightbox();
+      closeLightbox(null);
     } else {
       closeDetailPanel();
       closeCartPanel();
@@ -1881,8 +1906,9 @@ boot();
 </script>
 
 <!-- Image lightbox -->
-<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+<div class="lightbox" id="lightbox" onclick="closeLightbox(event)">
   <img id="lightbox-img" src="" alt="Card">
+  <button class="lightbox-flip" id="lightbox-flip" onclick="flipLightbox(event)">↻ Flip Card</button>
 </div>
 </body>
 </html>
