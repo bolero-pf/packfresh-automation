@@ -35,6 +35,18 @@ PENDING → PULLING → READY → ACCEPTED or RETURNED
 - After decisions, Re-accept a REJECTED card → creates Shopify listing
 - Return an ACCEPTED card → deletes Shopify listing, card goes to Return Queue
 - Both via `POST /api/holds/<id>/items/<id>/reverse`
+- Endpoint keys off `raw_cards.state` (not `hold_items.status`), so it works on closed holds too
+
+## Sell Tab — Active Listings & Undo
+- Front-of-house person ideally lives in the Sell tab.
+- `/api/sell/active` returns every PENDING_SALE card (regardless of source: hold-finalize or sell/finalize). Surfaced as a top panel in the Sell view.
+- `/api/sell/pull-listing` deletes the Shopify draft, flips card to PENDING_RETURN. Used when a customer changes their mind at the register.
+- `/api/sell/relist` is the inverse: PENDING_RETURN → fresh listing → PENDING_SALE. Exposed as "Sell instead" on Return Queue cards.
+- `raw_cards.shopify_product_id` / `shopify_variant_id` are populated on every listing creation so undo works without consulting `hold_items` (added in shared/018).
+
+## Sidebar Badges
+- `/api/badges` returns `{holds, returns, missing, active_listings}`.
+- Polled every 15s globally (not just when a view is active), so pending work is visible from any tab.
 
 ## Key Patterns
 - Barcode scanning via HID keyboard input (Enter key trigger, 500ms buffer timeout)

@@ -299,6 +299,7 @@
     </div>
     <div class="nav-item" onclick="showView('sell')" id="nav-sell">
       💵 Sell
+      <span class="nav-badge" id="badge-sell"></span>
     </div>
     <div class="nav-item" onclick="showView('editor')" id="nav-editor">
       ✎ Card Editor
@@ -441,7 +442,7 @@ function showView(name) {
   if (name === 'editor')   document.getElementById('editor-q').focus();
   if (name === 'display')  loadDisplay();
   if (name === 'binders')  loadBinders();
-  if (name === 'sell')     renderSell();
+  if (name === 'sell')     { renderSell(); refreshActiveListings(); }
   if (name === 'featured') loadFeatured();
 }
 
@@ -817,6 +818,8 @@ function renderReturns(cards, recentBatches) {
             <div style="font-size:0.75rem;color:var(--dim);">${esc(c.condition)} · ${esc(c.last_bin||'no bin')}</div>
           </div>
           <div class="return-barcode">${esc(c.barcode)}</div>
+          <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--green);color:var(--green);"
+                  onclick="event.stopPropagation();sellInstead('${esc(c.barcode)}')">💵 Sell instead</button>
         </div>
       `).join('')}
     </div>
@@ -838,6 +841,18 @@ function renderReturnScanned() {
     const el = document.getElementById(`rc-${bc}`);
     if (el) el.classList.add('scanned');
   });
+}
+
+async function sellInstead(barcode) {
+  if (!await themedConfirm('Sell instead',
+      'Customer changed their mind — list this card for sale and ring it up at the register?')) return;
+  try {
+    const d = await post('/api/sell/relist', { barcode });
+    toast(`✓ ${d.card_name} listed — see Sell tab`, 'green');
+    loadReturns();
+    refreshBadges();
+    refreshActiveListings();
+  } catch(e) { toast(e.message, 'red'); }
 }
 
 async function storeBatch() {
@@ -1860,8 +1875,19 @@ function undoBinderPullScan(idx) {
 }
 
 // ── Sell (POS) ────────────────────────────────────────────────────────────────
-let _sellCart = [];          // array of card objects (most recent first)
-let _sellLastResult = null;  // remembered after finalize so the success view sticks
+let _sellCart = [];           // array of card objects (most recent first)
+let _sellLastResult = null;   // remembered after finalize so the success view sticks
+let _sellActive = [];         // PENDING_SALE cards (active Shopify listings)
+
+async function refreshActiveListings() {
+  try {
+    const d = await get('/api/sell/active');
+    _sellActive = d.cards || [];
+    if (document.querySelector('.view.active')?.id === 'view-sell' && !_sellLastResult) {
+      renderSell();
+    }
+  } catch(e) { /* leave panel stale rather than flashing errors */ }
+}
 
 function renderSell() {
   const el = document.getElementById('sell-content');
@@ -1871,7 +1897,37 @@ function renderSell() {
   }
 
   const total = _sellCart.reduce((s, c) => s + parseFloat(c.current_price || 0), 0);
+
+  const activeHtml = _sellActive.length === 0 ? '' : `
+    <div style="margin-bottom:18px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;">
+          Active Listings — Ready at POS (${_sellActive.length})
+        </div>
+        <button class="btn btn-sm" style="font-size:0.7rem;padding:3px 10px;background:none;border:1px solid var(--border);color:var(--dim);" onclick="refreshActiveListings()">↻</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        ${_sellActive.map(c => `
+          <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:rgba(74,222,128,0.05);border:1px solid var(--green);border-radius:10px;">
+            ${c.image_url?`<img src="${esc(c.image_url)}" style="width:36px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">`:''}
+            <div style="flex:1;min-width:0;">
+              <div style="font-weight:600;">${esc(c.card_name)}</div>
+              <div style="font-size:0.75rem;color:var(--dim);">
+                ${esc(c.condition||'')}${c.hold_customer?` · from hold: <strong>${esc(c.hold_customer)}</strong>`:''}
+              </div>
+              <div style="font-family:var(--mono);font-size:0.7rem;color:var(--dim);">${esc(c.barcode)}</div>
+            </div>
+            <div class="ec-price" style="font-size:1.05rem;">$${parseFloat(c.current_price||0).toFixed(2)}</div>
+            <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--red);color:var(--red);"
+                    onclick="pullListing('${esc(c.barcode)}')">↩ Pull</button>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+
   el.innerHTML = `
+    ${activeHtml}
     <div class="stats-bar" style="margin-bottom:14px;">
       <div class="stat-box"><div class="stat-label">In Cart</div><div class="stat-val" style="color:var(--green);">${_sellCart.length}</div></div>
       <div class="stat-box"><div class="stat-label">Subtotal</div><div class="stat-val" style="font-family:var(--mono);">$${total.toFixed(2)}</div></div>
@@ -1904,6 +1960,19 @@ function renderSell() {
         </div>`
     }
   `;
+}
+
+async function pullListing(barcode) {
+  const card = _sellActive.find(c => c.barcode === barcode);
+  const name = card ? card.card_name : barcode;
+  if (!await themedConfirm('Pull listing',
+      `Customer changed their mind on ${name}? This deletes the Shopify draft and sends the card to the Return Queue to be re-shelved.`)) return;
+  try {
+    const d = await post('/api/sell/pull-listing', { barcode });
+    toast(`✓ ${d.card_name || name} pulled — re-shelve from Return Queue`, 'green');
+    await refreshActiveListings();
+    refreshBadges();
+  } catch(e) { toast(e.message, 'red'); }
 }
 
 async function handleSellScan(barcode) {
@@ -2081,11 +2150,32 @@ async function removeFeatured(id) {
 }
 
 // ── Polling ───────────────────────────────────────────────────────────────────
+async function refreshBadges() {
+  try {
+    const d = await get('/api/badges');
+    const set = (id, n) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = n;
+      el.classList.toggle('visible', n > 0);
+    };
+    set('badge-holds',   d.holds);
+    set('badge-returns', d.returns);
+    set('badge-missing', d.missing);
+    set('badge-sell',    d.active_listings);
+  } catch(e) { /* silent — sidebar nav stays stale rather than flashing errors */ }
+}
+
 function startPolling() {
+  refreshBadges();
   _pollTimer = setInterval(() => {
+    refreshBadges();
     const activeView = document.querySelector('.view.active')?.id;
-    if (activeView === 'view-holds') loadHolds();
-  }, 30000);
+    if (activeView === 'view-holds')   loadHolds();
+    if (activeView === 'view-returns') loadReturns();
+    if (activeView === 'view-missing') loadMissing();
+    if (activeView === 'view-sell')    refreshActiveListings();
+  }, 15000);
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

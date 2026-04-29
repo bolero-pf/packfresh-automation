@@ -106,6 +106,28 @@ def list_holds():
     return jsonify({"holds": [_ser(dict(r)) for r in rows]})
 
 
+@app.route("/api/badges")
+def sidebar_badges():
+    """Cheap counts for the sidebar nav badges. Polled from every view so
+    pending work is visible without clicking into each tab."""
+    row = db.query_one("""
+        SELECT
+          (SELECT COUNT(*) FROM holds
+             WHERE status = 'PENDING'
+               AND NOT (cohort = 'champion' AND checkout_status = 'pending')
+          ) AS holds,
+          (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_RETURN') AS returns,
+          (SELECT COUNT(*) FROM raw_cards WHERE state = 'MISSING')        AS missing,
+          (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_SALE')   AS active_listings
+    """)
+    return jsonify({
+        "holds":           int(row["holds"] or 0),
+        "returns":         int(row["returns"] or 0),
+        "missing":         int(row["missing"] or 0),
+        "active_listings": int(row["active_listings"] or 0),
+    })
+
+
 @app.route("/api/holds/<hold_id>")
 def get_hold(hold_id):
     """Hold detail with optimized pull list."""
@@ -338,13 +360,20 @@ def mark_item_missing(hold_id, hold_item_id):
 @app.route("/api/holds/<hold_id>/items/<hold_item_id>/reverse", methods=["POST"])
 def reverse_decision(hold_id, hold_item_id):
     """
-    Reverse a hold item decision after finalization.
-    - Re-accept a REJECTED card → create Shopify listing
-    - Return an ACCEPTED card → delete Shopify listing, mark PENDING_RETURN
+    Reverse a hold item decision. Works on both open and closed holds —
+    keys off the raw_card's current state, not hold_items.status, so
+    "I changed my mind" is always reachable from the hold detail.
+    - re-accept: PENDING_RETURN → create listing → PENDING_SALE
+    - return:    PENDING_SALE   → delete listing → PENDING_RETURN
     """
     item = db.query_one("""
-        SELECT hi.*, rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
-               rc.condition, rc.current_price, rc.image_url, rc.tcgplayer_id, rc.barcode
+        SELECT hi.id AS hold_item_id, hi.status AS hi_status,
+               hi.shopify_product_id AS hi_product_id,
+               rc.id AS card_id, rc.state AS card_state,
+               rc.shopify_product_id AS rc_product_id,
+               rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url,
+               rc.tcgplayer_id, rc.barcode
         FROM hold_items hi
         JOIN raw_cards rc ON hi.raw_card_id = rc.id
         WHERE hi.id = %s AND hi.hold_id = %s
@@ -354,30 +383,38 @@ def reverse_decision(hold_id, hold_item_id):
 
     action = (request.get_json() or {}).get("action", "").lower()
 
-    if action == "re-accept" and item["status"] == "REJECTED":
-        # Create Shopify listing and mark accepted
+    if action == "re-accept":
+        if item["card_state"] not in ("PENDING_RETURN", "STORED", "DISPLAY"):
+            return jsonify({"error": f"Can't re-accept — card is {item['card_state']}"}), 409
         try:
             listing = _create_raw_listing(item)
-            db.execute("""
-                UPDATE hold_items
-                SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP,
-                    shopify_product_id = %s, shopify_variant_id = %s
-                WHERE id = %s
-            """, (listing["product_id"], listing["variant_id"], hold_item_id))
-            db.execute("""
-                UPDATE raw_cards SET state = 'PENDING_SALE', current_hold_id = NULL
-                WHERE id = %s
-            """, (str(item["card_id"]),))
-            return jsonify({"success": True, "action": "re-accepted", "product_id": listing["product_id"]})
         except Exception as e:
             return jsonify({"error": f"Failed to create listing: {e}"}), 500
+        db.execute("""
+            UPDATE hold_items
+            SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP,
+                shopify_product_id = %s, shopify_variant_id = %s
+            WHERE id = %s
+        """, (listing["product_id"], listing["variant_id"], hold_item_id))
+        db.execute("""
+            UPDATE raw_cards
+            SET state = 'PENDING_SALE',
+                shopify_product_id = %s,
+                shopify_variant_id = %s,
+                current_hold_id = NULL
+            WHERE id = %s
+        """, (listing["product_id"], listing["variant_id"], str(item["card_id"])))
+        return jsonify({"success": True, "action": "re-accepted", "product_id": listing["product_id"]})
 
-    elif action == "return" and item["status"] == "ACCEPTED" and item.get("shopify_product_id"):
-        # Delete Shopify listing and mark for return
-        try:
-            _shopify("DELETE", f"/products/{item['shopify_product_id']}.json")
-        except Exception as e:
-            logger.warning(f"Failed to delete Shopify product {item['shopify_product_id']}: {e}")
+    if action == "return":
+        if item["card_state"] != "PENDING_SALE":
+            return jsonify({"error": f"Can't return — card is {item['card_state']}, not PENDING_SALE"}), 409
+        product_id = item.get("rc_product_id") or item.get("hi_product_id")
+        if product_id:
+            try:
+                _shopify("DELETE", f"/products/{product_id}.json")
+            except Exception as e:
+                logger.warning(f"Failed to delete Shopify product {product_id}: {e}")
         db.execute("""
             UPDATE hold_items
             SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP,
@@ -385,12 +422,16 @@ def reverse_decision(hold_id, hold_item_id):
             WHERE id = %s
         """, (hold_item_id,))
         db.execute("""
-            UPDATE raw_cards SET state = 'PENDING_RETURN', current_hold_id = NULL
+            UPDATE raw_cards
+            SET state = 'PENDING_RETURN',
+                shopify_product_id = NULL,
+                shopify_variant_id = NULL,
+                current_hold_id = NULL
             WHERE id = %s
         """, (str(item["card_id"]),))
         return jsonify({"success": True, "action": "returned"})
 
-    return jsonify({"error": "Invalid action or item status"}), 400
+    return jsonify({"error": f"Unknown action '{action}' (expected 're-accept' or 'return')"}), 400
 
 
 @app.route("/api/holds/<hold_id>/finish", methods=["POST"])
@@ -431,9 +472,13 @@ def finish_hold(hold_id):
                 WHERE id = %s
             """, (listing["product_id"], listing["variant_id"], str(item["hold_item_id"])))
             db.execute("""
-                UPDATE raw_cards SET state = 'PENDING_SALE', current_hold_id = NULL
+                UPDATE raw_cards
+                SET state = 'PENDING_SALE',
+                    shopify_product_id = %s,
+                    shopify_variant_id = %s,
+                    current_hold_id = NULL
                 WHERE id = %s
-            """, (str(item["card_id"]),))
+            """, (listing["product_id"], listing["variant_id"], str(item["card_id"])))
             results.append({
                 "barcode":     item["barcode"],
                 "card_name":   item["card_name"],
@@ -524,7 +569,8 @@ def _finish_champion_hold(hold_id):
     """
     # Auto-accept all PULLED/REQUESTED items (customer already paid)
     items = db.query("""
-        SELECT hi.id AS hold_item_id, hi.status, hi.raw_card_id
+        SELECT hi.id AS hold_item_id, hi.status, hi.raw_card_id,
+               hi.shopify_product_id, hi.shopify_variant_id
         FROM hold_items hi
         WHERE hi.hold_id = %s AND hi.status IN ('PULLED', 'REQUESTED')
     """, (hold_id,))
@@ -535,9 +581,14 @@ def _finish_champion_hold(hold_id):
             WHERE id = %s
         """, (str(item["hold_item_id"]),))
         db.execute("""
-            UPDATE raw_cards SET state = 'PENDING_SALE', current_hold_id = NULL
+            UPDATE raw_cards
+            SET state = 'PENDING_SALE',
+                shopify_product_id = COALESCE(%s, shopify_product_id),
+                shopify_variant_id = COALESCE(%s, shopify_variant_id),
+                current_hold_id = NULL
             WHERE id = %s
-        """, (str(item["raw_card_id"]),))
+        """, (item.get("shopify_product_id"), item.get("shopify_variant_id"),
+              str(item["raw_card_id"])))
 
     # Handle MISSING items — release them
     db.execute("""
@@ -1121,9 +1172,13 @@ def sell_finalize():
             listing = _create_raw_listing(dict(card))
             db.execute("""
                 UPDATE raw_cards
-                SET state = 'PENDING_SALE', current_hold_id = NULL, updated_at = CURRENT_TIMESTAMP
+                SET state = 'PENDING_SALE',
+                    shopify_product_id = %s,
+                    shopify_variant_id = %s,
+                    current_hold_id = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-            """, (str(card["id"]),))
+            """, (listing["product_id"], listing["variant_id"], str(card["id"])))
             listings.append({
                 "barcode":    bc,
                 "card_name":  card["card_name"],
@@ -1143,6 +1198,132 @@ def sell_finalize():
         "skipped":  skipped,
         "total":    sum(l["price"] for l in listings),
     })
+
+
+@app.route("/api/sell/active")
+def sell_active_listings():
+    """Every PENDING_SALE card with an active Shopify draft listing.
+    Surfaced in the Sell tab so the front-of-house person can see what's
+    waiting on the register and pull a listing if a customer changes
+    their mind — no need to dig back into a closed hold."""
+    rows = db.query("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.variant,
+               rc.shopify_product_id, rc.shopify_variant_id, rc.updated_at,
+               h.id AS hold_id, h.customer_name AS hold_customer,
+               hi.id AS hold_item_id
+        FROM raw_cards rc
+        LEFT JOIN hold_items hi ON hi.raw_card_id = rc.id AND hi.status = 'ACCEPTED'
+        LEFT JOIN holds h ON hi.hold_id = h.id
+        WHERE rc.state = 'PENDING_SALE'
+        ORDER BY rc.updated_at DESC NULLS LAST
+    """)
+    return jsonify({"cards": [_ser(dict(r)) for r in rows]})
+
+
+@app.route("/api/sell/pull-listing", methods=["POST"])
+def sell_pull_listing():
+    """Customer changed their mind — yank the active Shopify listing and
+    send the card to the Return Queue so it gets re-shelved on next pass.
+    Works whether the card was listed via finish_hold or sell/finalize."""
+    barcode = (request.get_json() or {}).get("barcode", "").strip()
+    if not barcode:
+        return jsonify({"error": "No barcode provided"}), 400
+
+    card = db.query_one("""
+        SELECT id, state, shopify_product_id, card_name
+        FROM raw_cards WHERE barcode = %s
+    """, (barcode,))
+    if not card:
+        return jsonify({"error": "Barcode not found"}), 404
+    if card["state"] != "PENDING_SALE":
+        return jsonify({"error": f"Card is {card['state']}, not PENDING_SALE"}), 409
+
+    product_id = card.get("shopify_product_id")
+    if not product_id:
+        # Fall back to the hold_items linkage if the column wasn't backfilled
+        hi = db.query_one("""
+            SELECT shopify_product_id FROM hold_items
+            WHERE raw_card_id = %s AND status = 'ACCEPTED'
+              AND shopify_product_id IS NOT NULL
+            ORDER BY resolved_at DESC NULLS LAST LIMIT 1
+        """, (str(card["id"]),))
+        product_id = hi and hi.get("shopify_product_id")
+
+    if product_id:
+        try:
+            _shopify("DELETE", f"/products/{product_id}.json")
+        except Exception as e:
+            logger.warning(f"Failed to delete Shopify product {product_id}: {e}")
+
+    db.execute("""
+        UPDATE hold_items
+        SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP,
+            shopify_product_id = NULL, shopify_variant_id = NULL
+        WHERE raw_card_id = %s AND status = 'ACCEPTED'
+    """, (str(card["id"]),))
+    db.execute("""
+        UPDATE raw_cards
+        SET state = 'PENDING_RETURN',
+            shopify_product_id = NULL,
+            shopify_variant_id = NULL,
+            current_hold_id = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+    """, (str(card["id"]),))
+    return jsonify({"success": True, "card_name": card["card_name"]})
+
+
+@app.route("/api/sell/relist", methods=["POST"])
+def sell_relist():
+    """Customer rejected, then changed their mind — pull the card out of
+    the Return Queue and create a fresh Shopify listing so it's ready to
+    ring up. Works on any PENDING_RETURN card; no hold required."""
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return jsonify({"error": "Shopify not configured"}), 503
+
+    barcode = (request.get_json() or {}).get("barcode", "").strip()
+    if not barcode:
+        return jsonify({"error": "No barcode provided"}), 400
+
+    card = db.query_one("""
+        SELECT id, barcode, card_name, set_name, card_number, condition,
+               current_price, image_url, tcgplayer_id, state
+        FROM raw_cards WHERE barcode = %s
+    """, (barcode,))
+    if not card:
+        return jsonify({"error": "Barcode not found"}), 404
+    if card["state"] != "PENDING_RETURN":
+        return jsonify({"error": f"Card is {card['state']}, not PENDING_RETURN"}), 409
+
+    try:
+        listing = _create_raw_listing(dict(card))
+    except Exception as e:
+        return jsonify({"error": f"Failed to create listing: {e}"}), 500
+
+    db.execute("""
+        UPDATE raw_cards
+        SET state = 'PENDING_SALE',
+            shopify_product_id = %s,
+            shopify_variant_id = %s,
+            current_hold_id = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+    """, (listing["product_id"], listing["variant_id"], str(card["id"])))
+    # Reattach to the most recent hold_items row if there is one, so the
+    # closed hold's history reflects the flip.
+    db.execute("""
+        UPDATE hold_items
+        SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP,
+            shopify_product_id = %s, shopify_variant_id = %s
+        WHERE id = (
+            SELECT id FROM hold_items
+            WHERE raw_card_id = %s
+            ORDER BY resolved_at DESC NULLS LAST LIMIT 1
+        )
+    """, (listing["product_id"], listing["variant_id"], str(card["id"])))
+    return jsonify({"success": True, "card_name": card["card_name"],
+                    "product_id": listing["product_id"], "title": listing.get("title")})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1503,10 +1684,10 @@ def editor_search():
     page_size  = 24
     offset     = (page - 1) * page_size
 
-    # Editor grid mirrors kiosk's view (state='STORED' AND current_hold_id IS NULL)
-    # so prices and counts reflect what's actually saleable. Repairs to non-saleable
-    # rows (PULLED/MISSING/PENDING_*) still happen via direct barcode search.
-    filters = ["state = 'STORED'", "current_hold_id IS NULL"]
+    # Editor grid covers everything physically in the store (bins + binders +
+    # display cases). PULLED/PENDING_*/MISSING are still reachable by direct
+    # barcode search, but the grid stays focused on cards that are saleable.
+    filters = ["state IN ('STORED', 'DISPLAY')", "current_hold_id IS NULL"]
     params  = []
     if q:
         # Barcode is unique; if the query looks like one, do an exact match
