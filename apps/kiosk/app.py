@@ -496,7 +496,8 @@ def card_detail():
     copies = db.query(f"""
         SELECT id, barcode, card_name, set_name, card_number,
                condition, current_price, image_url, variant,
-               tcgplayer_id, scrydex_id, rarity
+               tcgplayer_id, scrydex_id, rarity,
+               COALESCE(game, 'pokemon') AS game
         FROM raw_cards
         WHERE card_name = %s AND set_name = %s
           AND state = 'STORED' AND current_hold_id IS NULL

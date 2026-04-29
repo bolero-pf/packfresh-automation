@@ -1298,9 +1298,10 @@ function renderDetail(card, copies, meta) {
   function energySym(name) { return _energy[name] || _energy[name?.toLowerCase()] || esc(name); }
   function energyCost(arr) { return (arr||[]).map(energySym).join(''); }
 
-  // Build card info rows from available data + scrydex meta
+  // Build card info rows from available data + scrydex meta (game-aware)
   const firstCopy = copies[0] || {};
   const m = meta || {};
+  const game = (firstCopy.game || 'pokemon').toLowerCase();
   const infoRows = [];
   // Card number (prefer printed_number from meta)
   const num = m.printed_number || firstCopy.card_number;
@@ -1308,20 +1309,34 @@ function renderDetail(card, copies, meta) {
   if (card.set_name) infoRows.push(['Set', card.set_name]);
   if (firstCopy.rarity) infoRows.push(['Rarity', firstCopy.rarity]);
   if (card.variant_label) infoRows.push(['Variant', card.variant_label]);
-  // Pokemon fields
-  if (m.supertype) infoRows.push(['Type', m.supertype]);
-  if (m.hp) infoRows.push(['HP', String(m.hp)]);
-  if (m.types && m.types.length) infoRows.push(['Energy', m.types.map(t => energySym(t) + ' ' + esc(t)).join(' / '), true]);
-  if (m.evolves_from) {
-    const ef = Array.isArray(m.evolves_from) ? m.evolves_from.join(', ') : m.evolves_from;
-    if (ef) infoRows.push(['Evolves', 'From ' + ef]);
+
+  if (game === 'pokemon') {
+    // Pokemon: supertype (Pokémon/Trainer/Energy), HP, energy types, evolution
+    if (m.supertype) infoRows.push(['Type', m.supertype]);
+    if (m.hp) infoRows.push(['HP', String(m.hp)]);
+    if (m.types && m.types.length) infoRows.push(['Energy', m.types.map(t => energySym(t) + ' ' + esc(t)).join(' / '), true]);
+    if (m.subtypes && m.subtypes.length) infoRows.push(['Subtype', m.subtypes.join(', ')]);
+    if (m.evolves_from) {
+      const ef = Array.isArray(m.evolves_from) ? m.evolves_from.join(', ') : m.evolves_from;
+      if (ef) infoRows.push(['Evolves', 'From ' + ef]);
+    }
+  } else if (game === 'onepiece') {
+    // One Piece: card_type (Leader/Character/Event/Stage), attribute, power, life, colors
+    if (m.card_type) infoRows.push(['Type', m.card_type]);
+    if (m.attribute) infoRows.push(['Attr', m.attribute]);
+    if (m.power) infoRows.push(['Power', String(m.power)]);
+    if (m.life) infoRows.push(['Life', String(m.life)]);
+    if (m.colors && m.colors.length) infoRows.push(['Color', m.colors.join(' / ')]);
+  } else {
+    // Magic / Lorcana / other: types + subtypes form the type line
+    const typeLine = [];
+    if (m.supertype) typeLine.push(m.supertype);
+    if (m.types && m.types.length) typeLine.push(...m.types);
+    const subLine = (m.subtypes && m.subtypes.length) ? m.subtypes.join(' ') : '';
+    const fullType = typeLine.join(' ') + (subLine ? ' — ' + subLine : '');
+    if (fullType.trim()) infoRows.push(['Type', fullType.trim()]);
   }
-  // One Piece fields
-  if (m.card_type) infoRows.push(['Type', m.card_type]);
-  if (m.attribute) infoRows.push(['Attr', m.attribute]);
-  if (m.power) infoRows.push(['Power', String(m.power)]);
-  if (m.life) infoRows.push(['Life', String(m.life)]);
-  if (m.colors && m.colors.length) infoRows.push(['Color', m.colors.join(' / ')]);
+
   // Universal
   if (m.artist) infoRows.push(['Artist', m.artist]);
   const totalAvail = copies.length;
