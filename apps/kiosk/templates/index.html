@@ -185,6 +185,48 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .meta-text { font-size: 0.82rem; color: var(--text); line-height: 1.5; }
 .meta-flavor { font-style: italic; color: var(--dim); margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
 .energy-icon { display: inline-block; width: 18px; height: 18px; vertical-align: -3px; margin: 0 1px; }
+/* ── Tablet (768px+) ── */
+@media (min-width: 768px) {
+  .panel { max-width: 800px; padding: 32px 36px; }
+  .detail-img { width: 200px; min-width: 200px; }
+  .detail-hero { gap: 24px; }
+  .detail-info-row { font-size: 0.92rem; }
+  .detail-info-label { min-width: 70px; font-size: 0.8rem; }
+  .meta-section { padding: 14px 16px; }
+  .meta-text { font-size: 0.86rem; }
+  .meta-heading { font-size: 0.9rem; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 18px; }
+  .card-body { padding: 12px 14px 14px; }
+  .card-name { font-size: 0.92rem; }
+  .copy-row { padding: 14px 18px; }
+  .copy-cond { font-size: 1.05rem; }
+  .copy-num { font-size: 0.86rem; }
+  .copy-price { font-size: 1.05rem; }
+  .copy-add-btn { padding: 10px; font-size: 0.95rem; }
+  .cart-item { padding: 14px 18px; gap: 16px; }
+  .cart-item img { width: 48px; }
+  .cart-item-name { font-size: 0.95rem; }
+  .cart-item-sub { font-size: 0.8rem; }
+  .cart-item .qty-btn { width: 36px; height: 36px; font-size: 1.1rem; }
+  .confirm-screen { padding: 30px 20px 16px; }
+  .confirm-title { font-size: 2.8rem; }
+  .confirm-msg { font-size: 1.15rem; }
+  .btn { height: 60px; font-size: 1.05rem; }
+  .form-input { height: 60px; font-size: 1.05rem; }
+  .form-label { font-size: 0.85rem; }
+  .search-input { font-size: 1.05rem; }
+  .panel-title { font-size: 1.8rem; }
+  .panel-sub { font-size: 0.9rem; }
+  .lightbox-flip { padding: 12px 28px; font-size: 0.95rem; }
+}
+
+/* ── Large tablet landscape (1024px+) ── */
+@media (min-width: 1024px) {
+  .panel { max-width: 900px; }
+  .detail-img { width: 240px; min-width: 240px; }
+}
+
+/* ── Phone (480px and below) ── */
 @media (max-width: 480px) {
   .detail-hero { flex-direction: column; align-items: center; }
   .detail-img { width: 180px; min-width: unset; }
