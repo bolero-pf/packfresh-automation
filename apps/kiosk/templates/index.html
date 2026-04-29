@@ -150,6 +150,7 @@ header {
   padding: 20px;
 }
 .overlay.active { display: flex; }
+body.modal-open { overflow: hidden; touch-action: none; }
 
 .panel {
   background: var(--surface); border: 1.5px solid var(--border);
@@ -167,10 +168,12 @@ header {
 .panel-sub   { font-size: 0.85rem; color: var(--dim); margin-bottom: 20px; }
 
 /* Card detail panel */
-.detail-hero { display: flex; gap: 18px; margin-bottom: 20px; }
+.detail-hero { display: flex; gap: 18px; margin-bottom: 20px; align-items: flex-start; }
 .detail-img  { width: 140px; min-width: 140px; aspect-ratio: 2.5/3.5; border-radius: 8px; overflow: hidden; background: var(--surface2); cursor: pointer; transition: transform 0.15s; }
+.detail-img-wrap { display: flex; flex-direction: column; align-items: center; flex-shrink: 0; }
 .detail-img:hover { transform: scale(1.03); }
 .detail-img img { width: 100%; height: 100%; object-fit: contain; }
+.detail-img-hint { font-size: 0.7rem; color: var(--dim); margin-top: 4px; text-align: center; }
 .detail-info { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .detail-info-row { display: flex; align-items: center; gap: 8px; font-size: 0.88rem; }
 .detail-info-label { color: var(--dim); min-width: 60px; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -1147,6 +1150,7 @@ async function openDetail(card) {
   const panel   = document.getElementById('detail-panel');
   panel.innerHTML = '<div class="spinner"></div>';
   overlay.classList.add('active');
+  document.body.classList.add('modal-open');
 
   try {
     // tcgplayer_id is the actual card identity. Two cards with the same
@@ -1222,6 +1226,24 @@ function renderDetail(card, copies, meta) {
       </div>`;
     }).join('');
 
+  // Pokemon energy type → symbol mapping
+  const _energy = {
+    'Colorless':'⚪','colorless':'⚪','Normal':'⚪',
+    'Fire':'🔴','fire':'🔴',
+    'Water':'🔵','water':'🔵',
+    'Grass':'🟢','grass':'🟢',
+    'Lightning':'🟡','lightning':'🟡','Electric':'🟡',
+    'Psychic':'🟣','psychic':'🟣',
+    'Fighting':'🟤','fighting':'🟤',
+    'Darkness':'⚫','darkness':'⚫','Dark':'⚫',
+    'Metal':'⬜','metal':'⬜','Steel':'⬜',
+    'Dragon':'🟠','dragon':'🟠',
+    'Fairy':'🩷','fairy':'🩷',
+    'Free':'⚪',
+  };
+  function energySym(name) { return _energy[name] || name; }
+  function energyCost(arr) { return (arr||[]).map(energySym).join(''); }
+
   // Build card info rows from available data + scrydex meta
   const firstCopy = copies[0] || {};
   const m = meta || {};
@@ -1235,7 +1257,7 @@ function renderDetail(card, copies, meta) {
   // Pokemon fields
   if (m.supertype) infoRows.push(['Type', m.supertype]);
   if (m.hp) infoRows.push(['HP', String(m.hp)]);
-  if (m.types && m.types.length) infoRows.push(['Energy', m.types.join(' / ')]);
+  if (m.types && m.types.length) infoRows.push(['Energy', m.types.map(t => energySym(t) + ' ' + t).join(' / ')]);
   if (m.evolves_from) {
     const ef = Array.isArray(m.evolves_from) ? m.evolves_from.join(', ') : m.evolves_from;
     if (ef) infoRows.push(['Evolves', 'From ' + ef]);
@@ -1264,24 +1286,30 @@ function renderDetail(card, copies, meta) {
   }
   if (m.attacks && m.attacks.length) {
     metaHtml += m.attacks.map(a => {
-      const cost = (a.cost || []).join('');
+      const cost = energyCost(a.cost);
       const dmg = a.damage || '';
-      return `<div class="meta-block"><div class="meta-heading">${esc(cost ? cost + ' ' : '')}${esc(a.name || '')}${dmg ? ' — ' + esc(dmg) : ''}</div>${a.text ? `<div class="meta-text">${esc(a.text)}</div>` : ''}</div>`;
+      return `<div class="meta-block"><div class="meta-heading">${cost ? cost + ' ' : ''}${esc(a.name || '')}${dmg ? ' — ' + esc(dmg) : ''}</div>${a.text ? `<div class="meta-text">${esc(a.text)}</div>` : ''}</div>`;
     }).join('');
   }
+  // Rules: filter out Pokemon mechanic boilerplate (V rule, VSTAR, VMAX, ex rule, etc.)
   if (m.rules && m.rules.length) {
-    metaHtml += m.rules.map(r => `<div class="meta-block"><div class="meta-text" style="font-style:italic;">${esc(r)}</div></div>`).join('');
+    const dominated = /\b(V rule|VSTAR|VMAX|Prism Star|GX rule|EX rule|ex rule|TAG TEAM|Radiant)\b/i;
+    const meaningful = m.rules.filter(r => !dominated.test(r));
+    if (meaningful.length) {
+      metaHtml += meaningful.map(r => `<div class="meta-block"><div class="meta-text">${esc(r)}</div></div>`).join('');
+    }
   }
   if (m.weaknesses && m.weaknesses.length) {
-    const w = m.weaknesses.map(w => (w.type || '') + ' ' + (w.value || '')).join(', ');
-    if (w.trim()) metaHtml += `<div class="meta-block"><div class="meta-text">Weakness: ${esc(w.trim())}</div></div>`;
+    const w = m.weaknesses.map(w => energySym(w.type || '') + ' ' + (w.value || '')).join(', ');
+    if (w.trim()) metaHtml += `<div class="meta-block"><div class="meta-text">Weakness: ${w.trim()}</div></div>`;
   }
   if (m.resistances && m.resistances.length) {
-    const r = m.resistances.map(r => (r.type || '') + ' ' + (r.value || '')).join(', ');
-    if (r.trim()) metaHtml += `<div class="meta-block"><div class="meta-text">Resistance: ${esc(r.trim())}</div></div>`;
+    const r = m.resistances.map(r => energySym(r.type || '') + ' ' + (r.value || '')).join(', ');
+    if (r.trim()) metaHtml += `<div class="meta-block"><div class="meta-text">Resistance: ${r.trim()}</div></div>`;
   }
   if (m.converted_retreat_cost != null) {
-    metaHtml += `<div class="meta-block"><div class="meta-text">Retreat: ${m.converted_retreat_cost}</div></div>`;
+    const retreatDots = '⚪'.repeat(m.converted_retreat_cost);
+    metaHtml += `<div class="meta-block"><div class="meta-text">Retreat: ${retreatDots || '0'}</div></div>`;
   }
   if (m.flavor_text) {
     metaHtml += `<div class="meta-block"><div class="meta-text meta-flavor">${esc(m.flavor_text)}</div></div>`;
@@ -1297,7 +1325,10 @@ function renderDetail(card, copies, meta) {
       <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeDetailPanel()">✕</button>
     </div>
     <div class="detail-hero">
-      <div class="detail-img" ${imgUrl ? `onclick="openLightbox('${esc(imgUrl)}')" title="Tap to enlarge"` : ''}>${img}</div>
+      <div class="detail-img-wrap">
+        <div class="detail-img" ${imgUrl ? `onclick="openLightbox('${esc(imgUrl)}')"` : ''}>${img}</div>
+        ${imgUrl ? '<div class="detail-img-hint">Tap to enlarge</div>' : ''}
+      </div>
       <div style="flex:1;">
         <div class="detail-info">${infoHtml}</div>
         ${metaHtml ? `<div class="meta-section">${metaHtml}</div>` : ''}
@@ -1500,6 +1531,8 @@ function updateCartBadge() {
 
 function closeDetailPanel() {
   document.getElementById('detail-overlay').classList.remove('active');
+  if (!document.getElementById('cart-overlay').classList.contains('active'))
+    document.body.classList.remove('modal-open');
 }
 
 // ── Cart ──────────────────────────────────────────────────────────────────────
@@ -1507,6 +1540,7 @@ function openCart() {
   const panel = document.getElementById('cart-panel');
   renderCart(panel);
   document.getElementById('cart-overlay').classList.add('active');
+  document.body.classList.add('modal-open');
 }
 
 function renderCart(panel) {
@@ -1760,6 +1794,8 @@ async function submitChampionCheckout() {
 
 function closeCartPanel() {
   document.getElementById('cart-overlay').classList.remove('active');
+  if (!document.getElementById('detail-overlay').classList.contains('active'))
+    document.body.classList.remove('modal-open');
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
