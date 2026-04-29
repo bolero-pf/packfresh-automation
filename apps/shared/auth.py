@@ -33,6 +33,11 @@ JWT_COOKIE_NAME = "pf_auth"
 JWT_EXPIRY_HOURS = 24
 ADMIN_LOGIN_URL = "https://admin.pack-fresh.com/login"
 
+# Short-lived "manager-walked-up-and-typed-their-PIN" override tokens.
+# Sized for one transaction — long enough to fill out an offer, short
+# enough that walking away from the kiosk doesn't leave it unlocked.
+OVERRIDE_TTL_MINUTES = 10
+
 # Role hierarchy — higher index = more access
 ROLE_HIERARCHY = {
     "associate": 0,
@@ -66,6 +71,44 @@ def decode_token(token: str) -> dict | None:
     except jwt.InvalidTokenError as e:
         logger.debug(f"JWT invalid: {e}")
         return None
+
+
+def create_override_token(manager_id: str, manager_name: str, manager_role: str,
+                          action: str = "manager_override") -> str:
+    """Mint a short-lived JWT representing a manager's PIN-confirmed approval
+    of a single privileged action by an associate. The kind=override claim
+    keeps these tokens from being usable as login cookies.
+    """
+    payload = {
+        "kind": "override",
+        "sub": manager_id,
+        "name": manager_name,
+        "role": manager_role,
+        "action": action,
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=OVERRIDE_TTL_MINUTES),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_override_token(token: str, action: str | None = None) -> dict | None:
+    """Decode a manager-override token. Returns the payload (with manager
+    info) only if it's a valid override token and, when `action` is given,
+    matches that specific action label. Returns None otherwise — callers
+    should treat None as "associate is not authorized" and reject the
+    request.
+    """
+    if not token or not JWT_SECRET:
+        return None
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        return None
+    if payload.get("kind") != "override":
+        return None
+    if action is not None and payload.get("action") != action:
+        return None
+    return payload
 
 
 def get_current_user() -> dict | None:

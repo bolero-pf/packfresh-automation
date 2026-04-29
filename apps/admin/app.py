@@ -15,6 +15,7 @@ import db
 from auth import (
     create_token, decode_token, set_auth_cookie, clear_auth_cookie,
     get_current_user, JWT_COOKIE_NAME, require_auth,
+    create_override_token, OVERRIDE_TTL_MINUTES,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -23,6 +24,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
 db.init_pool()
+
+# Manager-override PIN column — additive migration so existing deploys
+# self-upgrade without running migrate_admin_users.py manually.
+try:
+    db.execute("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255)")
+except Exception as _e:
+    logger.warning(f"pin_hash column migration skipped: {_e}")
 
 # Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
 # In Docker: WORKDIR=/app, shared/ is at /app/shared/ (not ../shared/)
@@ -147,6 +155,107 @@ def change_password():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Manager-override PIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _valid_pin(pin: str) -> bool:
+    return bool(pin) and pin.isdigit() and 4 <= len(pin) <= 8
+
+
+@app.route("/api/set-my-pin", methods=["POST"])
+def set_my_pin():
+    """Self-service PIN management for owner/manager. Associates can't set a
+    PIN — there's nothing they could authorize. Caller must re-enter their
+    password to prevent a hijacked session from setting an attacker PIN.
+    Pass new_pin='' (empty) to clear it.
+    """
+    token = request.cookies.get(JWT_COOKIE_NAME)
+    payload = decode_token(token) if token else None
+    if not payload:
+        return jsonify({"error": "Not authenticated"}), 401
+    if payload.get("role") not in ("owner", "manager"):
+        return jsonify({"error": "Only managers can set a PIN"}), 403
+
+    data = request.get_json(silent=True) or {}
+    current_password = data.get("current_password", "")
+    new_pin = (data.get("new_pin") or "").strip()
+    clear = bool(data.get("clear"))
+
+    if not current_password:
+        return jsonify({"error": "Current password required"}), 400
+    if not clear and not _valid_pin(new_pin):
+        return jsonify({"error": "PIN must be 4-8 digits"}), 400
+
+    user = db.query_one(
+        "SELECT * FROM admin_users WHERE id::text = %s AND is_active = TRUE",
+        (payload["sub"],)
+    )
+    if not user or not _check_password(current_password, user["password_hash"]):
+        return jsonify({"error": "Current password is incorrect"}), 401
+
+    if clear:
+        db.execute("UPDATE admin_users SET pin_hash = NULL WHERE id::text = %s", (payload["sub"],))
+    else:
+        db.execute(
+            "UPDATE admin_users SET pin_hash = %s WHERE id::text = %s",
+            (_hash_password(new_pin), payload["sub"])
+        )
+    return jsonify({"ok": True, "cleared": clear})
+
+
+@app.route("/api/verify-pin", methods=["POST"])
+def verify_pin():
+    """Validate a PIN against any active owner/manager and issue a short-
+    lived override token. Used by associate-facing flows where a manager
+    walks up to authorize a privileged action without logging out.
+
+    Body: { "pin": "1234", "action": "offer_percentage" }
+    Returns the override token alongside which manager approved it so the
+    consuming service can audit-log the approval pair.
+    """
+    data = request.get_json(silent=True) or {}
+    pin = (data.get("pin") or "").strip()
+    action = (data.get("action") or "manager_override").strip() or "manager_override"
+
+    if not _valid_pin(pin):
+        return jsonify({"error": "PIN must be 4-8 digits"}), 400
+
+    candidates = db.query("""
+        SELECT id, name, role, pin_hash FROM admin_users
+        WHERE role IN ('owner', 'manager')
+          AND is_active = TRUE
+          AND pin_hash IS NOT NULL
+    """)
+
+    matched = None
+    for c in candidates:
+        try:
+            if _check_password(pin, c["pin_hash"]):
+                matched = c
+                break
+        except Exception:
+            continue
+
+    if not matched:
+        # Generic failure — never reveal whether a PIN exists or which user owns it.
+        return jsonify({"error": "Invalid PIN"}), 401
+
+    override = create_override_token(
+        str(matched["id"]), matched["name"], matched["role"], action
+    )
+    return jsonify({
+        "ok": True,
+        "manager": {
+            "id": str(matched["id"]),
+            "name": matched["name"],
+            "role": matched["role"],
+        },
+        "override_token": override,
+        "expires_in_seconds": OVERRIDE_TTL_MINUTES * 60,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Dashboard (requires auth)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -186,9 +295,12 @@ def list_users():
     auth_result = require_auth(roles=["owner"])
     if auth_result:
         return auth_result
-    users = db.query(
-        "SELECT id, email, name, role, is_active, created_at, last_login_at FROM admin_users ORDER BY created_at"
-    )
+    users = db.query("""
+        SELECT id, email, name, role, is_active, created_at, last_login_at,
+               (pin_hash IS NOT NULL) AS has_pin
+        FROM admin_users
+        ORDER BY created_at
+    """)
     return jsonify({"users": [_ser(u) for u in users]})
 
 
@@ -250,6 +362,16 @@ def update_user(user_id):
             return jsonify({"error": "Password must be at least 8 characters"}), 400
         updates.append("password_hash = %s")
         params.append(_hash_password(data["password"]))
+    if "pin" in data:
+        # "" or null clears the PIN; any other value must be 4–8 digits.
+        pin_val = (data.get("pin") or "").strip()
+        if pin_val == "":
+            updates.append("pin_hash = NULL")
+        else:
+            if not _valid_pin(pin_val):
+                return jsonify({"error": "PIN must be 4-8 digits"}), 400
+            updates.append("pin_hash = %s")
+            params.append(_hash_password(pin_val))
 
     if not updates:
         return jsonify({"error": "Nothing to update"}), 400

@@ -72,11 +72,18 @@ async function loadUsers() {
     const users = d.users || [];
     if (!users.length) { el.innerHTML = '<em style="color:var(--dim);">No users yet.</em>'; return; }
     el.innerHTML = `<table>
-      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>PIN</th><th>Last Login</th><th></th></tr></thead>
       <tbody>${users.map(u => {
         const active = u.is_active !== false;
         const login = u.last_login_at ? new Date(u.last_login_at).toLocaleDateString() : 'Never';
         const esc = s => (s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+        const canHavePin = (u.role === 'owner' || u.role === 'manager');
+        const pinCell = canHavePin
+          ? (u.has_pin ? '<span style="color:var(--green);">✓ Set</span>' : '<span style="color:var(--text-dim);">—</span>')
+          : '<span style="color:var(--text-dim);font-size:0.7rem;">n/a</span>';
+        const pinBtn = canHavePin
+          ? `<button class="btn-sm" title="Reset PIN" onclick="resetPin('${u.id}','${esc(u.name)}',${u.has_pin?'true':'false'})">🔢</button>`
+          : '';
         return `<tr class="${active ? '' : 'inactive'}">
           <td><strong>${u.name}</strong></td>
           <td style="color:var(--dim);">${u.email}</td>
@@ -87,10 +94,12 @@ async function loadUsers() {
               <option value="owner" ${u.role==='owner'?'selected':''}>Owner</option>
             </select>
           </td>
+          <td>${pinCell}</td>
           <td style="color:var(--dim);font-size:0.78rem;">${login}</td>
           <td style="white-space:nowrap;">
             <button class="btn-sm" onclick="editName('${u.id}','${esc(u.name)}')">✏️</button>
             <button class="btn-sm" onclick="resetPassword('${u.id}','${esc(u.name)}')">🔑</button>
+            ${pinBtn}
             <button class="btn-sm" onclick="toggleActive('${u.id}',${!active})">${active ? '🚫' : '✅'}</button>
           </td>
         </tr>`;
@@ -149,6 +158,28 @@ async function resetPassword(id, name) {
     });
     if (!r.ok) { const d = await r.json(); alert(d.error); return; }
     toast('Password reset', 'green');
+  } catch(e) { alert(e.message); }
+}
+
+async function resetPin(id, name, hasPin) {
+  const action = hasPin
+    ? `Reset PIN for ${name}? Type a new 4-8 digit PIN, or leave blank to clear it entirely.`
+    : `Set a 4-8 digit PIN for ${name}.`;
+  const pin = prompt(action, '');
+  if (pin === null) return;
+  const trimmed = pin.trim();
+  if (trimmed && !/^\d{4,8}$/.test(trimmed)) {
+    alert('PIN must be 4-8 digits.');
+    return;
+  }
+  try {
+    const r = await fetch(`/api/users/${id}`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ pin: trimmed }),
+    });
+    if (!r.ok) { const d = await r.json(); alert(d.error); return; }
+    toast(trimmed ? 'PIN updated' : 'PIN cleared', 'green');
+    loadUsers();
   } catch(e) { alert(e.message); }
 }
 

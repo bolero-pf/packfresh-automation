@@ -61,6 +61,9 @@ header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex;
     <span>{{ user.name }}</span>
     <span class="role-badge role-{{ user.role }}">{{ user.role }}</span>
     <a href="#" style="color:var(--dim);font-size:0.8rem;" onclick="openChangePassword()">Change Password</a>
+    {% if user.role in ('owner', 'manager') %}
+    <a href="#" style="color:var(--dim);font-size:0.8rem;" onclick="openChangePin()">Set PIN</a>
+    {% endif %}
     {% if user.role == 'owner' %}
     <a href="/users" style="color:var(--dim);font-size:0.8rem;">Manage Users</a>
     {% endif %}
@@ -211,6 +214,38 @@ header { padding:20px 24px; border-bottom:1px solid var(--border); display:flex;
   </div>
 </div>
 
+{% if user.role in ('owner', 'manager') %}
+<!-- Set/Change PIN Modal — manager-override authorization -->
+<div class="modal-overlay" id="pin-modal">
+  <div class="modal">
+    <h3>Set Manager PIN</h3>
+    <p style="font-size:0.82rem;color:var(--dim);margin-bottom:14px;line-height:1.5;">
+      Your PIN authorizes one-off overrides at the counter (e.g. unlocking
+      offer percentages on intake). 4–8 digits. Re-enter your password to confirm.
+    </p>
+    <div class="form-group">
+      <label class="form-label">Current Password</label>
+      <input class="form-input" id="pin-current" type="password">
+    </div>
+    <div class="form-group">
+      <label class="form-label">New PIN (4–8 digits)</label>
+      <input class="form-input" id="pin-new" type="password" inputmode="numeric" maxlength="8" pattern="[0-9]*">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Confirm PIN</label>
+      <input class="form-input" id="pin-confirm" type="password" inputmode="numeric" maxlength="8" pattern="[0-9]*"
+             onkeydown="if(event.key==='Enter')submitPin()">
+    </div>
+    <div class="error" id="pin-error"></div>
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="closeChangePin()">Cancel</button>
+      <button class="btn btn-secondary" onclick="clearPin()" title="Remove your PIN entirely">Clear PIN</button>
+      <button class="btn btn-primary" onclick="submitPin()">Save PIN</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <script>
 async function logout() {
   await fetch('/api/logout', { method: 'POST' });
@@ -246,6 +281,57 @@ async function submitPassword() {
     if (!r.ok) { err.textContent = d.error; err.style.display = 'block'; return; }
     closeChangePassword();
     alert('Password updated!');
+  } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
+}
+
+function openChangePin() {
+  const m = document.getElementById('pin-modal');
+  if (!m) return;
+  m.classList.add('active');
+  document.getElementById('pin-current').focus();
+}
+function closeChangePin() {
+  const m = document.getElementById('pin-modal');
+  if (!m) return;
+  m.classList.remove('active');
+  ['pin-current', 'pin-new', 'pin-confirm'].forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('pin-error').style.display = 'none';
+}
+async function submitPin() {
+  const current = document.getElementById('pin-current').value;
+  const newPin = document.getElementById('pin-new').value;
+  const confirm = document.getElementById('pin-confirm').value;
+  const err = document.getElementById('pin-error');
+  if (!current || !newPin) { err.textContent = 'Fill in all fields.'; err.style.display = 'block'; return; }
+  if (newPin !== confirm) { err.textContent = 'New PINs do not match.'; err.style.display = 'block'; return; }
+  if (!/^\d{4,8}$/.test(newPin)) { err.textContent = 'PIN must be 4-8 digits.'; err.style.display = 'block'; return; }
+  err.style.display = 'none';
+  try {
+    const r = await fetch('/api/set-my-pin', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ current_password: current, new_pin: newPin }),
+    });
+    const d = await r.json();
+    if (!r.ok) { err.textContent = d.error; err.style.display = 'block'; return; }
+    closeChangePin();
+    alert('PIN saved!');
+  } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
+}
+async function clearPin() {
+  const current = document.getElementById('pin-current').value;
+  const err = document.getElementById('pin-error');
+  if (!current) { err.textContent = 'Enter your current password to clear your PIN.'; err.style.display = 'block'; return; }
+  if (!confirm('Remove your PIN? You will not be able to authorize associate overrides until you set a new one.')) return;
+  err.style.display = 'none';
+  try {
+    const r = await fetch('/api/set-my-pin', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ current_password: current, clear: true }),
+    });
+    const d = await r.json();
+    if (!r.ok) { err.textContent = d.error; err.style.display = 'block'; return; }
+    closeChangePin();
+    alert('PIN cleared.');
   } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
 }
 </script>
