@@ -457,7 +457,11 @@ class PriceCache:
         graded_nested: dict = {}
 
         for r in rows:
-            variant = r.get("variant") or "normal"
+            # Normalize to display names ("Foil", "Holofoil", …) so this view's
+            # variant keys match what /api/search/cards emits — the intake
+            # condition picker passes the chip's display name back through
+            # /api/lookup/card and looks it up directly in this map.
+            variant = self._display_variant(r.get("variant") or "normal")
             currency = r.get("currency")
             price = _to_usd(r.get("market_price"), currency)
             if price is None:
@@ -474,9 +478,9 @@ class PriceCache:
                 if company and grade:
                     graded_nested.setdefault(company, {})[grade] = price
 
-        # Primary variant = holofoil > normal > first available.
+        # Primary variant = Holofoil > Normal > first available.
         primary = None
-        for candidate in ("holofoil", "normal"):
+        for candidate in ("Holofoil", "Normal"):
             if candidate in variants_map:
                 primary = candidate
                 break

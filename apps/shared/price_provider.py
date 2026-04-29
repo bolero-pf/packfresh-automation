@@ -424,16 +424,18 @@ class PriceProvider:
 
         Returns None if the card isn't in cache or primary.
 
-        Shape:
+        Shape (variant keys are display-cased — "Holofoil", "Normal", "Foil"
+        — so they match what /api/search/cards emits and the intake chip
+        passes back as preselectedVariant):
             {
                 "scrydex_id", "tcgplayer_id", "name", "set_name",
                 "card_number", "printed_number", "rarity", "game",
                 "image_small" / "image_medium" / "image_large",
                 "variants": {
-                    "holofoil": {"NM": Decimal, "LP": Decimal, ...},
-                    "normal":   {...},
+                    "Holofoil": {"NM": Decimal, "LP": Decimal, ...},
+                    "Normal":   {...},
                 },
-                "primary_variant": "holofoil",
+                "primary_variant": "Holofoil",
                 "graded": {
                     "PSA": {"10": Decimal, "9": Decimal, ...},
                 },
@@ -463,6 +465,9 @@ class PriceProvider:
         if not meta:
             return None
 
+        # Match the cache path's display-cased variant keys so callers can
+        # treat both code paths the same.
+        from price_cache import PriceCache
         variants_map: dict = {}
         for v in meta.get("variants") or []:
             try:
@@ -470,10 +475,10 @@ class PriceProvider:
             except (PPTError, ScrydexError):
                 cond_prices = {}
             if cond_prices:
-                variants_map[v] = cond_prices
+                variants_map[PriceCache._display_variant(v)] = cond_prices
 
         primary = None
-        for candidate in ("holofoil", "normal"):
+        for candidate in ("Holofoil", "Normal"):
             if candidate in variants_map:
                 primary = candidate
                 break
