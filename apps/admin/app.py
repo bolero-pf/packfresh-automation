@@ -104,6 +104,17 @@ def api_logout():
     return resp
 
 
+@app.route("/logout", methods=["GET"])
+def logout_redirect():
+    # Plain-link sign-out target for the shared admin bar. Used by every
+    # non-admin service (intake-service, ingestion, etc.) where there's no JS
+    # logout helper — a fetch POST to /api/logout would bypass cross-origin
+    # cookie clearing anyway, so we do GET → clear → 302.
+    resp = make_response(redirect("/login"))
+    clear_auth_cookie(resp)
+    return resp
+
+
 @app.route("/api/change-password", methods=["POST"])
 def change_password():
     """Any logged-in user can change their own password."""

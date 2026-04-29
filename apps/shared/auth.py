@@ -152,7 +152,7 @@ ADMIN_BAR_HTML = """
   <a href="https://admin.pack-fresh.com" style="color:#4f7df9;text-decoration:none;font-weight:600;">← Console</a>
   <span style="color:#6b7280;">|</span>
   <span style="color:#6b7280;" id="pf-admin-user"></span>
-  <a href="https://admin.pack-fresh.com/api/logout" style="color:#6b7280;text-decoration:none;margin-left:auto;font-size:0.72rem;" onclick="document.cookie='pf_auth=;domain=.pack-fresh.com;path=/;max-age=0';">Sign Out</a>
+  <a href="https://admin.pack-fresh.com/logout" style="color:#6b7280;text-decoration:none;margin-left:auto;font-size:0.72rem;" onclick="document.cookie='pf_auth=;domain=.pack-fresh.com;path=/;max-age=0';">Sign Out</a>
 </div>
 <script>
 try {
