@@ -90,3 +90,125 @@ function themedConfirm(title, message, opts) {
     document.getElementById('pf-confirm-cancel').onclick = function () { cleanup(false); };
   });
 }
+
+
+/* ───────────────────────────────────────────────────────────
+   pfSound — Web Audio API beeps. No file assets needed.
+   Browsers block autoplay until first user gesture; calls before
+   that resolve silently (visual feedback still fires).
+   ─────────────────────────────────────────────────────────── */
+var pfSound = (function () {
+  var ctx = null;
+  function _ctx() {
+    if (ctx) return ctx;
+    try {
+      var Ctor = window.AudioContext || window.webkitAudioContext;
+      if (!Ctor) return null;
+      ctx = new Ctor();
+      return ctx;
+    } catch (e) { return null; }
+  }
+
+  function _tone(freq, duration, type, gain, when) {
+    var c = _ctx();
+    if (!c) return;
+    if (c.state === 'suspended') { try { c.resume(); } catch (e) {} }
+    var osc = c.createOscillator();
+    var g = c.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.value = freq;
+    var t0 = (c.currentTime + (when || 0));
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(gain || 0.18, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+    osc.connect(g); g.connect(c.destination);
+    osc.start(t0);
+    osc.stop(t0 + duration + 0.02);
+  }
+
+  return {
+    /* Sharp descending two-tone — "you did the wrong thing". */
+    error:   function () { _tone(440, 0.12, 'square', 0.22, 0);
+                           _tone(180, 0.22, 'square', 0.22, 0.10); },
+    /* Rising chirp — "scan accepted / action committed". */
+    success: function () { _tone(660, 0.08, 'sine', 0.18, 0);
+                           _tone(990, 0.12, 'sine', 0.18, 0.07); },
+    /* Single warm bell — "new hold dropped, look at me". */
+    notify:  function () { _tone(880, 0.18, 'triangle', 0.22, 0);
+                           _tone(660, 0.22, 'triangle', 0.18, 0.16); }
+  };
+})();
+
+
+/* ───────────────────────────────────────────────────────────
+   pfBlock(title, message, opts) — single-OK blocking modal.
+   Use INSTEAD OF toast() when the user must acknowledge before
+   continuing (e.g. wrong-bin scan, wrong-hold scan, wrong-card scan).
+     opts.okText   — button label, default 'OK'
+     opts.error    — true ⇒ red border + error sound + shake
+     opts.sound    — override which pfSound to play ('error'|'notify'|'success'|null)
+   Returns Promise<void> that resolves after OK is clicked.
+   ─────────────────────────────────────────────────────────── */
+function pfBlock(title, message, opts) {
+  opts = opts || {};
+  var okText  = opts.okText || 'OK';
+  var isError = !!opts.error;
+  var soundName = (opts.sound !== undefined)
+    ? opts.sound
+    : (isError ? 'error' : null);
+
+  var overlay = document.getElementById('pf-block-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'pf-block-overlay';
+    overlay.className = 'pf-block-overlay';
+    overlay.innerHTML =
+      '<div class="pf-block-box" id="pf-block-box">' +
+        '<div class="pf-block-title" id="pf-block-title"></div>' +
+        '<div class="pf-block-msg" id="pf-block-msg"></div>' +
+        '<div class="pf-block-btns">' +
+          '<button class="btn btn-primary" id="pf-block-ok"></button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+  }
+
+  var box = document.getElementById('pf-block-box');
+  document.getElementById('pf-block-title').textContent = title || '';
+  document.getElementById('pf-block-msg').textContent   = message || '';
+
+  var okBtn = document.getElementById('pf-block-ok');
+  okBtn.textContent = okText;
+  okBtn.className = isError ? 'btn btn-danger' : 'btn btn-primary';
+
+  box.classList.toggle('pf-block-error', isError);
+  overlay.classList.add('active');
+  if (isError) {
+    box.classList.remove('pf-block-shake');
+    void box.offsetWidth;
+    box.classList.add('pf-block-shake');
+  }
+  if (soundName && pfSound[soundName]) { try { pfSound[soundName](); } catch (e) {} }
+
+  setTimeout(function () { try { okBtn.focus(); } catch (e) {} }, 30);
+
+  return new Promise(function (resolve) {
+    function cleanup() {
+      overlay.classList.remove('active');
+      okBtn.onclick = null;
+      document.removeEventListener('keydown', onKey, true);
+      resolve();
+    }
+    function onKey(ev) {
+      // Enter / Space / Escape all confirm — there's only one option anyway,
+      // and a scanner sending Enter at end-of-scan should dismiss cleanly.
+      if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        cleanup();
+      }
+    }
+    okBtn.onclick = cleanup;
+    document.addEventListener('keydown', onKey, true);
+  });
+}

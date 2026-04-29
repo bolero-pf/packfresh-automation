@@ -255,6 +255,54 @@ tbody tr:hover { background: rgba(79,125,249,0.04); }
 }
 
 
+/* ── Block Modal (pfBlock — must-acknowledge errors) ────── */
+.pf-block-overlay {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.78);
+  z-index: 10001;
+  align-items: center;
+  justify-content: center;
+}
+.pf-block-overlay.active { display: flex; }
+
+.pf-block-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 28px 24px;
+  max-width: 460px;
+  width: 92vw;
+  text-align: center;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+}
+.pf-block-box.pf-block-error {
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px rgba(229,62,62,0.25), 0 10px 40px rgba(0,0,0,0.5);
+}
+.pf-block-title {
+  font-size: 1.2rem; font-weight: 700; margin-bottom: 10px;
+}
+.pf-block-box.pf-block-error .pf-block-title { color: var(--red); }
+.pf-block-msg {
+  font-size: 0.95rem; color: var(--text); margin-bottom: 22px; line-height: 1.5;
+  white-space: pre-wrap;
+}
+.pf-block-btns {
+  display: flex; gap: 8px; justify-content: center;
+}
+.pf-block-btns .btn { min-width: 120px; }
+
+@keyframes pf-block-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+.pf-block-shake { animation: pf-block-shake 0.35s ease-in-out; }
+
+
 /* ── Stats bar ──────────────────────────────────────────── */
 .stats-bar  { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
 .stat-box   { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; flex: 1; min-width: 100px; }
