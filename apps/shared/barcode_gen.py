@@ -138,23 +138,31 @@ def generate_barcode_image(barcode_id: str, *,
     draw.line([(LEFT_PAD, div_y), (width_px - RIGHT_PAD, div_y)], fill="#cccccc", width=1)
 
     # ── Barcode zone ──────────────────────────────────────────────────────────
+    # Render at a fixed module width so short IDs produce a short barcode (and
+    # don't get stretched to fill the label, which produces uneven bars).
     code128 = barcode.get("code128", barcode_id, writer=ImageWriter())
     buf = io.BytesIO()
     code128.write(buf, options={
-        "module_width":  0.28,
-        "module_height": 10.0,
+        "module_width":  0.30,    # mm per bar — readable on 19mm-tall labels
+        "module_height": 10.0,    # mm
         "font_size":     0,
         "text_distance": 0,
-        "quiet_zone":    1.5,
+        "quiet_zone":    1.0,     # mm
         "write_text":    False,
+        "dpi":           300,
     })
     buf.seek(0)
     barcode_img = Image.open(buf)
 
     bc_y = div_y + 4
     bc_h = barcode_zone_h - 8
-    bc_w = width_px - LEFT_PAD - RIGHT_PAD
-    barcode_resized = barcode_img.resize((bc_w, bc_h), Image.Resampling.NEAREST)
+    max_bc_w = width_px - LEFT_PAD - RIGHT_PAD
+
+    # Keep natural barcode width if it fits — only scale down if a legacy
+    # long-format ID overflows the printable zone.
+    natural_w, _ = barcode_img.size
+    final_w = min(natural_w, max_bc_w)
+    barcode_resized = barcode_img.resize((final_w, bc_h), Image.Resampling.NEAREST)
     label.paste(barcode_resized, (LEFT_PAD, bc_y))
 
     # ── Barcode ID text ────────────────────────────────────────────────────────
