@@ -85,10 +85,12 @@ from routes.inventory import bp as inventory_bp  # noqa: E402
 from routes.breakdown import bp as breakdown_bp  # noqa: E402
 from routes.ai_enrichment import bp as ai_bp  # noqa: E402
 from routes.bulk_edit import bp as bulk_edit_bp  # noqa: E402
+from routes.barcode_bind import bp as barcode_bind_bp  # noqa: E402
 app.register_blueprint(inventory_bp)
 app.register_blueprint(breakdown_bp)
 app.register_blueprint(ai_bp)
 app.register_blueprint(bulk_edit_bp)
+app.register_blueprint(barcode_bind_bp)
 
 # Shared breakdown-cache blueprint (replaces cache CRUD, search, store-prices in breakdown.py)
 from breakdown_routes import create_breakdown_blueprint
