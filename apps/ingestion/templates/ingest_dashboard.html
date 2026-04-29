@@ -5460,8 +5460,9 @@ function _renderSealedRawResults(d, sessionId, panel) {
 // Cards arrive from /api/raw-cards/session/<id> in alpha order; this respects
 // whatever the user picked in the sort selector at the top of the dashboard.
 //   alpha       — A→Z by card_name
-//   intake      — created_at ASC (only meaningful for sessions entered one at
-//                 a time with staggered timestamps; bulk imports collapse here)
+//   intake      — intake_created_at ASC (from intake_items — staggered at entry
+//                 time so bulk-barcoded rows still preserve the order they were
+//                 originally typed in)
 //   price-high  — current_price DESC
 //   price-low   — current_price ASC
 //   default     — leaves API order (alpha) intact
@@ -5470,7 +5471,7 @@ function _sortBarcodeCards(cards) {
     if (_currentSortBy === 'alpha') {
         sorted.sort((a, b) => (a.card_name || '').localeCompare(b.card_name || ''));
     } else if (_currentSortBy === 'intake') {
-        sorted.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+        sorted.sort((a, b) => (a.intake_created_at || a.created_at || '').localeCompare(b.intake_created_at || b.created_at || ''));
     } else if (_currentSortBy === 'price-high') {
         sorted.sort((a, b) => (b.current_price || 0) - (a.current_price || 0));
     } else if (_currentSortBy === 'price-low') {

@@ -3723,14 +3723,21 @@ def get_session_raw_cards(session_id):
     staff sort dropdown is set (alpha / intake / price). Default API order
     is alpha + barcode tiebreaker for stability when an unsorted client
     consumes the response.
+
+    intake_created_at comes from intake_items (set at entry time, staggered
+    by add_single_raw_item) — that's the true entry order. raw_cards.created_at
+    fires at barcode time and is useless for "intake order" because bulk
+    barcoding collapses all rows into the same microsecond.
     """
     cards = db.query("""
         SELECT rc.barcode, rc.card_name, rc.set_name, rc.condition,
                rc.current_price, rc.state, rc.image_url, rc.card_number,
                rc.created_at,
+               ii.created_at AS intake_created_at,
                sl.bin_label, sl.card_type
         FROM raw_cards rc
         LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN intake_items ii ON ii.id = rc.intake_item_id
         WHERE rc.intake_session_id = %s
         ORDER BY LOWER(rc.card_name) ASC,
                  LOWER(COALESCE(rc.set_name, '')) ASC,
