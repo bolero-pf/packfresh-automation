@@ -91,6 +91,17 @@
             vertical-align: middle; margin-right: 8px;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pushWarnFlash {
+            0%   { opacity: 0; transform: scale(0.94); }
+            45%  { opacity: 1; transform: scale(1.04); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+        .push-warn-flash { animation: pushWarnFlash 0.35s ease-out; }
+        .push-warn-bc {
+            font-family: var(--mono); font-weight: 700; padding: 0 5px;
+            border-radius: 3px; background: rgba(245,158,11,0.22);
+            color: #fff; letter-spacing: 0.5px;
+        }
 
         /* ─── TABS ─── */
         .tab-btn {
@@ -3448,12 +3459,13 @@ function _pushScanSubmit(e) {
 function _pushHandleScan(barcode) {
     if (_pushIndex >= _pushPlan.length) return;
     const target = _pushPlan[_pushIndex];
+    const bcHl = `<span class="push-warn-bc">${barcode}</span>`;
     if (_pushPending.includes(barcode)) {
-        _pushShowWarning(`${barcode} already scanned for this bin.`, 'info');
+        _pushShowWarning(`${bcHl} already scanned for this bin.`, 'info');
         return;
     }
     if (!target.expected_barcodes.includes(barcode)) {
-        _pushShowWarning(`✗ ${barcode} doesn't belong in ${target.bin_label}. Wrong pile, or routed elsewhere.`);
+        _pushShowWarning(`✗ ${bcHl} doesn't belong in ${target.bin_label}. Wrong pile, or routed elsewhere.`);
         return;
     }
     _pushPending.push(barcode);
@@ -3466,7 +3478,14 @@ function _pushShowWarning(msg, kind) {
     const isInfo = kind === 'info';
     const color  = isInfo ? 'var(--text-dim)' : '#f59e0b';
     const border = isInfo ? 'var(--border)'   : '#f59e0b';
-    slot.innerHTML = `<div style="border:1px solid ${border}; color:${color}; background:${isInfo?'transparent':'rgba(245,158,11,0.06)'}; border-radius:6px; padding:6px 10px; font-size:0.82rem; text-align:center;">${msg}</div>`;
+    // Wipe and re-insert in a microtick so the .push-warn-flash animation
+    // re-fires on every scan — otherwise two identical errors look static
+    // and you can't tell the second one happened.
+    slot.innerHTML = '';
+    requestAnimationFrame(() => {
+        if (!slot) return;
+        slot.innerHTML = `<div class="push-warn-flash" style="border:1px solid ${border}; color:${color}; background:${isInfo?'transparent':'rgba(245,158,11,0.06)'}; border-radius:6px; padding:6px 10px; font-size:0.82rem; text-align:center;">${msg}</div>`;
+    });
     clearTimeout(_pushShowWarning._t);
     _pushShowWarning._t = setTimeout(() => { if (slot) slot.innerHTML = ''; }, 3500);
 }
