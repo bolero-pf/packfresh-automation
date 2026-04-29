@@ -597,7 +597,10 @@ function renderHoldDetail(d) {
           </div>
         ` : item.item_status === 'ACCEPTED' ? `
           <div style="display:flex;gap:6px;align-items:center;">
-            <span style="font-size:0.78rem;color:var(--green);font-weight:600;">ACCEPTED</span>
+            ${item.card_state === 'PENDING_SALE'
+              ? '<span style="font-size:0.78rem;color:var(--green);font-weight:600;">ACCEPTED</span>'
+              : `<span title="Listing was never created — push failed silently. Re-accept retries; Return drops it." style="font-size:0.7rem;color:var(--amber);font-weight:600;">⚠ NO LISTING (${esc(item.card_state||'?')})</span>`}
+            ${item.card_state !== 'PENDING_SALE' ? `<button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;border:1px solid var(--border);background:none;color:var(--green);" onclick="reverseDecision('${item.hold_item_id}','re-accept')">↻ Retry listing</button>` : ''}
             <button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;border:1px solid var(--border);background:none;color:var(--red);" onclick="reverseDecision('${item.hold_item_id}','return')">↩ Return</button>
           </div>
         ` : item.item_status === 'REJECTED' ? `

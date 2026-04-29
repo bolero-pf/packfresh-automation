@@ -384,7 +384,10 @@ def reverse_decision(hold_id, hold_item_id):
     action = (request.get_json() or {}).get("action", "").lower()
 
     if action == "re-accept":
-        if item["card_state"] not in ("PENDING_RETURN", "STORED", "DISPLAY"):
+        # Allowed from REJECTED/PENDING_RETURN, or from PULLED if the item is
+        # already flagged ACCEPTED but the listing never got created (orphaned
+        # by a Shopify failure during finish_hold) — we just retry the listing.
+        if item["card_state"] not in ("PENDING_RETURN", "STORED", "DISPLAY", "PULLED"):
             return jsonify({"error": f"Can't re-accept — card is {item['card_state']}"}), 409
         try:
             listing = _create_raw_listing(item)
@@ -407,8 +410,11 @@ def reverse_decision(hold_id, hold_item_id):
         return jsonify({"success": True, "action": "re-accepted", "product_id": listing["product_id"]})
 
     if action == "return":
-        if item["card_state"] != "PENDING_SALE":
-            return jsonify({"error": f"Can't return — card is {item['card_state']}, not PENDING_SALE"}), 409
+        # PENDING_SALE: the normal undo — listing exists, delete it.
+        # PULLED: orphaned ACCEPTED (finish_hold failed to create the listing).
+        #   No Shopify cleanup needed; just route the card to the Return Queue.
+        if item["card_state"] not in ("PENDING_SALE", "PULLED"):
+            return jsonify({"error": f"Can't return — card is {item['card_state']}"}), 409
         product_id = item.get("rc_product_id") or item.get("hi_product_id")
         if product_id:
             try:
