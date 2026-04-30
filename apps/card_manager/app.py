@@ -277,12 +277,22 @@ def scan_card(hold_id):
             "barcode": barcode,
         }), 409
 
-    # Mark this hold_item as PULLED, update the actual barcode used
+    # Mark this hold_item as PULLED, lock in the EXACT physical copy that was
+    # scanned. We update both `barcode` (display) AND `raw_card_id` (FK) so
+    # every downstream action — accept, reject, return, finish — operates on
+    # the specific copy the user pulled, not the original allocation. Without
+    # this, a hold for 4× NM Pikachu would always resolve actions back through
+    # the originally-allocated raw_card_ids, even after staff scanned 4
+    # different physical copies — causing "Return on row 2" to delete the
+    # Shopify listing for a different copy than the one shown in the UI.
     db.execute("""
         UPDATE hold_items
-        SET status = 'PULLED', pulled_at = CURRENT_TIMESTAMP, barcode = %s
+        SET status = 'PULLED',
+            pulled_at = CURRENT_TIMESTAMP,
+            barcode = %s,
+            raw_card_id = %s
         WHERE id = %s
-    """, (barcode, str(match["id"])))
+    """, (barcode, str(scanned["id"]), str(match["id"])))
 
     # Update the raw_card state
     db.execute("""
