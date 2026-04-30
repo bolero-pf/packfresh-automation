@@ -206,9 +206,18 @@ def upload_collectr():
     customer_name = request.form.get("customer_name", "").strip() or "Unknown"
     try:
         offer_pct = Decimal(request.form.get("offer_percentage", "75"))
+        cash_raw = request.form.get("cash_percentage")
+        credit_raw = request.form.get("credit_percentage")
+        cash_pct = Decimal(cash_raw) if cash_raw else offer_pct
+        credit_pct = Decimal(credit_raw) if credit_raw else None
     except InvalidOperation:
-        return jsonify({"error": "Invalid offer_percentage"}), 400
+        return jsonify({"error": "Invalid percentage"}), 400
     force_product_type = request.form.get("force_product_type")  # 'raw' or 'sealed' or None
+
+    # Item-level offer math stays denominated in cash (the operational
+    # baseline) until a customer picks an offer type. The credit
+    # projection is recomputed live on read.
+    offer_pct = cash_pct
 
     # Read file
     try:
@@ -240,11 +249,16 @@ def upload_collectr():
     else:
         session_type = "sealed"
 
-    # Create session
+    # Create session — CSV imports default to NOT walk-in (the customer
+    # is mailing or dropping off later). Walk-in flag can be flipped from
+    # the session UI if the import is actually being processed at the
+    # counter.
     session = intake.create_session(
         customer_name=customer_name or result.portfolio_name,
         session_type=session_type,
-        offer_percentage=offer_pct,
+        cash_percentage=cash_pct,
+        credit_percentage=credit_pct,
+        is_walk_in=False,
         file_name=file.filename,
         file_hash=result.file_hash,
     )
@@ -328,8 +342,14 @@ def upload_collectr_html():
     force_product_type = data.get("force_product_type")  # 'raw' or 'sealed' or None
     try:
         offer_pct = Decimal(str(data.get("offer_percentage", "75")))
+        cash_raw = data.get("cash_percentage")
+        credit_raw = data.get("credit_percentage")
+        cash_pct = Decimal(str(cash_raw)) if cash_raw is not None else offer_pct
+        credit_pct = Decimal(str(credit_raw)) if credit_raw is not None else None
     except InvalidOperation:
-        return jsonify({"error": "Invalid offer_percentage"}), 400
+        return jsonify({"error": "Invalid percentage"}), 400
+    # Item math stays cash-denominated (see upload_collectr).
+    offer_pct = cash_pct
 
     if not html_content:
         return jsonify({"error": "No HTML content provided"}), 400
@@ -370,7 +390,9 @@ def upload_collectr_html():
         session = intake.create_session(
             customer_name=customer_name,
             session_type=session_type,
-            offer_percentage=offer_pct,
+            cash_percentage=cash_pct,
+            credit_percentage=credit_pct,
+            is_walk_in=False,
             file_name="collectr_html_paste",
             file_hash=result.file_hash,
         )
@@ -471,8 +493,13 @@ def upload_generic_csv():
     customer_name = request.form.get("customer_name", "").strip() or "Unknown"
     try:
         offer_pct = Decimal(request.form.get("offer_percentage", "75"))
+        cash_raw = request.form.get("cash_percentage")
+        credit_raw = request.form.get("credit_percentage")
+        cash_pct = Decimal(cash_raw) if cash_raw else offer_pct
+        credit_pct = Decimal(credit_raw) if credit_raw else None
     except InvalidOperation:
-        return jsonify({"error": "Invalid offer_percentage"}), 400
+        return jsonify({"error": "Invalid percentage"}), 400
+    offer_pct = cash_pct  # item math stays cash-denominated
     force_product_type = request.form.get("force_product_type")  # 'raw' or 'sealed' or None
 
     # Get column overrides from form (JSON string)
@@ -520,11 +547,13 @@ def upload_generic_csv():
     else:
         session_type = "sealed"
 
-    # Create session
+    # Create session — generic CSV imports default to NOT walk-in.
     session = intake.create_session(
         customer_name=customer_name,
         session_type=session_type,
-        offer_percentage=offer_pct,
+        cash_percentage=cash_pct,
+        credit_percentage=credit_pct,
+        is_walk_in=False,
         file_name=file.filename,
         file_hash=result.file_hash,
     )
@@ -599,19 +628,44 @@ def upload_generic_csv():
 
 @app.route("/api/intake/create-session", methods=["POST"])
 def create_session():
-    """Create an empty intake session (for manual raw card entry)."""
+    """Create an empty intake session (for manual raw card entry).
+
+    Accepts the new cash/credit split. If only legacy `offer_percentage`
+    is supplied, treat it as the cash percentage so existing callers keep
+    working unchanged. `is_walk_in` defaults to TRUE for manual-entry
+    sessions because that's the dominant counter use case — CSV/HTML
+    upload paths pass it explicitly when they want non-walk-in.
+    """
     data = request.json or {}
     customer_name = data.get("customer_name", "Walk-in")
     session_type = data.get("session_type", "raw")
     try:
-        offer_pct = Decimal(str(data.get("offer_percentage", "65")))
+        # Cash defaults 65%, credit 75% (per the role-policy spec)
+        legacy_pct = data.get("offer_percentage")
+        cash_raw = data.get("cash_percentage", legacy_pct if legacy_pct is not None else "65")
+        credit_raw = data.get("credit_percentage", "75")
+        cash_pct = Decimal(str(cash_raw)) if cash_raw is not None else None
+        credit_pct = Decimal(str(credit_raw)) if credit_raw is not None else None
     except InvalidOperation:
-        return jsonify({"error": "Invalid offer_percentage"}), 400
+        return jsonify({"error": "Invalid percentage"}), 400
+
+    # Server-side role-policy check (issue #8b — see _validate_offer_caps).
+    # An associate can only create with the canonical defaults; managers
+    # are capped at 80; owner uncapped. Override tokens unlock as usual.
+    cap_err = _validate_offer_caps(data, cash_pct, credit_pct, session_id=None)
+    if cap_err:
+        return jsonify(cap_err), 403
+
+    is_walk_in = data.get("is_walk_in")
+    if is_walk_in is None:
+        is_walk_in = True  # manual-entry default
 
     session = intake.create_session(
         customer_name=customer_name,
         session_type=session_type,
-        offer_percentage=offer_pct,
+        cash_percentage=cash_pct,
+        credit_percentage=credit_pct,
+        is_walk_in=bool(is_walk_in),
         employee_id=data.get("employee_id"),
         notes=data.get("notes"),
     )
@@ -619,6 +673,10 @@ def create_session():
     if data.get("is_distribution"):
         db.execute("UPDATE intake_sessions SET is_distribution = TRUE WHERE id = %s", (session["id"],))
         session["is_distribution"] = True
+
+    # If an override was used, log it now that we have a session_id.
+    _log_override_if_present(data, session["id"], cash_pct, credit_pct)
+
     return jsonify({"success": True, "session": _serialize(session)})
 
 
@@ -743,8 +801,20 @@ def get_session(session_id):
         item_dict["velocity"] = _serialize(vel) if vel else None
         serialized.append(item_dict)
 
+    # Live cash/credit totals for the dual-offer projection. Until the
+    # customer commits to an offer type, intake_items.offer_price is
+    # cash-denominated; the credit total has to be computed from the
+    # session's credit_percentage on the fly.
+    s_out = _serialize(session)
+    try:
+        totals = intake.compute_offer_totals(session_id)
+        s_out["total_offer_cash"] = float(totals["cash"])
+        s_out["total_offer_credit"] = float(totals["credit"])
+    except Exception as e:
+        app.logger.warning(f"compute_offer_totals failed for {session_id}: {e}")
+
     return jsonify({
-        "session": _serialize(session),
+        "session": s_out,
         "items": serialized,
     })
 
@@ -791,17 +861,59 @@ def list_sessions():
 
 @app.route("/api/intake/session/<session_id>/offer-percentage", methods=["POST"])
 def update_offer_percentage(session_id):
-    """Update the offer percentage and recalculate all item offers."""
+    """Update offer percentages and recalculate item offers.
+
+    Accepts any combination of:
+      - `cash_percentage`     — new cash split (also mirrored to legacy
+                                offer_percentage for back-compat readers)
+      - `credit_percentage`   — new credit split
+      - `offer_percentage`    — legacy single value, treated as cash
+      - `override_token`      — manager/owner PIN-derived token if the
+                                caller's role can't authorize the new
+                                values (see _validate_offer_caps)
+
+    Path is kept on `/offer-percentage` to avoid breaking the running
+    frontend mid-deploy; the dashboard now POSTs cash + credit on the
+    same path.
+    """
     data = request.json or {}
     try:
-        new_pct = Decimal(str(data.get("offer_percentage", "65")))
+        cash_raw = data.get("cash_percentage")
+        credit_raw = data.get("credit_percentage")
+        legacy_raw = data.get("offer_percentage")
+        cash_pct = Decimal(str(cash_raw)) if cash_raw is not None else None
+        credit_pct = Decimal(str(credit_raw)) if credit_raw is not None else None
+        if cash_pct is None and legacy_raw is not None:
+            cash_pct = Decimal(str(legacy_raw))
     except Exception:
-        return jsonify({"error": "Invalid offer_percentage"}), 400
+        return jsonify({"error": "Invalid percentage"}), 400
+
+    if cash_pct is None and credit_pct is None:
+        return jsonify({"error": "No percentage provided"}), 400
+
+    cap_err = _validate_offer_caps(data, cash_pct, credit_pct, session_id=session_id)
+    if cap_err:
+        return jsonify(cap_err), 403
 
     try:
-        session = intake.update_offer_percentage(session_id, new_pct)
+        session = intake.update_session_percentages(
+            session_id, cash_pct=cash_pct, credit_pct=credit_pct,
+        )
+        _log_override_if_present(data, session_id, cash_pct, credit_pct)
         return jsonify({"success": True, "session": _serialize(session)})
     except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/intake/session/<session_id>/walk-in", methods=["POST"])
+def set_session_walk_in(session_id):
+    """Toggle / set the walk-in flag on a session."""
+    data = request.json or {}
+    flag = bool(data.get("is_walk_in", True))
+    try:
+        session = intake.set_walk_in(session_id, flag)
+        return jsonify({"success": True, "session": _serialize(session)})
+    except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 
@@ -1724,7 +1836,20 @@ def offer_session(session_id):
 
 @app.route("/api/intake/session/<session_id>/accept", methods=["POST"])
 def accept_session(session_id):
-    """Customer accepted the offer. Optionally set fulfillment method and tracking."""
+    """Customer accepted the offer.
+
+    New shape (#7):
+      - `offer_type` ('cash' or 'credit') — the offer the customer chose.
+        Stamps `accepted_offer_type`, re-prices items at the chosen
+        percentage, and walk-in sessions short-circuit straight to
+        'received' (skip the pickup/mail wait).
+
+    Legacy shape (still supported for the deploy window):
+      - No `offer_type` → behaves like the old single-offer accept
+        (just flips status to 'accepted'). The dashboard switches to the
+        new shape in the same deploy, so this branch only matters for
+        in-flight sessions someone has open in another tab.
+    """
     session = intake.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
@@ -1732,8 +1857,33 @@ def accept_session(session_id):
         return jsonify({"error": f"Cannot accept — session is '{session['status']}'"}), 400
     data = request.get_json(silent=True) or {}
     fulfillment = data.get("fulfillment_method", "pickup")  # pickup or mail
-    tracking = data.get("tracking_number", "").strip() or None
-    pickup_date = data.get("pickup_date", "").strip() or None
+    tracking = (data.get("tracking_number") or "").strip() or None
+    pickup_date = (data.get("pickup_date") or "").strip() or None
+
+    offer_type = (data.get("offer_type") or "").lower().strip()
+    if offer_type in ("cash", "credit"):
+        try:
+            updated = intake.accept_offer(
+                session_id,
+                offer_type=offer_type,
+                fulfillment=fulfillment,
+                tracking_number=tracking,
+                pickup_date=pickup_date,
+            )
+            return jsonify({
+                "success": True,
+                "status": updated["status"],
+                "accepted_offer_type": offer_type,
+                "fulfillment_method": fulfillment,
+                "is_walk_in": bool(updated.get("is_walk_in")),
+            })
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+    # Legacy path — preserved for any in-flight client that hasn't picked
+    # up the new dashboard. Does NOT set accepted_offer_type, does NOT
+    # short-circuit walk-ins. Once the dashboard deploy is universal we
+    # can drop this branch.
     db.execute("""
         UPDATE intake_sessions
         SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP,
@@ -2185,7 +2335,7 @@ def _serialize(obj):
     if obj is None:
         return None
     # Fields that must be real JS booleans (DB may return 0/1 integers)
-    BOOL_FIELDS = {"is_graded", "is_mapped", "is_distribution", "needsDetailedScrape"}
+    BOOL_FIELDS = {"is_graded", "is_mapped", "is_distribution", "is_walk_in", "needsDetailedScrape"}
     out = {}
     for k, v in obj.items():
         if k in BOOL_FIELDS:
@@ -2197,6 +2347,130 @@ def _serialize(obj):
         else:
             out[k] = v
     return out
+
+
+# ==========================================
+# OFFER PERCENTAGE ROLE CAPS + OVERRIDE
+# ==========================================
+#
+# Server is the authority on percentage caps. The frontend renders
+# associate inputs as read-only and offers a "Manager Override" button,
+# but a malicious associate could still hit the API directly. These
+# helpers enforce role policy on every endpoint that writes a
+# percentage.
+#
+# Defaults match the New-Intake form: cash 65%, credit 75%. An associate
+# without an override can only submit those exact numbers.
+# Managers can submit 0..80 inclusive on either side.
+# Owners are uncapped.
+# A `manager`-role override token raises an associate's cap to 80.
+# An `owner`-role override token removes caps entirely.
+#
+# OVERRIDE_ACTION matches the action label the admin service mints into
+# the token (`POST /api/verify-pin {action: "offer_percentage"}`). Using
+# a label here means a token issued for some future privileged action
+# can't be replayed against the offer endpoints.
+OVERRIDE_ACTION = "offer_percentage"
+ASSOCIATE_DEFAULT_CASH = Decimal("65")
+ASSOCIATE_DEFAULT_CREDIT = Decimal("75")
+MANAGER_CAP = Decimal("80")
+
+
+def _decode_override(data: dict):
+    """Return a decoded override-token payload (manager info) if the
+    request body carries a valid one for our action, else None.
+    """
+    token = (data or {}).get("override_token")
+    if not token:
+        return None
+    try:
+        from auth import decode_override_token
+    except Exception:
+        return None
+    return decode_override_token(token, action=OVERRIDE_ACTION)
+
+
+def _effective_caps_from_role(user_role: str, override_payload):
+    """Return (cash_min, cash_max, credit_min, credit_max) that the
+    requestor is allowed to submit, given their JWT role plus any
+    attached override token's role.
+
+    Associates are pinned to the defaults — both min and max equal the
+    canonical default — unless an override widens the window.
+    """
+    role = (user_role or "associate").lower()
+    eff_role = role
+    if override_payload:
+        # Override role wins if higher in the hierarchy.
+        rank = {"associate": 0, "manager": 1, "owner": 2}
+        if rank.get(override_payload.get("role", ""), 0) > rank.get(role, 0):
+            eff_role = override_payload.get("role")
+
+    if eff_role == "owner":
+        return (Decimal("0"), Decimal("100"), Decimal("0"), Decimal("100"))
+    if eff_role == "manager":
+        return (Decimal("0"), MANAGER_CAP, Decimal("0"), MANAGER_CAP)
+    # Associate: must hit the exact defaults
+    return (ASSOCIATE_DEFAULT_CASH, ASSOCIATE_DEFAULT_CASH,
+            ASSOCIATE_DEFAULT_CREDIT, ASSOCIATE_DEFAULT_CREDIT)
+
+
+def _validate_offer_caps(data: dict, cash_pct, credit_pct, session_id=None):
+    """Return None if the percentages are acceptable for this caller; a
+    `(error_dict)` shape suitable for a 403 JSON body otherwise.
+
+    Either percentage may be None (caller leaves it unchanged) — in that
+    case it's not validated.
+    """
+    user = getattr(g, "user", None) or {}
+    role = (user.get("role") or "associate").lower()
+    override = _decode_override(data)
+
+    cash_min, cash_max, credit_min, credit_max = _effective_caps_from_role(role, override)
+
+    def _outside(val, lo, hi):
+        return val is not None and (val < lo or val > hi)
+
+    if _outside(cash_pct, cash_min, cash_max) or _outside(credit_pct, credit_min, credit_max):
+        return {
+            "error": "Override required",
+            "code": "override_required",
+            "role": role,
+            "cash_max": float(cash_max),
+            "credit_max": float(credit_max),
+        }
+    return None
+
+
+def _log_override_if_present(data: dict, session_id: str,
+                              cash_pct=None, credit_pct=None):
+    """If the request carries a valid override token, append an audit row
+    to `session_overrides`. Best-effort — never blocks the request on
+    failure (the table may not exist yet on a service that hasn't run
+    the migration).
+    """
+    override = _decode_override(data)
+    if not override:
+        return
+    user = getattr(g, "user", None) or {}
+    try:
+        db.execute("""
+            INSERT INTO session_overrides
+                (session_id, approved_by_user_id, approver_role,
+                 approved_for_user_id, action,
+                 approved_cash_pct, approved_credit_pct)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (
+            session_id,
+            override.get("sub"),
+            override.get("role"),
+            user.get("id"),
+            override.get("action") or OVERRIDE_ACTION,
+            cash_pct,
+            credit_pct,
+        ))
+    except Exception as e:
+        app.logger.warning(f"session_overrides insert failed: {e}")
 
 
 # ==========================================

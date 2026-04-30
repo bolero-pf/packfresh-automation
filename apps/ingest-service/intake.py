@@ -132,18 +132,41 @@ def get_all_mappings(product_type: str = None) -> list[dict]:
 # ==========================================
 
 def create_session(customer_name: str, session_type: str,
-                   offer_percentage: Decimal,
+                   offer_percentage: Decimal = None,
+                   cash_percentage: Decimal = None,
+                   credit_percentage: Decimal = None,
+                   is_walk_in: bool = False,
                    file_name: str = None, file_hash: str = None,
                    employee_id: str = None, notes: str = None) -> dict:
-    """Create a new intake session. Returns the full session row."""
+    """Create a new intake session. Returns the full session row.
+
+    Cash/credit split (Phase 2):
+      - Pass `cash_percentage` and/or `credit_percentage` to set the split
+        directly. If neither is supplied, fall back to `offer_percentage`
+        as cash (legacy single-offer behavior).
+      - `offer_percentage` is mirrored from cash_percentage (or whichever
+        legacy value was passed) so old readers still see something sane
+        until they migrate to the split columns.
+      - `is_walk_in` flags counter sessions; on accept the writer skips
+        the offered → accepted → received pickup/mail interstitial and
+        jumps straight to received.
+    """
+    # Defense in depth: ensure we always have a cash percentage even when a
+    # caller still passes only the legacy offer_percentage.
+    cash_pct = cash_percentage if cash_percentage is not None else offer_percentage
+    credit_pct = credit_percentage  # may legitimately be None on legacy callers
+    legacy_pct = offer_percentage if offer_percentage is not None else cash_pct
+
     session_id = str(uuid4())
     return execute_returning("""
         INSERT INTO intake_sessions
             (id, customer_name, session_type, offer_percentage,
+             cash_percentage, credit_percentage, is_walk_in,
              source_file_name, source_file_hash, employee_id, notes)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
-    """, (session_id, customer_name, session_type, offer_percentage,
+    """, (session_id, customer_name, session_type, legacy_pct,
+          cash_pct, credit_pct, bool(is_walk_in),
           file_name, file_hash, employee_id, notes))
 
 
@@ -392,8 +415,24 @@ def _recalculate_session_totals(session_id: str):
 
 
 def update_offer_percentage(session_id: str, new_percentage: Decimal) -> dict:
+    """Legacy single-percentage update — still used by older flows that
+    haven't been split yet. Internally this just updates `cash_percentage`
+    (and the mirrored `offer_percentage`); credit is left untouched so a
+    pre-existing credit number doesn't get clobbered.
     """
-    Change the offer percentage for a session and recalculate all item offer prices.
+    return update_session_percentages(session_id, cash_pct=new_percentage)
+
+
+def update_session_percentages(session_id: str,
+                                cash_pct: Decimal = None,
+                                credit_pct: Decimal = None) -> dict:
+    """Update one or both percentages on a session and recalculate item
+    offer prices using the cash percentage (since that's what
+    `intake_items.offer_price` currently represents until a customer picks
+    an offer type). Per-item bulk rule (raw < $2 → 25%) still applies.
+
+    Either argument may be None to leave that side alone — useful when the
+    UI saves the two inputs independently.
     """
     session = get_session(session_id)
     if not session:
@@ -401,13 +440,141 @@ def update_offer_percentage(session_id: str, new_percentage: Decimal) -> dict:
     if session["status"] in ("cancelled", "rejected", "received", "partially_ingested", "ingested", "finalized"):
         raise ValueError("Cannot change offer % on this session")
 
-    # Update session offer_percentage
-    execute("""
-        UPDATE intake_sessions SET offer_percentage = %s WHERE id = %s
-    """, (new_percentage, session_id))
+    # Build a dynamic UPDATE so unspecified columns aren't overwritten
+    sets = []
+    params = []
+    if cash_pct is not None:
+        sets.append("cash_percentage = %s")
+        params.append(cash_pct)
+        # Mirror to legacy column so any reader still on offer_percentage
+        # sees the active cash number rather than a stale value.
+        sets.append("offer_percentage = %s")
+        params.append(cash_pct)
+    if credit_pct is not None:
+        sets.append("credit_percentage = %s")
+        params.append(credit_pct)
+    if sets:
+        params.append(session_id)
+        execute(f"UPDATE intake_sessions SET {', '.join(sets)} WHERE id = %s", tuple(params))
 
-    # Recalculate every item's offer_price
-    # Raw cards under $2 get flat 25% regardless of session percentage
+    # Recalculate item-level offer_price using cash (the operational baseline).
+    # Until the customer commits to an offer type, item rows stay denominated
+    # in cash; total_offer_amount also stays cash-based. The frontend
+    # additionally renders a credit projection from session.credit_percentage.
+    effective_cash = cash_pct if cash_pct is not None else session.get("cash_percentage")
+    if effective_cash is None:
+        effective_cash = session.get("offer_percentage")  # last-resort legacy fallback
+    if effective_cash is not None:
+        execute("""
+            UPDATE intake_items
+            SET offer_price = market_price * quantity * (
+                CASE WHEN product_type = 'raw' AND market_price < 2.00
+                     THEN 25.0
+                     ELSE %s
+                END / 100.0
+            )
+            WHERE session_id = %s
+        """, (effective_cash, session_id))
+
+    _recalculate_session_totals(session_id)
+    return get_session(session_id)
+
+
+def set_walk_in(session_id: str, is_walk_in: bool) -> dict:
+    """Flip the walk-in flag on a session. Walk-in sessions short-circuit
+    the offered → accepted → received flow on accept (customer is already
+    at the counter with the cards)."""
+    execute(
+        "UPDATE intake_sessions SET is_walk_in = %s WHERE id = %s",
+        (bool(is_walk_in), session_id),
+    )
+    return get_session(session_id)
+
+
+def compute_offer_totals(session_id: str) -> dict:
+    """Compute live cash and credit totals for the session's active items
+    (good + damaged), honoring the bulk-raw $2 floor on cash. Returns
+    `{"cash": Decimal, "credit": Decimal}`. Used for the dual-projection
+    UI before a customer commits to an offer type.
+
+    Note: credit also respects the bulk-raw rule — bulk cards still pay
+    25% in credit, same as cash. That mirrors how the original
+    single-offer flow treated bulk regardless of percentage.
+    """
+    session = query_one(
+        "SELECT cash_percentage, credit_percentage, offer_percentage FROM intake_sessions WHERE id = %s",
+        (session_id,),
+    )
+    if not session:
+        return {"cash": Decimal("0"), "credit": Decimal("0")}
+
+    cash_pct = session["cash_percentage"] or session["offer_percentage"] or Decimal("0")
+    credit_pct = session["credit_percentage"] or Decimal("0")
+
+    rows = query("""
+        SELECT product_type, quantity, market_price, item_status
+        FROM intake_items
+        WHERE session_id = %s
+    """, (session_id,))
+
+    cash_total = Decimal("0")
+    credit_total = Decimal("0")
+    for r in rows:
+        if r.get("item_status", "good") not in ("good", "damaged"):
+            continue
+        is_damaged = r.get("item_status") == "damaged"
+        cash_offer, _ = calc_offer_price(
+            r["market_price"], r["quantity"], cash_pct,
+            product_type=r.get("product_type", "raw"),
+            is_damaged=is_damaged)
+        cash_total += cash_offer
+        if credit_pct > 0:
+            credit_offer, _ = calc_offer_price(
+                r["market_price"], r["quantity"], credit_pct,
+                product_type=r.get("product_type", "raw"),
+                is_damaged=is_damaged)
+            credit_total += credit_offer
+    return {"cash": cash_total, "credit": credit_total}
+
+
+def accept_offer(session_id: str, offer_type: str,
+                 fulfillment: str = "pickup",
+                 tracking_number: str = None,
+                 pickup_date: str = None) -> dict:
+    """Customer accepted one of the two offers.
+
+    - `offer_type` must be 'cash' or 'credit'
+    - Recomputes item offer_price using the chosen percentage
+    - Stamps `accepted_offer_type` and `total_offer_amount`
+    - For walk-in sessions, jumps status straight to 'received' (no
+      pickup/mail interstitial — the customer is at the counter)
+    - For mail/pickup sessions, behaves like the legacy accept (offered →
+      accepted, awaits a separate /receive call when product arrives)
+
+    Returns the updated session row.
+    """
+    if offer_type not in ("cash", "credit"):
+        raise ValueError("offer_type must be 'cash' or 'credit'")
+
+    session = query_one(
+        "SELECT * FROM intake_sessions WHERE id = %s",
+        (session_id,),
+    )
+    if not session:
+        raise ValueError("Session not found")
+    if session["status"] not in ("offered",):
+        raise ValueError(f"Cannot accept — session is '{session['status']}'")
+
+    if offer_type == "cash":
+        chosen_pct = session["cash_percentage"] or session["offer_percentage"]
+    else:
+        chosen_pct = session["credit_percentage"]
+    if chosen_pct is None:
+        raise ValueError(f"Session has no {offer_type}_percentage set")
+
+    # Re-price every active item at the accepted percentage so the rest of
+    # the pipeline (received_items_snapshot, _finalize_*) sees the right
+    # numbers. Bulk raw rule still applies.
     execute("""
         UPDATE intake_items
         SET offer_price = market_price * quantity * (
@@ -415,9 +582,57 @@ def update_offer_percentage(session_id: str, new_percentage: Decimal) -> dict:
                  THEN 25.0
                  ELSE %s
             END / 100.0
-        )
+        ) * (CASE WHEN item_status = 'damaged' THEN 0.88 ELSE 1.0 END)
         WHERE session_id = %s
-    """, (new_percentage, session_id))
+    """, (chosen_pct, session_id))
+
+    is_walk_in = bool(session.get("is_walk_in"))
+    new_status = "received" if is_walk_in else "accepted"
+
+    if is_walk_in:
+        # Snapshot items at receive-time exactly like the regular receive
+        # endpoint does, so partial-ingest reconciliation downstream sees
+        # consistent shape regardless of fulfillment path.
+        items = query(
+            "SELECT * FROM intake_items WHERE session_id = %s",
+            (session_id,),
+        )
+        import json as _json
+        snapshot = _json.dumps([{
+            "id": str(i["id"]),
+            "product_name": i.get("product_name"),
+            "tcgplayer_id": i.get("tcgplayer_id"),
+            "quantity": i.get("quantity", 1),
+            "market_price": float(i.get("market_price", 0)),
+            "offer_price": float(i.get("offer_price", 0)),
+            "item_status": i.get("item_status", "good"),
+        } for i in items if i.get("item_status") in ("good", "damaged")])
+
+        execute("""
+            UPDATE intake_sessions
+            SET status = 'received',
+                accepted_offer_type = %s,
+                accepted_at = CURRENT_TIMESTAMP,
+                received_at = CURRENT_TIMESTAMP,
+                fulfillment_method = COALESCE(%s, fulfillment_method, 'pickup'),
+                tracking_number = COALESCE(%s, tracking_number),
+                pickup_date = COALESCE(%s, pickup_date),
+                received_items_snapshot = %s,
+                original_offer_amount = total_offer_amount
+            WHERE id = %s
+        """, (offer_type, fulfillment, tracking_number, pickup_date,
+              snapshot, session_id))
+    else:
+        execute("""
+            UPDATE intake_sessions
+            SET status = 'accepted',
+                accepted_offer_type = %s,
+                accepted_at = CURRENT_TIMESTAMP,
+                fulfillment_method = %s,
+                tracking_number = %s,
+                pickup_date = %s
+            WHERE id = %s
+        """, (offer_type, fulfillment, tracking_number, pickup_date, session_id))
 
     _recalculate_session_totals(session_id)
     return get_session(session_id)
