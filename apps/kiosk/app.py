@@ -124,6 +124,73 @@ ERA_PREFIXES = {
 }
 
 
+# raw_cards.game uses short codes ('magic', 'pokemon', 'onepiece') while
+# scrydex_card_meta uses Scrydex's API names (so 'magicthegathering' for MTG).
+# Filter joins always need both names — the raw_cards side and the meta side.
+_GAME_TO_SCRYDEX_GAME = {
+    "magic":     "magicthegathering",
+    "pokemon":   "pokemon",
+    "onepiece":  "onepiece",
+    "lorcana":   "lorcana",
+    "riftbound": "riftbound",
+}
+
+
+# Per-game advanced-filter shape. The frontend reads this from
+# /api/filter-meta to render only the controls that apply.
+#   colors_field   — JSONB path the filter checks against (in scrydex_card_meta)
+#   colors_options — canonical option list (omitted ⇒ derive from data)
+#   color_modes    — ('any',) or ('any','exactly'); MTG/OP support both
+#   types_field    — JSONB path / column for the type/category filter
+#   types_options  — canonical option list (omitted ⇒ derive from data)
+# Rarity is always raw_cards.rarity (already on every card row).
+GAME_FILTER_SCHEMA = {
+    "magic": {
+        "colors": {
+            "label":   "Color",
+            "field":   "raw->'color_identity'",  # commander-style identity
+            "type":    "jsonb",
+            "options": ["W", "U", "B", "R", "G", "C"],
+            "labels":  {"W": "White", "U": "Blue", "B": "Black",
+                        "R": "Red",   "G": "Green", "C": "Colorless"},
+            "modes":   ["any", "exactly"],
+        },
+        "card_type": {
+            "label":   "Card type",
+            "field":   "raw->'types'",
+            "type":    "jsonb",
+            "options": ["Land", "Creature", "Artifact", "Enchantment",
+                        "Instant", "Sorcery", "Planeswalker", "Battle"],
+        },
+    },
+    "pokemon": {
+        "card_type": {
+            "label":   "Energy",
+            "field":   "types",
+            "type":    "jsonb",
+            "options": ["Grass", "Fire", "Water", "Lightning", "Psychic",
+                        "Fighting", "Darkness", "Metal", "Fairy",
+                        "Dragon", "Colorless"],
+        },
+    },
+    "onepiece": {
+        "colors": {
+            "label":   "Color",
+            "field":   "colors",
+            "type":    "jsonb",
+            "options": ["Red", "Green", "Blue", "Purple", "Black", "Yellow"],
+            "modes":   ["any", "exactly"],
+        },
+        "card_type": {
+            "label":   "Card type",
+            "field":   "card_type",
+            "type":    "text",
+            "options": ["Leader", "Character", "Event", "Stage"],
+        },
+    },
+}
+
+
 def _classify_era(set_name: str) -> str:
     """Map a set_name to an era using case-insensitive prefix match.
     Anything unmatched (Base Set, Jungle, Fossil, Team Rocket, Gym, Neo,
@@ -173,6 +240,107 @@ def gate_api():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Filter helpers (game-aware advanced filters)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _multi_param(name: str) -> list[str]:
+    """Read a comma-separated multi-select query param."""
+    raw = (request.args.get(name) or "").strip()
+    if not raw:
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _build_meta_filter_subquery(game: str,
+                                colors: list[str], color_mode: str,
+                                card_types: list[str],
+                                rarities: list[str]) -> tuple[str, list]:
+    """Build a `rc.id IN (subquery)` fragment that narrows raw_cards to those
+    matching the per-game advanced filters.
+
+    Returns ('', []) when no filters apply.
+
+    Game name maps from raw_cards.game (short code) to scrydex_card_meta.game
+    (Scrydex API name) — see _GAME_TO_SCRYDEX_GAME.
+
+    Rarity lives on raw_cards directly so it's applied via OR-list outside
+    this subquery (no need to join meta for rarity alone).
+    """
+    schema = GAME_FILTER_SCHEMA.get(game)
+    if not schema:
+        return "", []
+
+    # Rarity goes in the outer query — it's a column on raw_cards directly
+    # and doesn't require a meta join.
+    needs_join = bool(colors or card_types)
+    if not needs_join:
+        return "", []
+
+    sx_game = _GAME_TO_SCRYDEX_GAME.get(game, game)
+    parts: list[str] = []
+    p: list = []
+
+    # Colors
+    if colors and "colors" in schema:
+        spec = schema["colors"]
+        field = spec["field"]   # e.g. "raw->'color_identity'" or "colors"
+        if color_mode == "exactly":
+            # Card's full color identity is exactly the selected set (BUG = exactly B,U,G).
+            # Use a normalized comparison: sort + dedupe both sides as TEXT[]
+            # so order-insensitive equality works.
+            arr_lit_ph = ",".join(["%s"] * len(colors))
+            parts.append(
+                f"(SELECT COALESCE(array_agg(DISTINCT x ORDER BY x), ARRAY[]::text[]) "
+                f" FROM jsonb_array_elements_text({field}) AS x) "
+                f"= (SELECT COALESCE(array_agg(DISTINCT v ORDER BY v), ARRAY[]::text[]) "
+                f" FROM unnest(ARRAY[{arr_lit_ph}]) AS v)"
+            )
+            p.extend(colors)
+        else:
+            # Any: card's identity contains at least one of the selected.
+            # ?| takes a TEXT[] of keys.
+            parts.append(f"{field} ?| %s::text[]")
+            p.append(colors)
+
+    # Card type / Energy
+    if card_types and "card_type" in schema:
+        spec = schema["card_type"]
+        field = spec["field"]
+        if spec["type"] == "jsonb":
+            parts.append(f"{field} ?| %s::text[]")
+            p.append(card_types)
+        else:
+            ph = ",".join(["%s"] * len(card_types))
+            parts.append(f"{field} IN ({ph})")
+            p.extend(card_types)
+
+    if not parts:
+        return "", []
+
+    inner_where = " AND ".join(parts)
+
+    # Walk: raw_cards.tcgplayer_id ↘ scrydex_price_cache.scrydex_id
+    # ↘ scrydex_card_meta. raw_cards.scrydex_id is reliable for Pokemon but
+    # NULL for MTG/OP today — going through tcgplayer_id makes this work for
+    # all three games.
+    #
+    # Returned as a `tcgplayer_id IN (...)` clause (no `rc.` alias) so it
+    # composes with the existing /api/browse query which references
+    # raw_cards unaliased. The subquery is a list of distinct tcgplayer_ids
+    # — not raw_cards.id — because the same physical card row never matters
+    # here, only whether the card identity (tcgplayer_id) matches the meta.
+    subq = (
+        "tcgplayer_id IN ("
+        " SELECT pc.tcgplayer_id FROM scrydex_price_cache pc"
+        " JOIN scrydex_card_meta m"
+        "   ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id"
+        f" WHERE pc.game = %s AND {inner_where}"
+        ")"
+    )
+    return subq, [sx_game, *p]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Browse API
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -183,7 +351,12 @@ def browse():
     Groups raw_cards by (card_name, set_name, tcgplayer_id)
     Returns available qty per condition, total count, price range.
 
-    Query params: q, set, page (24 per page)
+    Query params: q, set, page (24 per page), plus per-game advanced filters:
+      colors=W,U,B&color_mode=exactly|any
+      card_type=Sorcery,Instant       (MTG types / Pokemon energy / OP card_type)
+      card_rarity=Rare,Mythic         (raw_cards.rarity multi-select)
+    Filter relevance is resolved server-side via GAME_FILTER_SCHEMA — passing
+    `colors` while game=pokemon is silently ignored (no schema entry).
     """
     q          = (request.args.get("q") or "").strip()
     set_name   = (request.args.get("set") or "").strip()
@@ -195,6 +368,14 @@ def browse():
     sort       = (request.args.get("sort") or "name_asc").strip()
     page       = max(1, int(request.args.get("page", 1)))
     offset     = (page - 1) * 24
+
+    # Game-aware advanced filters
+    colors     = _multi_param("colors")
+    color_mode = (request.args.get("color_mode") or "any").strip().lower()
+    if color_mode not in ("any", "exactly"):
+        color_mode = "any"
+    card_types = _multi_param("card_type")
+    rarities   = _multi_param("card_rarity")
 
     filters = ["state = 'STORED'", "current_hold_id IS NULL"]
     params  = []
@@ -244,6 +425,24 @@ def browse():
         else:
             # Era selected but no in-stock sets for it — force empty result.
             filters.append("FALSE")
+
+    # Rarity (raw_cards.rarity, case-insensitive multi-select). Only meaningful
+    # when game is set; otherwise the same label means different things across
+    # games (Pokemon "Rare" vs MTG "Rare").
+    if rarities and game:
+        ph = ",".join(["%s"] * len(rarities))
+        filters.append(f"LOWER(rarity) IN ({ph})")
+        params += [r.lower() for r in rarities]
+
+    # Game-aware advanced filters (colors / card_type) — push down via subquery
+    # so it doesn't blow up rows for the count/aggregation logic that follows.
+    if game:
+        meta_clause, meta_params = _build_meta_filter_subquery(
+            game, colors, color_mode, card_types, rarities,
+        )
+        if meta_clause:
+            filters.append(meta_clause)
+            params += meta_params
 
     where = " AND ".join(filters)
 
@@ -458,6 +657,117 @@ def list_games():
         "qty":   r["qty"],
     } for r in rows]
     return jsonify({"games": games})
+
+
+@app.route("/api/filter-meta")
+def filter_meta():
+    """Return the per-game advanced-filter schema + which option values
+    actually have STORED stock right now (for chip qty badges).
+
+    Query: ?game=magic|pokemon|onepiece (required)
+
+    Response:
+    {
+      "game": "magic",
+      "color_modes": ["any", "exactly"],
+      "filters": {
+        "colors":    {"label": "Color", "options": [{"value":"W","label":"White","qty": 12}, ...]},
+        "card_type": {"label": "Card type", "options": [{"value":"Creature","qty":24}, ...]},
+        "rarity":    {"label": "Rarity", "options": [{"value":"Rare","qty":38}, ...]}
+      }
+    }
+
+    qty counts are independent of OTHER active filters — they reflect the
+    intersection of (game, STORED, current_hold_id IS NULL) so the chip
+    badges stay stable while users toggle filters. Re-querying the schema
+    on every keystroke would otherwise cause "13" → "0" → "13" flicker.
+    """
+    game = (request.args.get("game") or "").strip().lower()
+    if not game or game not in GAME_FILTER_SCHEMA:
+        return jsonify({"game": game, "filters": {}, "color_modes": []})
+
+    schema = GAME_FILTER_SCHEMA[game]
+    sx_game = _GAME_TO_SCRYDEX_GAME.get(game, game)
+    out: dict = {
+        "game": game,
+        "color_modes": list(schema.get("colors", {}).get("modes", [])),
+        "filters": {},
+    }
+
+    # Helper: count distinct STORED tcgplayer_ids whose meta has the field.
+    # (We count by tcgplayer_id rather than raw_cards rows so duplicates of
+    # a single card don't inflate the chip badge.)
+    def _count_jsonb(field: str) -> dict[str, int]:
+        rows = db.query(f"""
+            SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
+            FROM raw_cards rc
+            JOIN scrydex_price_cache pc
+              ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
+            JOIN scrydex_card_meta m
+              ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+            JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
+            WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+            GROUP BY elem
+        """, (sx_game, game))
+        return {r["k"]: int(r["n"]) for r in rows}
+
+    def _count_text(field: str) -> dict[str, int]:
+        rows = db.query(f"""
+            SELECT m.{field} AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
+            FROM raw_cards rc
+            JOIN scrydex_price_cache pc
+              ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
+            JOIN scrydex_card_meta m
+              ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+            WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+              AND m.{field} IS NOT NULL
+            GROUP BY m.{field}
+        """, (sx_game, game))
+        return {r["k"]: int(r["n"]) for r in rows}
+
+    # Colors
+    if "colors" in schema:
+        spec = schema["colors"]
+        counts = _count_jsonb(spec["field"]) if spec["type"] == "jsonb" else _count_text(spec["field"])
+        labels = spec.get("labels") or {}
+        out["filters"]["colors"] = {
+            "label":   spec["label"],
+            "options": [
+                {"value": v, "label": labels.get(v, v), "qty": counts.get(v, 0)}
+                for v in spec["options"]
+            ],
+        }
+
+    # Card type
+    if "card_type" in schema:
+        spec = schema["card_type"]
+        counts = _count_jsonb(spec["field"]) if spec["type"] == "jsonb" else _count_text(spec["field"])
+        out["filters"]["card_type"] = {
+            "label":   spec["label"],
+            "options": [
+                {"value": v, "label": v, "qty": counts.get(v, 0)}
+                for v in spec["options"]
+            ],
+        }
+
+    # Rarity — pulled live from raw_cards (varies per game and changes as new
+    # rarities ship). Hard-coding it would break when Scrydex adds a new label.
+    rarity_rows = db.query("""
+        SELECT rarity, COUNT(*) AS n FROM raw_cards
+        WHERE state='STORED' AND current_hold_id IS NULL AND game = %s
+          AND rarity IS NOT NULL AND rarity <> ''
+        GROUP BY rarity
+        ORDER BY n DESC
+    """, (game,))
+    out["filters"]["rarity"] = {
+        "label":   "Rarity",
+        "options": [
+            {"value": r["rarity"], "label": r["rarity"], "qty": int(r["n"])}
+            for r in rarity_rows
+        ],
+    }
+
+    return jsonify(out)
 
 
 @app.route("/api/card")
