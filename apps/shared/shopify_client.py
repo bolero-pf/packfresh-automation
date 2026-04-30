@@ -135,6 +135,7 @@ class ShopifyClient:
             edges {
               node {
                 id title handle status tags
+                featuredImage { url }
                 variants(first: 10) {
                   edges { node { id price sku inventoryQuantity
                     inventoryItem { id
@@ -177,6 +178,7 @@ class ShopifyClient:
 
                 tags = node.get("tags", [])
                 tags_csv = ", ".join(tags) if isinstance(tags, list) else (tags or "")
+                image_url = ((node.get("featuredImage") or {}).get("url")) or None
                 is_damaged = (
                     "damaged" in [t.lower() for t in (tags if isinstance(tags, list) else [])]
                     or "[DAMAGED]" in node.get("title", "").upper()
@@ -210,6 +212,7 @@ class ShopifyClient:
                         "is_damaged":         is_damaged,
                         "tags_csv":           tags_csv,
                         "unit_cost":          unit_cost,
+                        "image_url":          image_url,
                     })
 
             has_next = data["products"]["pageInfo"]["hasNextPage"]

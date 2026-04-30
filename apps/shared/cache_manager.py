@@ -205,6 +205,7 @@ class CacheManager:
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS committed INTEGER DEFAULT 0",
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS unit_cost NUMERIC(10,2)",
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS sku VARCHAR(200)",
+                f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS image_url TEXT",
             ]
         migrations += [
             f"ALTER TABLE {self._meta_table} ADD COLUMN IF NOT EXISTS last_tool_push_at TIMESTAMP",
@@ -366,8 +367,8 @@ class CacheManager:
                 INSERT INTO {self._cache_table}
                     (shopify_product_id, shopify_variant_id, title, handle, status,
                      tags, sku, shopify_price, shopify_qty, inventory_item_id,
-                     tcgplayer_id, is_damaged, committed, unit_cost, last_synced)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                     tcgplayer_id, is_damaged, committed, unit_cost, image_url, last_synced)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (shopify_product_id, shopify_variant_id) DO UPDATE SET
                     title             = EXCLUDED.title,
                     handle            = EXCLUDED.handle,
@@ -381,6 +382,7 @@ class CacheManager:
                     is_damaged        = EXCLUDED.is_damaged,
                     committed         = EXCLUDED.committed,
                     unit_cost         = EXCLUDED.unit_cost,
+                    image_url         = EXCLUDED.image_url,
                     last_synced       = CURRENT_TIMESTAMP
             """, (
                 p["shopify_product_id"], p["variant_id"],
@@ -393,6 +395,7 @@ class CacheManager:
                 p.get("is_damaged", False),
                 p.get("committed", 0),
                 p.get("unit_cost"),
+                p.get("image_url"),
             ))
         else:
             # Intake/ingestion schema (keyed by tcgplayer_id)

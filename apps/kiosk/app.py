@@ -101,6 +101,10 @@ def _ensure_kiosk_tables():
             db.execute("ALTER TABLE inventory_product_cache ADD COLUMN IF NOT EXISTS sku VARCHAR(200)")
         except Exception as e:
             logger.debug(f"inventory_product_cache.sku migration skipped ({e})")
+        try:
+            db.execute("ALTER TABLE inventory_product_cache ADD COLUMN IF NOT EXISTS image_url TEXT")
+        except Exception as e:
+            logger.debug(f"inventory_product_cache.image_url migration skipped ({e})")
         logger.info("kiosk tables ensured")
     except Exception as e:
         logger.warning(f"_ensure_kiosk_tables warning: {e}")
@@ -997,6 +1001,7 @@ def list_products():
             ipc.handle,
             ipc.tags,
             ipc.sku,
+            ipc.image_url,
             ipc.shopify_price,
             ipc.shopify_qty,
             COALESCE((
@@ -1026,12 +1031,9 @@ def list_products():
             "title":              r["title"],
             "handle":              r["handle"],
             "sku":                r.get("sku") or "",
+            "image_url":          r.get("image_url") or None,
             "price":              float(r["shopify_price"]) if r["shopify_price"] is not None else None,
             "available_qty":      avail,
-            # image_url left for the frontend to lazy-fetch via Storefront
-            # JSON (`/products/<handle>.json`) — inventory_product_cache
-            # doesn't store images and we don't want to pay an Admin API
-            # call per row here.
             "storefront_url":     f"{SHOPIFY_STOREFRONT_URL}/products/{r['handle']}" if r["handle"] else None,
         })
 
