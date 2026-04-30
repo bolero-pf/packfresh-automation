@@ -48,6 +48,15 @@ header {
 .header-search { max-width: 1200px; margin: 10px auto 0; }
 .logo { font-family: var(--display); font-size: 2rem; letter-spacing: 0.06em; color: var(--accent); white-space: nowrap; line-height: 1; }
 .logo-sub { font-size: 0.65rem; color: var(--dim); letter-spacing: 0.15em; text-transform: uppercase; margin-top: -2px; }
+/* Commonlands logo PNG ships with ~25% whitespace padding around the
+   visible glyphs, so the rendered box is taller than the artwork. The
+   negative vertical margins absorb that padding back into the header
+   so the apparent logo height matches the previous "Pack Fresh" lockup
+   without bloating the bar. */
+.logo-img { display: block; height: 96px; width: auto; margin: -18px 0; }
+@media (max-width: 640px) {
+  .logo-img { height: 80px; margin: -14px 0; }
+}
 
 .search-input {
   width: 100%; height: var(--touch);
@@ -680,10 +689,9 @@ body.modal-open { overflow: hidden; touch-action: none; }
 
 <header>
   <div class="header-top">
-    <div>
-      <div class="logo">Pack Fresh</div>
-      <div class="logo-sub">Card Browser</div>
-    </div>
+    <a href="/" style="text-decoration:none;line-height:0;">
+      <img class="logo-img" src="/static/commonlandslogo.png" alt="Commonlands">
+    </a>
     <button class="cart-btn" onclick="openCart()">
       🃏 My Picks
       <span class="cart-badge" id="cart-badge">0</span>
