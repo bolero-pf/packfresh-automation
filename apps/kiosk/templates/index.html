@@ -185,8 +185,8 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .meta-text { font-size: 0.82rem; color: var(--text); line-height: 1.5; }
 .meta-flavor { font-style: italic; color: var(--dim); margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
 .energy-icon { display: inline-block; width: 18px; height: 18px; vertical-align: -3px; margin: 0 1px; }
-/* ── Tablet (768px+) ── */
-@media (min-width: 768px) {
+/* ── Tablet (768px+ touch devices only) ── */
+@media (min-width: 768px) and (pointer: coarse) {
   .panel { max-width: 800px; padding: 32px 36px; }
   .detail-img { width: 200px; min-width: 200px; }
   .detail-hero { gap: 24px; }
@@ -220,8 +220,8 @@ body.modal-open { overflow: hidden; touch-action: none; }
   .lightbox-flip { padding: 12px 28px; font-size: 0.95rem; }
 }
 
-/* ── Large tablet landscape (1024px+) ── */
-@media (min-width: 1024px) {
+/* ── Large tablet landscape (1024px+ touch devices only) ── */
+@media (min-width: 1024px) and (pointer: coarse) {
   .panel { max-width: 900px; }
   .detail-img { width: 240px; min-width: 240px; }
 }

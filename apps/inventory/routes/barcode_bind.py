@@ -510,6 +510,8 @@ tbody tr:hover { background: var(--s2); }
 <script>
 let pendingBarcode = null;
 let currentVariant = null;  // most recent successful lookup match
+let currentMatches = [];    // all variants returned for the last barcode scan
+let lastScannedBarcode = null;
 const history = [];
 
 function esc(s) {
@@ -559,11 +561,32 @@ function renderHistory() {
 
 // ─── Result render + qty adjust ──────────────────────────────────────────────
 
-function renderResult(m, barcode, matchCount) {
+function renderResult(m, barcode, allMatches) {
   const body = document.getElementById('result-body');
   const qty = (m.inventory_quantity == null) ? null : Number(m.inventory_quantity);
   const qtyDisplay = (qty == null) ? '—' : qty;
   const canAdjust = !!m.inventory_item_id;
+
+  let matchesHtml = '';
+  if (allMatches.length > 1) {
+    matchesHtml =
+      '<div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">'
+      + '<div class="warn-badge" style="margin-bottom:8px;">⚠ ' + allMatches.length + ' variants share this barcode</div>'
+      + '<table><thead><tr><th>Product</th><th>Variant</th><th>SKU</th><th>Qty</th><th></th></tr></thead><tbody>'
+      + allMatches.map((v, i) => {
+          const isActive = v.variant_id === m.variant_id;
+          return '<tr' + (isActive ? ' style="background:var(--s2);"' : '') + '>'
+            + '<td>' + esc(v.product_title || '') + '</td>'
+            + '<td>' + esc(v.variant_title || '') + '</td>'
+            + '<td class="code">' + esc(v.variant_sku || '—') + '</td>'
+            + '<td>' + (v.inventory_quantity == null ? '—' : v.inventory_quantity) + '</td>'
+            + '<td>' + (isActive
+                ? '<span class="success-badge">Selected</span>'
+                : '<button class="btn" onclick="selectMatch(' + i + ')">Use this</button>')
+            + '</td></tr>';
+        }).join('')
+      + '</tbody></table></div>';
+  }
 
   body.innerHTML =
     '<div><span class="success-badge">FOUND</span> &nbsp;'
@@ -571,9 +594,6 @@ function renderResult(m, barcode, matchCount) {
     + '<div style="margin-top:8px; font-size:15px; font-weight:600;">' + esc(m.product_title || '') + '</div>'
     + '<div class="muted">' + esc(m.variant_title || '')
     + (m.variant_sku ? ' · SKU ' + esc(m.variant_sku) : '') + '</div>'
-    + (matchCount > 1
-        ? '<div class="warn-badge" style="margin-top:8px;">⚠ ' + matchCount
-          + ' variants share this barcode</div>' : '')
     + '<div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); display:flex; align-items:center; gap:14px; flex-wrap:wrap;">'
     +   '<div>'
     +     '<div class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">On hand</div>'
@@ -594,7 +614,11 @@ function renderResult(m, barcode, matchCount) {
           + '<input id="adjust-note" type="text" placeholder="Note (optional, only if something looks off)" autocomplete="off" style="font-size:13px;">'
           + '</div>'
           + '<div id="adjust-history" class="history" style="margin-top:10px;"></div>'
-        : '');
+        : '')
+    + matchesHtml
+    + '<div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">'
+    + '<button class="btn" style="color:var(--amber); border-color:var(--amber);" onclick="reassignBarcode()">Wrong product? Reassign this barcode</button>'
+    + '</div>';
 }
 
 async function adjustQty(delta) {
@@ -671,6 +695,23 @@ async function loadAdjustHistory(variant_id) {
   } catch (e) { /* silent — history is bonus */ }
 }
 
+function selectMatch(idx) {
+  if (!currentMatches[idx] || !lastScannedBarcode) return;
+  const m = currentMatches[idx];
+  currentVariant = m;
+  renderResult(m, lastScannedBarcode, currentMatches);
+  loadAdjustHistory(m.variant_id);
+  toast('Switched to: ' + (m.product_title || ''), 'green');
+}
+
+function reassignBarcode() {
+  if (!lastScannedBarcode) { toast('No barcode to reassign. Re-scan.', 'amber'); return; }
+  pendingBarcode = lastScannedBarcode;
+  document.getElementById('search-card').style.display = '';
+  document.getElementById('search').focus();
+  setStatus('Reassigning barcode ' + lastScannedBarcode + ' — search for the correct product.');
+}
+
 async function lookupScan() {
   const barcode = document.getElementById('scan').value.trim();
   if (!barcode) return;
@@ -697,9 +738,11 @@ async function lookupScan() {
   card.style.display = '';
   if (data.matches && data.matches.length > 0) {
     pendingBarcode = null;
+    lastScannedBarcode = barcode;
+    currentMatches = data.matches;
     const m = data.matches[0];
     currentVariant = m;  // for adjust handlers
-    renderResult(m, barcode, data.matches.length);
+    renderResult(m, barcode, data.matches);
     pushHistory(barcode, m.product_title || '', 'hit');
     setStatus('Found — adjust qty or scan next.');
     toast('Rings up: ' + (m.product_title || ''), 'green');
@@ -856,6 +899,8 @@ function resetAll() {
   document.getElementById('result-card').style.display = 'none';
   document.getElementById('search-card').style.display = 'none';
   document.getElementById('variants-card').style.display = 'none';
+  currentMatches = [];
+  lastScannedBarcode = null;
   setStatus('Ready.');
   focusScan();
 }
