@@ -668,29 +668,106 @@ def raw_runs_list():
 
 @app.route('/dashboard/raw-runs/<run_id>')
 def raw_run_detail(run_id):
-    """Per-row view of one raw card pricing run, with apply/dismiss buttons."""
+    """Grouped view of one raw card pricing run.
+
+    Identical raw cards (same card_name + set_name + card_number + variant +
+    condition) collapse into a single row even if there are 25 copies — they
+    all point to the same SKU semantically and must price together. The per-
+    row apply endpoint still exists (defense in depth); the UI defaults to
+    group-apply via /dashboard/raw-runs/group/apply.
+
+    Cost basis can vary across copies in a group (bought at different times),
+    so we surface min/max/avg rather than averaging silently. current_price
+    *should* be uniform across the group; if it's not, the group is flagged
+    as inconsistent so staff can decide whether to uniformize.
+    """
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
     import db as shared_db
     shared_db.init_pool()
 
     action_filter = (request.args.get("action") or "").strip()
     params = [run_id]
-    sql = """
-        SELECT id, raw_card_id, barcode, card_name, set_name, card_number,
-               condition, variant, cost_basis,
-               old_price, new_price, suggested_price,
-               cache_market, cache_low, delta_pct,
-               action, reason, apply_status, applied_at, applied_price,
-               started_at
-        FROM raw_card_price_runs
-        WHERE run_id = %s
-    """
+
+    # Group identity: (card_name, set_name, card_number, variant, condition).
+    # NULL variant collapses to '' so single-printing cards group cleanly. We
+    # carry the full set of per-row primitives (id, raw_card_id, old_price,
+    # apply_status, bin_label) inside aggregate arrays so the UI can:
+    #   - show how many copies and where they live
+    #   - detect inconsistent old_price within the group
+    #   - issue one apply call covering every row_id in the group
+    where_action = ""
     if action_filter:
-        sql += " AND action = %s"
+        where_action = "AND action = %s"
         params.append(action_filter)
-    sql += """
+
+    sql = f"""
+        WITH base AS (
+            SELECT r.id, r.raw_card_id, r.barcode, r.card_name, r.set_name,
+                   r.card_number, r.condition, r.variant, r.cost_basis,
+                   r.old_price, r.new_price, r.suggested_price,
+                   r.cache_market, r.cache_low, r.delta_pct,
+                   r.action, r.reason, r.apply_status, r.applied_at,
+                   r.applied_price, r.started_at,
+                   sl.bin_label AS bin_label
+            FROM raw_card_price_runs r
+            LEFT JOIN raw_cards rc      ON rc.id = r.raw_card_id
+            LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+            WHERE r.run_id = %s
+              {where_action}
+        )
+        SELECT
+            -- group identity (used as a stable key in the UI)
+            card_name, set_name, card_number, condition,
+            COALESCE(variant, '') AS variant,
+            -- one representative action / pricing snapshot for the group.
+            -- All rows in a group share suggested_price (same scrydex lookup).
+            -- For action we pick the most-actionable (worst delta) pillar
+            -- so a group with mixed flag_over + ok still surfaces as a flag.
+            (ARRAY_AGG(action ORDER BY
+                CASE action
+                    WHEN 'error'            THEN 0
+                    WHEN 'flag_underpriced' THEN 1
+                    WHEN 'flag_overpriced'  THEN 2
+                    WHEN 'auto_applied'     THEN 3
+                    WHEN 'ok'               THEN 4
+                    WHEN 'skip'             THEN 5
+                    ELSE 6
+                END))[1] AS action,
+            MAX(reason)          AS reason,
+            MAX(suggested_price) AS suggested_price,
+            MAX(cache_market)    AS cache_market,
+            MAX(cache_low)       AS cache_low,
+            MAX(delta_pct)       AS delta_pct,
+            MAX(new_price)       AS new_price,
+            -- per-copy spread
+            COUNT(*)             AS copies,
+            MIN(cost_basis)      AS cost_basis_min,
+            MAX(cost_basis)      AS cost_basis_max,
+            AVG(cost_basis)      AS cost_basis_avg,
+            MIN(old_price)       AS old_price_min,
+            MAX(old_price)       AS old_price_max,
+            COUNT(DISTINCT old_price) AS distinct_old_prices,
+            -- arrays the UI / apply endpoint need
+            ARRAY_AGG(id ORDER BY id)            AS row_ids,
+            ARRAY_AGG(raw_card_id ORDER BY id)   AS raw_card_ids,
+            ARRAY_AGG(barcode ORDER BY id)       AS barcodes,
+            ARRAY_AGG(apply_status ORDER BY id)  AS apply_statuses,
+            ARRAY_AGG(applied_price ORDER BY id) AS applied_prices,
+            ARRAY_AGG(DISTINCT bin_label) FILTER (WHERE bin_label IS NOT NULL) AS bin_labels
+        FROM base
+        GROUP BY card_name, set_name, card_number, condition,
+                 COALESCE(variant, '')
         ORDER BY
-            CASE action
+            CASE (ARRAY_AGG(action ORDER BY
+                CASE action
+                    WHEN 'error'            THEN 0
+                    WHEN 'flag_underpriced' THEN 1
+                    WHEN 'flag_overpriced'  THEN 2
+                    WHEN 'auto_applied'     THEN 3
+                    WHEN 'ok'               THEN 4
+                    WHEN 'skip'             THEN 5
+                    ELSE 6
+                END))[1]
                 WHEN 'error'            THEN 0
                 WHEN 'flag_underpriced' THEN 1
                 WHEN 'flag_overpriced'  THEN 2
@@ -699,17 +776,20 @@ def raw_run_detail(run_id):
                 WHEN 'skip'             THEN 5
                 ELSE 6
             END,
-            ABS(COALESCE(delta_pct, 0)) DESC NULLS LAST,
+            ABS(COALESCE(MAX(delta_pct), 0)) DESC NULLS LAST,
             card_name
     """
-    rows = shared_db.query(sql, tuple(params))
+    groups = shared_db.query(sql, tuple(params))
+
     summary = shared_db.query_one("""
         SELECT MIN(started_at) AS started_at, COUNT(*) AS total
         FROM raw_card_price_runs WHERE run_id = %s
     """, (run_id,))
+
     return render_template(
         "raw_run_detail.html",
-        run_id=run_id, rows=rows, summary=summary, action_filter=action_filter,
+        run_id=run_id, groups=groups, summary=summary,
+        action_filter=action_filter,
     )
 
 
@@ -751,6 +831,137 @@ def raw_run_apply_row(row_id):
     except Exception as e:
         return jsonify({"ok": False, "error": f"DB update failed: {e}"}), 502
     return jsonify({"ok": True, "applied_price": target, "card_name": row["card_name"]})
+
+
+@app.route('/dashboard/raw-runs/group/apply', methods=["POST"])
+def raw_run_apply_group():
+    """Apply a single price to every copy in a group.
+
+    Body: {row_ids: [int, ...], price?: float}
+      - row_ids: every raw_card_price_runs.id in the group (frontend reads
+        these from the rendered group's data attribute).
+      - price (optional): override; otherwise uses the group's
+        suggested_price (uniform across the group by construction).
+
+    Writes raw_cards.current_price for every linked raw_card_id and marks
+    every run row applied — in one transaction so a 25-copy group is one
+    click. Already-applied or already-dismissed rows in the group are
+    skipped (idempotent), not failed.
+    """
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+
+    body = request.get_json(silent=True) or {}
+    row_ids = body.get("row_ids") or []
+    if not isinstance(row_ids, list) or not row_ids:
+        return jsonify({"ok": False, "error": "row_ids required (non-empty list)"}), 400
+    try:
+        row_ids = [int(x) for x in row_ids]
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "row_ids must be ints"}), 400
+
+    rows = shared_db.query("""
+        SELECT id, raw_card_id, suggested_price, apply_status, card_name
+        FROM raw_card_price_runs
+        WHERE id = ANY(%s)
+    """, (row_ids,))
+    if not rows:
+        return jsonify({"ok": False, "error": "no matching rows"}), 404
+
+    # Filter out already-resolved + rows missing raw_card_id (skip rows that
+    # never matched a real card don't have one). Idempotent — caller may
+    # re-click the group apply button without it failing on partial state.
+    pending = [r for r in rows
+               if r["apply_status"] not in ("applied", "dismissed")
+               and r["raw_card_id"]]
+    if not pending:
+        return jsonify({
+            "ok": True, "applied_count": 0, "skipped_count": len(rows),
+            "reason": "all rows already resolved",
+        })
+
+    override = body.get("price")
+    if override is not None:
+        try:
+            target = float(override)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "price must be numeric"}), 400
+    else:
+        # All rows in a real group share suggested_price. Defensive: take
+        # the first non-null. If they actually differ (caller fed wrong
+        # row_ids), reject — don't silently apply the wrong price.
+        suggesteds = {float(r["suggested_price"]) for r in pending
+                      if r["suggested_price"] is not None}
+        if not suggesteds:
+            return jsonify({"ok": False, "error": "no suggested_price on group"}), 400
+        if len(suggesteds) > 1:
+            return jsonify({
+                "ok": False,
+                "error": f"group has divergent suggested prices {sorted(suggesteds)} — "
+                         f"pass an explicit price",
+            }), 400
+        target = next(iter(suggesteds))
+
+    if target <= 0:
+        return jsonify({"ok": False, "error": "no valid price to apply"}), 400
+
+    target = round(target, 2)
+    raw_card_ids = [r["raw_card_id"] for r in pending]
+    pending_ids  = [r["id"] for r in pending]
+
+    try:
+        shared_db.execute(
+            "UPDATE raw_cards SET current_price = %s, last_price_update = NOW() "
+            "WHERE id = ANY(%s)",
+            (target, raw_card_ids),
+        )
+        shared_db.execute("""
+            UPDATE raw_card_price_runs
+               SET apply_status='applied', applied_at=NOW(), applied_price=%s
+             WHERE id = ANY(%s)
+        """, (target, pending_ids))
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"DB update failed: {e}"}), 502
+
+    return jsonify({
+        "ok": True,
+        "applied_count": len(pending_ids),
+        "skipped_count": len(rows) - len(pending_ids),
+        "applied_price": target,
+        "card_name": pending[0]["card_name"],
+    })
+
+
+@app.route('/dashboard/raw-runs/group/dismiss', methods=["POST"])
+def raw_run_dismiss_group():
+    """Mark every pending row in a group as dismissed in one call.
+    Body: {row_ids: [int, ...]}. Already-resolved rows are left alone."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+
+    body = request.get_json(silent=True) or {}
+    row_ids = body.get("row_ids") or []
+    if not isinstance(row_ids, list) or not row_ids:
+        return jsonify({"ok": False, "error": "row_ids required (non-empty list)"}), 400
+    try:
+        row_ids = [int(x) for x in row_ids]
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "row_ids must be ints"}), 400
+
+    try:
+        shared_db.execute("""
+            UPDATE raw_card_price_runs
+               SET apply_status='dismissed', applied_at=NOW()
+             WHERE id = ANY(%s)
+               AND apply_status NOT IN ('applied', 'dismissed')
+        """, (row_ids,))
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"DB update failed: {e}"}), 502
+    return jsonify({"ok": True})
 
 
 @app.route('/dashboard/raw-runs/row/<int:row_id>/dismiss', methods=["POST"])
