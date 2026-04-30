@@ -1158,21 +1158,24 @@ def list_products():
 @app.route("/api/products/filter-meta")
 def products_filter_meta():
     """
-    Returns the available filter buckets for the sealed/slab catalog along
-    with row counts (only counts rows in stock). Empty buckets are omitted
-    so the UI doesn't render dead options.
+    Returns the filter buckets available for the sealed/slab catalog with
+    **faceted** counts — each facet's counts apply ALL OTHER selected
+    filters but NOT the facet's own selection, the same way the raw filter
+    sheet works. So selecting Pokémon hides ETB / counts non-Pokémon
+    formats, but the game chips themselves keep their full counts so you
+    can switch.
 
     Query params:
-      kind=sealed|slab     (required)
+      kind=sealed|slab        (required)
+      game=…                  (current selection — single)
+      format=a,b,…            (current selection — sealed only, multi)
+      era=a,b,…               (current selection — multi)
+      grade=10,9,…            (current selection — slab only, multi)
+      min_price, max_price    (current selection — numeric)
 
-    Response:
-      {
-        "kind": "sealed",
-        "games":   [{"key":"pokemon","label":"Pokémon","count":521}, ...],
-        "formats": [{"key":"booster_box", "label":"Booster Box", "count":51}, ...],   # sealed only
-        "eras":    [{"key":"sword_shield","label":"Sword & Shield","count":85}, ...],
-        "grades":  [{"key":"10","label":"PSA 10","count":8}, ...],                     # slab only
-      }
+    Response: same shape as before, but each bucket's `count` reflects
+    "rows that would match if you toggled this bucket on (and kept the
+    other facets' selections)". Empty buckets are dropped.
     """
     kind = (request.args.get("kind") or "").strip().lower()
     if kind not in ("sealed", "slab"):
@@ -1181,28 +1184,77 @@ def products_filter_meta():
         return jsonify({"error": "Not available in this mode", "code": "kind_forbidden"}), 403
 
     kind_tag = _kind_tag(kind)
+    kind_frag, kind_pat = _csv_tag_clause(kind_tag)
 
-    def _bucket_count(tags: list[str]) -> int:
-        ors = []
-        params = [f"%,{kind_tag.lower()},%"]
-        kind_frag, _ = _csv_tag_clause(kind_tag)
-        for t in tags:
-            frag, pat = _csv_tag_clause(t)
-            ors.append(frag)
-            params.append(pat)
-        bucket_sql = " OR ".join(ors)
-        row = db.query_one(f"""
-            SELECT COUNT(*) AS n FROM inventory_product_cache
-            WHERE status='ACTIVE' AND shopify_qty > 0
-              AND {kind_frag}
-              AND ({bucket_sql})
-        """, tuple(params))
-        return int(row["n"] if row else 0)
+    # Read current selections
+    sel_game    = (request.args.get("game") or "").strip().lower()
+    if sel_game not in GAME_TAG_BUCKETS:
+        sel_game = ""
+    sel_formats = [f for f in (request.args.get("format") or "").lower().split(",")
+                   if f in FORMAT_TAG_BUCKETS] if kind == "sealed" else []
+    sel_eras    = [e for e in (request.args.get("era") or "").lower().split(",")
+                   if e in ERA_TAG_BUCKETS]
+    sel_grades  = [gr for gr in (request.args.get("grade") or "").lower().split(",")
+                   if gr in GRADE_TAG_BUCKETS] if kind == "slab" else []
 
-    def _bucket_list(table: dict[str, list[str]], labels: dict[str, str]) -> list[dict]:
-        out = []
+    def _opt_price(name: str):
+        raw = (request.args.get(name) or "").strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+    sel_min = _opt_price("min_price")
+    sel_max = _opt_price("max_price")
+
+    def _base_where(exclude: str) -> tuple[list[str], list]:
+        """WHERE/params for "all current selections EXCEPT the named facet"."""
+        where = ["status='ACTIVE'", "shopify_qty > 0", kind_frag]
+        params: list = [kind_pat]
+        if exclude != "game" and sel_game:
+            _add_bucket_clause(where, params, [sel_game], GAME_TAG_BUCKETS)
+        if exclude != "format" and sel_formats:
+            _add_bucket_clause(where, params, sel_formats, FORMAT_TAG_BUCKETS)
+        if exclude != "era" and sel_eras:
+            _add_bucket_clause(where, params, sel_eras, ERA_TAG_BUCKETS)
+        if exclude != "grade" and sel_grades:
+            _add_bucket_clause(where, params, sel_grades, GRADE_TAG_BUCKETS)
+        if sel_min is not None:
+            where.append("COALESCE(shopify_price, 0) >= %s")
+            params.append(sel_min)
+        if sel_max is not None:
+            where.append("COALESCE(shopify_price, 0) <= %s")
+            params.append(sel_max)
+        return where, params
+
+    def _facet_counts(facet_name: str, table: dict[str, list[str]]) -> dict[str, int]:
+        """Pull rows that match all OTHER facets, then count per bucket
+        in Python. The candidate set is small (<1k) so this is cheap and
+        avoids one round-trip per bucket key."""
+        where, params = _base_where(facet_name)
+        rows = db.query(
+            f"SELECT tags FROM inventory_product_cache WHERE {' AND '.join(where)}",
+            tuple(params),
+        )
+        # Pre-compute normalized tag sets per row
+        row_sets: list[str] = []
+        for r in rows:
+            csv = ("," + (r.get("tags") or "").replace(", ", ",") + ",").lower()
+            row_sets.append(csv)
+        counts: dict[str, int] = {}
         for key, tags in table.items():
-            n = _bucket_count(tags)
+            patterns = [f",{t.lower()}," for t in tags]
+            n = sum(1 for csv in row_sets if any(p in csv for p in patterns))
+            counts[key] = n
+        return counts
+
+    def _bucket_list(facet_name: str, table: dict[str, list[str]],
+                     labels: dict[str, str]) -> list[dict]:
+        counts = _facet_counts(facet_name, table)
+        out = []
+        for key in table.keys():
+            n = counts.get(key, 0)
             if n > 0:
                 out.append({"key": key, "label": labels.get(key, key), "count": n})
         return out
@@ -1219,13 +1271,13 @@ def products_filter_meta():
 
     out = {
         "kind":  kind,
-        "games": _bucket_list(GAME_TAG_BUCKETS, GAME_LABELS),
-        "eras":  _bucket_list(ERA_TAG_BUCKETS, ERA_LABELS),
+        "games": _bucket_list("game", GAME_TAG_BUCKETS, GAME_LABELS),
+        "eras":  _bucket_list("era",  ERA_TAG_BUCKETS,  ERA_LABELS),
     }
     if kind == "sealed":
-        out["formats"] = _bucket_list(FORMAT_TAG_BUCKETS, FMT_LABELS)
+        out["formats"] = _bucket_list("format", FORMAT_TAG_BUCKETS, FMT_LABELS)
     if kind == "slab":
-        out["grades"]  = _bucket_list(GRADE_TAG_BUCKETS, GRADE_LABELS)
+        out["grades"]  = _bucket_list("grade",  GRADE_TAG_BUCKETS, GRADE_LABELS)
     return jsonify(out)
 
 
@@ -1346,15 +1398,18 @@ def filter_meta():
     # facet we'll OR-together the snippets it needs (i.e. all groups except
     # itself). The clauses are written against the same JOIN shape used by
     # _count_jsonb_facet / _count_rarity_facet below: rc + pc + m.
-    def colors_clause() -> tuple[str, list]:
-        if not sel_colors or "colors" not in schema:
+    def colors_predicate(colors_set, mode: str) -> tuple[str, list]:
+        """Build the SQL predicate for an ARBITRARY color selection — used
+        both for the live filter (current selection) and for the per-chip
+        what-if counts shown on the colors facet."""
+        if not colors_set or "colors" not in schema:
             return "", []
         spec = schema["colors"]
         field = "m." + spec["field"]
         is_mtg = (game == "magic")
-        has_c  = is_mtg and ("C" in sel_colors)
-        chrom  = [c for c in sel_colors if c != "C"] if is_mtg else sel_colors
-        if sel_color_mode == "exactly":
+        has_c  = is_mtg and ("C" in colors_set)
+        chrom  = [c for c in colors_set if c != "C"] if is_mtg else list(colors_set)
+        if mode == "exactly":
             if has_c and not chrom:
                 return f"jsonb_array_length({field}) = 0", []
             if not chrom:
@@ -1377,6 +1432,9 @@ def filter_meta():
         if not any_parts:
             return "", []
         return "(" + " OR ".join(any_parts) + ")", params
+
+    def colors_clause() -> tuple[str, list]:
+        return colors_predicate(set(sel_colors), sel_color_mode)
 
     def card_type_clause() -> tuple[str, list]:
         if not sel_card_types or "card_type" not in schema:
@@ -1421,38 +1479,74 @@ def filter_meta():
         # Other filters ⇒ card_type + rarity (skip colors itself).
         extra_w, extra_p = merged_extra((cardt_w, cardt_p), (rarity_w, rarity_p))
         field = "m." + spec["field"]
-        rows = db.query(f"""
-            SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
-              FROM raw_cards rc
-              JOIN scrydex_price_cache pc
-                ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
-              JOIN scrydex_card_meta m
-                ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
-              JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
-             WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
-                   {extra_w}
-             GROUP BY elem
-        """, (sx_game, game, *extra_p))
-        counts = {r["k"]: int(r["n"]) for r in rows}
+        labels = spec.get("labels") or {}
+        counts: dict[str, int] = {}
 
-        # MTG: a colorless card has color_identity=[] and never shows up in
-        # the lateral elements-of-array unfold above. Count it separately so
-        # the "C" chip reflects reality.
-        if game == "magic":
-            row = db.query_one(f"""
-                SELECT COUNT(DISTINCT rc.tcgplayer_id) AS n
+        if sel_color_mode == "exactly":
+            # Per-chip what-if count: tapping chip C toggles C in/out of the
+            # exact-set, so the count must reflect the new toggled set's
+            # exact match — not the any-mode unfold.
+            current = set(sel_colors)
+            for v in spec["options"]:
+                new_set = (current ^ {v})  # symmetric diff = toggle
+                pred_w, pred_p = colors_predicate(new_set, "exactly")
+                if not new_set:
+                    # Tapping the only-selected chip clears the exact filter.
+                    where_extra = extra_w
+                    where_params = list(extra_p)
+                else:
+                    if not pred_w:
+                        # Should not happen for non-empty set in mtg, but
+                        # guard anyway.
+                        counts[v] = 0
+                        continue
+                    where_extra = f"{extra_w} AND {pred_w}" if extra_w else f" AND {pred_w}"
+                    where_params = list(extra_p) + list(pred_p)
+                row = db.query_one(f"""
+                    SELECT COUNT(DISTINCT rc.tcgplayer_id) AS n
+                      FROM raw_cards rc
+                      JOIN scrydex_price_cache pc
+                        ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
+                      JOIN scrydex_card_meta m
+                        ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                     WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL
+                       AND rc.game = %s
+                           {where_extra}
+                """, (sx_game, game, *where_params))
+                counts[v] = int((row or {}).get("n") or 0)
+        else:
+            # any-mode: unfold color_identity into rows and group-count.
+            rows = db.query(f"""
+                SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
                   FROM raw_cards rc
                   JOIN scrydex_price_cache pc
                     ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
                   JOIN scrydex_card_meta m
                     ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                  JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
                  WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
-                   AND jsonb_array_length({field}) = 0
                        {extra_w}
+                 GROUP BY elem
             """, (sx_game, game, *extra_p))
-            counts["C"] = int((row or {}).get("n") or 0)
+            counts = {r["k"]: int(r["n"]) for r in rows}
 
-        labels = spec.get("labels") or {}
+            # MTG: a colorless card has color_identity=[] and never shows up
+            # in the lateral elements-of-array unfold above. Count it
+            # separately so the "C" chip reflects reality.
+            if game == "magic":
+                row = db.query_one(f"""
+                    SELECT COUNT(DISTINCT rc.tcgplayer_id) AS n
+                      FROM raw_cards rc
+                      JOIN scrydex_price_cache pc
+                        ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
+                      JOIN scrydex_card_meta m
+                        ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                     WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+                       AND jsonb_array_length({field}) = 0
+                           {extra_w}
+                """, (sx_game, game, *extra_p))
+                counts["C"] = int((row or {}).get("n") or 0)
+
         out["filters"]["colors"] = {
             "label":   spec["label"],
             "options": [

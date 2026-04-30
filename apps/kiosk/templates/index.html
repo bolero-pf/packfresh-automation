@@ -1956,10 +1956,53 @@ function _refreshProdFiltersBtn() {
 }
 
 async function _loadProdFilterMeta() {
+  // Pass the current draft selections so the server can return faceted
+  // counts (each facet's counts apply OTHER selections but not its own).
+  const p = new URLSearchParams({ kind: _activeKind });
+  const d = _prodDraft;
+  if (d) {
+    if (d.game) p.set('game', d.game);
+    if (d.formats && d.formats.size) p.set('format', [...d.formats].join(','));
+    if (d.eras    && d.eras.size)    p.set('era',    [...d.eras].join(','));
+    if (d.grades  && d.grades.size)  p.set('grade',  [...d.grades].join(','));
+    if (d.minP)   p.set('min_price', d.minP);
+    if (d.maxP)   p.set('max_price', d.maxP);
+  }
   try {
-    const d = await get(`/api/products/filter-meta?kind=${_activeKind}`);
-    _prodFilterMeta = d || null;
+    _prodFilterMeta = await get('/api/products/filter-meta?' + p.toString()) || null;
   } catch(e) { _prodFilterMeta = null; }
+}
+
+// Debounced re-fetch on chip toggle, mirroring refreshFacetCounts() for raw.
+let _prodFilterMetaTimer = null;
+function _refreshProdFacetCounts() {
+  if (_prodFilterMetaTimer) clearTimeout(_prodFilterMetaTimer);
+  _prodFilterMetaTimer = setTimeout(async () => {
+    _prodFilterMetaTimer = null;
+    if (!_prodDraft) return;
+    await _loadProdFilterMeta();
+    _renderAllProdSheetSections();
+  }, 220);
+}
+
+function _renderAllProdSheetSections() {
+  const meta = _prodFilterMeta || {};
+  _renderProdSheetSection('prod-sheet-game-section', 'prod-sheet-games',
+    meta.games || [], null, 'game');
+  if (_activeKind === 'sealed') {
+    _renderProdSheetSection('prod-sheet-format-section', 'prod-sheet-formats',
+      meta.formats || [], _prodDraft.formats, null);
+  } else {
+    document.getElementById('prod-sheet-format-section').style.display = 'none';
+  }
+  if (_activeKind === 'slab') {
+    _renderProdSheetSection('prod-sheet-grade-section', 'prod-sheet-grades',
+      meta.grades || [], _prodDraft.grades, null);
+  } else {
+    document.getElementById('prod-sheet-grade-section').style.display = 'none';
+  }
+  _renderProdSheetSection('prod-sheet-era-section', 'prod-sheet-eras',
+    meta.eras || [], _prodDraft.eras, null);
 }
 
 function _renderProdSheetSection(sectionId, listId, options, draftSet, single) {
@@ -1988,8 +2031,10 @@ function _renderProdSheetSection(sectionId, listId, options, draftSet, single) {
       } else {
         if (draftSet.has(k)) draftSet.delete(k); else draftSet.add(k);
       }
-      // Re-render this section so selection state reflects
+      // Re-render this section immediately so selection state reflects,
+      // then debounced re-fetch of OTHER facets' counts.
       _renderProdSheetSection(sectionId, listId, options, draftSet, single);
+      _refreshProdFacetCounts();
     };
   });
 }
@@ -2009,30 +2054,9 @@ async function openProdFilterSheet() {
   document.getElementById('prod-sheet-title').textContent =
     (_activeKind === 'slab') ? 'Slab Filters' : 'Sealed Filters';
 
-  // Load fresh meta (counts) for this kind
+  // Load fresh meta (counts) for this kind, faceted by current draft.
   await _loadProdFilterMeta();
-  const meta = _prodFilterMeta || {};
-
-  // Game (single-select)
-  _renderProdSheetSection('prod-sheet-game-section', 'prod-sheet-games',
-    meta.games || [], null, 'game');
-  // Format (sealed only, multi-select)
-  if (_activeKind === 'sealed') {
-    _renderProdSheetSection('prod-sheet-format-section', 'prod-sheet-formats',
-      meta.formats || [], _prodDraft.formats, null);
-  } else {
-    document.getElementById('prod-sheet-format-section').style.display = 'none';
-  }
-  // Grade (slab only, multi-select)
-  if (_activeKind === 'slab') {
-    _renderProdSheetSection('prod-sheet-grade-section', 'prod-sheet-grades',
-      meta.grades || [], _prodDraft.grades, null);
-  } else {
-    document.getElementById('prod-sheet-grade-section').style.display = 'none';
-  }
-  // Era (multi-select, both kinds)
-  _renderProdSheetSection('prod-sheet-era-section', 'prod-sheet-eras',
-    meta.eras || [], _prodDraft.eras, null);
+  _renderAllProdSheetSections();
   // Sort
   document.querySelectorAll('#prod-sheet-sort .chip').forEach(el => {
     el.classList.toggle('on', el.getAttribute('data-sort') === _prodDraft.sort);
@@ -2067,23 +2091,11 @@ function clearAllProdFilters() {
   };
   document.getElementById('prod-price-min').value = '';
   document.getElementById('prod-price-max').value = '';
-  // Re-render sections so all chips clear
-  const meta = _prodFilterMeta || {};
-  _renderProdSheetSection('prod-sheet-game-section', 'prod-sheet-games',
-    meta.games || [], null, 'game');
-  if (_activeKind === 'sealed') {
-    _renderProdSheetSection('prod-sheet-format-section', 'prod-sheet-formats',
-      meta.formats || [], _prodDraft.formats, null);
-  }
-  if (_activeKind === 'slab') {
-    _renderProdSheetSection('prod-sheet-grade-section', 'prod-sheet-grades',
-      meta.grades || [], _prodDraft.grades, null);
-  }
-  _renderProdSheetSection('prod-sheet-era-section', 'prod-sheet-eras',
-    meta.eras || [], _prodDraft.eras, null);
   document.querySelectorAll('#prod-sheet-sort .chip').forEach(el => {
     el.classList.toggle('on', el.getAttribute('data-sort') === 'name_asc');
   });
+  // Re-fetch with cleared selections so the chip counts go back to global.
+  _refreshProdFacetCounts();
 }
 
 function applyProdFilterSheet() {
