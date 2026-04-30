@@ -76,6 +76,70 @@
 .pull-name { font-weight: 700; font-size: 0.95rem; flex: 1; }
 .pull-count { font-family: var(--mono); font-size: 0.8rem; color: var(--dim); }
 
+/* ── Hold Detail: bin-grouped pull list ── */
+.bin-group {
+  background: var(--s1); border: 1.5px solid var(--border);
+  border-radius: 12px; padding: 14px; margin-bottom: 14px;
+}
+.bin-group.all-pulled { border-color: var(--green); opacity: 0.85; }
+.bin-group-header {
+  display: flex; align-items: baseline; gap: 14px;
+  padding-bottom: 10px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.bin-group-label {
+  font-family: var(--mono); font-size: 1.6rem; font-weight: 700;
+  color: var(--green); letter-spacing: 0.04em;
+}
+.bin-group-count {
+  margin-left: auto; font-family: var(--mono); font-size: 0.85rem;
+  color: var(--dim); font-weight: 600;
+}
+.pull-card-row {
+  display: flex; align-items: stretch; gap: 14px;
+  background: var(--s2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 14px; margin-bottom: 8px;
+}
+.pull-card-row.done { border-color: var(--green); background: rgba(52,208,88,0.05); }
+.pull-card-thumb {
+  width: 130px; min-width: 130px; aspect-ratio: 2.5/3.5;
+  border-radius: 6px; overflow: hidden; background: var(--s1);
+  display: flex; align-items: center; justify-content: center;
+}
+.pull-card-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.pull-card-thumb .no-img { font-size: 2.2rem; opacity: 0.2; }
+.pull-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.pull-card-name { font-size: 1.05rem; font-weight: 700; line-height: 1.25; }
+.pull-card-meta { font-size: 0.78rem; color: var(--dim); display: flex; flex-wrap: wrap; gap: 4px; }
+.pull-card-altbins {
+  font-size: 0.72rem; color: var(--dim); margin-top: 2px;
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.pull-card-altbins span {
+  font-family: var(--mono);
+  background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 4px;
+}
+.pull-card-count {
+  align-self: center; font-family: var(--mono);
+  font-size: 0.95rem; color: var(--dim); font-weight: 600;
+  min-width: 50px; text-align: center;
+}
+/* QTY > 1: drastic, impossible-to-miss callout */
+.pull-qty-loud {
+  align-self: stretch; min-width: 80px;
+  background: var(--amber); color: #000;
+  border-radius: 8px; padding: 10px 14px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font-size: 0.7rem; font-weight: 800; letter-spacing: 0.1em;
+  text-transform: uppercase;
+  box-shadow: 0 0 0 2px rgba(232,197,71,0.3);
+}
+.pull-qty-num {
+  font-size: 2.2rem; line-height: 1;
+  font-family: var(--mono); font-weight: 800;
+  display: block; margin-top: 2px;
+}
+
 .bin-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
 .bin-tag {
   background: var(--s2); border: 1px solid var(--border);
@@ -554,42 +618,75 @@ function renderHoldDetail(d) {
     </div>
   `;
 
-  // Pull list (grouped by card type)
+  // Pull list (grouped by BIN, sorted in walk order — A-1, A-2, …, B-1, …).
+  // Each bin shows the cards staff needs to grab there, with a drastic QTY
+  // badge when a single row needs >1 copy. Image is large enough to identify
+  // a card from a few feet away without picking it up.
   if (hold.status === 'PENDING' || hold.status === 'PULLING') {
-    html += `<div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Pull List</div>`;
-    html += pull.map(group => {
+    // Bucket each card-group into one bin: the one with the most copies of
+    // that card_name+condition (best_bins[0]). If best_bins is empty (no
+    // assignment) the group goes into a "— No bin" bucket so staff still see
+    // the work to do.
+    const binBuckets = new Map();
+    pull.forEach(group => {
       const groupItems = items.filter(i =>
         i.tcgplayer_id == group.tcgplayer_id && i.condition === group.condition
       );
-      const pulledInGroup = groupItems.filter(i => ['PULLED','ACCEPTED','REJECTED','MISSING'].includes(i.item_status)).length;
-      const allGroupPulled = pulledInGroup === groupItems.length;
+      const primaryBin = (group.best_bins && group.best_bins[0]) ? group.best_bins[0].bin_label : '— No bin';
+      if (!binBuckets.has(primaryBin)) binBuckets.set(primaryBin, []);
+      binBuckets.get(primaryBin).push({ group, groupItems });
+    });
 
-      return `<div class="pull-group ${allGroupPulled ? 'all-pulled' : ''}">
-        <div class="pull-header">
-          ${group.image_url ? `<img class="pull-img" src="${esc(group.image_url)}" alt="">` : '<div class="pull-img"></div>'}
-          <div style="flex:1;">
-            <div class="pull-name">${esc(group.card_name)}</div>
-            <div style="font-size:0.75rem;color:var(--dim);">${esc(group.condition)} · need ${group.qty_needed}</div>
-          </div>
-          <div class="pull-count">${pulledInGroup}/${group.qty_needed} ✓</div>
+    const sortedBins = Array.from(binBuckets.keys()).sort(_binCompare);
+
+    html += `<div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Pull List — Walk in bin order</div>`;
+    html += sortedBins.map(binLabel => {
+      const rows = binBuckets.get(binLabel);
+      const totalQty   = rows.reduce((s, r) => s + r.group.qty_needed, 0);
+      const pulledQty  = rows.reduce((s, r) =>
+        s + r.groupItems.filter(i => ['PULLED','ACCEPTED','REJECTED','MISSING'].includes(i.item_status)).length, 0);
+      const binDone    = pulledQty === totalQty;
+
+      return `<div class="bin-group ${binDone ? 'all-pulled' : ''}">
+        <div class="bin-group-header">
+          <div class="bin-group-label">${esc(binLabel)}</div>
+          <div class="bin-group-count">${pulledQty}/${totalQty} pulled</div>
         </div>
-        ${group.best_bins.length ? `
-          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Best bins to pull from:</div>
-          <div class="bin-tags">
-            ${group.best_bins.slice(0,4).map(b => `<div class="bin-tag">${b.bin_label}<span class="bin-count">×${b.count}</span></div>`).join('')}
-          </div>
-        ` : '<div style="font-size:0.75rem;color:var(--red);">No bin assignment found</div>'}
-        <div class="scan-items">
-          ${groupItems.map(item => `
-            <div class="scan-item ${item.item_status.toLowerCase()}" id="scan-item-${item.hold_item_id}">
-              <div class="scan-check">${item.item_status === 'PULLED' || item.item_status === 'ACCEPTED' ? '✓' : item.item_status === 'REJECTED' ? '✕' : item.item_status === 'MISSING' ? '⚠' : ''}</div>
-              <span style="font-family:var(--mono);font-size:0.72rem;flex:1;">${esc(item.barcode)}</span>
-              <span style="font-size:0.75rem;color:var(--dim);">${esc(item.bin_label||'')}</span>
-              ${item.item_status === 'REQUESTED' ? `<button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:2px 8px;" onclick="markMissing('${item.hold_item_id}')">Can't Find</button>` : ''}
-              ${item.item_status === 'MISSING' ? '<span style="font-size:0.68rem;color:var(--red);font-weight:600;">MISSING</span>' : ''}
+        ${rows.map(({ group, groupItems }) => {
+          const pulledInGroup  = groupItems.filter(i => ['PULLED','ACCEPTED','REJECTED','MISSING'].includes(i.item_status)).length;
+          const allGroupPulled = pulledInGroup === groupItems.length;
+          const qtyBig         = group.qty_needed > 1;
+          const altBins        = (group.best_bins || []).slice(1, 4);
+          return `<div class="pull-card-row ${allGroupPulled ? 'done' : ''}">
+            <div class="pull-card-thumb">
+              ${group.image_url ? `<img src="${esc(group.image_url)}" alt="${esc(group.card_name)}">` : '<div class="no-img">🃏</div>'}
             </div>
-          `).join('')}
-        </div>
+            <div class="pull-card-body">
+              <div class="pull-card-name">${esc(group.card_name)}</div>
+              <div class="pull-card-meta">
+                <span>${esc(group.set_name||'')}</span>
+                ${group.card_number ? `<span>· #${esc(group.card_number)}</span>` : ''}
+                <span>· ${esc(group.condition)}</span>
+              </div>
+              ${altBins.length ? `<div class="pull-card-altbins">also in: ${altBins.map(b => `<span>${esc(b.bin_label)}×${b.count}</span>`).join(' ')}</div>` : ''}
+              <div class="scan-items" style="margin-top:8px;">
+                ${groupItems.map(item => `
+                  <div class="scan-item ${item.item_status.toLowerCase()}" id="scan-item-${item.hold_item_id}">
+                    <div class="scan-check">${item.item_status === 'PULLED' || item.item_status === 'ACCEPTED' ? '✓' : item.item_status === 'REJECTED' ? '✕' : item.item_status === 'MISSING' ? '⚠' : ''}</div>
+                    <span style="font-family:var(--mono);font-size:0.72rem;flex:1;">${esc(item.barcode || '—')}</span>
+                    <span style="font-size:0.72rem;color:var(--dim);">${esc(item.bin_label||'')}</span>
+                    ${item.item_status === 'REQUESTED' ? `<button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:2px 8px;" onclick="markMissing('${item.hold_item_id}')">Can't Find</button>` : ''}
+                    ${item.item_status === 'MISSING' ? '<span style="font-size:0.68rem;color:var(--red);font-weight:600;">MISSING</span>' : ''}
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+            ${qtyBig
+              ? `<div class="pull-qty-loud" title="Pull ${group.qty_needed} of this exact card">QTY<br><span class="pull-qty-num">${group.qty_needed}</span></div>`
+              : `<div class="pull-card-count">${pulledInGroup}/${group.qty_needed}</div>`
+            }
+          </div>`;
+        }).join('')}
       </div>`;
     }).join('');
   }
@@ -2243,6 +2340,22 @@ function _age(iso) {
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
   return `${h}h ${m%60}m ago`;
+}
+
+// Sort bin labels (e.g. "A-3", "A-10", "B-1") by row letter, then numeric
+// partition. Mirrors the helper in ingestion's barcode page so both apps
+// walk bins in the same order. Unassigned ("— No bin" etc.) sorts last.
+function _binSortKey(label) {
+  if (!label) return ['ZZZ', 999];
+  const m = String(label).match(/^([A-Za-z]+)-?(\d+)?/);
+  if (!m) return ['ZZZ', 999, label];
+  return [m[1].toUpperCase(), parseInt(m[2] || 0, 10)];
+}
+function _binCompare(a, b) {
+  const [ar, an] = _binSortKey(a);
+  const [br, bn] = _binSortKey(b);
+  if (ar !== br) return ar < br ? -1 : 1;
+  return an - bn;
 }
 
 loadHolds();
