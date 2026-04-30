@@ -16,11 +16,12 @@ import hmac
 import hashlib
 import base64
 import logging
+import secrets
 import time
 import threading
 import requests as _requests
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, Response, render_template
+from flask import Flask, request, jsonify, Response, render_template, redirect, g
 
 import db
 
@@ -29,6 +30,74 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 db.init_pool()
+
+
+def _ensure_kiosk_tables():
+    """Create kiosk-specific tables and extend hold_items for sealed/slab items.
+    Idempotent — runs at startup. ALTER statements use IF NOT EXISTS so reruns
+    are no-ops; the raw_card_id NOT NULL drop is wrapped in try/except because
+    older Postgres needs ALTER ... DROP NOT NULL even when already nullable.
+    """
+    try:
+        # ── Device identity: one row per activated iPad ───────────────────────
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS kiosk_devices (
+                device_id     VARCHAR(64) PRIMARY KEY,
+                label         VARCHAR(120),
+                activated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at  TIMESTAMP,
+                revoked_at    TIMESTAMP,
+                user_agent    VARCHAR(500)
+            )
+        """)
+        # ── One-time activation tokens (24h TTL, single-use) ──────────────────
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS kiosk_activation_tokens (
+                token              VARCHAR(64) PRIMARY KEY,
+                label              VARCHAR(120),
+                created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_by         VARCHAR(200),
+                expires_at         TIMESTAMP NOT NULL,
+                used_at             TIMESTAMP,
+                used_by_device_id  VARCHAR(64)
+            )
+        """)
+        # ── hold_items extensions for sealed/slab line items ──────────────────
+        # Sealed/slab items have no raw_cards row; raw_card_id must be nullable.
+        # SKU is what staff scans (printed on the Shopify product); barcode
+        # column is reused for raw cards. unit_price snapshots the price at
+        # request time so cart totals don't drift while customer browses.
+        for sql in [
+            "ALTER TABLE hold_items ADD COLUMN IF NOT EXISTS item_kind VARCHAR(20) DEFAULT 'raw'",
+            "ALTER TABLE hold_items ADD COLUMN IF NOT EXISTS sku VARCHAR(200)",
+            "ALTER TABLE hold_items ADD COLUMN IF NOT EXISTS title VARCHAR(500)",
+            "ALTER TABLE hold_items ADD COLUMN IF NOT EXISTS image_url TEXT",
+            "ALTER TABLE hold_items ADD COLUMN IF NOT EXISTS unit_price NUMERIC(10,2)",
+            "ALTER TABLE hold_items ADD COLUMN IF NOT EXISTS returned_at TIMESTAMP",
+            "ALTER TABLE hold_items ADD COLUMN IF NOT EXISTS returned_by VARCHAR(200)",
+            "ALTER TABLE hold_items ADD COLUMN IF NOT EXISTS shopify_order_id BIGINT",
+        ]:
+            try:
+                db.execute(sql)
+            except Exception as e:
+                logger.debug(f"hold_items migration skipped ({e}): {sql[:60]}")
+        # raw_card_id NOT NULL → NULLABLE so sealed/slab items can use the table
+        try:
+            db.execute("ALTER TABLE hold_items ALTER COLUMN raw_card_id DROP NOT NULL")
+        except Exception as e:
+            logger.debug(f"raw_card_id DROP NOT NULL skipped ({e})")
+        # Index sku for scan-out lookup speed
+        try:
+            db.execute("CREATE INDEX IF NOT EXISTS idx_hold_items_sku ON hold_items(sku)")
+        except Exception:
+            pass
+        logger.info("kiosk tables ensured")
+    except Exception as e:
+        logger.warning(f"_ensure_kiosk_tables warning: {e}")
+
+
+_ensure_kiosk_tables()
+
 
 MAX_HOLD_ITEMS = 20
 HOLD_EXPIRY_HOURS = 2
@@ -52,8 +121,23 @@ SHOPIFY_STOREFRONT_URL = os.environ.get("SHOPIFY_STOREFRONT_URL", "https://pack-
 # Feature flag: disable Champion checkout (browse-only mode)
 KIOSK_CHECKOUT_ENABLED = os.environ.get("KIOSK_CHECKOUT_ENABLED", "false").lower() == "true"
 
-# Access key — required to use kiosk (set once on in-store tablets via URL param ?key=...)
+# Access key — legacy in-store gate (kept as fallback during cookie migration)
 KIOSK_ACCESS_KEY = os.environ.get("KIOSK_ACCESS_KEY", "")
+
+# Cookie name + lifetime for in-store device identity. Set on /activate, cleared
+# server-side via revoked_at on kiosk_devices. Long expiry because Kiosk Pro on
+# the iPad never clears cookies once configured.
+KIOSK_DEVICE_COOKIE = "pf_kiosk_device"
+KIOSK_DEVICE_COOKIE_MAX_AGE = 10 * 365 * 24 * 3600  # 10 years
+ACTIVATION_TOKEN_TTL_HOURS = 24
+
+# Idle / pull-request thresholds
+INSTORE_HOLD_REQUEST_EXPIRY_MIN = 15      # REQUESTED hold_items unclaimed → expire
+PULLED_UNRESOLVED_AFTER_HOURS   = 4       # PULLED but no return / no order → flag
+
+# Tags that identify sealed and slab products in inventory_product_cache.tags (CSV)
+SEALED_TAG = "sealed"
+SLAB_TAG   = "slab"
 
 # Era mapping — list of canonical set-name PREFIXES per era. A set_name is
 # classified to an era when one of its prefixes matches case-insensitively.
@@ -212,31 +296,254 @@ def index():
     return render_template("index.html", access_key=KIOSK_ACCESS_KEY)
 
 
-def _check_access():
-    """Verify the request has a valid access key or Champion identity."""
-    if not KIOSK_ACCESS_KEY:
-        return True
-    key = request.headers.get("X-Kiosk-Key", "") or request.args.get("key", "")
-    if key == KIOSK_ACCESS_KEY:
-        return True
-    # Champions get access via their verified email header
-    champ = request.headers.get("X-Champion-Email", "")
-    if champ:
-        return True
-    return False
+# ═══════════════════════════════════════════════════════════════════════════════
+# Mode detection — instore (device cookie) vs champion (verified email header)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _lookup_device(device_id: str) -> dict | None:
+    """Return the kiosk_devices row if the device is active (not revoked)."""
+    if not device_id:
+        return None
+    try:
+        row = db.query_one(
+            "SELECT device_id, label, activated_at, revoked_at "
+            "FROM kiosk_devices WHERE device_id = %s",
+            (device_id,),
+        )
+        if not row:
+            return None
+        if row.get("revoked_at"):
+            return None
+        return row
+    except Exception as e:
+        logger.warning(f"device lookup failed: {e}")
+        return None
+
+
+def _resolve_kiosk_mode():
+    """
+    Determine the mode of the current request:
+      - 'instore'  : trusted iPad with valid device cookie (or legacy ?key=)
+      - 'champion' : remote VIP3 customer (verified via X-Champion-Email header)
+      - None       : unauthenticated; only the gate UI / champion identify is allowed
+
+    Sets g.kiosk_mode + g.kiosk_device_id. Cheap; safe to call from before_request.
+    """
+    # Device cookie wins — in-store iPads always present a cookie
+    device_id = request.cookies.get(KIOSK_DEVICE_COOKIE, "")
+    if device_id:
+        dev = _lookup_device(device_id)
+        if dev:
+            g.kiosk_mode = "instore"
+            g.kiosk_device_id = device_id
+            # Lightweight last_seen update — best effort, ignore failures
+            try:
+                db.execute(
+                    "UPDATE kiosk_devices SET last_seen_at = CURRENT_TIMESTAMP "
+                    "WHERE device_id = %s",
+                    (device_id,),
+                )
+            except Exception:
+                pass
+            return
+    # Legacy URL key (transition fallback) — also bumps to instore
+    if KIOSK_ACCESS_KEY:
+        key = request.headers.get("X-Kiosk-Key", "") or request.args.get("key", "")
+        if key and key == KIOSK_ACCESS_KEY:
+            g.kiosk_mode = "instore"
+            g.kiosk_device_id = None
+            return
+    # Champion path
+    if request.headers.get("X-Champion-Email", ""):
+        g.kiosk_mode = "champion"
+        g.kiosk_device_id = None
+        return
+    g.kiosk_mode = None
+    g.kiosk_device_id = None
+
+
+# Paths that never need a mode (handled by their own auth or are public)
+_PUBLIC_PATHS = {
+    "/", "/health", "/activate",
+    "/api/mode", "/api/champion/identify",
+}
+_PUBLIC_PREFIXES = ("/api/webhooks/", "/api/cleanup/", "/api/admin/", "/admin/", "/staff/")
 
 
 @app.before_request
 def gate_api():
-    """Block API access without a valid access key. Health/webhook endpoints are exempt."""
-    if not KIOSK_ACCESS_KEY:
-        return
+    """Resolve kiosk mode for every request, then gate /api/* endpoints
+    that require a recognised cohort. Webhooks/cleanup/admin/staff have
+    their own auth (HMAC, bearer, JWT) and bypass this gate."""
+    _resolve_kiosk_mode()
     path = request.path
-    if path in ("/", "/health", "/api/champion/identify") or path.startswith("/api/webhooks/") or path.startswith("/api/cleanup/"):
+    if path in _PUBLIC_PATHS:
         return
+    for prefix in _PUBLIC_PREFIXES:
+        if path.startswith(prefix):
+            return
+    # Read-only browse + cart endpoints require either instore or champion
     if path.startswith("/api/"):
-        if not _check_access():
-            return jsonify({"error": "Access key required"}), 403
+        if not g.kiosk_mode:
+            return jsonify({"error": "Access required", "code": "no_mode"}), 403
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Activation — turn a one-time token into a long-lived device cookie
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/activate")
+def activate_device():
+    """
+    Hit once per iPad during setup:
+        https://kiosk.pack-fresh.com/activate?token=<one-time>
+
+    Validates the token, mints a new device_id, sets the long-lived
+    pf_kiosk_device cookie (HttpOnly, Secure, SameSite=Strict, 10y), and
+    redirects to /. The token is single-use.
+    """
+    token = (request.args.get("token") or "").strip()
+    if not token:
+        return Response("Missing activation token", status=400)
+    row = db.query_one(
+        "SELECT token, expires_at, used_at, label "
+        "FROM kiosk_activation_tokens WHERE token = %s",
+        (token,),
+    )
+    if not row:
+        return Response("Unknown activation token", status=404)
+    if row.get("used_at"):
+        return Response("Activation token already used", status=409)
+    if row["expires_at"] and row["expires_at"] < datetime.utcnow():
+        return Response("Activation token expired", status=410)
+
+    device_id = secrets.token_urlsafe(32)
+    label = row.get("label") or "Kiosk iPad"
+    user_agent = request.headers.get("User-Agent", "")[:500]
+
+    db.execute(
+        "INSERT INTO kiosk_devices (device_id, label, user_agent) VALUES (%s, %s, %s)",
+        (device_id, label, user_agent),
+    )
+    db.execute(
+        "UPDATE kiosk_activation_tokens SET used_at = CURRENT_TIMESTAMP, "
+        "used_by_device_id = %s WHERE token = %s",
+        (device_id, token),
+    )
+    logger.info(f"Activated kiosk device label={label!r} device_id={device_id[:8]}…")
+
+    resp = redirect("/")
+    resp.set_cookie(
+        KIOSK_DEVICE_COOKIE,
+        device_id,
+        max_age=KIOSK_DEVICE_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="Strict",
+        path="/",
+    )
+    return resp
+
+
+@app.route("/api/mode")
+def api_mode():
+    """Tell the frontend whether this device is in-store, a champion, or
+    needs to identify. Cheap, called once during page boot."""
+    return jsonify({
+        "mode":          g.kiosk_mode,             # 'instore' | 'champion' | None
+        "device_label":  None,                     # filled below if instore
+        "show_kinds":    _allowed_kinds(g.kiosk_mode),
+    })
+
+
+def _allowed_kinds(mode: str | None) -> list[str]:
+    """Which catalogs the current cohort may browse. Champions never see
+    sealed/slabs — they have pack-fresh.com for that. Anonymous sees nothing."""
+    if mode == "instore":
+        return ["raw", "sealed", "slab"]
+    if mode == "champion":
+        return ["raw"]
+    return []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Admin: mint activation token, list / revoke devices (JWT-gated)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _require_staff(roles=("owner", "manager")):
+    """Use shared JWT auth for staff endpoints. Returns a Flask response on
+    failure (caller should `return` it), or None when the user is allowed."""
+    try:
+        from auth import require_auth  # shared/auth.py on PYTHONPATH
+    except Exception as e:
+        logger.error(f"shared/auth not available: {e}")
+        return jsonify({"error": "auth backend missing"}), 500
+    return require_auth(roles=list(roles))
+
+
+@app.route("/api/admin/mint-activation", methods=["POST"])
+def admin_mint_activation():
+    """Generate a one-time activation token. Staff types the resulting URL into
+    the iPad's Kiosk Pro home URL during setup; the device hits /activate, gets
+    a long-lived cookie, and the token is consumed. Manager+ only."""
+    err = _require_staff()
+    if err is not None:
+        return err
+    data = request.get_json(silent=True) or {}
+    label = (data.get("label") or "Kiosk iPad").strip()[:120]
+    token = secrets.token_urlsafe(24)
+    expires_at = datetime.utcnow() + timedelta(hours=ACTIVATION_TOKEN_TTL_HOURS)
+    user = getattr(g, "user", {}) or {}
+    db.execute(
+        "INSERT INTO kiosk_activation_tokens (token, label, created_by, expires_at) "
+        "VALUES (%s, %s, %s, %s)",
+        (token, label, user.get("email") or user.get("name") or "unknown", expires_at),
+    )
+    base = request.host_url.rstrip("/")
+    return jsonify({
+        "token":          token,
+        "label":          label,
+        "expires_at":     expires_at.isoformat() + "Z",
+        "activation_url": f"{base}/activate?token={token}",
+    })
+
+
+@app.route("/api/admin/devices")
+def admin_list_devices():
+    """List activated kiosk devices for the admin UI."""
+    err = _require_staff()
+    if err is not None:
+        return err
+    rows = db.query(
+        "SELECT device_id, label, activated_at, last_seen_at, revoked_at, user_agent "
+        "FROM kiosk_devices ORDER BY activated_at DESC"
+    )
+    return jsonify({"devices": [_ser(dict(r)) for r in rows]})
+
+
+@app.route("/admin/devices")
+def admin_devices_page():
+    """Manager-facing UI: list of activated kiosks + button to mint a new
+    activation URL. Manager+ only."""
+    err = _require_staff()
+    if err is not None:
+        return err
+    return render_template("admin_devices.html")
+
+
+@app.route("/api/admin/devices/<device_id>/revoke", methods=["POST"])
+def admin_revoke_device(device_id):
+    """Mark a device as revoked. Future requests with that cookie fall through
+    to anonymous (locked) mode. Useful for lost iPads."""
+    err = _require_staff()
+    if err is not None:
+        return err
+    db.execute(
+        "UPDATE kiosk_devices SET revoked_at = CURRENT_TIMESTAMP "
+        "WHERE device_id = %s AND revoked_at IS NULL",
+        (device_id,),
+    )
+    return jsonify({"revoked": True})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -284,23 +591,39 @@ def _build_meta_filter_subquery(game: str,
     if colors and "colors" in schema:
         spec = schema["colors"]
         field = spec["field"]   # e.g. "raw->'color_identity'" or "colors"
+        # MTG quirk: a colorless card's color_identity is an EMPTY jsonb array
+        # ([]), NOT ["C"]. So `field ?| ['C']` never matches it. Treat "C" as
+        # a sentinel for "empty color_identity" and split it out from the
+        # other-color matching below.
+        is_mtg_colors = (game == "magic")
+        has_c = is_mtg_colors and ("C" in colors)
+        chromatic = [c for c in colors if c != "C"] if is_mtg_colors else colors
         if color_mode == "exactly":
-            # Card's full color identity is exactly the selected set (BUG = exactly B,U,G).
-            # Use a normalized comparison: sort + dedupe both sides as TEXT[]
-            # so order-insensitive equality works.
-            arr_lit_ph = ",".join(["%s"] * len(colors))
-            parts.append(
-                f"(SELECT COALESCE(array_agg(DISTINCT x ORDER BY x), ARRAY[]::text[]) "
-                f" FROM jsonb_array_elements_text({field}) AS x) "
-                f"= (SELECT COALESCE(array_agg(DISTINCT v ORDER BY v), ARRAY[]::text[]) "
-                f" FROM unnest(ARRAY[{arr_lit_ph}]) AS v)"
-            )
-            p.extend(colors)
+            # Exactly C alone = colorless card. C plus other colors is a
+            # contradiction (a card is either colorless or it has colors), so
+            # we drop the C in that case and match on the chromatic set.
+            if has_c and not chromatic:
+                parts.append(f"jsonb_array_length({field}) = 0")
+            elif chromatic:
+                arr_lit_ph = ",".join(["%s"] * len(chromatic))
+                parts.append(
+                    f"(SELECT COALESCE(array_agg(DISTINCT x ORDER BY x), ARRAY[]::text[]) "
+                    f" FROM jsonb_array_elements_text({field}) AS x) "
+                    f"= (SELECT COALESCE(array_agg(DISTINCT v ORDER BY v), ARRAY[]::text[]) "
+                    f" FROM unnest(ARRAY[{arr_lit_ph}]) AS v)"
+                )
+                p.extend(chromatic)
         else:
-            # Any: card's identity contains at least one of the selected.
-            # ?| takes a TEXT[] of keys.
-            parts.append(f"{field} ?| %s::text[]")
-            p.append(colors)
+            # Any: card's identity contains at least one of the selected
+            # chromatic colors, OR (if C was picked) is colorless.
+            any_parts: list[str] = []
+            if chromatic:
+                any_parts.append(f"{field} ?| %s::text[]")
+                p.append(chromatic)
+            if has_c:
+                any_parts.append(f"jsonb_array_length({field}) = 0")
+            if any_parts:
+                parts.append("(" + " OR ".join(any_parts) + ")")
 
     # Card type / Energy
     if card_types and "card_type" in schema:
@@ -351,7 +674,8 @@ def browse():
     Groups raw_cards by (card_name, set_name, tcgplayer_id)
     Returns available qty per condition, total count, price range.
 
-    Query params: q, set, page (24 per page), plus per-game advanced filters:
+    Query params: q, set, page (25 per page = 5 cols × 5 rows), plus per-game
+    advanced filters:
       colors=W,U,B&color_mode=exactly|any
       card_type=Sorcery,Instant       (MTG types / Pokemon energy / OP card_type)
       card_rarity=Rare,Mythic         (raw_cards.rarity multi-select)
@@ -367,7 +691,7 @@ def browse():
     game       = (request.args.get("game") or "").strip().lower()
     sort       = (request.args.get("sort") or "name_asc").strip()
     page       = max(1, int(request.args.get("page", 1)))
-    offset     = (page - 1) * 24
+    offset     = (page - 1) * 25
 
     # Game-aware advanced filters
     colors     = _multi_param("colors")
@@ -509,7 +833,7 @@ def browse():
         ) sub
         GROUP BY card_name, set_name, tcgplayer_id, variant_key
         ORDER BY {order_by}
-        LIMIT 24 OFFSET %s
+        LIMIT 25 OFFSET %s
     """, tuple(params) + (offset,))
 
     # Enrich each row with two things from scrydex_price_cache:
@@ -586,7 +910,126 @@ def browse():
         "cards":  cards,
         "total":  total,
         "page":   page,
-        "pages":  max(1, (total + 23) // 24),
+        "pages":  max(1, (total + 24) // 25),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sealed / Slabs catalog — reads from inventory_product_cache
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _kind_tag(kind: str) -> str | None:
+    if kind == "sealed":
+        return SEALED_TAG
+    if kind == "slab":
+        return SLAB_TAG
+    return None
+
+
+@app.route("/api/products")
+def list_products():
+    """
+    Sealed + slab catalog. Reads inventory_product_cache (the live Shopify
+    mirror refreshed by shared/cache_manager.py — no extra Shopify API calls).
+
+    Query params:
+      kind=sealed|slab     (required)
+      q=search             (matches title)
+      page=1               (25 per page = 5 cols × 5 rows)
+      sort=name_asc|price_asc|price_desc
+
+    Returns rows with available_qty = shopify_qty − active hold_items.
+    """
+    kind = (request.args.get("kind") or "").strip().lower()
+    if kind not in ("sealed", "slab"):
+        return jsonify({"error": "kind must be sealed or slab"}), 400
+    if kind not in _allowed_kinds(g.kiosk_mode):
+        return jsonify({"error": "Not available in this mode", "code": "kind_forbidden"}), 403
+
+    tag = _kind_tag(kind)
+    q    = (request.args.get("q") or "").strip()
+    sort = (request.args.get("sort") or "name_asc").strip()
+    page = max(1, int(request.args.get("page", 1)))
+    offset = (page - 1) * 25
+
+    # CSV tag exact-match: wrap both sides in commas so 'unsealed' won't
+    # falsely match 'sealed'. Tag case is normalized lower.
+    where = ["status = 'ACTIVE'", "shopify_qty > 0",
+             "LOWER(',' || COALESCE(tags,'') || ',') LIKE %s"]
+    params: list = [f"%,{tag},%"]
+    if q:
+        where.append("title ILIKE %s")
+        params.append(f"%{q}%")
+
+    sort_map = {
+        "name_asc":   "title ASC",
+        "price_asc":  "shopify_price ASC NULLS LAST",
+        "price_desc": "shopify_price DESC NULLS LAST",
+    }
+    order_by = sort_map.get(sort, "title ASC")
+
+    where_sql = " AND ".join(where)
+
+    count_row = db.query_one(
+        f"SELECT COUNT(*) AS total FROM inventory_product_cache WHERE {where_sql}",
+        tuple(params),
+    )
+    total = count_row["total"] if count_row else 0
+
+    # available_qty subtracts in-flight requests (REQUESTED + PULLED on
+    # active holds) so the catalog reflects what's actually grabbable.
+    rows = db.query(f"""
+        SELECT
+            ipc.shopify_product_id,
+            ipc.shopify_variant_id,
+            ipc.title,
+            ipc.handle,
+            ipc.tags,
+            ipc.sku,
+            ipc.shopify_price,
+            ipc.shopify_qty,
+            COALESCE((
+                SELECT COUNT(*)::int FROM hold_items hi
+                JOIN holds h ON hi.hold_id = h.id
+                WHERE hi.shopify_variant_id = ipc.shopify_variant_id
+                  AND hi.item_kind = %s
+                  AND hi.status IN ('REQUESTED','PULLED')
+                  AND COALESCE(h.status, '') NOT IN ('ABANDONED','COMPLETED')
+            ), 0) AS in_flight
+        FROM inventory_product_cache ipc
+        WHERE {where_sql}
+        ORDER BY {order_by}
+        LIMIT 25 OFFSET %s
+    """, (kind, *params, offset))
+
+    products = []
+    for r in rows:
+        qty = int(r["shopify_qty"] or 0)
+        in_flight = int(r["in_flight"] or 0)
+        avail = max(0, qty - in_flight)
+        if avail <= 0:
+            continue  # shouldn't happen often; skip if fully reserved
+        products.append({
+            "shopify_product_id": r["shopify_product_id"],
+            "shopify_variant_id": r["shopify_variant_id"],
+            "title":              r["title"],
+            "handle":              r["handle"],
+            "sku":                r.get("sku") or "",
+            "price":              float(r["shopify_price"]) if r["shopify_price"] is not None else None,
+            "available_qty":      avail,
+            # image_url left for the frontend to lazy-fetch via Storefront
+            # JSON (`/products/<handle>.json`) — inventory_product_cache
+            # doesn't store images and we don't want to pay an Admin API
+            # call per row here.
+            "storefront_url":     f"{SHOPIFY_STOREFRONT_URL}/products/{r['handle']}" if r["handle"] else None,
+        })
+
+    return jsonify({
+        "kind":     kind,
+        "products": products,
+        "total":    total,
+        "page":     page,
+        "pages":    max(1, (total + 24) // 25),
     })
 
 
@@ -661,10 +1104,21 @@ def list_games():
 
 @app.route("/api/filter-meta")
 def filter_meta():
-    """Return the per-game advanced-filter schema + which option values
-    actually have STORED stock right now (for chip qty badges).
+    """Per-game advanced-filter schema + faceted qty counts that reflect
+    the user's CURRENT filter selection.
 
-    Query: ?game=magic|pokemon|onepiece (required)
+    Query:
+      ?game=magic|pokemon|onepiece (required)
+      &colors=W,U                  (current color selection — affects card_type and rarity counts)
+      &color_mode=any|exactly      (only meaningful with colors)
+      &card_type=Creature,Sorcery  (current card_type selection — affects color and rarity counts)
+      &card_rarity=Rare,Mythic     (current rarity selection — affects color and card_type counts)
+
+    Each facet's counts are computed by applying ALL the OTHER selected
+    filters and excluding the facet itself. So toggling within one group
+    doesn't collapse that group's own options to 0 — but selecting Black
+    correctly narrows "Creature: 26" down to "Creature: 4" in the
+    card_type group, because card_type's count includes the Black filter.
 
     Response:
     {
@@ -672,15 +1126,10 @@ def filter_meta():
       "color_modes": ["any", "exactly"],
       "filters": {
         "colors":    {"label": "Color", "options": [{"value":"W","label":"White","qty": 12}, ...]},
-        "card_type": {"label": "Card type", "options": [{"value":"Creature","qty":24}, ...]},
+        "card_type": {"label": "Card type", "options": [{"value":"Creature","qty":4}, ...]},
         "rarity":    {"label": "Rarity", "options": [{"value":"Rare","qty":38}, ...]}
       }
     }
-
-    qty counts are independent of OTHER active filters — they reflect the
-    intersection of (game, STORED, current_hold_id IS NULL) so the chip
-    badges stay stable while users toggle filters. Re-querying the schema
-    on every keystroke would otherwise cause "13" → "0" → "13" flicker.
     """
     game = (request.args.get("game") or "").strip().lower()
     if not game or game not in GAME_FILTER_SCHEMA:
@@ -688,47 +1137,125 @@ def filter_meta():
 
     schema = GAME_FILTER_SCHEMA[game]
     sx_game = _GAME_TO_SCRYDEX_GAME.get(game, game)
+
+    # Read the current filter state.
+    sel_colors     = _multi_param("colors")
+    sel_color_mode = (request.args.get("color_mode") or "any").strip().lower()
+    if sel_color_mode not in ("any", "exactly"):
+        sel_color_mode = "any"
+    sel_card_types = _multi_param("card_type")
+    sel_rarities   = _multi_param("card_rarity")
+
+    # Build a set of "extra WHERE clauses + params" snippets, then for each
+    # facet we'll OR-together the snippets it needs (i.e. all groups except
+    # itself). The clauses are written against the same JOIN shape used by
+    # _count_jsonb_facet / _count_rarity_facet below: rc + pc + m.
+    def colors_clause() -> tuple[str, list]:
+        if not sel_colors or "colors" not in schema:
+            return "", []
+        spec = schema["colors"]
+        field = "m." + spec["field"]
+        is_mtg = (game == "magic")
+        has_c  = is_mtg and ("C" in sel_colors)
+        chrom  = [c for c in sel_colors if c != "C"] if is_mtg else sel_colors
+        if sel_color_mode == "exactly":
+            if has_c and not chrom:
+                return f"jsonb_array_length({field}) = 0", []
+            if not chrom:
+                return "", []
+            arr_lit_ph = ",".join(["%s"] * len(chrom))
+            return (
+                f"(SELECT COALESCE(array_agg(DISTINCT x ORDER BY x), ARRAY[]::text[]) "
+                f" FROM jsonb_array_elements_text({field}) AS x) "
+                f"= (SELECT COALESCE(array_agg(DISTINCT v ORDER BY v), ARRAY[]::text[]) "
+                f" FROM unnest(ARRAY[{arr_lit_ph}]) AS v)"
+            ), list(chrom)
+        # any
+        any_parts: list[str] = []
+        params: list = []
+        if chrom:
+            any_parts.append(f"{field} ?| %s::text[]")
+            params.append(chrom)
+        if has_c:
+            any_parts.append(f"jsonb_array_length({field}) = 0")
+        if not any_parts:
+            return "", []
+        return "(" + " OR ".join(any_parts) + ")", params
+
+    def card_type_clause() -> tuple[str, list]:
+        if not sel_card_types or "card_type" not in schema:
+            return "", []
+        spec = schema["card_type"]
+        field = "m." + spec["field"]
+        if spec["type"] == "jsonb":
+            return f"{field} ?| %s::text[]", [list(sel_card_types)]
+        ph = ",".join(["%s"] * len(sel_card_types))
+        return f"{field} IN ({ph})", list(sel_card_types)
+
+    def rarity_clause() -> tuple[str, list]:
+        if not sel_rarities:
+            return "", []
+        ph = ",".join(["%s"] * len(sel_rarities))
+        return f"rc.rarity IN ({ph})", list(sel_rarities)
+
+    color_w,  color_p  = colors_clause()
+    cardt_w,  cardt_p  = card_type_clause()
+    rarity_w, rarity_p = rarity_clause()
+
+    def merged_extra(*pairs: tuple[str, list]) -> tuple[str, list]:
+        """AND together a subset of (where, params) pairs."""
+        parts, params = [], []
+        for w, p in pairs:
+            if w:
+                parts.append(w)
+                params.extend(p)
+        if not parts:
+            return "", []
+        return " AND " + " AND ".join(parts), params
+
+    # ── Colors facet (count of cards per color, given other filters) ────────
     out: dict = {
         "game": game,
         "color_modes": list(schema.get("colors", {}).get("modes", [])),
         "filters": {},
     }
 
-    # Helper: count distinct STORED tcgplayer_ids whose meta has the field.
-    # (We count by tcgplayer_id rather than raw_cards rows so duplicates of
-    # a single card don't inflate the chip badge.)
-    def _count_jsonb(field: str) -> dict[str, int]:
-        rows = db.query(f"""
-            SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
-            FROM raw_cards rc
-            JOIN scrydex_price_cache pc
-              ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
-            JOIN scrydex_card_meta m
-              ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
-            JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
-            WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
-            GROUP BY elem
-        """, (sx_game, game))
-        return {r["k"]: int(r["n"]) for r in rows}
-
-    def _count_text(field: str) -> dict[str, int]:
-        rows = db.query(f"""
-            SELECT m.{field} AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
-            FROM raw_cards rc
-            JOIN scrydex_price_cache pc
-              ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
-            JOIN scrydex_card_meta m
-              ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
-            WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
-              AND m.{field} IS NOT NULL
-            GROUP BY m.{field}
-        """, (sx_game, game))
-        return {r["k"]: int(r["n"]) for r in rows}
-
-    # Colors
     if "colors" in schema:
         spec = schema["colors"]
-        counts = _count_jsonb(spec["field"]) if spec["type"] == "jsonb" else _count_text(spec["field"])
+        # Other filters ⇒ card_type + rarity (skip colors itself).
+        extra_w, extra_p = merged_extra((cardt_w, cardt_p), (rarity_w, rarity_p))
+        field = "m." + spec["field"]
+        rows = db.query(f"""
+            SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
+              FROM raw_cards rc
+              JOIN scrydex_price_cache pc
+                ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
+              JOIN scrydex_card_meta m
+                ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+              JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
+             WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+                   {extra_w}
+             GROUP BY elem
+        """, (sx_game, game, *extra_p))
+        counts = {r["k"]: int(r["n"]) for r in rows}
+
+        # MTG: a colorless card has color_identity=[] and never shows up in
+        # the lateral elements-of-array unfold above. Count it separately so
+        # the "C" chip reflects reality.
+        if game == "magic":
+            row = db.query_one(f"""
+                SELECT COUNT(DISTINCT rc.tcgplayer_id) AS n
+                  FROM raw_cards rc
+                  JOIN scrydex_price_cache pc
+                    ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
+                  JOIN scrydex_card_meta m
+                    ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                 WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+                   AND jsonb_array_length({field}) = 0
+                       {extra_w}
+            """, (sx_game, game, *extra_p))
+            counts["C"] = int((row or {}).get("n") or 0)
+
         labels = spec.get("labels") or {}
         out["filters"]["colors"] = {
             "label":   spec["label"],
@@ -738,10 +1265,39 @@ def filter_meta():
             ],
         }
 
-    # Card type
+    # ── Card type facet ─────────────────────────────────────────────────────
     if "card_type" in schema:
         spec = schema["card_type"]
-        counts = _count_jsonb(spec["field"]) if spec["type"] == "jsonb" else _count_text(spec["field"])
+        # Other filters ⇒ colors + rarity (skip card_type itself).
+        extra_w, extra_p = merged_extra((color_w, color_p), (rarity_w, rarity_p))
+        field = "m." + spec["field"]
+        if spec["type"] == "jsonb":
+            rows = db.query(f"""
+                SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
+                  FROM raw_cards rc
+                  JOIN scrydex_price_cache pc
+                    ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
+                  JOIN scrydex_card_meta m
+                    ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                  JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
+                 WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+                       {extra_w}
+                 GROUP BY elem
+            """, (sx_game, game, *extra_p))
+        else:
+            rows = db.query(f"""
+                SELECT {field} AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
+                  FROM raw_cards rc
+                  JOIN scrydex_price_cache pc
+                    ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
+                  JOIN scrydex_card_meta m
+                    ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                 WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+                   AND {field} IS NOT NULL
+                       {extra_w}
+                 GROUP BY {field}
+            """, (sx_game, game, *extra_p))
+        counts = {r["k"]: int(r["n"]) for r in rows}
         out["filters"]["card_type"] = {
             "label":   spec["label"],
             "options": [
@@ -750,19 +1306,36 @@ def filter_meta():
             ],
         }
 
-    # Rarity — pulled live from raw_cards (varies per game and changes as new
-    # rarities ship). Hard-coding it would break when Scrydex adds a new label.
-    rarity_rows = db.query("""
-        SELECT rarity, COUNT(*) AS n FROM raw_cards
-        WHERE state='STORED' AND current_hold_id IS NULL AND game = %s
-          AND rarity IS NOT NULL AND rarity <> ''
-        GROUP BY rarity
-        ORDER BY n DESC
-    """, (game,))
+    # ── Rarity facet (lives on raw_cards directly, no meta join needed for
+    # the rarity column itself — but we may still need meta JOIN if colors
+    # or card_type filters are active). ─────────────────────────────────────
+    extra_w, extra_p = merged_extra((color_w, color_p), (cardt_w, cardt_p))
+    if extra_w:
+        rarity_rows = db.query(f"""
+            SELECT rc.rarity AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
+              FROM raw_cards rc
+              JOIN scrydex_price_cache pc
+                ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
+              JOIN scrydex_card_meta m
+                ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+             WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+               AND rc.rarity IS NOT NULL AND rc.rarity <> ''
+                   {extra_w}
+             GROUP BY rc.rarity
+             ORDER BY n DESC
+        """, (sx_game, game, *extra_p))
+    else:
+        rarity_rows = db.query("""
+            SELECT rarity AS k, COUNT(*) AS n FROM raw_cards
+             WHERE state='STORED' AND current_hold_id IS NULL AND game = %s
+               AND rarity IS NOT NULL AND rarity <> ''
+             GROUP BY rarity
+             ORDER BY n DESC
+        """, (game,))
     out["filters"]["rarity"] = {
         "label":   "Rarity",
         "options": [
-            {"value": r["rarity"], "label": r["rarity"], "qty": int(r["n"])}
+            {"value": r["k"], "label": r["k"], "qty": int(r["n"])}
             for r in rarity_rows
         ],
     }
@@ -925,20 +1498,24 @@ def card_detail():
 @app.route("/api/hold", methods=["POST"])
 def create_hold():
     """
-    Submit a hold request.
+    Submit a hold request. Supports mixed raw / sealed / slab items in one
+    cart for in-store guests; sealed/slab items go straight into hold_items
+    with item_kind set, no raw_cards row.
 
     POST body:
     {
         "customer_name": "Mark",
         "customer_phone": "555-1234",
         "items": [
-            {"card_name": "Charizard ex", "set_name": "...", "condition": "NM", "qty": 2},
-            ...
+            // raw card (default kind):
+            {"kind": "raw", "card_name": "Charizard ex", "set_name": "...",
+             "condition": "NM", "qty": 2, "variant": "", "tcgplayer_id": 12345},
+            // sealed / slab:
+            {"kind": "sealed", "shopify_variant_id": 4242,
+             "sku": "PF-ABC123", "title": "Surging Sparks Booster Box",
+             "qty": 1, "unit_price": 159.99}
         ]
     }
-
-    Resolves which specific barcodes to hold, marks them PULLED state
-    (actually PULLED happens when staff scans — here we just reserve them).
     Returns hold_id + summary.
     """
     data     = request.get_json() or {}
@@ -951,98 +1528,155 @@ def create_hold():
     if not items:
         return jsonify({"error": "No items in hold request"}), 400
 
-    # Validate total quantity
     total_qty = sum(int(i.get("qty", 1)) for i in items)
     if total_qty > MAX_HOLD_ITEMS:
-        return jsonify({"error": f"Maximum {MAX_HOLD_ITEMS} cards per hold (requested {total_qty})"}), 400
+        return jsonify({"error": f"Maximum {MAX_HOLD_ITEMS} items per hold (requested {total_qty})"}), 400
     if total_qty < 1:
-        return jsonify({"error": "Must request at least 1 card"}), 400
+        return jsonify({"error": "Must request at least 1 item"}), 400
 
-    # For each line item, find available STORED cards matching card+set+condition
-    # Lock them by setting current_hold_id
-    assigned = []
-    errors   = []
-
-    # Resolve which cards to hold before opening transaction.
-    # Variant is part of the matching key — same (name,set,cond) can hold both
-    # 1st Ed and Unlimited copies, and a cart line for one must not steal from
-    # the other. Default variants (normal/holofoil/null) fold into '' to match
-    # how /api/browse groups.
-    lines_resolved = []
+    # Sealed/slab restricted to in-store mode
+    allowed = set(_allowed_kinds(g.kiosk_mode))
     for line in items:
-        card_name = line.get("card_name", "")
-        set_name  = line.get("set_name", "")
-        condition = line.get("condition", "NM")
-        variant   = (line.get("variant") or "").strip()
-        tcgplayer_id = line.get("tcgplayer_id")
-        scrydex_id   = (line.get("scrydex_id") or "").strip()
-        qty       = max(1, int(line.get("qty", 1)))
+        kind = (line.get("kind") or "raw").strip().lower()
+        if kind not in ("raw", "sealed", "slab"):
+            return jsonify({"error": f"Unknown item kind: {kind}"}), 400
+        if kind not in allowed:
+            return jsonify({"error": f"{kind} items are not available in {g.kiosk_mode} mode"}), 403
 
-        # Disambiguate same-name-same-set-same-variant cards (e.g. OP14-041
-        # and OP14-112 Boa Hancock both fold to altArt) by tcgplayer_id /
-        # scrydex_id. Without this, a hold for one would steal copies of
-        # the other in created_at order.
-        id_filter = ""
-        id_params: list = []
-        if scrydex_id:
-            id_filter = " AND scrydex_id = %s"
-            id_params.append(scrydex_id)
-        elif tcgplayer_id:
-            id_filter = " AND tcgplayer_id = %s"
-            id_params.append(int(tcgplayer_id))
+    # ── Resolve raw lines (lock raw_cards rows by current_hold_id) ───────────
+    lines_resolved: list[dict] = []
+    errors: list[str] = []
+    assigned: list[dict] = []
 
-        available = db.query(f"""
-            SELECT id, barcode FROM raw_cards
-            WHERE card_name = %s AND set_name = %s
-              AND condition = %s AND state = 'STORED'
-              AND current_hold_id IS NULL
-              AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s
-              {id_filter}
-            ORDER BY created_at ASC
-            LIMIT %s
-        """, (card_name, set_name, condition, variant, *id_params, qty))
+    for line in items:
+        kind = (line.get("kind") or "raw").strip().lower()
+        qty  = max(1, int(line.get("qty", 1)))
 
-        if not available:
-            errors.append(f"No {condition} copies available for {card_name}")
-            continue
-        if len(available) < qty:
-            errors.append(f"Only {len(available)} {condition} {card_name} available (requested {qty})")
+        if kind == "raw":
+            card_name = line.get("card_name", "")
+            set_name  = line.get("set_name", "")
+            condition = line.get("condition", "NM")
+            variant   = (line.get("variant") or "").strip()
+            tcgplayer_id = line.get("tcgplayer_id")
+            scrydex_id   = (line.get("scrydex_id") or "").strip()
 
-        for card in available:
-            lines_resolved.append({
-                "card_name": card_name, "set_name": set_name,
-                "condition": condition, "variant": variant,
-                "card_id": str(card["id"]), "barcode": card["barcode"],
-            })
+            id_filter = ""
+            id_params: list = []
+            if scrydex_id:
+                id_filter = " AND scrydex_id = %s"
+                id_params.append(scrydex_id)
+            elif tcgplayer_id:
+                id_filter = " AND tcgplayer_id = %s"
+                id_params.append(int(tcgplayer_id))
+
+            available = db.query(f"""
+                SELECT id, barcode FROM raw_cards
+                WHERE card_name = %s AND set_name = %s
+                  AND condition = %s AND state = 'STORED'
+                  AND current_hold_id IS NULL
+                  AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s
+                  {id_filter}
+                ORDER BY created_at ASC
+                LIMIT %s
+            """, (card_name, set_name, condition, variant, *id_params, qty))
+
+            if not available:
+                errors.append(f"No {condition} copies available for {card_name}")
+                continue
+            if len(available) < qty:
+                errors.append(f"Only {len(available)} {condition} {card_name} available (requested {qty})")
+
+            for card in available:
+                lines_resolved.append({
+                    "kind": "raw",
+                    "card_name": card_name, "set_name": set_name,
+                    "condition": condition, "variant": variant,
+                    "card_id": str(card["id"]), "barcode": card["barcode"],
+                })
+        else:
+            # sealed / slab
+            variant_id = line.get("shopify_variant_id")
+            sku        = (line.get("sku") or "").strip()
+            title      = (line.get("title") or "").strip()
+            unit_price = line.get("unit_price")
+            if not variant_id or not sku:
+                errors.append(f"{kind} item missing variant_id/sku")
+                continue
+            # Re-verify availability — guard against stale frontend state.
+            avail_row = db.query_one(f"""
+                SELECT ipc.shopify_qty,
+                       COALESCE((SELECT COUNT(*) FROM hold_items hi
+                                 JOIN holds h ON hi.hold_id = h.id
+                                 WHERE hi.shopify_variant_id = ipc.shopify_variant_id
+                                   AND hi.item_kind = %s
+                                   AND hi.status IN ('REQUESTED','PULLED')
+                                   AND COALESCE(h.status,'') NOT IN ('ABANDONED','COMPLETED')
+                                ), 0) AS in_flight,
+                       ipc.title AS cache_title,
+                       ipc.shopify_price AS cache_price
+                FROM inventory_product_cache ipc
+                WHERE ipc.shopify_variant_id = %s
+            """, (kind, int(variant_id)))
+            if not avail_row:
+                errors.append(f"{title or sku} not found in catalog")
+                continue
+            avail = max(0, int(avail_row["shopify_qty"] or 0) - int(avail_row["in_flight"] or 0))
+            if avail < qty:
+                errors.append(f"Only {avail} {title or sku} available (requested {qty})")
+                qty = avail
+                if qty <= 0:
+                    continue
+            # Trust the cache for title + price snapshot if frontend didn't supply them
+            title = title or (avail_row.get("cache_title") or sku)
+            if unit_price is None and avail_row.get("cache_price") is not None:
+                unit_price = float(avail_row["cache_price"])
+            for _ in range(qty):
+                lines_resolved.append({
+                    "kind":      kind,
+                    "variant_id": int(variant_id),
+                    "sku":       sku,
+                    "title":     title,
+                    "unit_price": unit_price,
+                })
 
     if not lines_resolved:
-        return jsonify({"error": "No cards available for any requested items", "details": errors}), 409
+        return jsonify({"error": "No items available for any requested lines", "details": errors}), 409
 
-    # Single transaction: create hold + reserve cards + create hold_items
+    # ── Persist: one transaction creates the hold + all lines ───────────────
     with db.get_conn() as conn:
         conn.autocommit = False
         try:
-            with conn.cursor() as cur:
-                from psycopg2.extras import RealDictCursor
-                cur = conn.cursor(cursor_factory=RealDictCursor)
+            from psycopg2.extras import RealDictCursor
+            cur = conn.cursor(cursor_factory=RealDictCursor)
 
-                cur.execute("""
-                    INSERT INTO holds (customer_name, customer_phone, status, item_count)
-                    VALUES (%s, %s, 'PENDING', %s) RETURNING id
-                """, (name, phone or None, len(lines_resolved)))
-                hold_id = str(cur.fetchone()["id"])
+            cur.execute("""
+                INSERT INTO holds (customer_name, customer_phone, status, item_count)
+                VALUES (%s, %s, 'PENDING', %s) RETURNING id
+            """, (name, phone or None, len(lines_resolved)))
+            hold_id = str(cur.fetchone()["id"])
 
-                for r in lines_resolved:
+            for r in lines_resolved:
+                if r["kind"] == "raw":
                     cur.execute("""
                         UPDATE raw_cards SET current_hold_id = %s WHERE id = %s
                     """, (hold_id, r["card_id"]))
                     cur.execute("""
-                        INSERT INTO hold_items (hold_id, raw_card_id, barcode, status)
-                        VALUES (%s, %s, %s, 'REQUESTED')
+                        INSERT INTO hold_items (hold_id, raw_card_id, barcode, status, item_kind)
+                        VALUES (%s, %s, %s, 'REQUESTED', 'raw')
                     """, (hold_id, r["card_id"], r["barcode"]))
-                    assigned.append({"card_name": r["card_name"], "condition": r["condition"], "barcode": r["barcode"]})
+                    assigned.append({"kind": "raw", "card_name": r["card_name"],
+                                     "condition": r["condition"], "barcode": r["barcode"]})
+                else:
+                    cur.execute("""
+                        INSERT INTO hold_items
+                            (hold_id, raw_card_id, barcode, status, item_kind,
+                             sku, title, shopify_variant_id, unit_price)
+                        VALUES (%s, NULL, %s, 'REQUESTED', %s, %s, %s, %s, %s)
+                    """, (hold_id, r["sku"], r["kind"], r["sku"], r["title"],
+                          r["variant_id"], r["unit_price"]))
+                    assigned.append({"kind": r["kind"], "title": r["title"], "sku": r["sku"]})
 
-                conn.commit()
+            conn.commit()
         except Exception:
             conn.rollback()
             raise
@@ -1057,16 +1691,165 @@ def create_hold():
     })
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Staff scan flow — pulls + returns for in-store hold fulfillment
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _find_hold_item_by_scan(scan: str) -> dict | None:
+    """Resolve a scanned barcode/SKU to its hold_item. The barcode column is
+    populated for both raw (raw_cards.barcode) and sealed/slab (sku), so a
+    single lookup covers both."""
+    scan = (scan or "").strip()
+    if not scan:
+        return None
+    return db.query_one("""
+        SELECT hi.id, hi.hold_id, hi.barcode, hi.sku, hi.title, hi.item_kind,
+               hi.status, hi.raw_card_id, hi.shopify_variant_id, hi.pulled_at,
+               hi.returned_at, h.customer_name, h.status AS hold_status
+        FROM hold_items hi
+        JOIN holds h ON hi.hold_id = h.id
+        WHERE hi.barcode = %s
+          AND COALESCE(h.status, '') NOT IN ('ABANDONED','COMPLETED')
+        ORDER BY hi.created_at DESC
+        LIMIT 1
+    """, (scan,))
+
+
+@app.route("/api/staff/scan-out", methods=["POST"])
+def staff_scan_out():
+    """Mark a REQUESTED hold_item as PULLED. Staff scans the barcode (raw)
+    or printed SKU (sealed/slab) when bringing it to the counter."""
+    err = _require_staff(roles=("owner", "manager", "associate"))
+    if err is not None:
+        return err
+    data = request.get_json() or {}
+    scan = (data.get("scan") or "").strip()
+    item = _find_hold_item_by_scan(scan)
+    if not item:
+        return jsonify({"error": "No active hold matches that scan"}), 404
+    if item["status"] not in ("REQUESTED",):
+        return jsonify({
+            "error": f"Item is already {item['status']}",
+            "current_status": item["status"],
+        }), 409
+    user = (getattr(g, "user", {}) or {}).get("name") or "staff"
+    db.execute(
+        "UPDATE hold_items SET status = 'PULLED', pulled_at = CURRENT_TIMESTAMP "
+        "WHERE id = %s",
+        (item["id"],),
+    )
+    return jsonify({
+        "success": True,
+        "hold_id": str(item["hold_id"]),
+        "item_kind": item["item_kind"],
+        "title": item.get("title") or item.get("barcode"),
+        "pulled_by": user,
+    })
+
+
+@app.route("/api/staff/scan-return", methods=["POST"])
+def staff_scan_return():
+    """Mark a PULLED sealed/slab item as RETURNED. Raw cards don't return
+    via this path — they go through the existing accept/reject hold flow."""
+    err = _require_staff(roles=("owner", "manager", "associate"))
+    if err is not None:
+        return err
+    data = request.get_json() or {}
+    scan = (data.get("scan") or "").strip()
+    item = _find_hold_item_by_scan(scan)
+    if not item:
+        return jsonify({"error": "No active hold matches that scan"}), 404
+    if item["item_kind"] not in ("sealed", "slab"):
+        return jsonify({
+            "error": "Scan-return is for sealed/slab items only — raw cards use the existing reject flow",
+        }), 400
+    if item["status"] != "PULLED":
+        return jsonify({
+            "error": f"Item is {item['status']}, can only return PULLED",
+            "current_status": item["status"],
+        }), 409
+    user = (getattr(g, "user", {}) or {}).get("name") or "staff"
+    db.execute(
+        "UPDATE hold_items SET status = 'RETURNED', returned_at = CURRENT_TIMESTAMP, "
+        "returned_by = %s WHERE id = %s",
+        (user, item["id"]),
+    )
+    return jsonify({
+        "success": True,
+        "hold_id": str(item["hold_id"]),
+        "title": item.get("title") or item.get("sku"),
+        "returned_by": user,
+    })
+
+
+@app.route("/api/staff/pulls")
+def staff_pulls_data():
+    """Active pulls grouped by hold + the recent UNRESOLVED list. Drives
+    the /staff/pulls page."""
+    err = _require_staff(roles=("owner", "manager", "associate"))
+    if err is not None:
+        return err
+    rows = db.query("""
+        SELECT hi.id, hi.hold_id, hi.barcode, hi.sku, hi.title, hi.item_kind,
+               hi.status, hi.created_at, hi.pulled_at, hi.returned_at,
+               hi.unit_price, hi.shopify_order_id,
+               h.customer_name, h.customer_phone, h.created_at AS hold_created_at,
+               h.status AS hold_status
+        FROM hold_items hi
+        JOIN holds h ON hi.hold_id = h.id
+        WHERE hi.status IN ('REQUESTED','PULLED','UNRESOLVED')
+          AND COALESCE(h.status,'') NOT IN ('ABANDONED','COMPLETED')
+        ORDER BY h.created_at DESC, hi.created_at ASC
+    """)
+    holds: dict[str, dict] = {}
+    for r in rows:
+        hid = str(r["hold_id"])
+        if hid not in holds:
+            holds[hid] = {
+                "hold_id":        hid,
+                "customer_name":  r["customer_name"],
+                "customer_phone": r["customer_phone"],
+                "created_at":     r["hold_created_at"].isoformat() if r["hold_created_at"] else None,
+                "items":          [],
+            }
+        holds[hid]["items"].append({
+            "id":          str(r["id"]),
+            "kind":        r["item_kind"],
+            "barcode":     r["barcode"],
+            "sku":         r["sku"],
+            "title":       r["title"] or r["barcode"],
+            "status":      r["status"],
+            "pulled_at":   r["pulled_at"].isoformat() if r["pulled_at"] else None,
+            "returned_at": r["returned_at"].isoformat() if r["returned_at"] else None,
+            "unit_price":  float(r["unit_price"]) if r["unit_price"] is not None else None,
+        })
+    return jsonify({"holds": list(holds.values())})
+
+
+@app.route("/staff/pulls")
+def staff_pulls_page():
+    """Standalone scan UI for staff. Lists active holds and their items, with
+    a global scan input that routes to scan-out (REQUESTED) or scan-return
+    (PULLED sealed/slab) based on current item status."""
+    err = _require_staff(roles=("owner", "manager", "associate"))
+    if err is not None:
+        return err
+    return render_template("staff_pulls.html")
+
+
 @app.route("/api/hold/<hold_id>")
 def get_hold(hold_id):
     hold = db.query_one("SELECT * FROM holds WHERE id = %s", (hold_id,))
     if not hold:
         return jsonify({"error": "Hold not found"}), 404
+    # LEFT JOIN raw_cards because sealed/slab hold_items have raw_card_id IS NULL.
+    # Fall back to hold_items.title/sku for non-raw items.
     items = db.query("""
-        SELECT hi.*, rc.card_name, rc.set_name, rc.condition,
-               rc.current_price, rc.card_number, rc.image_url
+        SELECT hi.*,
+               rc.card_name, rc.set_name, rc.condition,
+               rc.current_price, rc.card_number, rc.image_url AS rc_image_url
         FROM hold_items hi
-        JOIN raw_cards rc ON hi.raw_card_id = rc.id
+        LEFT JOIN raw_cards rc ON hi.raw_card_id = rc.id
         WHERE hi.hold_id = %s
         ORDER BY hi.created_at
     """, (hold_id,))
@@ -1410,13 +2193,11 @@ def webhook_order_paid():
 
     order = request.get_json(silent=True) or {}
     line_items = order.get("line_items", [])
+    shopify_order_id = order.get("id")
 
-    # Find kiosk-raw items by checking product tags
+    # ── 1. Champion raw checkout: match by variant_id (existing path) ────────
     hold_ids = set()
     for item in line_items:
-        # Shopify includes tags as a comma-separated string on the product
-        tags = (item.get("properties") or [])
-        # Also check via product_id against our hold_items
         variant_id = item.get("variant_id")
         if variant_id:
             hold_item = db.query_one("""
@@ -1427,8 +2208,31 @@ def webhook_order_paid():
             if hold_item:
                 hold_ids.add(str(hold_item["hold_id"]))
 
+    # ── 2. In-store sealed/slab POS sale: match by line-item SKU ─────────────
+    # When staff rings up a PULLED sealed/slab item at POS, the Shopify order's
+    # line_item.sku is the same SKU recorded on the hold_item. Mark it SOLD so
+    # UNRESOLVED reconciliation doesn't flag it later. Best-effort — logs only.
+    sealed_slab_skus: list[str] = []
+    for item in line_items:
+        sku = (item.get("sku") or "").strip()
+        if sku:
+            sealed_slab_skus.append(sku)
+    if sealed_slab_skus:
+        try:
+            ph = ",".join(["%s"] * len(sealed_slab_skus))
+            db.execute(f"""
+                UPDATE hold_items
+                SET status = 'SOLD', shopify_order_id = %s
+                WHERE sku IN ({ph})
+                  AND item_kind IN ('sealed','slab')
+                  AND status = 'PULLED'
+                  AND shopify_order_id IS NULL
+            """, (shopify_order_id, *sealed_slab_skus))
+        except Exception as e:
+            logger.warning(f"sealed/slab POS match failed: {e}")
+
     if not hold_ids:
-        return jsonify({"ok": True, "kiosk": False}), 200
+        return jsonify({"ok": True, "kiosk": "sealed_slab_match_attempted"}), 200
 
     # Extract order info for staff fulfillment
     shopify_order_id = order.get("id")
@@ -1529,11 +2333,63 @@ def health():
     return "ok"
 
 
-# ── Background cleanup: expire abandoned Champion holds every 10 min ─────────
+# ── Background cleanup: Champion holds + in-store hold lifecycle ─────────────
+def _expire_unclaimed_instore_requests():
+    """In-store guest REQUESTED items unclaimed after INSTORE_HOLD_REQUEST_EXPIRY_MIN
+    minutes → EXPIRED_UNCLAIMED, release any raw_cards lock so the items return
+    to circulation. Sealed/slab REQUESTED rows just get marked expired (no
+    inventory lock to release)."""
+    cutoff = datetime.utcnow() - timedelta(minutes=INSTORE_HOLD_REQUEST_EXPIRY_MIN)
+    # Release raw_card locks for expiring raw items
+    try:
+        db.execute("""
+            UPDATE raw_cards SET current_hold_id = NULL
+            WHERE current_hold_id IN (
+                SELECT DISTINCT hi.hold_id FROM hold_items hi
+                JOIN holds h ON hi.hold_id = h.id
+                WHERE hi.status = 'REQUESTED' AND hi.created_at < %s
+                  AND COALESCE(h.cohort,'') <> 'champion'
+                  AND COALESCE(h.status,'') NOT IN ('ABANDONED','COMPLETED')
+            )
+            AND id IN (
+                SELECT raw_card_id FROM hold_items hi2
+                WHERE hi2.status = 'REQUESTED' AND hi2.created_at < %s
+                  AND hi2.raw_card_id IS NOT NULL
+            )
+        """, (cutoff, cutoff))
+    except Exception as e:
+        logger.warning(f"Failed releasing expired raw locks: {e}")
+    # Mark hold_items expired
+    db.execute("""
+        UPDATE hold_items SET status = 'EXPIRED_UNCLAIMED'
+        WHERE status = 'REQUESTED' AND created_at < %s
+          AND hold_id IN (
+              SELECT id FROM holds
+              WHERE COALESCE(cohort,'') <> 'champion'
+          )
+    """, (cutoff,))
+
+
+def _flag_unresolved_pulls():
+    """PULLED sealed/slab items with no return AND no matching order after
+    PULLED_UNRESOLVED_AFTER_HOURS → UNRESOLVED. This is the loss-detection
+    signal — surfaced on the staff page in red."""
+    cutoff = datetime.utcnow() - timedelta(hours=PULLED_UNRESOLVED_AFTER_HOURS)
+    db.execute("""
+        UPDATE hold_items SET status = 'UNRESOLVED'
+        WHERE status = 'PULLED'
+          AND item_kind IN ('sealed','slab')
+          AND pulled_at < %s
+          AND returned_at IS NULL
+          AND shopify_order_id IS NULL
+    """, (cutoff,))
+
+
 def _cleanup_loop():
     while True:
         time.sleep(600)
         try:
+            # 1. Champion checkout abandonment (existing)
             cutoff = datetime.utcnow() - timedelta(minutes=CHAMPION_HOLD_MINUTES)
             expired = db.query("""
                 SELECT id FROM holds
@@ -1545,6 +2401,12 @@ def _cleanup_loop():
                 _cleanup_hold(str(hold["id"]))
             if expired:
                 logger.info(f"Background cleanup: expired {len(expired)} abandoned Champion hold(s)")
+
+            # 2. In-store unclaimed requests
+            _expire_unclaimed_instore_requests()
+
+            # 3. Unresolved pulls (loss signal)
+            _flag_unresolved_pulls()
         except Exception as e:
             logger.warning(f"Background cleanup error: {e}")
 

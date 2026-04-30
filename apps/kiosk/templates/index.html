@@ -384,6 +384,24 @@ body.modal-open { overflow: hidden; touch-action: none; }
   background: var(--surface); border-bottom: 1px solid var(--border);
   max-width: 1200px; margin: 0 auto;
 }
+/* Kind tabs (Raw / Sealed / Slabs) — sit above the filter strip. */
+.kind-tabs {
+  display: flex; gap: 4px; padding: 8px 16px 0;
+  max-width: 1200px; margin: 0 auto;
+}
+.kind-tab {
+  flex: 1; min-height: 44px; padding: 0 14px;
+  border: 1px solid var(--border);
+  background: var(--surface); color: var(--dim);
+  font-family: inherit; font-weight: 700; font-size: 0.92rem;
+  border-radius: 10px 10px 0 0; cursor: pointer;
+  border-bottom: 0;
+}
+.kind-tab.on {
+  background: var(--bg); color: var(--accent);
+  border-color: var(--accent); border-bottom-color: var(--bg);
+  margin-bottom: -1px;
+}
 .game-pills {
   display: flex; gap: 8px; overflow-x: auto; flex: 1; padding: 2px 0;
   scrollbar-width: none;
@@ -667,12 +685,20 @@ body.modal-open { overflow: hidden; touch-action: none; }
     </button>
   </div>
   <div class="header-search">
-    <input class="search-input" type="text" id="q" placeholder="Search cards or card #…" oninput="debounce()" autocomplete="off" autocorrect="off">
+    <input class="search-input" type="text" id="q" placeholder="Search…" oninput="debounce()" autocomplete="off" autocorrect="off">
   </div>
 </header>
 
-<!-- Top filter strip: Game pills (always visible) + Filters button -->
-<div class="filter-strip">
+<!-- Kind tabs (Raw / Sealed / Slabs). In Champion mode only Raw renders. -->
+<div class="kind-tabs" id="kind-tabs" style="display:none;">
+  <button class="kind-tab on" data-kind="raw" onclick="setActiveKind('raw')">Raw</button>
+  <button class="kind-tab" data-kind="sealed" onclick="setActiveKind('sealed')">Sealed</button>
+  <button class="kind-tab" data-kind="slab" onclick="setActiveKind('slab')">Slabs</button>
+</div>
+
+<!-- Top filter strip: Game pills (always visible) + Filters button.
+     Only relevant on the Raw tab — hidden when browsing sealed/slabs. -->
+<div class="filter-strip" id="raw-filter-strip">
   <div class="game-pills" id="game-pills"></div>
   <button class="filters-btn" id="filters-btn" onclick="openFilterSheet()">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
@@ -862,6 +888,13 @@ async function gateChampionVerify() {
     errEl.style.display = 'block';
   }
 }
+
+// Mode + active catalog tab. _mode comes from /api/mode (cookie or champion);
+// _activeKind drives whether we render raw, sealed, or slab content. Champions
+// only ever see the Raw tab (server enforces too).
+let _mode = null;             // 'instore' | 'champion' | null
+let _allowedKinds = ['raw'];  // restricted in champion mode, full set in-store
+let _activeKind = 'raw';
 
 // Champion state — persisted in localStorage
 let _champion = null;  // { verified, first_name, customer_gid, email }
@@ -1134,12 +1167,46 @@ function renderGameChips() {
 }
 
 // ── Game-aware advanced filters: color / card_type / rarity ─────────────────
+//
+// Filter-meta is faceted: each group's counts reflect the OTHER currently-
+// selected groups. So if the user picks Black, the card_type counts narrow
+// from "Creature: 26" to "Creature: 4" — but the colors group itself stays
+// stable (its own selection doesn't shrink its own options). Re-fetching on
+// every toggle keeps badges live; we debounce so rapid clicks don't thrash.
 async function loadFilterMetaForDraft() {
   const game = _draft ? _draft.game : _filters.game;
   if (!game) { _filterMeta = null; return; }
+  const p = new URLSearchParams();
+  p.set('game', game);
+  if (_draft) {
+    if (_draft.colors && _draft.colors.size) {
+      p.set('colors', Array.from(_draft.colors).join(','));
+      if (_draft.colorMode === 'exactly') p.set('color_mode', 'exactly');
+    }
+    if (_draft.cardTypes && _draft.cardTypes.size) {
+      p.set('card_type', Array.from(_draft.cardTypes).join(','));
+    }
+    if (_draft.rarities && _draft.rarities.size) {
+      p.set('card_rarity', Array.from(_draft.rarities).join(','));
+    }
+  }
   try {
-    _filterMeta = await get('/api/filter-meta?game=' + encodeURIComponent(game));
+    _filterMeta = await get('/api/filter-meta?' + p.toString());
   } catch(e) { _filterMeta = null; }
+}
+
+// Debounced refresh: fired after any chip toggle so qty badges across the
+// other facets update to reflect the new selection. We re-render the whole
+// filter sheet — it's short, no scroll cost — but only after a 220 ms
+// quiet period so a flurry of toggles produces one network roundtrip.
+let _filterMetaRefreshTimer = null;
+function refreshFacetCounts() {
+  if (_filterMetaRefreshTimer) clearTimeout(_filterMetaRefreshTimer);
+  _filterMetaRefreshTimer = setTimeout(async () => {
+    _filterMetaRefreshTimer = null;
+    await loadFilterMetaForDraft();
+    renderAdvancedFilterSections();
+  }, 220);
 }
 
 function renderAdvancedFilterSections() {
@@ -1183,6 +1250,7 @@ function renderAdvancedFilterSections() {
         const v = el.getAttribute('data-color');
         if (_draft.colors.has(v)) _draft.colors.delete(v); else _draft.colors.add(v);
         el.classList.toggle('on');
+        refreshFacetCounts();
       });
     });
     colorsSec.style.display = '';
@@ -1209,6 +1277,7 @@ function renderAdvancedFilterSections() {
         const v = el.getAttribute('data-cardtype');
         if (_draft.cardTypes.has(v)) _draft.cardTypes.delete(v); else _draft.cardTypes.add(v);
         el.classList.toggle('on');
+        refreshFacetCounts();
       });
     });
     typeSec.style.display = '';
@@ -1231,6 +1300,7 @@ function renderAdvancedFilterSections() {
         const v = el.getAttribute('data-rarity');
         if (_draft.rarities.has(v)) _draft.rarities.delete(v); else _draft.rarities.add(v);
         el.classList.toggle('on');
+        refreshFacetCounts();
       });
     });
     raritySec.style.display = '';
@@ -1245,6 +1315,7 @@ function setSheetColorMode(mode) {
   document.querySelectorAll('#sheet-color-mode .mode-btn').forEach(b => {
     b.classList.toggle('on', b.getAttribute('data-mode') === _draft.colorMode);
   });
+  refreshFacetCounts();
 }
 
 // ── Active filter chips (above results) — removable, plus a clear pill ──────
@@ -1462,28 +1533,189 @@ async function boot() {
   _loadCart();
   _loadChampion();
 
-  // Champions bypass the access gate
-  const championAccess = _champion && _champion.verified;
-  if (!championAccess && !checkAccess()) {
+  // Strip legacy ?key=... param into localStorage so it travels via
+  // X-Kiosk-Key on subsequent requests. Once /activate sets the cookie,
+  // this path is dead — but it stays as a transition fallback.
+  checkAccess();
+
+  // Server is the source of truth: cookie OR legacy key OR champion header
+  // determine our mode. Anonymous → access gate.
+  await loadMode();
+  if (_mode === null) {
     showAccessGate();
     return;
   }
   _hasAccess = true;
 
+  _renderKindTabs();
   updateCartBadge();
   updateChampionUI();
-  // Restore filter state from URL (so a shared link / page refresh keeps
-  // the customer's filter combo). _readUrlState mutates _filters in place.
+
+  // Filter state restoration only matters for Raw — sealed/slabs don't use it.
   _readUrlState();
   await Promise.all([loadGames(), loadSetsForFilters(_filters.era, _filters.game), loadEras()]);
-  // Advanced-filter labels for the active chips strip need filter-meta;
-  // load it once on boot if a game is selected.
   if (_filters.game) {
     try { _filterMeta = await get('/api/filter-meta?game=' + encodeURIComponent(_filters.game)); }
     catch(e) { _filterMeta = null; }
   }
   _refreshFiltersBtn();
   _renderActiveChips();
+  startIdleWatch();
+  doSearch();
+}
+
+// ── Mode + tabs ──────────────────────────────────────────────────────────────
+async function loadMode() {
+  try {
+    const r = await fetch('/api/mode', { headers: _kioskHeaders() });
+    const d = await r.json();
+    _mode = d.mode || null;
+    _allowedKinds = d.show_kinds || ['raw'];
+    if (!_allowedKinds.includes(_activeKind)) {
+      _activeKind = _allowedKinds[0] || 'raw';
+    }
+  } catch (e) {
+    _mode = null;
+    _allowedKinds = ['raw'];
+  }
+}
+
+function _renderKindTabs() {
+  const tabs = document.getElementById('kind-tabs');
+  if (!tabs) return;
+  // Champions only ever see one catalog → no need for a tab strip at all.
+  if (_allowedKinds.length <= 1) {
+    tabs.style.display = 'none';
+    return;
+  }
+  tabs.style.display = 'flex';
+  for (const btn of tabs.querySelectorAll('.kind-tab')) {
+    const kind = btn.getAttribute('data-kind');
+    btn.style.display = _allowedKinds.includes(kind) ? '' : 'none';
+    btn.classList.toggle('on', kind === _activeKind);
+  }
+  // Hide raw-only filter strip when not on Raw tab
+  const fs = document.getElementById('raw-filter-strip');
+  if (fs) fs.style.display = (_activeKind === 'raw') ? '' : 'none';
+}
+
+// ── Idle watchdog (in-store auto-reset between customers) ───────────────────
+const IDLE_WARN_MS  = 90_000;   // first warning at 90s of no activity
+const IDLE_FINAL_MS = 10_000;   // 10s grace after warning before reset
+let _idleLast = Date.now();
+let _idleWarning = null;        // overlay element when shown
+let _idleTimer = null;
+
+function _onActivity() {
+  _idleLast = Date.now();
+  if (_idleWarning) _dismissIdleWarning();
+}
+
+function startIdleWatch() {
+  ['touchstart','pointerdown','keydown','scroll'].forEach(ev =>
+    document.addEventListener(ev, _onActivity, { passive: true }));
+  // Active modals/inputs count as activity too
+  if (_idleTimer) clearInterval(_idleTimer);
+  _idleTimer = setInterval(_idleTick, 1000);
+}
+
+function _idleTick() {
+  const now = Date.now();
+  const idle = now - _idleLast;
+  if (idle >= IDLE_WARN_MS && !_idleWarning) {
+    _showIdleWarning();
+  } else if (idle >= IDLE_WARN_MS + IDLE_FINAL_MS) {
+    _doIdleReset();
+  }
+}
+
+function _showIdleWarning() {
+  if (_idleWarning) return;
+  const el = document.createElement('div');
+  el.id = 'pf-idle-warning';
+  el.style.cssText = `
+    position:fixed; inset:0; z-index:99999;
+    background:rgba(0,0,0,0.7); display:flex;
+    align-items:center; justify-content:center;
+    backdrop-filter: blur(4px);
+  `;
+  el.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--accent);
+                border-radius:14px;padding:30px 36px;max-width:360px;text-align:center;
+                box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+      <div style="font-size:2.4rem;margin-bottom:12px;">⏳</div>
+      <div style="font-size:1.2rem;font-weight:700;margin-bottom:8px;">Still there?</div>
+      <div style="color:var(--dim);margin-bottom:20px;font-size:0.92rem;">
+        Resetting in <span id="idle-countdown">10</span>s…
+      </div>
+      <button class="btn btn-gold" style="width:100%;" onclick="_dismissIdleWarning()">I'm Still Here</button>
+    </div>
+  `;
+  document.body.appendChild(el);
+  _idleWarning = el;
+  // Live countdown
+  let n = Math.ceil(IDLE_FINAL_MS / 1000);
+  const cd = el.querySelector('#idle-countdown');
+  const t = setInterval(() => {
+    if (!_idleWarning) { clearInterval(t); return; }
+    n--;
+    if (cd) cd.textContent = String(Math.max(0, n));
+    if (n <= 0) clearInterval(t);
+  }, 1000);
+}
+
+function _dismissIdleWarning() {
+  if (_idleWarning) {
+    _idleWarning.remove();
+    _idleWarning = null;
+  }
+  _idleLast = Date.now();
+}
+
+function _doIdleReset() {
+  _dismissIdleWarning();
+  // Clear customer-level state but KEEP the device cookie / legacy key so
+  // the iPad stays unlocked as in-store
+  _cart = [];
+  _saveCart();
+  updateCartBadge();
+  // Drop champion identity so the next walk-up customer starts fresh
+  if (_champion) {
+    _champion = null;
+    try { localStorage.removeItem('pf_champion'); } catch(e) {}
+    updateChampionUI();
+  }
+  // Close any open overlays
+  document.body.classList.remove('modal-open');
+  ['cart-overlay','detail-overlay','filter-sheet-overlay','confirm-overlay','lightbox']
+    .forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.remove('active');
+    });
+  // Reset search + filters back to Raw default
+  const q = document.getElementById('q');
+  if (q) q.value = '';
+  if (_allowedKinds.includes('raw') && _activeKind !== 'raw') {
+    setActiveKind('raw');
+  } else {
+    doSearch();
+  }
+  window.scrollTo(0, 0);
+  _idleLast = Date.now();
+}
+
+function setActiveKind(kind) {
+  if (!_allowedKinds.includes(kind)) return;
+  if (_activeKind === kind) return;
+  _activeKind = kind;
+  // Reset paging + clear search input to avoid carrying a raw query into sealed
+  _page = 1;
+  const qInput = document.getElementById('q');
+  if (qInput) qInput.value = '';
+  // Hide any Raw-only filter chips display
+  const ac = document.getElementById('active-chips');
+  if (ac) ac.style.display = (kind === 'raw') ? '' : 'none';
+  _renderKindTabs();
   doSearch();
 }
 
@@ -1503,6 +1735,11 @@ function debounce() {
 
 async function doSearch(page) {
   _page = page || 1;
+  // Dispatch by active tab — Raw uses the existing /api/browse, sealed/slabs
+  // use the simpler /api/products endpoint that reads inventory_product_cache.
+  if (_activeKind === 'sealed' || _activeKind === 'slab') {
+    return doSearchProducts();
+  }
   const q = document.getElementById('q').value.trim();
   const conds = [..._filters.conds].join(',');
   const params = new URLSearchParams({
@@ -1589,6 +1826,128 @@ function renderGrid(cards) {
       </div>
     </div>`;
   }).join('');
+}
+
+// ── Sealed / Slabs grid (reads inventory_product_cache via /api/products) ────
+async function doSearchProducts() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '<div class="spinner"></div>';
+  document.getElementById('pagination').innerHTML = '';
+  document.getElementById('results-info').textContent = '';
+
+  const q = (document.getElementById('q')?.value || '').trim();
+  const params = new URLSearchParams({ kind: _activeKind, page: _page, sort: 'name_asc' });
+  if (q) params.set('q', q);
+
+  try {
+    const d = await get('/api/products?' + params);
+    renderProductsGrid(d.products || []);
+    renderPagination(d.page, d.pages, d.total);
+    document.getElementById('results-info').textContent =
+      d.total ? `${d.total} ${_activeKind === 'slab' ? 'slab' : 'sealed product'}${d.total !== 1 ? 's' : ''} available` : '';
+  } catch (e) {
+    grid.innerHTML = `<div class="empty"><div class="empty-icon">⚠</div><p>${esc(e.message)}</p></div>`;
+  }
+}
+
+function renderProductsGrid(products) {
+  const grid = document.getElementById('grid');
+  if (!products.length) {
+    const hint = (document.getElementById('q')?.value || '').trim()
+      ? 'No matches. Try a different search.'
+      : `No ${_activeKind === 'slab' ? 'slabs' : 'sealed products'} in stock right now.`;
+    grid.innerHTML = `<div class="empty"><div class="empty-icon">📦</div><p>${esc(hint)}</p></div>`;
+    return;
+  }
+  // Cache so click handlers don't have to re-encode card data into attributes
+  window._productCache = {};
+  grid.innerHTML = products.map((p, idx) => {
+    window._productCache[idx] = p;
+    const price = (p.price !== null && p.price !== undefined)
+      ? `$${Number(p.price).toFixed(2)}`
+      : '';
+    const qtyLabel = `${p.available_qty} in stock`;
+    return `<div class="card" onclick="openProductDetail(window._productCache[${idx}])">
+      <div class="card-img"><div class="no-img">📦</div></div>
+      <div class="card-body">
+        <div class="card-name">${esc(p.title)}</div>
+        <div class="cond-pills"><span class="cond-pill">${esc(qtyLabel)}</span></div>
+        ${price ? `<div class="card-price">${price}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openProductDetail(p) {
+  // Lightweight inline detail — no full overlay, just a confirm-style sheet
+  // that lets the customer pick qty and add to the cart. Sealed/slab UX
+  // intentionally simpler than raw cards.
+  const overlay = document.getElementById('detail-overlay');
+  const panel = document.getElementById('detail-panel');
+  const max = Math.min(p.available_qty || 1, MAX);
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <div class="panel-title">${esc(p.title)}</div>
+      <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeDetailPanel()">✕</button>
+    </div>
+    <div style="margin-bottom:12px;color:var(--dim);">${p.available_qty} in stock${p.price ? ` · $${Number(p.price).toFixed(2)} each` : ''}</div>
+    <div class="form-row">
+      <label class="form-label">Quantity</label>
+      <input class="form-input" id="prod-qty" type="number" inputmode="numeric" min="1" max="${max}" value="1">
+    </div>
+    <div class="btn-row" style="margin-top:12px;">
+      <button class="btn btn-outline" onclick="closeDetailPanel()">Cancel</button>
+      <button class="btn btn-gold" onclick="confirmAddProduct(${p.shopify_variant_id})">Add to Picks</button>
+    </div>
+  `;
+  overlay.classList.add('active');
+  document.body.classList.add('modal-open');
+}
+
+function confirmAddProduct(variantId) {
+  // Resolve product from the cached grid render
+  let p = null;
+  for (const idx in (window._productCache || {})) {
+    if (window._productCache[idx].shopify_variant_id === variantId) {
+      p = window._productCache[idx]; break;
+    }
+  }
+  if (!p) return;
+  const qtyInput = document.getElementById('prod-qty');
+  const qty = Math.max(1, Math.min(p.available_qty || 1, parseInt(qtyInput.value) || 1));
+  if (cartCount() + qty > MAX) {
+    showToast(`Cart limit is ${MAX} items.`);
+    return;
+  }
+  addProductToCart(_activeKind, p, qty);
+  closeDetailPanel();
+  showToast(`Added ${qty}× ${p.title}`);
+}
+
+function addProductToCart(kind, p, qty) {
+  const probe = { kind, shopify_variant_id: p.shopify_variant_id };
+  const existing = _cart.find(c => _sameCartItem(c, probe));
+  if (existing) {
+    existing.qty = Math.min(existing.qty + qty, MAX);
+    existing.avail = p.available_qty;
+  } else {
+    // SKU comes from inventory_product_cache (populated by the daily price-
+    // updater pull). Falls back to a variant-id placeholder only if the
+    // cache hasn't been refreshed since the SKU column was added — staff
+    // scan-out will fail in that case, which is the loud signal we want.
+    _cart.push({
+      kind,
+      shopify_variant_id: p.shopify_variant_id,
+      sku:       p.sku || `variant-${p.shopify_variant_id}`,
+      title:     p.title,
+      qty,
+      price:     p.price,
+      unit_price: p.price,
+      avail:     p.available_qty,
+    });
+  }
+  updateCartBadge();
+  _saveCart();
 }
 
 function renderPagination(page, pages, total) {
@@ -1963,21 +2322,28 @@ document.addEventListener('click', function(e) {
   e.stopPropagation();
   const row = btn.closest('.cart-item');
   if (!row) return;
-  const cardName = row.dataset.cardName;
-  const setName = row.dataset.setName;
-  const cond = row.dataset.condition;
-  const variantKey = row.dataset.variantKey || '';
-  const tcgId = row.dataset.tcgId || '';
-  const sxId  = row.dataset.scrydexId || '';
+  const kind = row.dataset.kind || 'raw';
   const delta = parseInt(btn.dataset.delta);
   const avail = parseInt(row.dataset.avail) || 999;
-  const probe = { card_name: cardName, set_name: setName, condition: cond,
-                  variant_key: variantKey, tcg_id: tcgId, scrydex_id: sxId };
+
+  let probe;
+  if (kind === 'sealed' || kind === 'slab') {
+    probe = { kind, shopify_variant_id: parseInt(row.dataset.variantId) };
+  } else {
+    probe = {
+      kind: 'raw',
+      card_name: row.dataset.cardName, set_name: row.dataset.setName,
+      condition: row.dataset.condition, variant_key: row.dataset.variantKey || '',
+      tcg_id: row.dataset.tcgId || '', scrydex_id: row.dataset.scrydexId || '',
+    };
+  }
   const item = _cart.find(c => _sameCartItem(c, probe));
   if (!item) return;
   const newQty = item.qty + delta;
   if (newQty < 1) {
-    removeFromCart(cardName, setName, cond, variantKey, tcgId, sxId);
+    _cart = _cart.filter(c => !_sameCartItem(c, probe));
+    updateCartBadge();
+    _saveCart();
     renderCart(document.getElementById('cart-panel'));
     return;
   }
@@ -2007,14 +2373,18 @@ document.addEventListener('click', function(e) {
 });
 
 
-// Identity key for a cart line. Two raw_cards with the same name + set +
-// variant fold can still be different products (OP14-041 vs OP14-112 Boa
-// Hancock both share name + set + variant_fold='altArt'); the actual
-// distinguisher is tcgplayer_id (or scrydex_id when there's no TCG ID).
+// Identity key for a cart line. Sealed/slab items key on (kind, variant_id);
+// raw items key on the (name, set, variant, tcg_id) tuple — name+set+variant
+// alone isn't unique because OP14-041 vs OP14-112 Boa Hancock both fold to
+// altArt and the disambiguator is tcgplayer_id / scrydex_id.
 function _cartItemKey(c) {
+  const k = c.kind || 'raw';
+  if (k === 'sealed' || k === 'slab') {
+    return [k, String(c.shopify_variant_id || '')].join('§');
+  }
   const tcg = c.tcg_id || c.tcgplayer_id || '';
   const sx  = c.scrydex_id || '';
-  return [c.card_name||'', c.set_name||'', c.condition||'',
+  return ['raw', c.card_name||'', c.set_name||'', c.condition||'',
           c.variant_key||'', String(tcg), sx].join('§');
 }
 function _sameCartItem(a, b) { return _cartItemKey(a) === _cartItemKey(b); }
@@ -2098,13 +2468,43 @@ function renderCart(panel) {
   }
 
   const items = _cart.map(c => {
+    const kind = c.kind || 'raw';
+    const price = parseFloat(c.price) || 0;
+    const subtotal = price * c.qty;
+    if (kind === 'sealed' || kind === 'slab') {
+      const kindLabel = kind === 'slab' ? 'Slab' : 'Sealed';
+      return `
+      <div class="cart-item"
+           data-kind="${kind}"
+           data-variant-id="${esc(String(c.shopify_variant_id))}"
+           data-avail="${c.avail || c.qty}">
+        <div class="cart-item-info">
+          <div class="cart-item-name">${esc(c.title)}</div>
+          <div class="cart-item-sub">
+            <span class="cond-pill" style="background:rgba(232,197,71,0.18);color:var(--accent);">${kindLabel}</span>
+            · $${price.toFixed(2)} ea · <strong style="color:var(--accent);">$${subtotal.toFixed(2)}</strong>
+          </div>
+        </div>
+        <div class="copy-qty-bar" style="flex-shrink:0;">
+          <button class="qty-btn cart-qty-btn" data-delta="-1">−</button>
+          <div class="qty-val">${c.qty}</div>
+          <button class="qty-btn cart-qty-btn" data-delta="1">+</button>
+        </div>
+      </div>`;
+    }
+    // Raw card line (existing layout)
     const vBadge = c.variant_label ? `<span class="variant-badge" style="margin-left:6px;">${esc(c.variant_label)}</span>` : '';
     return `
-    <div class="cart-item" data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}" data-condition="${c.condition}" data-variant-key="${esc(c.variant_key||'')}" data-tcg-id="${esc(String(c.tcg_id||''))}" data-scrydex-id="${esc(c.scrydex_id||'')}" data-avail="${c.avail || c.qty}">
+    <div class="cart-item"
+         data-kind="raw"
+         data-card-name="${esc(c.card_name)}" data-set-name="${esc(c.set_name)}"
+         data-condition="${c.condition}" data-variant-key="${esc(c.variant_key||'')}"
+         data-tcg-id="${esc(String(c.tcg_id||''))}" data-scrydex-id="${esc(c.scrydex_id||'')}"
+         data-avail="${c.avail || c.qty}">
       ${c.image_url ? `<img src="${esc(c.image_url)}" style="aspect-ratio:2.5/3.5;object-fit:contain;border-radius:4px;">` : ''}
       <div class="cart-item-info">
         <div class="cart-item-name">${esc(c.card_name)}${vBadge}</div>
-        <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> · $${(parseFloat(c.price)||0).toFixed(2)} ea · <strong style="color:var(--accent);">$${((parseFloat(c.price)||0) * c.qty).toFixed(2)}</strong></div>
+        <div class="cart-item-sub"><span class="cond-pill cond-${c.condition}">${c.condition}</span> · $${price.toFixed(2)} ea · <strong style="color:var(--accent);">$${subtotal.toFixed(2)}</strong></div>
       </div>
       <div class="copy-qty-bar" style="flex-shrink:0;">
         <button class="qty-btn cart-qty-btn" data-delta="-1">−</button>
@@ -2195,15 +2595,29 @@ async function submitHold() {
   btn.textContent = 'Submitting…';
   errEl.style.display = 'none';
 
-  const items = _cart.map(c => ({
-    card_name:    c.card_name,
-    set_name:     c.set_name,
-    condition:    c.condition,
-    variant:      c.variant_key || '',
-    tcgplayer_id: c.tcg_id || null,
-    scrydex_id:   c.scrydex_id || null,
-    qty:          c.qty,
-  }));
+  const items = _cart.map(c => {
+    const kind = c.kind || 'raw';
+    if (kind === 'sealed' || kind === 'slab') {
+      return {
+        kind,
+        shopify_variant_id: c.shopify_variant_id,
+        sku:                c.sku,
+        title:              c.title,
+        unit_price:         c.unit_price ?? c.price ?? null,
+        qty:                c.qty,
+      };
+    }
+    return {
+      kind:        'raw',
+      card_name:   c.card_name,
+      set_name:    c.set_name,
+      condition:   c.condition,
+      variant:     c.variant_key || '',
+      tcgplayer_id: c.tcg_id || null,
+      scrydex_id:   c.scrydex_id || null,
+      qty:          c.qty,
+    };
+  });
 
   try {
     const d = await post('/api/hold', { customer_name: name, customer_phone: phone, items });
