@@ -1860,6 +1860,63 @@ def editor_search():
     })
 
 
+@app.route("/api/editor/lookup-barcode")
+def editor_lookup_barcode():
+    """Resolve a barcode scan straight to the editor-card shape so the
+    editor's scan-to-edit input can open the detail modal in one round
+    trip. 404 if the barcode isn't in raw_cards at all."""
+    barcode = (request.args.get("barcode") or "").strip()
+    if not barcode:
+        return jsonify({"error": "No barcode provided"}), 400
+
+    row = db.query_one("""
+        SELECT card_name, set_name, tcgplayer_id, scrydex_id,
+               variant AS variant_raw,
+               CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
+                    THEN '' ELSE variant END AS variant_key,
+               image_url
+        FROM raw_cards
+        WHERE barcode = %s
+        LIMIT 1
+    """, (barcode,))
+    if not row:
+        return jsonify({"error": "No card with that barcode"}), 404
+
+    # Image fallback to scrydex cache (matches editor_search behaviour).
+    image_url = row["image_url"]
+    sid = row["scrydex_id"]
+    tcg = row["tcgplayer_id"]
+    if not image_url and (sid or tcg):
+        if sid:
+            sx = db.query_one("""
+                SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+                FROM scrydex_price_cache WHERE scrydex_id = %s
+            """, (sid,))
+        else:
+            sx = db.query_one("""
+                SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+                FROM scrydex_price_cache WHERE tcgplayer_id = %s
+            """, (tcg,))
+        if sx:
+            image_url = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
+
+    variant_raw   = (row.get("variant_raw") or "").strip()
+    variant_label = variant_raw if variant_raw and variant_raw.lower() not in ("normal", "holofoil") else None
+
+    return jsonify({
+        "card": {
+            "card_name":     row["card_name"],
+            "set_name":      row["set_name"],
+            "tcgplayer_id":  row["tcgplayer_id"],
+            "scrydex_id":    row["scrydex_id"],
+            "variant_key":   row["variant_key"] or "",
+            "variant_label": variant_label,
+            "image_url":     image_url,
+        },
+        "barcode": barcode,
+    })
+
+
 @app.route("/api/editor/copies")
 def editor_copies():
     """Individual raw_cards copies for a (name, set, variant_key) tile.

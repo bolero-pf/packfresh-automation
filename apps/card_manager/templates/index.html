@@ -459,12 +459,19 @@
     <!-- Card Editor -->
     <div class="view" id="view-editor">
       <div class="page-title">Card Editor</div>
-      <div class="page-sub">Search any raw card in stock and repair its identity, condition, variant, or price.</div>
+      <div class="page-sub">Search any raw card in stock and repair its identity, condition, variant, or price. Scan a barcode to jump straight to that card's edit panel.</div>
+      <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:var(--surface);border:1.5px dashed var(--accent);border-radius:10px;margin-bottom:12px;">
+        <span style="font-size:1.4rem;">🔍</span>
+        <input id="editor-scan"
+               placeholder="Scan a card's barcode to load its editor…"
+               autocomplete="off"
+               style="flex:1;padding:8px 12px;background:var(--surface-2);border:1.5px solid var(--border);border-radius:8px;color:var(--text);font-size:0.95rem;font-family:var(--mono);">
+      </div>
       <div class="editor-search">
-        <input id="editor-q" placeholder="Search by name, set, card #, or barcode…" autocomplete="off">
+        <input id="editor-q" placeholder="…or search by name, set, card #" autocomplete="off">
       </div>
       <div id="editor-results">
-        <div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:40px;">Type to search.</div>
+        <div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:40px;">Type to search or scan a barcode above.</div>
       </div>
       <div id="editor-pagination" style="display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap;"></div>
     </div>
@@ -518,7 +525,7 @@ function showView(name) {
   if (name === 'holds')    loadHolds();
   if (name === 'returns')  loadReturns();
   if (name === 'missing')  loadMissing();
-  if (name === 'editor')   document.getElementById('editor-q').focus();
+  if (name === 'editor')   document.getElementById('editor-scan').focus();
   if (name === 'display')  loadDisplay();
   if (name === 'binders')  loadBinders();
   if (name === 'sell')     { renderSell(); refreshActiveListings(); }
@@ -1107,6 +1114,29 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       _relinkSearchTimer = setTimeout(() => runRelinkSearch(q), 250);
+    });
+  }
+  // Editor barcode-scan input — scanner sends Enter at end of scan.
+  const scanInput = document.getElementById('editor-scan');
+  if (scanInput) {
+    scanInput.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const bc = scanInput.value.trim();
+      if (!bc) return;
+      scanInput.value = '';
+      try {
+        const d = await get('/api/editor/lookup-barcode?barcode=' + encodeURIComponent(bc));
+        // Stash the card under a one-shot cache key and open the detail.
+        // We don't run the full grid render; the modal is the work surface.
+        _editorCardCache['__scan__'] = d.card;
+        openEditorDetail('__scan__');
+      } catch(err) {
+        await pfBlock('No card with that barcode',
+                      'Scanned barcode "' + bc + '" — nothing in raw_cards matches. Check the label or try the search.',
+                      { error: true });
+        try { scanInput.focus(); } catch(_) {}
+      }
     });
   }
 });
