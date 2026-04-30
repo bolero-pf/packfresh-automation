@@ -916,7 +916,7 @@ def raw_run_apply_group():
     try:
         shared_db.execute(
             "UPDATE raw_cards SET current_price = %s, last_price_update = NOW() "
-            "WHERE id = ANY(%s)",
+            "WHERE id = ANY(%s::uuid[])",
             (target, raw_card_ids),
         )
         shared_db.execute("""
