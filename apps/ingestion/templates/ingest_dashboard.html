@@ -462,6 +462,65 @@ let _currentSessionId = null;
 
 // themedConfirm is now provided by shared pf_ui.js
 
+// ═══════════════════════════════════════════════════════════════════
+// OFFER PERCENTAGE DISPLAY HELPERS
+// ═══════════════════════════════════════════════════════════════════
+// Sessions now track separate cash + credit offer percentages plus which
+// type the customer accepted. Legacy rows have only `offer_percentage` set
+// and `cash_percentage`/`credit_percentage`/`accepted_offer_type` may be
+// NULL — we fall back to whatever single value exists without crashing.
+
+function _fmtPct(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = parseFloat(v);
+    if (!isFinite(n)) return null;
+    // Stored as e.g. 65.00 → "65%". Round to nearest int unless fractional.
+    return (n % 1 === 0) ? `${n.toFixed(0)}%` : `${n.toFixed(1)}%`;
+}
+
+// Compact "Cash 65% · Credit 75% · Accepted: Credit" for the session header.
+// Returns '' when no data is available so callers can drop it cleanly.
+function _renderOfferPctDetail(s) {
+    if (!s) return '';
+    const cash    = _fmtPct(s.cash_percentage);
+    const credit  = _fmtPct(s.credit_percentage);
+    const legacy  = _fmtPct(s.offer_percentage);
+    const acc     = (s.accepted_offer_type || '').toLowerCase();
+    const parts = [];
+    if (cash)   parts.push(`Cash ${cash}`);
+    if (credit) parts.push(`Credit ${credit}`);
+    // Legacy fallback: only `offer_percentage` is set (pre-split sessions).
+    if (!parts.length && legacy) parts.push(`Offer ${legacy}`);
+    if (!parts.length) return '';
+    let acceptedHtml = '';
+    if (acc === 'cash' || acc === 'credit') {
+        const label = acc.charAt(0).toUpperCase() + acc.slice(1);
+        acceptedHtml = ` · <strong style="color:var(--accent);">Accepted: ${label}</strong>`;
+    }
+    return parts.join(' · ') + acceptedHtml;
+}
+
+// Single-token version for dense rows (queue cards, completed table). e.g.
+// "65% / 75% (Credit)" — readable without taking three lines.
+function _renderOfferPctCompact(s) {
+    if (!s) return '';
+    const cash    = _fmtPct(s.cash_percentage);
+    const credit  = _fmtPct(s.credit_percentage);
+    const legacy  = _fmtPct(s.offer_percentage);
+    const acc     = (s.accepted_offer_type || '').toLowerCase();
+    let core;
+    if (cash && credit) core = `${cash} / ${credit}`;
+    else if (cash)      core = cash;
+    else if (credit)    core = credit;
+    else if (legacy)    core = legacy;
+    else                return '';
+    if (acc === 'cash' || acc === 'credit') {
+        const label = acc.charAt(0).toUpperCase() + acc.slice(1);
+        return `${core} <span style="color:var(--accent);">(${label})</span>`;
+    }
+    return core;
+}
+
 function themedPrompt(title, msg, defaultVal = '', inputType = 'number') {
     return new Promise(resolve => {
         const overlay = document.getElementById('prompt-overlay');
@@ -551,6 +610,7 @@ async function loadSessions() {
                 : status === 'breakdown_complete' ? 'Ready to Push'
                 : '📦 Partial';
             const date = new Date(s.created_at).toLocaleDateString();
+            const pctCompact = _renderOfferPctCompact(s);
             return `<div class="session-row" onclick="viewSession('${s.id}')">
                 <div>
                     <div class="name">${s.customer_name || 'Unknown'}</div>
@@ -561,7 +621,10 @@ async function loadSessions() {
                     <div style="font-weight:600;">${s.item_count || 0} items</div>
                     <div class="meta">${s.total_qty || 0} units</div>
                 </div>
-                <div style="font-weight:700; font-size:1.1rem;">$${(s.total_offer_amount || 0).toFixed(2)}</div>
+                <div style="text-align:right;">
+                    <div style="font-weight:700; font-size:1.1rem;">$${(s.total_offer_amount || 0).toFixed(2)}</div>
+                    ${pctCompact ? `<div class="meta" style="font-size:0.72rem;">${pctCompact}</div>` : ''}
+                </div>
             </div>`;
         }).join('');
     } catch(err) {
@@ -595,11 +658,12 @@ async function loadCompletedSessions() {
             </tr></thead>
             <tbody>${sessions.map(s => {
                 const ingestedDate = s.ingested_at ? new Date(s.ingested_at).toLocaleDateString() : '—';
+                const pctCompact = _renderOfferPctCompact(s);
                 return `<tr>
                     <td style="font-weight:600;">${s.customer_name || 'Unknown'}</td>
                     <td style="color:var(--text-dim);">${s.session_type || 'sealed'}</td>
                     <td style="text-align:center;">${s.item_count || 0} <small style="color:var(--text-dim);">(${s.total_qty || 0} units)</small></td>
-                    <td style="text-align:center; font-weight:600;">$${(s.total_offer_amount || 0).toFixed(2)}</td>
+                    <td style="text-align:center; font-weight:600;">$${(s.total_offer_amount || 0).toFixed(2)}${pctCompact ? `<br><small style="color:var(--text-dim); font-weight:400;">${pctCompact}</small>` : ''}</td>
                     <td style="text-align:center; color:var(--text-dim);">${ingestedDate}</td>
                     <td><button class="btn btn-secondary btn-sm" style="font-size:0.75rem;" onclick="viewSession('${s.id}')">View</button></td>
                 </tr>`;
@@ -800,6 +864,7 @@ async function viewSession(sessionId, _preserveScroll) {
             ingested: { cls: 'badge-green', label: 'Ingested' },
         }[s.status] || { cls: 'badge-dim', label: s.status };
 
+        const pctDetail = _renderOfferPctDetail(s);
         let html = `
             <div class="card">
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
@@ -824,6 +889,7 @@ async function viewSession(sessionId, _preserveScroll) {
                         <div class="stat-value">$${(s.total_market_value || 0).toFixed(2)}</div>
                     </div>
                 </div>
+                ${pctDetail ? `<div style="margin-top:8px; font-size:0.85rem; color:var(--text-dim);">${pctDetail}</div>` : ''}
             </div>
 
             <div id="offer-adjustment-card"></div>
@@ -1626,10 +1692,12 @@ function _renderBreakdownContent(data) {
     const sorted = _sortItems(topLevel);
     const groups = _groupItems(sorted);
 
+    const _bdPct = _renderOfferPctCompact(s);
     let html = `<div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
             <div style="display:flex; align-items:center; gap:10px;">
                 <h2 style="margin:0;">Breakdown Decisions</h2>
+                ${_bdPct ? `<span style="font-size:0.78rem; color:var(--text-dim);">${_bdPct}</span>` : ''}
             </div>
             <span style="color:var(--text-dim); font-size:0.82rem;">Break down what you want, skip the rest</span>
         </div>
