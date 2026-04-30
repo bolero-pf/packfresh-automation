@@ -547,6 +547,82 @@ body.modal-open { overflow: hidden; touch-action: none; }
 }
 .sheet-apply:disabled { opacity: 0.55; }
 
+/* Segmented Any/Exactly toggle for MTG/OP color identity */
+.mode-toggle {
+  display: inline-flex; align-items: stretch;
+  border: 1.5px solid rgba(240,240,248,0.28); border-radius: 16px;
+  background: rgba(240,240,248,0.04);
+  overflow: hidden; font-family: var(--sans); font-size: 0.78rem;
+}
+.mode-toggle .mode-btn {
+  padding: 4px 12px; min-height: 28px;
+  background: transparent; color: var(--text); border: none;
+  cursor: pointer; font-weight: 600; letter-spacing: 0.02em;
+  transition: background 0.12s, color 0.12s;
+}
+.mode-toggle .mode-btn.on {
+  background: var(--accent); color: #0a0a0f;
+}
+.mode-toggle .mode-btn + .mode-btn { border-left: 1.5px solid rgba(240,240,248,0.18); }
+.mode-toggle .mode-btn.on + .mode-btn,
+.mode-toggle .mode-btn:has(+ .mode-btn.on) { border-left-color: transparent; }
+
+/* MTG color chips — colored pip on the chip when on */
+.chip-color {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.chip-color .pip {
+  width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+  border: 1px solid rgba(0,0,0,0.25);
+}
+.pip-W  { background: #f8f3d4; }
+.pip-U  { background: #2196f3; border-color: rgba(255,255,255,0.4); }
+.pip-B  { background: #2a2a2a; border-color: rgba(255,255,255,0.4); }
+.pip-R  { background: #e53935; border-color: rgba(255,255,255,0.4); }
+.pip-G  { background: #43a047; border-color: rgba(255,255,255,0.4); }
+.pip-C  { background: linear-gradient(135deg, #cccccc 0%, #999999 100%); }
+.pip-Red    { background: #e53935; }
+.pip-Green  { background: #43a047; }
+.pip-Blue   { background: #2196f3; }
+.pip-Purple { background: #8e24aa; }
+.pip-Black  { background: #2a2a2a; border-color: rgba(255,255,255,0.4); }
+.pip-Yellow { background: #fdd835; border-color: rgba(0,0,0,0.35); }
+
+/* Selected-filter chips strip above results */
+.active-chips {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-bottom: 14px; min-height: 0;
+}
+.active-chips:empty { display: none; }
+.active-chips .ac-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px 4px 12px; border-radius: 14px;
+  background: rgba(232,197,71,0.14);
+  border: 1px solid rgba(232,197,71,0.45);
+  color: var(--accent); font-size: 0.78rem; font-weight: 600;
+}
+.active-chips .ac-chip .ac-x {
+  cursor: pointer; font-weight: 700;
+  width: 18px; height: 18px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(232,197,71,0.25);
+}
+.active-chips .ac-chip .ac-x:active { background: rgba(232,197,71,0.45); }
+.active-chips .ac-clear {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px; border-radius: 14px; cursor: pointer;
+  background: transparent; border: 1px solid rgba(248,113,113,0.5);
+  color: var(--red); font-size: 0.76rem; font-weight: 600;
+}
+
+/* Tablet: more breathing room */
+@media (min-width: 768px) {
+  .active-chips { gap: 8px; margin-bottom: 18px; }
+  .active-chips .ac-chip { font-size: 0.85rem; padding: 5px 12px 5px 14px; }
+  .mode-toggle { font-size: 0.85rem; }
+  .mode-toggle .mode-btn { padding: 6px 14px; min-height: 32px; }
+}
+
 /* Empty / loading */
 .empty { text-align: center; padding: 80px 20px; color: var(--dim); }
 .empty-icon { font-size: 3rem; opacity: 0.2; margin-bottom: 12px; }
@@ -618,6 +694,27 @@ body.modal-open { overflow: hidden; touch-action: none; }
         <div class="sheet-section-title">Game</div>
         <div class="chip-row" id="sheet-games"></div>
       </div>
+
+      <!-- ── Game-specific advanced filters (color / type / rarity) ── -->
+      <!-- Each section is conditionally shown based on the selected game's schema -->
+      <div class="sheet-section" id="sheet-colors-section" style="display:none;">
+        <div class="sheet-section-title" id="sheet-colors-title" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <span id="sheet-colors-label">Color</span>
+          <span class="mode-toggle" id="sheet-color-mode" style="display:none;text-transform:none;letter-spacing:0;font-weight:600;">
+            <button type="button" class="mode-btn on" data-mode="any" onclick="setSheetColorMode('any')">Any</button><button type="button" class="mode-btn" data-mode="exactly" onclick="setSheetColorMode('exactly')">Exactly</button>
+          </span>
+        </div>
+        <div class="chip-row" id="sheet-colors"></div>
+      </div>
+      <div class="sheet-section" id="sheet-cardtype-section" style="display:none;">
+        <div class="sheet-section-title" id="sheet-cardtype-label">Card type</div>
+        <div class="chip-row" id="sheet-cardtypes"></div>
+      </div>
+      <div class="sheet-section" id="sheet-rarity-section" style="display:none;">
+        <div class="sheet-section-title">Rarity</div>
+        <div class="chip-row" id="sheet-rarities"></div>
+      </div>
+
       <div class="sheet-section" id="sheet-era-section" style="display:none;">
         <div class="sheet-section-title">Era (Pokémon)</div>
         <div class="chip-row" id="sheet-eras"></div>
@@ -674,6 +771,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
 </div>
 
 <div class="main">
+  <div class="active-chips" id="active-chips"></div>
   <div class="results-info" id="results-info"></div>
   <div id="grid" class="grid"></div>
   <div id="pagination" class="pagination"></div>
@@ -702,8 +800,11 @@ function checkAccess() {
   const urlKey = params.get('key');
   if (urlKey && urlKey === KIOSK_ACCESS_KEY) {
     localStorage.setItem('pf_kiosk_key', urlKey);
-    // Clean the URL
-    window.history.replaceState({}, '', '/');
+    // Strip only the `key` param — preserve filter state in the rest of
+    // the URL so a shared/bookmarked link still applies its filters.
+    params.delete('key');
+    const rest = params.toString();
+    window.history.replaceState({}, '', rest ? '?' + rest : '/');
     _hasAccess = true;
     return true;
   }
@@ -818,10 +919,16 @@ let _filters = {
   conds: new Set(['NM','LP','MP','HP','DMG']),
   minP: '',
   maxP: '',
+  // Game-aware advanced filters (only meaningful when game !== '')
+  colors:    new Set(),   // MTG: W/U/B/R/G/C — OP: Red/Blue/...
+  colorMode: 'any',       // 'any' or 'exactly' (MTG/OP only)
+  cardTypes: new Set(),   // MTG: Sorcery/Instant/... — Pokemon: Fire/Water/... — OP: Leader/...
+  rarities:  new Set(),   // raw_cards.rarity values (game-specific)
 };
 // Sheet's pending state — committed only when Apply pressed
 let _draft = null;
 let _allSets = [];   // current /api/sets response, for in-sheet search filter
+let _filterMeta = null;  // /api/filter-meta response for current draft.game
 
 function _activeFilterCount() {
   let n = 0;
@@ -832,6 +939,9 @@ function _activeFilterCount() {
   if (_filters.conds.size && _filters.conds.size !== 5) n++;
   if (_filters.minP)   n++;
   if (_filters.maxP)   n++;
+  if (_filters.colors && _filters.colors.size)       n++;
+  if (_filters.cardTypes && _filters.cardTypes.size) n++;
+  if (_filters.rarities && _filters.rarities.size)   n++;
   return n;
 }
 
@@ -867,9 +977,18 @@ async function loadGames() {
         const newGame = el.getAttribute('data-game');
         if (_filters.game === newGame) return;
         _filters.game = newGame;
-        // Switching games invalidates set + era — they're game-scoped
+        // Switching games invalidates set + era — they're game-scoped.
+        // Same for the advanced filters: 'White (W)' on MTG means nothing
+        // on OP, and 'Holo Rare' from Pokemon shouldn't carry over.
         _filters.set = '';
         _filters.era = '';
+        _filters.colors    = new Set();
+        _filters.cardTypes = new Set();
+        _filters.rarities  = new Set();
+        _filters.colorMode = 'any';
+        // Refresh meta cache so the next sheet open / chip-render uses the
+        // correct labels for the new game.
+        _filterMeta = null;
         loadGames();          // re-render pills with new active state
         loadSetsForFilters(); // refresh available sets for this game
         _refreshFiltersBtn();
@@ -892,6 +1011,10 @@ function openFilterSheet() {
     conds: new Set(_filters.conds),
     minP: _filters.minP,
     maxP: _filters.maxP,
+    colors:    new Set(_filters.colors),
+    colorMode: _filters.colorMode || 'any',
+    cardTypes: new Set(_filters.cardTypes),
+    rarities:  new Set(_filters.rarities),
   };
   renderGameChips();
   _refreshSheetEraVisibility();
@@ -911,6 +1034,8 @@ function openFilterSheet() {
   renderEraChips();
   document.getElementById('set-search-input').value = '';
   renderSetList();
+  // Game-aware advanced filters (color/type/rarity) — fetch + render
+  loadFilterMetaForDraft().then(renderAdvancedFilterSections);
 
   document.getElementById('filter-sheet-overlay').classList.add('open');
   document.body.style.overflow = 'hidden';
@@ -928,6 +1053,8 @@ function clearAllFilters() {
     game: '', era: '', set: '', sort: 'name_asc',
     conds: new Set(['NM','LP','MP','HP','DMG']),
     minP: '', maxP: '',
+    colors: new Set(), colorMode: 'any',
+    cardTypes: new Set(), rarities: new Set(),
   };
   document.querySelectorAll('#sheet-conds .chip').forEach(el => el.classList.add('on'));
   document.querySelectorAll('#sheet-sort .chip').forEach(el => {
@@ -941,6 +1068,8 @@ function clearAllFilters() {
     document.getElementById('set-search-input').value = '';
     renderSetList();
   });
+  // Reset advanced sections (game now '', so they hide)
+  loadFilterMetaForDraft().then(renderAdvancedFilterSections);
 }
 
 function applyFilterSheet() {
@@ -953,6 +1082,8 @@ function applyFilterSheet() {
   // Re-render the top-strip game pills so the active state matches
   loadGames();
   _refreshFiltersBtn();
+  _renderActiveChips();
+  _writeUrlState();
   doSearch();
 }
 
@@ -982,6 +1113,12 @@ function renderGameChips() {
       // Switching games invalidates set + era selections — they're game-scoped
       _draft.era = '';
       _draft.set = '';
+      // Same for the advanced filters: 'White (W)' on MTG means nothing on
+      // OP, and 'Holo Rare' from Pokemon shouldn't carry over. Wipe them.
+      _draft.colors    = new Set();
+      _draft.cardTypes = new Set();
+      _draft.rarities  = new Set();
+      _draft.colorMode = 'any';
       renderGameChips();
       _refreshSheetEraVisibility();
       // Refetch sets/eras scoped to the new draft.game
@@ -989,8 +1126,251 @@ function renderGameChips() {
       renderEraChips();
       document.getElementById('set-search-input').value = '';
       renderSetList();
+      // Refetch + render game-aware advanced filter sections
+      await loadFilterMetaForDraft();
+      renderAdvancedFilterSections();
     });
   });
+}
+
+// ── Game-aware advanced filters: color / card_type / rarity ─────────────────
+async function loadFilterMetaForDraft() {
+  const game = _draft ? _draft.game : _filters.game;
+  if (!game) { _filterMeta = null; return; }
+  try {
+    _filterMeta = await get('/api/filter-meta?game=' + encodeURIComponent(game));
+  } catch(e) { _filterMeta = null; }
+}
+
+function renderAdvancedFilterSections() {
+  const colorsSec = document.getElementById('sheet-colors-section');
+  const typeSec   = document.getElementById('sheet-cardtype-section');
+  const raritySec = document.getElementById('sheet-rarity-section');
+  if (!colorsSec || !typeSec || !raritySec) return;
+
+  // Hide everything when no game selected (filters are game-scoped)
+  if (!_draft || !_draft.game || !_filterMeta || !_filterMeta.filters) {
+    colorsSec.style.display = 'none';
+    typeSec.style.display = 'none';
+    raritySec.style.display = 'none';
+    return;
+  }
+
+  const F = _filterMeta.filters || {};
+  const game = _draft.game;
+
+  // Colors
+  if (F.colors) {
+    document.getElementById('sheet-colors-label').textContent = F.colors.label || 'Color';
+    const modes = _filterMeta.color_modes || [];
+    const modeWrap = document.getElementById('sheet-color-mode');
+    modeWrap.style.display = modes.length > 1 ? '' : 'none';
+    // Sync mode toggle UI
+    modeWrap.querySelectorAll('.mode-btn').forEach(b => {
+      b.classList.toggle('on', b.getAttribute('data-mode') === (_draft.colorMode || 'any'));
+    });
+    const wrap = document.getElementById('sheet-colors');
+    wrap.innerHTML = (F.colors.options || []).map(o => {
+      const on = _draft.colors.has(o.value);
+      const cls = 'pip-' + o.value;  // pip-W / pip-Red / etc
+      return `<span class="chip chip-color${on ? ' on' : ''}" data-color="${esc(o.value)}">
+        <span class="pip ${cls}"></span>${esc(o.label)} <span class="qty">${o.qty}</span>
+      </span>`;
+    }).join('');
+    wrap.querySelectorAll('.chip-color').forEach(el => {
+      el.addEventListener('click', () => {
+        if (!_draft) return;
+        const v = el.getAttribute('data-color');
+        if (_draft.colors.has(v)) _draft.colors.delete(v); else _draft.colors.add(v);
+        el.classList.toggle('on');
+      });
+    });
+    colorsSec.style.display = '';
+  } else {
+    colorsSec.style.display = 'none';
+  }
+
+  // Card type / Energy
+  if (F.card_type) {
+    document.getElementById('sheet-cardtype-label').textContent = F.card_type.label || 'Card type';
+    const wrap = document.getElementById('sheet-cardtypes');
+    wrap.innerHTML = (F.card_type.options || []).map(o => {
+      const on = _draft.cardTypes.has(o.value);
+      // Don't show options that have zero in stock — looks broken if you
+      // toggle 'Battle' for MTG and the result is always 0.
+      if (!o.qty) return '';
+      return `<span class="chip${on ? ' on' : ''}" data-cardtype="${esc(o.value)}">
+        ${esc(o.label)} <span class="qty">${o.qty}</span>
+      </span>`;
+    }).join('') || '<div style="color:var(--dim);font-size:0.8rem;">No cards in stock yet for this game.</div>';
+    wrap.querySelectorAll('.chip').forEach(el => {
+      el.addEventListener('click', () => {
+        if (!_draft) return;
+        const v = el.getAttribute('data-cardtype');
+        if (_draft.cardTypes.has(v)) _draft.cardTypes.delete(v); else _draft.cardTypes.add(v);
+        el.classList.toggle('on');
+      });
+    });
+    typeSec.style.display = '';
+  } else {
+    typeSec.style.display = 'none';
+  }
+
+  // Rarity (always shown for the three supported games)
+  if (F.rarity) {
+    const wrap = document.getElementById('sheet-rarities');
+    wrap.innerHTML = (F.rarity.options || []).map(o => {
+      const on = _draft.rarities.has(o.value);
+      return `<span class="chip${on ? ' on' : ''}" data-rarity="${esc(o.value)}">
+        ${esc(o.label)} <span class="qty">${o.qty}</span>
+      </span>`;
+    }).join('') || '<div style="color:var(--dim);font-size:0.8rem;">No rarities in stock.</div>';
+    wrap.querySelectorAll('.chip').forEach(el => {
+      el.addEventListener('click', () => {
+        if (!_draft) return;
+        const v = el.getAttribute('data-rarity');
+        if (_draft.rarities.has(v)) _draft.rarities.delete(v); else _draft.rarities.add(v);
+        el.classList.toggle('on');
+      });
+    });
+    raritySec.style.display = '';
+  } else {
+    raritySec.style.display = 'none';
+  }
+}
+
+function setSheetColorMode(mode) {
+  if (!_draft) return;
+  _draft.colorMode = (mode === 'exactly') ? 'exactly' : 'any';
+  document.querySelectorAll('#sheet-color-mode .mode-btn').forEach(b => {
+    b.classList.toggle('on', b.getAttribute('data-mode') === _draft.colorMode);
+  });
+}
+
+// ── Active filter chips (above results) — removable, plus a clear pill ──────
+function _renderActiveChips() {
+  const wrap = document.getElementById('active-chips');
+  if (!wrap) return;
+  const chips = [];
+  function chip(key, label) {
+    chips.push(`<span class="ac-chip" data-key="${esc(key)}">${esc(label)}<span class="ac-x" title="Remove">✕</span></span>`);
+  }
+  if (_filters.game) {
+    const g = (_gameCache.find(x => x.code === _filters.game) || {});
+    chip('game', g.label || _filters.game);
+  }
+  if (_filters.era) chip('era', _filters.era);
+  if (_filters.set) chip('set', _filters.set);
+  if (_filters.colors && _filters.colors.size) {
+    const mode = (_filters.colorMode === 'exactly') ? 'Exactly' : 'Any';
+    // Reuse the option labels from the cached filter meta when available
+    const labels = (_filterMeta && _filterMeta.filters && _filterMeta.filters.colors)
+      ? Object.fromEntries(_filterMeta.filters.colors.options.map(o => [o.value, o.label]))
+      : {};
+    const list = [..._filters.colors].map(c => labels[c] || c).join(', ');
+    chip('colors', `${mode}: ${list}`);
+  }
+  if (_filters.cardTypes && _filters.cardTypes.size) {
+    chip('cardTypes', [..._filters.cardTypes].join(', '));
+  }
+  if (_filters.rarities && _filters.rarities.size) {
+    chip('rarities', [..._filters.rarities].join(', '));
+  }
+  if (_filters.minP || _filters.maxP) {
+    const lo = _filters.minP ? `$${_filters.minP}` : '$0';
+    const hi = _filters.maxP ? `$${_filters.maxP}` : '∞';
+    chip('price', `${lo} – ${hi}`);
+  }
+  if (_filters.conds && _filters.conds.size && _filters.conds.size !== 5) {
+    chip('conds', [..._filters.conds].join(', '));
+  }
+  if (chips.length) {
+    chips.push('<button type="button" class="ac-clear" onclick="_clearAllActive()">Clear all</button>');
+  }
+  wrap.innerHTML = chips.join('');
+  wrap.querySelectorAll('.ac-chip').forEach(el => {
+    el.querySelector('.ac-x').addEventListener('click', (e) => {
+      e.stopPropagation();
+      _removeActive(el.getAttribute('data-key'));
+    });
+  });
+}
+
+function _removeActive(key) {
+  switch (key) {
+    case 'game':      _filters.game = ''; _filters.era = ''; _filters.set = '';
+                      _filters.colors = new Set(); _filters.cardTypes = new Set();
+                      _filters.rarities = new Set(); break;
+    case 'era':       _filters.era = ''; break;
+    case 'set':       _filters.set = ''; break;
+    case 'colors':    _filters.colors = new Set(); _filters.colorMode = 'any'; break;
+    case 'cardTypes': _filters.cardTypes = new Set(); break;
+    case 'rarities':  _filters.rarities = new Set(); break;
+    case 'price':     _filters.minP = ''; _filters.maxP = ''; break;
+    case 'conds':     _filters.conds = new Set(['NM','LP','MP','HP','DMG']); break;
+  }
+  loadGames();             // re-render top game-pills (in case game cleared)
+  _refreshFiltersBtn();
+  _renderActiveChips();
+  _writeUrlState();
+  doSearch();
+}
+
+function _clearAllActive() {
+  _filters.game = ''; _filters.era = ''; _filters.set = '';
+  _filters.colors = new Set(); _filters.cardTypes = new Set(); _filters.rarities = new Set();
+  _filters.colorMode = 'any';
+  _filters.minP = ''; _filters.maxP = '';
+  _filters.conds = new Set(['NM','LP','MP','HP','DMG']);
+  _filters.sort = 'name_asc';
+  loadGames();
+  _refreshFiltersBtn();
+  _renderActiveChips();
+  _writeUrlState();
+  doSearch();
+}
+
+// ── URL state — bookmark / share-friendly persistence ────────────────────────
+function _writeUrlState() {
+  const p = new URLSearchParams();
+  if (_filters.game)   p.set('game', _filters.game);
+  if (_filters.era)    p.set('era', _filters.era);
+  if (_filters.set)    p.set('set', _filters.set);
+  if (_filters.sort && _filters.sort !== 'name_asc') p.set('sort', _filters.sort);
+  if (_filters.colors && _filters.colors.size) {
+    p.set('colors', [..._filters.colors].join(','));
+    if (_filters.colorMode === 'exactly') p.set('color_mode', 'exactly');
+  }
+  if (_filters.cardTypes && _filters.cardTypes.size) p.set('card_type',   [..._filters.cardTypes].join(','));
+  if (_filters.rarities  && _filters.rarities.size)  p.set('card_rarity', [..._filters.rarities].join(','));
+  if (_filters.minP) p.set('min_price', _filters.minP);
+  if (_filters.maxP) p.set('max_price', _filters.maxP);
+  if (_filters.conds && _filters.conds.size !== 5)   p.set('condition', [..._filters.conds].join(','));
+  const q = (document.getElementById('q')?.value || '').trim();
+  if (q) p.set('q', q);
+  const qs = p.toString();
+  // replaceState (not pushState) — back button shouldn't unwind every chip toggle
+  history.replaceState({}, '', qs ? '?' + qs : window.location.pathname);
+}
+
+function _readUrlState() {
+  const p = new URLSearchParams(window.location.search);
+  if (p.has('game')) _filters.game = p.get('game');
+  if (p.has('era'))  _filters.era  = p.get('era');
+  if (p.has('set'))  _filters.set  = p.get('set');
+  if (p.has('sort')) _filters.sort = p.get('sort');
+  if (p.has('colors')) _filters.colors = new Set(p.get('colors').split(',').filter(Boolean));
+  if (p.get('color_mode') === 'exactly') _filters.colorMode = 'exactly';
+  if (p.has('card_type'))   _filters.cardTypes = new Set(p.get('card_type').split(',').filter(Boolean));
+  if (p.has('card_rarity')) _filters.rarities  = new Set(p.get('card_rarity').split(',').filter(Boolean));
+  if (p.has('min_price'))   _filters.minP = p.get('min_price');
+  if (p.has('max_price'))   _filters.maxP = p.get('max_price');
+  if (p.has('condition'))   _filters.conds = new Set(p.get('condition').split(',').filter(Boolean));
+  if (p.has('q')) {
+    const qInput = document.getElementById('q');
+    if (qInput) qInput.value = p.get('q');
+  }
+  // Don't strip the URL here — boot() does the access-key clean-up later.
 }
 
 function toggleSheetCond(el) {
@@ -1092,8 +1472,18 @@ async function boot() {
 
   updateCartBadge();
   updateChampionUI();
-  await Promise.all([loadGames(), loadSetsForFilters(), loadEras()]);
+  // Restore filter state from URL (so a shared link / page refresh keeps
+  // the customer's filter combo). _readUrlState mutates _filters in place.
+  _readUrlState();
+  await Promise.all([loadGames(), loadSetsForFilters(_filters.era, _filters.game), loadEras()]);
+  // Advanced-filter labels for the active chips strip need filter-meta;
+  // load it once on boot if a game is selected.
+  if (_filters.game) {
+    try { _filterMeta = await get('/api/filter-meta?game=' + encodeURIComponent(_filters.game)); }
+    catch(e) { _filterMeta = null; }
+  }
   _refreshFiltersBtn();
+  _renderActiveChips();
   doSearch();
 }
 
@@ -1123,10 +1513,26 @@ async function doSearch(page) {
   if (_filters.era)  params.set('era', _filters.era);
   if (_filters.minP) params.set('min_price', _filters.minP);
   if (_filters.maxP) params.set('max_price', _filters.maxP);
+  // Game-aware advanced filters — only sent when a game is selected, since
+  // the same value space is meaningless cross-game (MTG 'B' ≠ OP 'Black').
+  if (_filters.game && _filters.colors && _filters.colors.size) {
+    params.set('colors', [..._filters.colors].join(','));
+    if (_filters.colorMode === 'exactly') params.set('color_mode', 'exactly');
+  }
+  if (_filters.game && _filters.cardTypes && _filters.cardTypes.size) {
+    params.set('card_type', [..._filters.cardTypes].join(','));
+  }
+  if (_filters.game && _filters.rarities && _filters.rarities.size) {
+    params.set('card_rarity', [..._filters.rarities].join(','));
+  }
 
   const grid = document.getElementById('grid');
   grid.innerHTML = '<div class="spinner"></div>';
   document.getElementById('pagination').innerHTML = '';
+
+  // Repaint chips + URL on every search so they always match what's loaded
+  _renderActiveChips();
+  _writeUrlState();
 
   try {
     const d = await get('/api/browse?' + params);
@@ -1142,7 +1548,13 @@ async function doSearch(page) {
 function renderGrid(cards) {
   const grid = document.getElementById('grid');
   if (!cards.length) {
-    grid.innerHTML = '<div class="empty"><div class="empty-icon">🃏</div><p>No cards found</p></div>';
+    // Show actionable empty state when filters are active — no point telling
+    // a customer "no cards" when the fix is right there.
+    const hasFilters = _activeFilterCount() > 0 || (document.getElementById('q')?.value || '').trim();
+    const msg = hasFilters
+      ? 'No cards match. Try removing a filter.'
+      : 'No cards found';
+    grid.innerHTML = `<div class="empty"><div class="empty-icon">🃏</div><p>${msg}</p></div>`;
     return;
   }
   // Store card data in a map keyed by index to avoid HTML attribute escaping issues
