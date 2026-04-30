@@ -2540,7 +2540,7 @@ function renderDetail(card, copies, meta) {
         <div class="copy-list" id="copy-list">${condRows}</div>
       </div>
     </div>
-    ${cartTotal >= MAX ? `<div class="warning">You've reached the maximum of ${MAX} cards per request.</div>` : ''}
+    ${cartTotal >= MAX ? `<div class="warning">You've reached the maximum of ${MAX} items per request.</div>` : ''}
     <div class="btn-row" style="margin-top:8px;">
       <button class="btn btn-outline" onclick="closeDetailPanel()">Back to Browse</button>
       <button class="btn btn-gold" id="detail-picks-btn" onclick="closeDetailPanel(); openCart();">View My Picks (${cartTotal})</button>
@@ -2727,7 +2727,7 @@ function removeFromCart(cardName, setName, cond, variantKey, tcgId, scrydexId) {
 }
 
 async function clearCart() {
-  const ok = await themedConfirm('Clear All Picks?', 'This will remove all cards from your selection.');
+  const ok = await themedConfirm('Clear All Picks?', 'This will remove all items from your selection.');
   if (!ok) return;
   _cart = [];
   updateCartBadge();
@@ -2883,7 +2883,7 @@ function renderCart(panel) {
       <div id="submit-error" style="display:none;" class="warning"></div>
       <div class="btn-row" style="margin-top:8px;">
         <button class="btn btn-outline" onclick="closeCartPanel()">Back</button>
-        <button class="btn btn-gold" id="submit-btn" onclick="submitHold()">Request These Cards →</button>
+        <button class="btn btn-gold" id="submit-btn" onclick="submitHold()">Request These Items →</button>
       </div>
     `}
   `;
@@ -2937,7 +2937,7 @@ async function submitHold() {
     _saveCart();
   } catch(e) {
     btn.disabled = false;
-    btn.textContent = 'Request These Cards →';
+    btn.textContent = 'Request These Items →';
     errEl.textContent = e.message || 'Something went wrong. Please ask a staff member.';
     errEl.style.display = 'block';
   }
@@ -2947,7 +2947,7 @@ function showConfirmation(d, name) {
   const panel = document.getElementById('cart-panel');
   const warnings = (d.warnings || []).length > 0
     ? `<div class="warning" style="text-align:left;margin-bottom:16px;">
-        Some cards weren't available: ${d.warnings.join('; ')}
+        Some items weren't available: ${d.warnings.join('; ')}
        </div>` : '';
   panel.innerHTML = `
     <div class="confirm-screen">
@@ -2956,7 +2956,7 @@ function showConfirmation(d, name) {
       <div class="confirm-ref">Ref: ${d.hold_id?.slice(0,8).toUpperCase()}</div>
       ${warnings}
       <div class="confirm-msg">
-        A staff member will retrieve your ${d.assigned} card${d.assigned !== 1 ? 's' : ''} shortly.<br>
+        A staff member will retrieve your ${d.assigned} item${d.assigned !== 1 ? 's' : ''} shortly.<br>
         Please stay nearby — we'll come find you!
       </div>
       <button class="btn btn-gold" onclick="closeCartPanel()">Continue Browsing</button>
