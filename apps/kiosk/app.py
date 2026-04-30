@@ -12,6 +12,7 @@ Max 20 cards per hold.
 """
 
 import os
+import re
 import hmac
 import hashlib
 import base64
@@ -980,6 +981,37 @@ GRADE_TAG_BUCKETS = {
     "8":  ["grade-8"],
 }
 
+# Title fallback for slabs that pre-date the grade-N tag automation.
+# Postgres POSIX (case-insensitive ~*); the trailing alternation rules out
+# "PSA 100", "PSA 10.5", "PSA 9.5", "PSA 95" from matching whole grades.
+GRADE_TITLE_REGEX_PG = {
+    "10": r"\mpsa\s*10($|[^0-9.])",
+    "9":  r"\mpsa\s*9($|[^0-9.])",
+    "8":  r"\mpsa\s*8($|[^0-9.])",
+}
+GRADE_TITLE_REGEX_PY = {
+    k: re.compile(r"\bpsa\s*" + k + r"(?:$|[^0-9.])", re.I)
+    for k in GRADE_TAG_BUCKETS
+}
+
+
+def _add_grade_clause(where: list, params: list, grades: list[str]) -> None:
+    """Match a slab by either the grade-N tag (set on new listings) or a
+    PSA-grade pattern in the title (covers older listings that pre-date
+    auto-tagging). OR-joined per requested grade."""
+    ors = []
+    for g_key in grades:
+        for tag in GRADE_TAG_BUCKETS.get(g_key, []):
+            frag, pat = _csv_tag_clause(tag)
+            ors.append(frag)
+            params.append(pat)
+        title_re = GRADE_TITLE_REGEX_PG.get(g_key)
+        if title_re:
+            ors.append("title ~* %s")
+            params.append(title_re)
+    if ors:
+        where.append("(" + " OR ".join(ors) + ")")
+
 
 def _csv_tag_clause(tag: str) -> tuple[str, str]:
     """Return (where-fragment, like-pattern) matching one CSV tag."""
@@ -1065,7 +1097,7 @@ def list_products():
         grade_csv = (request.args.get("grade") or "").strip().lower()
         grades = [g for g in grade_csv.split(",") if g in GRADE_TAG_BUCKETS]
         if grades:
-            _add_bucket_clause(where, params, grades, GRADE_TAG_BUCKETS)
+            _add_grade_clause(where, params, grades)
 
     # Price range (NUMERIC compare on shopify_price)
     def _opt_price(name: str):
@@ -1219,7 +1251,7 @@ def products_filter_meta():
         if exclude != "era" and sel_eras:
             _add_bucket_clause(where, params, sel_eras, ERA_TAG_BUCKETS)
         if exclude != "grade" and sel_grades:
-            _add_bucket_clause(where, params, sel_grades, GRADE_TAG_BUCKETS)
+            _add_grade_clause(where, params, sel_grades)
         if sel_min is not None:
             where.append("COALESCE(shopify_price, 0) >= %s")
             params.append(sel_min)
@@ -1231,21 +1263,27 @@ def products_filter_meta():
     def _facet_counts(facet_name: str, table: dict[str, list[str]]) -> dict[str, int]:
         """Pull rows that match all OTHER facets, then count per bucket
         in Python. The candidate set is small (<1k) so this is cheap and
-        avoids one round-trip per bucket key."""
+        avoids one round-trip per bucket key. Title is also pulled so the
+        grade facet can fall back to the PSA-N regex for older slabs."""
         where, params = _base_where(facet_name)
         rows = db.query(
-            f"SELECT tags FROM inventory_product_cache WHERE {' AND '.join(where)}",
+            f"SELECT tags, title FROM inventory_product_cache WHERE {' AND '.join(where)}",
             tuple(params),
         )
-        # Pre-compute normalized tag sets per row
-        row_sets: list[str] = []
+        row_sets: list[tuple[str, str]] = []
         for r in rows:
             csv = ("," + (r.get("tags") or "").replace(", ", ",") + ",").lower()
-            row_sets.append(csv)
+            title = r.get("title") or ""
+            row_sets.append((csv, title))
         counts: dict[str, int] = {}
         for key, tags in table.items():
             patterns = [f",{t.lower()}," for t in tags]
-            n = sum(1 for csv in row_sets if any(p in csv for p in patterns))
+            title_re = GRADE_TITLE_REGEX_PY.get(key) if facet_name == "grade" else None
+            if title_re is not None:
+                n = sum(1 for csv, title in row_sets
+                        if any(p in csv for p in patterns) or title_re.search(title))
+            else:
+                n = sum(1 for csv, _t in row_sets if any(p in csv for p in patterns))
             counts[key] = n
         return counts
 
@@ -1483,25 +1521,25 @@ def filter_meta():
         counts: dict[str, int] = {}
 
         if sel_color_mode == "exactly":
-            # Per-chip what-if count: tapping chip C toggles C in/out of the
-            # exact-set, so the count must reflect the new toggled set's
-            # exact match — not the any-mode unfold.
+            # Per-chip count semantics in exactly mode:
+            #   - ON chip  → count of cards matching the CURRENT exact-set
+            #     (matches what the result grid is showing). Tapping it would
+            #     remove the chip, but until then this chip *is* the filter.
+            #   - OFF chip → count if you ADD this color to the exact-set
+            #     (i.e. exactly = current ∪ {v}). Lets you preview multi-color
+            #     exact matches before committing.
+            # The old "symmetric diff = toggle me" math made the only-selected
+            # chip read its own count as the unfiltered total, because
+            # toggling the only chip cleared the color predicate entirely.
             current = set(sel_colors)
             for v in spec["options"]:
-                new_set = (current ^ {v})  # symmetric diff = toggle
-                pred_w, pred_p = colors_predicate(new_set, "exactly")
-                if not new_set:
-                    # Tapping the only-selected chip clears the exact filter.
-                    where_extra = extra_w
-                    where_params = list(extra_p)
-                else:
-                    if not pred_w:
-                        # Should not happen for non-empty set in mtg, but
-                        # guard anyway.
-                        counts[v] = 0
-                        continue
-                    where_extra = f"{extra_w} AND {pred_w}" if extra_w else f" AND {pred_w}"
-                    where_params = list(extra_p) + list(pred_p)
+                pred_set = current if v in current else (current | {v})
+                pred_w, pred_p = colors_predicate(pred_set, "exactly")
+                if not pred_set or not pred_w:
+                    counts[v] = 0
+                    continue
+                where_extra = f"{extra_w} AND {pred_w}" if extra_w else f" AND {pred_w}"
+                where_params = list(extra_p) + list(pred_p)
                 row = db.query_one(f"""
                     SELECT COUNT(DISTINCT rc.tcgplayer_id) AS n
                       FROM raw_cards rc

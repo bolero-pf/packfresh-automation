@@ -439,23 +439,24 @@ body.modal-open { overflow: hidden; touch-action: none; }
   font-size: 0.78rem; font-weight: 700; font-variant-numeric: tabular-nums;
 }
 
-/* Bottom sheet overlay */
+/* Bottom sheet overlay (centers when content is short, fills upward to 90vh
+   when tall — short prod-filter sheets shouldn't get pinned to the bottom). */
 .sheet-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.55);
-  display: none; z-index: 100; align-items: flex-end;
+  display: none; z-index: 100; align-items: center; justify-content: center;
   animation: fadeIn 0.18s ease-out;
 }
 .sheet-overlay.open { display: flex; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
 .sheet {
-  width: 100%; max-width: 760px; margin: 0 auto;
-  background: var(--surface); border-top-left-radius: 18px; border-top-right-radius: 18px;
+  width: 100%; max-width: 760px; margin: auto;
+  background: var(--surface); border-radius: 18px;
   max-height: 90vh; display: flex; flex-direction: column;
   animation: slideUp 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-  box-shadow: 0 -10px 40px rgba(0,0,0,0.5);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.55);
 }
-@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes slideUp { from { transform: translateY(40px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
 .sheet-grip { width: 36px; height: 4px; background: var(--border); border-radius: 2px; margin: 10px auto 0; }
 .sheet-header {
