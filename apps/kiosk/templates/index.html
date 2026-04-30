@@ -711,6 +711,66 @@ body.modal-open { overflow: hidden; touch-action: none; }
   </button>
 </div>
 
+<!-- Sealed / Slabs filter strip — kind-aware filter sheet for products. -->
+<div class="filter-strip" id="prod-filter-strip" style="display:none;">
+  <div style="font-size:0.78rem;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;">
+    <span id="prod-strip-label">Sealed products</span>
+  </div>
+  <button class="filters-btn" id="prod-filters-btn" onclick="openProdFilterSheet()">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+    <span>Filters</span>
+    <span class="badge" id="prod-filters-count" style="display:none;">0</span>
+  </button>
+</div>
+
+<!-- Bottom-sheet filter overlay (sealed/slab) -->
+<div class="sheet-overlay" id="prod-filter-sheet-overlay" onclick="closeProdFilterSheet(event)">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <div class="sheet-grip"></div>
+    <div class="sheet-header">
+      <h3 id="prod-sheet-title">Filters</h3>
+      <button class="clear-link" onclick="clearAllProdFilters()">Clear all</button>
+    </div>
+    <div class="sheet-body">
+      <div class="sheet-section" id="prod-sheet-game-section">
+        <div class="sheet-section-title">Game</div>
+        <div class="chip-row" id="prod-sheet-games"></div>
+      </div>
+      <div class="sheet-section" id="prod-sheet-format-section" style="display:none;">
+        <div class="sheet-section-title">Format</div>
+        <div class="chip-row" id="prod-sheet-formats"></div>
+      </div>
+      <div class="sheet-section" id="prod-sheet-grade-section" style="display:none;">
+        <div class="sheet-section-title">Grade</div>
+        <div class="chip-row" id="prod-sheet-grades"></div>
+      </div>
+      <div class="sheet-section" id="prod-sheet-era-section" style="display:none;">
+        <div class="sheet-section-title">Era</div>
+        <div class="chip-row" id="prod-sheet-eras"></div>
+      </div>
+      <div class="sheet-section">
+        <div class="sheet-section-title">Sort</div>
+        <div class="chip-row" id="prod-sheet-sort">
+          <span class="chip on" data-sort="name_asc" onclick="setProdSheetSort(this)">Name A–Z</span>
+          <span class="chip" data-sort="price_asc" onclick="setProdSheetSort(this)">Price Low–High</span>
+          <span class="chip" data-sort="price_desc" onclick="setProdSheetSort(this)">Price High–Low</span>
+        </div>
+      </div>
+      <div class="sheet-section">
+        <div class="sheet-section-title">Price</div>
+        <div class="price-row">
+          <input class="price-input" id="prod-price-min" type="number" inputmode="numeric" min="0" step="1" placeholder="Min $">
+          <span class="price-dash">—</span>
+          <input class="price-input" id="prod-price-max" type="number" inputmode="numeric" min="0" step="1" placeholder="Max $">
+        </div>
+      </div>
+    </div>
+    <div class="sheet-footer">
+      <button class="sheet-apply" onclick="applyProdFilterSheet()">Apply</button>
+    </div>
+  </div>
+</div>
+
 <!-- Bottom-sheet filter overlay -->
 <div class="sheet-overlay" id="filter-sheet-overlay" onclick="closeFilterSheet(event)">
   <div class="sheet" onclick="event.stopPropagation()">
@@ -1598,9 +1658,14 @@ function _renderKindTabs() {
     btn.style.display = _allowedKinds.includes(kind) ? '' : 'none';
     btn.classList.toggle('on', kind === _activeKind);
   }
-  // Hide raw-only filter strip when not on Raw tab
+  // Hide raw-only filter strip when not on Raw tab; show the product
+  // (sealed/slab) filter strip on those tabs.
   const fs = document.getElementById('raw-filter-strip');
   if (fs) fs.style.display = (_activeKind === 'raw') ? '' : 'none';
+  const ps = document.getElementById('prod-filter-strip');
+  if (ps) ps.style.display = (_activeKind === 'sealed' || _activeKind === 'slab') ? '' : 'none';
+  const psl = document.getElementById('prod-strip-label');
+  if (psl) psl.textContent = (_activeKind === 'slab') ? 'PSA Slabs' : 'Sealed Products';
 }
 
 // ── Idle watchdog (in-store auto-reset between customers) ───────────────────
@@ -1712,6 +1777,7 @@ function _doIdleReset() {
   // Clear all active filters (game/era/set/conds/price/colors/types/rarities/sort)
   // — this also re-renders chips, refreshes the filter button, and runs doSearch().
   _clearAllActive();
+  _resetProdFilters();
   window.scrollTo(0, 0);
   _idleLast = Date.now();
   _idleDirty = false;
@@ -1728,6 +1794,12 @@ function setActiveKind(kind) {
   // Hide any Raw-only filter chips display
   const ac = document.getElementById('active-chips');
   if (ac) ac.style.display = (kind === 'raw') ? '' : 'none';
+  // Reset product filters when switching between sealed/slab — the filter
+  // dimensions overlap (game/era) but the format vs grade pickers are
+  // kind-specific, and stale state would surface buttons that no longer apply.
+  if (kind === 'sealed' || kind === 'slab') {
+    _resetProdFilters();
+  }
   _renderKindTabs();
   doSearch();
 }
@@ -1841,6 +1913,198 @@ function renderGrid(cards) {
   }).join('');
 }
 
+// ── Sealed / Slabs filter sheet ──────────────────────────────────────────────
+// Distinct from the raw filter sheet — sealed/slab share most filters with
+// each other but very few with raw, so a separate sheet keeps each flow simple.
+let _prodFilters = {
+  game:    '',
+  formats: new Set(),
+  eras:    new Set(),
+  grades:  new Set(),
+  minP:    '',
+  maxP:    '',
+  sort:    'name_asc',
+};
+let _prodDraft = null;
+let _prodFilterMeta = null;  // {games, formats, eras, grades} from /api/products/filter-meta
+
+function _prodActiveFilterCount() {
+  const f = _prodFilters; let n = 0;
+  if (f.game) n++;
+  if (f.formats && f.formats.size) n++;
+  if (f.eras    && f.eras.size)    n++;
+  if (f.grades  && f.grades.size)  n++;
+  if (f.minP)   n++;
+  if (f.maxP)   n++;
+  if (f.sort && f.sort !== 'name_asc') n++;
+  return n;
+}
+
+function _refreshProdFiltersBtn() {
+  const btn = document.getElementById('prod-filters-btn');
+  const badge = document.getElementById('prod-filters-count');
+  if (!btn || !badge) return;
+  const n = _prodActiveFilterCount();
+  if (n > 0) {
+    btn.classList.add('has-active');
+    badge.textContent = String(n);
+    badge.style.display = '';
+  } else {
+    btn.classList.remove('has-active');
+    badge.style.display = 'none';
+  }
+}
+
+async function _loadProdFilterMeta() {
+  try {
+    const d = await get(`/api/products/filter-meta?kind=${_activeKind}`);
+    _prodFilterMeta = d || null;
+  } catch(e) { _prodFilterMeta = null; }
+}
+
+function _renderProdSheetSection(sectionId, listId, options, draftSet, single) {
+  // options: [{key,label,count}, ...]; single=true → radio behavior on draft.<single>
+  const sec = document.getElementById(sectionId);
+  const wrap = document.getElementById(listId);
+  if (!sec || !wrap) return;
+  if (!options || !options.length) {
+    sec.style.display = 'none';
+    wrap.innerHTML = '';
+    return;
+  }
+  sec.style.display = '';
+  wrap.innerHTML = options.map(o => {
+    const on = single
+      ? (_prodDraft[single] === o.key)
+      : (draftSet && draftSet.has(o.key));
+    return `<span class="chip ${on ? 'on' : ''}" data-key="${esc(o.key)}">${esc(o.label)} <span class="qty">${o.count}</span></span>`;
+  }).join('');
+  wrap.querySelectorAll('.chip').forEach(el => {
+    el.onclick = () => {
+      const k = el.getAttribute('data-key');
+      if (single) {
+        // Single-select: toggle off if already selected
+        _prodDraft[single] = (_prodDraft[single] === k) ? '' : k;
+      } else {
+        if (draftSet.has(k)) draftSet.delete(k); else draftSet.add(k);
+      }
+      // Re-render this section so selection state reflects
+      _renderProdSheetSection(sectionId, listId, options, draftSet, single);
+    };
+  });
+}
+
+async function openProdFilterSheet() {
+  // Snapshot current filters into a draft so Cancel just closes
+  _prodDraft = {
+    game: _prodFilters.game,
+    formats: new Set(_prodFilters.formats),
+    eras:    new Set(_prodFilters.eras),
+    grades:  new Set(_prodFilters.grades),
+    minP:    _prodFilters.minP,
+    maxP:    _prodFilters.maxP,
+    sort:    _prodFilters.sort,
+  };
+  // Title reflects the current tab
+  document.getElementById('prod-sheet-title').textContent =
+    (_activeKind === 'slab') ? 'Slab Filters' : 'Sealed Filters';
+
+  // Load fresh meta (counts) for this kind
+  await _loadProdFilterMeta();
+  const meta = _prodFilterMeta || {};
+
+  // Game (single-select)
+  _renderProdSheetSection('prod-sheet-game-section', 'prod-sheet-games',
+    meta.games || [], null, 'game');
+  // Format (sealed only, multi-select)
+  if (_activeKind === 'sealed') {
+    _renderProdSheetSection('prod-sheet-format-section', 'prod-sheet-formats',
+      meta.formats || [], _prodDraft.formats, null);
+  } else {
+    document.getElementById('prod-sheet-format-section').style.display = 'none';
+  }
+  // Grade (slab only, multi-select)
+  if (_activeKind === 'slab') {
+    _renderProdSheetSection('prod-sheet-grade-section', 'prod-sheet-grades',
+      meta.grades || [], _prodDraft.grades, null);
+  } else {
+    document.getElementById('prod-sheet-grade-section').style.display = 'none';
+  }
+  // Era (multi-select, both kinds)
+  _renderProdSheetSection('prod-sheet-era-section', 'prod-sheet-eras',
+    meta.eras || [], _prodDraft.eras, null);
+  // Sort
+  document.querySelectorAll('#prod-sheet-sort .chip').forEach(el => {
+    el.classList.toggle('on', el.getAttribute('data-sort') === _prodDraft.sort);
+  });
+  // Price
+  document.getElementById('prod-price-min').value = _prodDraft.minP || '';
+  document.getElementById('prod-price-max').value = _prodDraft.maxP || '';
+
+  document.getElementById('prod-filter-sheet-overlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeProdFilterSheet(e) {
+  if (e && e.target.id !== 'prod-filter-sheet-overlay') return;
+  document.getElementById('prod-filter-sheet-overlay').classList.remove('open');
+  document.body.style.overflow = '';
+  _prodDraft = null;
+}
+
+function setProdSheetSort(el) {
+  if (!_prodDraft) return;
+  _prodDraft.sort = el.getAttribute('data-sort');
+  document.querySelectorAll('#prod-sheet-sort .chip').forEach(c => {
+    c.classList.toggle('on', c === el);
+  });
+}
+
+function clearAllProdFilters() {
+  _prodDraft = {
+    game: '', formats: new Set(), eras: new Set(), grades: new Set(),
+    minP: '', maxP: '', sort: 'name_asc',
+  };
+  document.getElementById('prod-price-min').value = '';
+  document.getElementById('prod-price-max').value = '';
+  // Re-render sections so all chips clear
+  const meta = _prodFilterMeta || {};
+  _renderProdSheetSection('prod-sheet-game-section', 'prod-sheet-games',
+    meta.games || [], null, 'game');
+  if (_activeKind === 'sealed') {
+    _renderProdSheetSection('prod-sheet-format-section', 'prod-sheet-formats',
+      meta.formats || [], _prodDraft.formats, null);
+  }
+  if (_activeKind === 'slab') {
+    _renderProdSheetSection('prod-sheet-grade-section', 'prod-sheet-grades',
+      meta.grades || [], _prodDraft.grades, null);
+  }
+  _renderProdSheetSection('prod-sheet-era-section', 'prod-sheet-eras',
+    meta.eras || [], _prodDraft.eras, null);
+  document.querySelectorAll('#prod-sheet-sort .chip').forEach(el => {
+    el.classList.toggle('on', el.getAttribute('data-sort') === 'name_asc');
+  });
+}
+
+function applyProdFilterSheet() {
+  if (!_prodDraft) return;
+  _prodDraft.minP = document.getElementById('prod-price-min').value || '';
+  _prodDraft.maxP = document.getElementById('prod-price-max').value || '';
+  Object.assign(_prodFilters, _prodDraft);
+  closeProdFilterSheet({ target: { id: 'prod-filter-sheet-overlay' } });
+  _refreshProdFiltersBtn();
+  _page = 1;
+  doSearch();
+}
+
+function _resetProdFilters() {
+  _prodFilters = {
+    game: '', formats: new Set(), eras: new Set(), grades: new Set(),
+    minP: '', maxP: '', sort: 'name_asc',
+  };
+  _refreshProdFiltersBtn();
+}
+
 // ── Sealed / Slabs grid (reads inventory_product_cache via /api/products) ────
 async function doSearchProducts() {
   const grid = document.getElementById('grid');
@@ -1849,8 +2113,15 @@ async function doSearchProducts() {
   document.getElementById('results-info').textContent = '';
 
   const q = (document.getElementById('q')?.value || '').trim();
-  const params = new URLSearchParams({ kind: _activeKind, page: _page, sort: 'name_asc' });
-  if (q) params.set('q', q);
+  const f = _prodFilters;
+  const params = new URLSearchParams({ kind: _activeKind, page: _page, sort: f.sort || 'name_asc' });
+  if (q)         params.set('q', q);
+  if (f.game)    params.set('game', f.game);
+  if (f.formats && f.formats.size) params.set('format', [...f.formats].join(','));
+  if (f.eras    && f.eras.size)    params.set('era',    [...f.eras].join(','));
+  if (f.grades  && f.grades.size)  params.set('grade',  [...f.grades].join(','));
+  if (f.minP)    params.set('min_price', f.minP);
+  if (f.maxP)    params.set('max_price', f.maxP);
 
   try {
     const d = await get('/api/products?' + params);

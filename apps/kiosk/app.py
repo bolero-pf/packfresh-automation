@@ -940,6 +940,69 @@ def _kind_tag(kind: str) -> str | None:
     return None
 
 
+# Tag-based filter buckets for sealed/slab. Tags are normalized (lowercased,
+# comma-separator collapsed) before LIKE matching, so the values here are the
+# exact lowercase tag strings as they appear in inventory_product_cache.tags.
+GAME_TAG_BUCKETS = {
+    # MTG products carry one of two redundant tags depending on when they were
+    # ingested — match either.
+    "pokemon":   ["pokemon"],
+    "mtg":       ["mtg", "magic: the gathering (mtg)"],
+    "lorcana":   ["lorcana"],
+    "one_piece": ["one piece"],
+}
+
+# Sealed-only product format buckets
+FORMAT_TAG_BUCKETS = {
+    "booster_box":    ["booster box"],
+    "booster_pack":   ["booster pack"],
+    "etb":            ["etb", "pcetb"],
+    "collection_box": ["collection box"],
+    "blister":        ["blister"],
+    "tin":            ["tin"],
+    "sleeved":        ["sleeved"],
+}
+
+# Pokemon-era buckets — match the tag strings as ingested
+ERA_TAG_BUCKETS = {
+    "mega":           ["mega era"],
+    "scarlet_violet": ["scarlet violet era"],
+    "sword_shield":   ["sword shield era"],
+    "sun_moon":       ["sun moon era"],
+    "xy":             ["x&y era"],
+    "vintage":        ["vintage"],
+}
+
+# Slab grade buckets (PSA — agencies are uniformly tagged grade-N)
+GRADE_TAG_BUCKETS = {
+    "10": ["grade-10"],
+    "9":  ["grade-9"],
+    "8":  ["grade-8"],
+}
+
+
+def _csv_tag_clause(tag: str) -> tuple[str, str]:
+    """Return (where-fragment, like-pattern) matching one CSV tag."""
+    return ("LOWER(',' || REPLACE(COALESCE(tags,''), ', ', ',') || ',') LIKE %s",
+            f"%,{tag.lower()},%")
+
+
+def _add_bucket_clause(where: list, params: list, bucket_keys: list[str],
+                       bucket_table: dict[str, list[str]]) -> None:
+    """OR-join all the tags in the requested buckets and AND-attach to WHERE."""
+    tags = []
+    for k in bucket_keys:
+        tags.extend(bucket_table.get(k, []))
+    if not tags:
+        return
+    ors = []
+    for t in tags:
+        frag, pat = _csv_tag_clause(t)
+        ors.append(frag)
+        params.append(pat)
+    where.append("(" + " OR ".join(ors) + ")")
+
+
 @app.route("/api/products")
 def list_products():
     """
@@ -951,6 +1014,11 @@ def list_products():
       q=search             (matches title)
       page=1               (25 per page = 5 cols × 5 rows)
       sort=name_asc|price_asc|price_desc
+      game=pokemon|mtg|lorcana|one_piece
+      format=booster_box,booster_pack,...     (sealed only, comma-list)
+      era=scarlet_violet,sword_shield,...     (comma-list)
+      grade=10,9,8                            (slab only, comma-list)
+      min_price, max_price                    (numeric)
 
     Returns rows with available_qty = shopify_qty − active hold_items.
     """
@@ -966,15 +1034,56 @@ def list_products():
     page = max(1, int(request.args.get("page", 1)))
     offset = (page - 1) * 25
 
-    # CSV tag exact-match: wrap both sides in commas so 'unsealed' won't
-    # falsely match 'sealed'. shared/shopify_client.py joins tags with ", "
-    # (comma+space), so collapse the separator before matching.
-    where = ["status = 'ACTIVE'", "shopify_qty > 0",
-             "LOWER(',' || REPLACE(COALESCE(tags,''), ', ', ',') || ',') LIKE %s"]
-    params: list = [f"%,{tag},%"]
+    where = ["status = 'ACTIVE'", "shopify_qty > 0"]
+    params: list = []
+    # Always require the kind tag (sealed or slab)
+    _add_bucket_clause(where, params, [kind], {kind: [tag]})
     if q:
         where.append("title ILIKE %s")
         params.append(f"%{q}%")
+
+    # Game (single-select)
+    game = (request.args.get("game") or "").strip().lower()
+    if game in GAME_TAG_BUCKETS:
+        _add_bucket_clause(where, params, [game], GAME_TAG_BUCKETS)
+
+    # Format (sealed only, multi-select CSV)
+    if kind == "sealed":
+        fmt_csv = (request.args.get("format") or "").strip().lower()
+        formats = [f for f in fmt_csv.split(",") if f in FORMAT_TAG_BUCKETS]
+        if formats:
+            _add_bucket_clause(where, params, formats, FORMAT_TAG_BUCKETS)
+
+    # Era (multi-select CSV)
+    era_csv = (request.args.get("era") or "").strip().lower()
+    eras = [e for e in era_csv.split(",") if e in ERA_TAG_BUCKETS]
+    if eras:
+        _add_bucket_clause(where, params, eras, ERA_TAG_BUCKETS)
+
+    # Grade (slab only, multi-select CSV)
+    if kind == "slab":
+        grade_csv = (request.args.get("grade") or "").strip().lower()
+        grades = [g for g in grade_csv.split(",") if g in GRADE_TAG_BUCKETS]
+        if grades:
+            _add_bucket_clause(where, params, grades, GRADE_TAG_BUCKETS)
+
+    # Price range (NUMERIC compare on shopify_price)
+    def _opt_price(name: str):
+        raw = (request.args.get(name) or "").strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+    min_p = _opt_price("min_price")
+    max_p = _opt_price("max_price")
+    if min_p is not None:
+        where.append("COALESCE(shopify_price, 0) >= %s")
+        params.append(min_p)
+    if max_p is not None:
+        where.append("COALESCE(shopify_price, 0) <= %s")
+        params.append(max_p)
 
     sort_map = {
         "name_asc":   "title ASC",
@@ -1044,6 +1153,80 @@ def list_products():
         "page":     page,
         "pages":    max(1, (total + 24) // 25),
     })
+
+
+@app.route("/api/products/filter-meta")
+def products_filter_meta():
+    """
+    Returns the available filter buckets for the sealed/slab catalog along
+    with row counts (only counts rows in stock). Empty buckets are omitted
+    so the UI doesn't render dead options.
+
+    Query params:
+      kind=sealed|slab     (required)
+
+    Response:
+      {
+        "kind": "sealed",
+        "games":   [{"key":"pokemon","label":"Pokémon","count":521}, ...],
+        "formats": [{"key":"booster_box", "label":"Booster Box", "count":51}, ...],   # sealed only
+        "eras":    [{"key":"sword_shield","label":"Sword & Shield","count":85}, ...],
+        "grades":  [{"key":"10","label":"PSA 10","count":8}, ...],                     # slab only
+      }
+    """
+    kind = (request.args.get("kind") or "").strip().lower()
+    if kind not in ("sealed", "slab"):
+        return jsonify({"error": "kind must be sealed or slab"}), 400
+    if kind not in _allowed_kinds(g.kiosk_mode):
+        return jsonify({"error": "Not available in this mode", "code": "kind_forbidden"}), 403
+
+    kind_tag = _kind_tag(kind)
+
+    def _bucket_count(tags: list[str]) -> int:
+        ors = []
+        params = [f"%,{kind_tag.lower()},%"]
+        kind_frag, _ = _csv_tag_clause(kind_tag)
+        for t in tags:
+            frag, pat = _csv_tag_clause(t)
+            ors.append(frag)
+            params.append(pat)
+        bucket_sql = " OR ".join(ors)
+        row = db.query_one(f"""
+            SELECT COUNT(*) AS n FROM inventory_product_cache
+            WHERE status='ACTIVE' AND shopify_qty > 0
+              AND {kind_frag}
+              AND ({bucket_sql})
+        """, tuple(params))
+        return int(row["n"] if row else 0)
+
+    def _bucket_list(table: dict[str, list[str]], labels: dict[str, str]) -> list[dict]:
+        out = []
+        for key, tags in table.items():
+            n = _bucket_count(tags)
+            if n > 0:
+                out.append({"key": key, "label": labels.get(key, key), "count": n})
+        return out
+
+    GAME_LABELS  = {"pokemon": "Pokémon", "mtg": "Magic: the Gathering",
+                    "lorcana": "Lorcana", "one_piece": "One Piece"}
+    FMT_LABELS   = {"booster_box": "Booster Box", "booster_pack": "Booster Pack",
+                    "etb": "ETB", "collection_box": "Collection Box",
+                    "blister": "Blister", "tin": "Tin", "sleeved": "Sleeved"}
+    ERA_LABELS   = {"mega": "Mega Evolution", "scarlet_violet": "Scarlet & Violet",
+                    "sword_shield": "Sword & Shield", "sun_moon": "Sun & Moon",
+                    "xy": "XY", "vintage": "Vintage"}
+    GRADE_LABELS = {"10": "PSA 10", "9": "PSA 9", "8": "PSA 8"}
+
+    out = {
+        "kind":  kind,
+        "games": _bucket_list(GAME_TAG_BUCKETS, GAME_LABELS),
+        "eras":  _bucket_list(ERA_TAG_BUCKETS, ERA_LABELS),
+    }
+    if kind == "sealed":
+        out["formats"] = _bucket_list(FORMAT_TAG_BUCKETS, FMT_LABELS)
+    if kind == "slab":
+        out["grades"]  = _bucket_list(GRADE_TAG_BUCKETS, GRADE_LABELS)
+    return jsonify(out)
 
 
 @app.route("/api/sets")
