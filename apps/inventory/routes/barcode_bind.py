@@ -178,6 +178,7 @@ def api_assign():
     variant_id = str(body.get("variant_id", "")).strip()
     barcode = str(body.get("barcode", "")).strip()
     force = bool(body.get("force"))
+    clear_others = bool(body.get("clear_others", True))
     if not variant_id or not barcode:
         return jsonify({"error": "variant_id + barcode required"}), 400
 
@@ -226,8 +227,10 @@ def api_assign():
         return jsonify({"error": "shopify_error", "status": resp.status_code,
                         "detail": resp.text[:500]}), 502
 
-    # Clear the barcode from any OTHER variants that had it.
+    # Clear the barcode from any OTHER variants that had it (only when requested).
     cleared = []
+    if not clear_others:
+        duplicates = []
     for dup in duplicates:
         dup_id = dup["variant_id"]
         try:
@@ -635,8 +638,9 @@ function renderResult(m, barcode, allMatches) {
           + '<div id="adjust-history" class="history" style="margin-top:10px;"></div>'
         : '')
     + matchesHtml
-    + '<div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">'
-    + '<button class="btn" style="color:var(--amber); border-color:var(--amber);" onclick="reassignBarcode()">Wrong product? Reassign this barcode</button>'
+    + '<div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); display:flex; gap:8px; flex-wrap:wrap;">'
+    + '<button class="btn" style="color:var(--amber); border-color:var(--amber);" onclick="reassignBarcode()">Wrong product? Reassign</button>'
+    + '<button class="btn" style="color:var(--accent2); border-color:var(--accent2);" onclick="alsoBindBarcode()">Also bind to another product</button>'
     + '</div>';
 }
 
@@ -723,12 +727,24 @@ function selectMatch(idx) {
   toast('Switched to: ' + (m.product_title || ''), 'green');
 }
 
+let assignMode = 'reassign'; // 'reassign' clears others, 'also' keeps them
+
 function reassignBarcode() {
   if (!lastScannedBarcode) { toast('No barcode to reassign. Re-scan.', 'amber'); return; }
+  assignMode = 'reassign';
   pendingBarcode = lastScannedBarcode;
   document.getElementById('search-card').style.display = '';
   document.getElementById('search').focus();
   setStatus('Reassigning barcode ' + lastScannedBarcode + ' — search for the correct product.');
+}
+
+function alsoBindBarcode() {
+  if (!lastScannedBarcode) { toast('No barcode pending. Re-scan.', 'amber'); return; }
+  assignMode = 'also';
+  pendingBarcode = lastScannedBarcode;
+  document.getElementById('search-card').style.display = '';
+  document.getElementById('search').focus();
+  setStatus('Adding barcode ' + lastScannedBarcode + ' to another product (keeping existing bindings).');
 }
 
 async function lookupScan() {
@@ -874,7 +890,8 @@ async function loadVariants(productId) {
 async function assignBarcode(variantId, variantTitle, force) {
   if (!pendingBarcode) { toast('No barcode pending. Re-scan.', 'amber'); return; }
 
-  const body = { variant_id: variantId, barcode: pendingBarcode };
+  const clearOthers = assignMode !== 'also';
+  const body = { variant_id: variantId, barcode: pendingBarcode, clear_others: clearOthers };
   if (force) body.force = true;
 
   let data, status;
@@ -891,6 +908,10 @@ async function assignBarcode(variantId, variantTitle, force) {
   }
 
   if (status === 409 && data.error === 'duplicate') {
+    if (assignMode === 'also') {
+      // "Also bind" mode — duplicates are expected, just push through without clearing
+      return assignBarcode(variantId, variantTitle, true);
+    }
     const list = (data.duplicates || [])
       .map(d => (d.product_title || '?') + ' · ' + (d.variant_title || '')).join('\\n');
     if (confirm('Barcode ' + pendingBarcode + ' is already on:\\n\\n' + list
