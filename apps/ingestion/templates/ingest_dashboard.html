@@ -942,27 +942,40 @@ async function viewSession(sessionId, _preserveScroll) {
 // card's image URL arrives — avoids re-rendering the whole stage (which
 // on the Route tab = rebuilding 300+ cards via innerHTML).
 function _patchStageImages(itemIds, bySrc) {
+    // Each stage uses a different thumb size:
+    //   Route   = 60×84 (rendered inline)
+    //   Verify/Breakdown/Push = 48×67 (via pfCardThumb)
+    // Match any thumb-sized placeholder so a late-arriving image lights up
+    // whichever stage is currently rendered without forcing a full re-render.
+    const _thumbSizeRe = /width:\s*(\d+)px[^;]*;\s*height:\s*(\d+)px/i;
     for (const id of itemIds) {
         const card = document.querySelector(`#stage-content [data-item-id="${id}"]`);
         if (!card) continue;
         const src = bySrc[id];
         if (!src || !src.image_url) continue;
-        // Existing render is either an <img> (already done, skip) or a
-        // placeholder <div> sized 60×84 sitting right inside the row.
+        // If the thumb is already an <img>, just patch its src.
         const existingImg = card.querySelector('img');
         if (existingImg) {
             if (!existingImg.getAttribute('src')) existingImg.setAttribute('src', src.image_url);
             continue;
         }
-        // Find a width:60px / height:84px sibling div placeholder and swap.
-        const placeholder = Array.from(card.querySelectorAll('div'))
-            .find(d => /width:\s*60px/i.test(d.getAttribute('style') || '')
-                    && /height:\s*84px/i.test(d.getAttribute('style') || ''));
+        // Otherwise find the thumb-shaped placeholder div (matches both
+        // 60×84 route placeholders and 48×67 verify/breakdown/push thumbs).
+        const placeholder = Array.from(card.querySelectorAll('div')).find(d => {
+            const m = (d.getAttribute('style') || '').match(_thumbSizeRe);
+            if (!m) return false;
+            const w = parseInt(m[1], 10), h = parseInt(m[2], 10);
+            // Reasonable thumb dimensions — exclude full-card images / non-thumb divs.
+            return w >= 30 && w <= 80 && h >= 40 && h <= 100;
+        });
         if (placeholder) {
+            const m = (placeholder.getAttribute('style') || '').match(_thumbSizeRe);
+            const w = m ? m[1] : '60';
+            const h = m ? m[2] : '84';
             const img = document.createElement('img');
             img.src = src.image_url;
             img.loading = 'lazy';
-            img.style.cssText = 'width:60px; height:84px; object-fit:contain; border-radius:4px; flex-shrink:0; background:var(--surface-2);';
+            img.style.cssText = `width:${w}px; height:${h}px; object-fit:contain; border-radius:4px; flex-shrink:0; background:var(--surface-2);`;
             placeholder.replaceWith(img);
         }
     }

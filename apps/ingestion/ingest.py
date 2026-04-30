@@ -129,15 +129,34 @@ def get_session(session_id: str) -> Optional[dict]:
 
 
 def get_session_items(session_id: str, include_missing: bool = False) -> list[dict]:
+    """
+    Return items for a session, with `image_url` LATERAL-joined from
+    scrydex_price_cache so the Verify/Breakdown/Push tables show thumbnails
+    on the first paint instead of waiting for a separate /enrich-route round
+    trip. Mirrors the join used by /api/ingest/session/<id>/route-summary —
+    routing always had thumbs from the start because of this join, the rest
+    of the stages didn't until callers ran /enrich-route, which is why the
+    thumb only appeared after a tab-switch round-trip.
+    """
+    base_select = """
+        SELECT i.*,
+               COALESCE(img.image_large, img.image_medium, img.image_small) AS image_url
+        FROM intake_items i
+        LEFT JOIN LATERAL (
+            SELECT image_large, image_medium, image_small
+            FROM scrydex_price_cache
+            WHERE (i.tcgplayer_id IS NOT NULL AND tcgplayer_id = i.tcgplayer_id)
+               OR (i.scrydex_id IS NOT NULL AND scrydex_id = i.scrydex_id)
+            ORDER BY fetched_at DESC
+            LIMIT 1
+        ) img ON true
+        WHERE i.session_id = %s
+    """
     if include_missing:
-        return query(
-            "SELECT * FROM intake_items WHERE session_id = %s AND item_status NOT IN ('rejected') ORDER BY created_at",
-            (session_id,)
-        )
-    return query(
-        "SELECT * FROM intake_items WHERE session_id = %s AND item_status NOT IN ('rejected', 'missing') ORDER BY created_at",
-        (session_id,)
-    )
+        return query(base_select + " AND i.item_status NOT IN ('rejected') ORDER BY i.created_at",
+                     (session_id,))
+    return query(base_select + " AND i.item_status NOT IN ('rejected', 'missing') ORDER BY i.created_at",
+                 (session_id,))
 
 
 # ==========================================
