@@ -1,5 +1,6 @@
 """
-Migration: Split offer_percentage into cash_percentage + credit_percentage.
+Migration: Split offer_percentage into cash_percentage + credit_percentage,
+plus add the walk-in session flag.
 
 Pre-Phase-2 migration so the ingest-service AND ingestion agents can both
 read the new columns in parallel without coordinating a schema change.
@@ -12,14 +13,19 @@ What this does:
   2. Adds intake_sessions.credit_percentage   DECIMAL(5,2) NULL
   3. Adds intake_sessions.accepted_offer_type VARCHAR(10)  NULL
        (will be set to 'cash' or 'credit' once a customer accepts)
-  4. Backfills cash_percentage from offer_percentage on rows where the
+  4. Adds intake_sessions.is_walk_in          BOOLEAN DEFAULT FALSE
+       (TRUE = customer is physically at the counter; accepting jumps
+        the session straight to 'received' with no pickup/mail step)
+  5. Backfills cash_percentage from offer_percentage on rows where the
      legacy column has a value — that preserves all existing pricing.
-  5. Recreates intake_session_summary view to expose the new columns.
+  6. Recreates intake_session_summary view to expose the new columns.
 
 The Phase-2 ingest-service agent owns:
   - Removing offer_percentage references from app.py / intake.py
   - UI that captures both percentages and the accepted type
   - Role caps (associate locked at defaults, manager 0-80%, owner uncapped)
+  - Walk-in flag on manual entry (defaults TRUE) and the short-circuit
+    accept flow that skips pickup/mail.
 
 Run once: python migrate_offer_split.py
 """
@@ -68,6 +74,7 @@ def add_column(col, ddl_type):
 add_column("cash_percentage",     "DECIMAL(5, 2)")
 add_column("credit_percentage",   "DECIMAL(5, 2)")
 add_column("accepted_offer_type", "VARCHAR(10)")
+add_column("is_walk_in",          "BOOLEAN DEFAULT FALSE")
 
 # Backfill cash_percentage from the legacy single column. credit_percentage
 # stays NULL on legacy rows — historically only one offer existed, and we
@@ -95,6 +102,7 @@ cur.execute("""
         s.cash_percentage,
         s.credit_percentage,
         s.accepted_offer_type,
+        s.is_walk_in,
         s.total_offer_amount,
         s.created_at,
         s.finalized_at,

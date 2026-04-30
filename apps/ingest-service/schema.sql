@@ -52,6 +52,9 @@ CREATE TABLE intake_sessions (
     cash_percentage DECIMAL(5, 2),     -- e.g., 65.00 for 65% cash offer
     credit_percentage DECIMAL(5, 2),   -- e.g., 75.00 for 75% store-credit offer
     accepted_offer_type VARCHAR(10),   -- 'cash' or 'credit' once customer accepts
+    is_walk_in BOOLEAN DEFAULT FALSE,  -- TRUE = customer is at the counter;
+                                       -- accepting jumps status straight to
+                                       -- 'received' (skip pickup/mail wait)
     total_offer_amount DECIMAL(10, 2),
     
     -- Metadata
@@ -310,6 +313,7 @@ SELECT
     s.cash_percentage,
     s.credit_percentage,
     s.accepted_offer_type,
+    s.is_walk_in,
     s.total_offer_amount,
     s.created_at,
     s.finalized_at,
