@@ -62,6 +62,8 @@ def api_lookup():
       productVariants(first: 10, query: $q) {
         edges { node {
           id title barcode sku
+          inventoryQuantity
+          inventoryItem { id }
           product { id title status handle }
         } }
       }
@@ -73,11 +75,14 @@ def api_lookup():
     for e in edges:
         n = e["node"] or {}
         prod = n.get("product") or {}
+        inv_item = n.get("inventoryItem") or {}
         matches.append({
             "variant_id": _gid_num(n.get("id", "")),
             "variant_title": n.get("title"),
             "variant_barcode": n.get("barcode"),
             "variant_sku": n.get("sku"),
+            "inventory_quantity": n.get("inventoryQuantity"),
+            "inventory_item_id": _gid_num(inv_item.get("id", "")) if inv_item.get("id") else None,
             "product_id": _gid_num(prod.get("id", "")),
             "product_title": prod.get("title"),
             "product_status": prod.get("status"),
@@ -232,6 +237,169 @@ def api_assign():
     return jsonify({"ok": True, "variant_id": variant_id, "barcode": barcode})
 
 
+# ─── Inventory adjust (aisle-walk physical audit) ──────────────────────────────
+#
+# Sean's flow: walk the aisle, scan a sealed product, eyeball the qty on the
+# shelf vs what Shopify thinks we have, click +/- to reconcile. No reason
+# dropdown — when something is off it usually takes a real audit to figure
+# out where it went, so we just log who/when/delta and move on. The optional
+# note is for the rare "this is suspicious" moment.
+
+_LOCATION_ID_CACHE: list[str] = []
+
+
+def _get_primary_location_id() -> str | None:
+    """Cache the first Shopify location's gid for the lifetime of the worker."""
+    if _LOCATION_ID_CACHE:
+        return _LOCATION_ID_CACHE[0]
+    try:
+        data = shopify_gql("{ locations(first: 1) { edges { node { id } } } }")
+        edges = (data.get("data") or {}).get("locations", {}).get("edges", []) or []
+        if not edges:
+            return None
+        loc_id = edges[0]["node"]["id"]
+        _LOCATION_ID_CACHE.append(loc_id)
+        return loc_id
+    except Exception as e:
+        logger.warning(f"location lookup failed: {e}")
+        return None
+
+
+@bp.route("/api/adjust", methods=["POST"])
+@requires_auth
+def api_adjust():
+    """Adjust on-hand inventory by a delta (positive or negative). Calls
+    Shopify's inventoryAdjustQuantities and writes an audit row. Sealed-only
+    — raw cards are tracked one-per-barcode and don't go through this.
+    """
+    body = request.json or {}
+    variant_id = str(body.get("variant_id", "")).strip()
+    inventory_item_id = str(body.get("inventory_item_id", "")).strip()
+    try:
+        delta = int(body.get("delta", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "delta must be an integer"}), 400
+    note = (body.get("note") or "").strip() or None
+    qty_before = body.get("qty_before")
+    if qty_before is not None:
+        try:
+            qty_before = int(qty_before)
+        except (TypeError, ValueError):
+            qty_before = None
+    product_title = (body.get("product_title") or "").strip() or None
+    variant_title = (body.get("variant_title") or "").strip() or None
+
+    if not variant_id or not inventory_item_id:
+        return jsonify({"error": "variant_id + inventory_item_id required"}), 400
+    if delta == 0:
+        return jsonify({"error": "delta cannot be zero"}), 400
+
+    location_id = _get_primary_location_id()
+    if not location_id:
+        return jsonify({"error": "no_location"}), 502
+
+    if DRY_RUN:
+        logger.info(f"[DRY_RUN] would adjust variant {variant_id} by {delta}")
+        return jsonify({"ok": True, "dry_run": True, "delta": delta,
+                        "qty_after": (qty_before + delta) if qty_before is not None else None})
+
+    mutation = """
+    mutation inventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
+      inventoryAdjustQuantities(input: $input) {
+        inventoryAdjustmentGroup { reason changes { delta quantityAfterChange } }
+        userErrors { field message }
+      }
+    }
+    """
+    inv_item_gid = (
+        inventory_item_id
+        if inventory_item_id.startswith("gid://")
+        else f"gid://shopify/InventoryItem/{inventory_item_id}"
+    )
+    data = shopify_gql(mutation, {
+        "input": {
+            "reason": "correction",
+            "name": "available",
+            "changes": [{
+                "delta": delta,
+                "inventoryItemId": inv_item_gid,
+                "locationId": location_id,
+            }],
+        },
+    })
+    payload = (data.get("data") or {}).get("inventoryAdjustQuantities") or {}
+    user_errs = payload.get("userErrors") or []
+    if user_errs:
+        logger.warning(f"inventoryAdjustQuantities user errors: {user_errs}")
+        return jsonify({"error": "shopify_error", "user_errors": user_errs}), 502
+
+    qty_after = None
+    changes = (payload.get("inventoryAdjustmentGroup") or {}).get("changes") or []
+    if changes:
+        qty_after = changes[0].get("quantityAfterChange")
+    if qty_after is None and qty_before is not None:
+        qty_after = qty_before + delta
+
+    user = getattr(g, "user", None) or {}
+    try:
+        db.execute("""
+            INSERT INTO inventory_adjustments (
+                variant_id, product_id, inventory_item_id,
+                product_title, variant_title,
+                user_id, user_name,
+                delta, qty_before, qty_after, note
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            int(variant_id),
+            int(body.get("product_id")) if body.get("product_id") else None,
+            int(_gid_num(inv_item_gid)) if _gid_num(inv_item_gid).isdigit() else None,
+            product_title, variant_title,
+            user.get("sub") or user.get("user_id"),
+            user.get("name"),
+            delta, qty_before, qty_after, note,
+        ))
+    except Exception as e:
+        # Don't fail the user-visible action if audit logging hiccups —
+        # Shopify is already adjusted. Log it and move on.
+        logger.warning(f"inventory_adjustments insert failed: {e}")
+
+    try:
+        db.execute("UPDATE inventory_cache_meta SET last_tool_push_at = NOW() WHERE id = 1")
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "delta": delta, "qty_after": qty_after})
+
+
+@bp.route("/api/adjustments/<variant_id>", methods=["GET"])
+@requires_auth
+def api_adjustments(variant_id):
+    """Recent adjustments for a single variant — surfaces in the UI under
+    the qty controls so staff can see what's been touched today."""
+    try:
+        vid = int(variant_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "bad variant_id"}), 400
+    rows = db.query("""
+        SELECT delta, qty_before, qty_after, note, user_name, created_at
+          FROM inventory_adjustments
+         WHERE variant_id = %s
+         ORDER BY created_at DESC
+         LIMIT 20
+    """, (vid,))
+    out = []
+    for r in rows:
+        out.append({
+            "delta": int(r["delta"]),
+            "qty_before": r.get("qty_before"),
+            "qty_after": r.get("qty_after"),
+            "note": r.get("note"),
+            "user_name": r.get("user_name"),
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+        })
+    return jsonify({"adjustments": out})
+
+
 # ─── Page ──────────────────────────────────────────────────────────────────────
 
 @bp.route("/", methods=["GET"])
@@ -299,7 +467,7 @@ tbody tr:hover { background: var(--s2); }
 </div>
 
 <h1>Barcode Bind</h1>
-<div class="sub">Scan a sealed product. If it doesn't ring up, search the store and assign the scanned barcode to the right variant.</div>
+<div class="sub">Scan a sealed product. Hits show on-hand qty with ± buttons for aisle-walk audits. Misses fall through to search-and-assign so unbound UPCs get attached to the right variant.</div>
 
 <div class="card">
   <label class="muted">Scan barcode (focus is auto-set; press <span class="kb">Enter</span> to look up)</label>
@@ -341,6 +509,7 @@ tbody tr:hover { background: var(--s2); }
 
 <script>
 let pendingBarcode = null;
+let currentVariant = null;  // most recent successful lookup match
 const history = [];
 
 function esc(s) {
@@ -388,6 +557,120 @@ function renderHistory() {
   }).join('');
 }
 
+// ─── Result render + qty adjust ──────────────────────────────────────────────
+
+function renderResult(m, barcode, matchCount) {
+  const body = document.getElementById('result-body');
+  const qty = (m.inventory_quantity == null) ? null : Number(m.inventory_quantity);
+  const qtyDisplay = (qty == null) ? '—' : qty;
+  const canAdjust = !!m.inventory_item_id;
+
+  body.innerHTML =
+    '<div><span class="success-badge">FOUND</span> &nbsp;'
+    + 'Barcode <span class="code">' + esc(barcode) + '</span> rings up.</div>'
+    + '<div style="margin-top:8px; font-size:15px; font-weight:600;">' + esc(m.product_title || '') + '</div>'
+    + '<div class="muted">' + esc(m.variant_title || '')
+    + (m.variant_sku ? ' · SKU ' + esc(m.variant_sku) : '') + '</div>'
+    + (matchCount > 1
+        ? '<div class="warn-badge" style="margin-top:8px;">⚠ ' + matchCount
+          + ' variants share this barcode</div>' : '')
+    + '<div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); display:flex; align-items:center; gap:14px; flex-wrap:wrap;">'
+    +   '<div>'
+    +     '<div class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">On hand</div>'
+    +     '<div id="qty-display" style="font-size:32px; font-weight:700; font-family:ui-monospace,Menlo,Consolas,monospace; line-height:1;">'
+    +       qtyDisplay + '</div>'
+    +   '</div>'
+    +   (canAdjust
+        ? '<div class="row" style="gap:6px;">'
+          + '<button class="btn" onclick="adjustQty(-5)">−5</button>'
+          + '<button class="btn" onclick="adjustQty(-1)">−1</button>'
+          + '<button class="btn btn-primary" onclick="adjustQty(1)">+1</button>'
+          + '<button class="btn" onclick="adjustQty(5)">+5</button>'
+          + '</div>'
+        : '<div class="muted" style="font-size:12px;">No inventory item — adjust unavailable.</div>')
+    + '</div>'
+    + (canAdjust
+        ? '<div style="margin-top:10px;">'
+          + '<input id="adjust-note" type="text" placeholder="Note (optional, only if something looks off)" autocomplete="off" style="font-size:13px;">'
+          + '</div>'
+          + '<div id="adjust-history" class="history" style="margin-top:10px;"></div>'
+        : '');
+}
+
+async function adjustQty(delta) {
+  if (!currentVariant) return;
+  const m = currentVariant;
+  const note = (document.getElementById('adjust-note') || {}).value || '';
+  const qtyEl = document.getElementById('qty-display');
+  const before = qtyEl ? Number(qtyEl.textContent) : null;
+
+  setStatus(delta > 0 ? 'Adjusting +' + delta + '…' : 'Adjusting ' + delta + '…');
+  let data;
+  try {
+    const r = await fetch('/inventory/barcode-bind/api/adjust', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        variant_id:        m.variant_id,
+        product_id:        m.product_id,
+        inventory_item_id: m.inventory_item_id,
+        product_title:     m.product_title,
+        variant_title:     m.variant_title,
+        delta:             delta,
+        qty_before:        Number.isFinite(before) ? before : null,
+        note:              note,
+      }),
+    });
+    data = await r.json();
+  } catch (e) {
+    toast('Network error', 'red');
+    setStatus('Network error.');
+    return;
+  }
+
+  if (!data.ok) {
+    toast(data.error || 'Adjust failed', 'red');
+    setStatus('Adjust failed.');
+    return;
+  }
+
+  const after = (data.qty_after != null) ? Number(data.qty_after)
+              : (Number.isFinite(before) ? before + delta : null);
+  if (qtyEl && after != null) qtyEl.textContent = after;
+  // Update the cached match so the next adjust on the same variant uses fresh qty.
+  if (currentVariant) currentVariant.inventory_quantity = after;
+  toast((delta > 0 ? '+' : '') + delta + ' → ' + (after == null ? '?' : after), 'green');
+  setStatus('Adjusted. Scan next or adjust again.');
+
+  // Clear the optional note so it doesn't accidentally reuse on the next press.
+  const noteEl = document.getElementById('adjust-note');
+  if (noteEl) noteEl.value = '';
+  loadAdjustHistory(m.variant_id);
+}
+
+async function loadAdjustHistory(variant_id) {
+  const el = document.getElementById('adjust-history');
+  if (!el) return;
+  try {
+    const r = await fetch('/inventory/barcode-bind/api/adjustments/' + encodeURIComponent(variant_id));
+    const data = await r.json();
+    const rows = data.adjustments || [];
+    if (!rows.length) { el.innerHTML = ''; return; }
+    el.innerHTML =
+      '<div class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:4px;">Recent adjustments (this variant)</div>'
+      + rows.slice(0, 6).map(r => {
+          const sign = r.delta > 0 ? '+' : '';
+          const cls = r.delta > 0 ? 'success-badge' : 'miss-badge';
+          const when = new Date(r.created_at).toLocaleString();
+          const noteHtml = r.note ? ' · <span class="muted">' + esc(r.note) + '</span>' : '';
+          return '<div class="history-row">'
+            + '<span><span class="' + cls + '">' + sign + r.delta + '</span> '
+            + esc(r.user_name || '') + noteHtml + '</span>'
+            + '<span class="muted">' + esc(when) + '</span>'
+            + '</div>';
+        }).join('');
+  } catch (e) { /* silent — history is bonus */ }
+}
+
 async function lookupScan() {
   const barcode = document.getElementById('scan').value.trim();
   if (!barcode) return;
@@ -415,20 +698,14 @@ async function lookupScan() {
   if (data.matches && data.matches.length > 0) {
     pendingBarcode = null;
     const m = data.matches[0];
-    body.innerHTML =
-      '<div><span class="success-badge">FOUND</span> &nbsp;'
-      + 'Barcode <span class="code">' + esc(barcode) + '</span> rings up.</div>'
-      + '<div style="margin-top:8px; font-size:15px; font-weight:600;">' + esc(m.product_title || '') + '</div>'
-      + '<div class="muted">' + esc(m.variant_title || '')
-      + (m.variant_sku ? ' · SKU ' + esc(m.variant_sku) : '') + '</div>'
-      + (data.matches.length > 1
-          ? '<div class="warn-badge" style="margin-top:8px;">⚠ ' + data.matches.length
-            + ' variants share this barcode</div>' : '');
+    currentVariant = m;  // for adjust handlers
+    renderResult(m, barcode, data.matches.length);
     pushHistory(barcode, m.product_title || '', 'hit');
-    setStatus('Found — ready for next scan.');
+    setStatus('Found — adjust qty or scan next.');
     toast('Rings up: ' + (m.product_title || ''), 'green');
     document.getElementById('scan').value = '';
     focusScan();
+    loadAdjustHistory(m.variant_id);
   } else {
     pendingBarcode = barcode;
     body.innerHTML =
