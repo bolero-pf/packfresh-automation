@@ -600,13 +600,18 @@ async function refreshHoldDetail() {
 }
 
 function renderHoldDetail(d) {
-  const hold  = d.hold;
-  const items = d.items;
-  const pull  = d.pull_list;
-  const el    = document.getElementById('hold-detail-content');
+  const hold     = d.hold;
+  const items    = d.items;
+  const pull     = d.pull_list;
+  // Sealed/slab items live alongside raw items but skip the bin walk + decision
+  // step. They go REQUESTED → PULLED → (SOLD via order webhook) | RETURNED.
+  const products = (d.product_items || []).slice();
+  const rawItems = items.filter(i => (i.item_kind || 'raw') === 'raw');
+  const el       = document.getElementById('hold-detail-content');
 
+  // "All pulled" must include sealed/slab items even though they have no decision phase.
   const allPulled   = items.every(i => ['PULLED','ACCEPTED','REJECTED','MISSING'].includes(i.item_status));
-  const anyDecided  = items.some(i => ['ACCEPTED','REJECTED'].includes(i.item_status));
+  const anyDecided  = rawItems.some(i => ['ACCEPTED','REJECTED'].includes(i.item_status));
   const pulledCount = items.filter(i => i.item_status === 'PULLED').length;
   const totalCount  = items.length;
   const badgeCls    = hold.status === 'PENDING' ? 'badge-pending' : hold.status === 'PULLING' ? 'badge-pulling' : 'badge-ready';
@@ -701,10 +706,43 @@ function renderHoldDetail(d) {
     }).join('');
   }
 
-  // Decision phase (READY)
+  // Sealed / slab items — always shown regardless of phase, since they have
+  // no decision step and need a way to be marked "picked up". Scan the SKU
+  // (or click Mark Pulled) to flip REQUESTED → PULLED.
+  if (products.length) {
+    html += `<div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:16px 0 8px;">Sealed &amp; Slabs — scan SKU or tap Mark Pulled</div>`;
+    html += products.map(item => {
+      const kindLabel = (item.item_kind === 'slab') ? 'Slab' : 'Sealed';
+      const price = parseFloat(item.current_price || 0);
+      return `
+      <div class="scan-item ${item.item_status.toLowerCase()} no-hover" style="margin-bottom:6px;padding:10px 14px;border-radius:8px;">
+        <div class="scan-check">${item.item_status === 'PULLED' ? '✓' : ''}</div>
+        ${item.image_url ? `<img src="${esc(item.image_url)}" style="width:38px;height:38px;object-fit:contain;border-radius:4px;background:var(--surface2);">` : ''}
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;font-size:0.88rem;">
+            <span class="badge" style="background:rgba(232,197,71,0.18);color:var(--accent);font-size:0.62rem;padding:1px 6px;border-radius:4px;margin-right:6px;">${kindLabel}</span>
+            ${esc(item.card_name)}
+          </div>
+          <div style="font-size:0.75rem;color:var(--dim);">
+            ${item.sku ? `SKU: <code style="font-family:var(--mono);">${esc(item.sku)}</code>` : ''}
+            ${price ? ` · $${price.toFixed(2)}` : ''}
+          </div>
+        </div>
+        ${item.item_status === 'REQUESTED' ? `
+          <button class="btn btn-sm btn-green" style="font-size:0.7rem;padding:4px 10px;" onclick="markProductPulled('${item.hold_item_id}','${esc(item.sku||'')}')">✓ Mark Pulled</button>
+        ` : item.item_status === 'PULLED' ? `
+          <span style="font-size:0.78rem;color:var(--green);font-weight:600;">PULLED</span>
+        ` : `<span style="font-size:0.78rem;color:var(--dim);">${item.item_status}</span>`}
+      </div>`;
+    }).join('');
+  }
+
+  // Decision phase (READY) — raw items only. Sealed/slab don't have an
+  // accept/reject step (the customer pays at the register; the order webhook
+  // marks them SOLD).
   if (hold.status === 'READY' || anyDecided) {
     html += `<div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:16px 0 8px;">Customer Decision</div>`;
-    html += items.map(item => `
+    html += rawItems.map(item => `
       <div class="scan-item ${item.item_status.toLowerCase()} no-hover" style="margin-bottom:6px;padding:10px 14px;border-radius:8px;">
         <div class="scan-check">${item.item_status === 'ACCEPTED' ? '✓' : item.item_status === 'REJECTED' ? '✕' : ''}</div>
         ${item.image_url ? `<img src="${esc(item.image_url)}" style="width:32px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">` : ''}
@@ -752,6 +790,22 @@ async function decide(holdItemId, decision) {
   try {
     await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/decision`, { decision });
     await refreshHoldDetail();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function markProductPulled(holdItemId, sku) {
+  // Sealed/slab don't have raw_card_id, so the scan endpoint matches by SKU
+  // on the hold's REQUESTED product items. Reuse the existing endpoint by
+  // sending the SKU as the "barcode" — it now handles both.
+  if (!sku) {
+    toast('No SKU on this item — cache may be stale. Refreshing…', 'amber');
+    await refreshHoldDetail();
+    return;
+  }
+  try {
+    await post(`/api/holds/${_currentHoldId}/scan`, { barcode: sku });
+    await refreshHoldDetail();
+    toast('Marked pulled', 'green');
   } catch(e) { toast(e.message, 'red'); }
 }
 

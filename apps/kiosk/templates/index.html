@@ -2408,7 +2408,7 @@ document.addEventListener('click', function(e) {
   }
   // Update count
   const limitEl = document.querySelector('.cart-limit');
-  if (limitEl) limitEl.textContent = `${cartCount()} of ${MAX} cards selected`;
+  if (limitEl) limitEl.textContent = `${cartCount()} of ${MAX} items selected`;
 });
 
 
@@ -2499,7 +2499,7 @@ function renderCart(panel) {
       </div>
       <div class="empty" style="padding:40px 0;">
         <div class="empty-icon">🃏</div>
-        <p>No cards selected yet.</p>
+        <p>No items selected yet.</p>
       </div>
       <button class="btn btn-outline" onclick="closeCartPanel()">Keep Browsing</button>
     `;
@@ -2562,7 +2562,7 @@ function renderCart(panel) {
         <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeCartPanel()">✕</button>
       </div>
     </div>
-    <div class="cart-limit">${total} of ${MAX} cards selected</div>
+    <div class="cart-limit">${total} of ${MAX} items selected</div>
     <div class="cart-items">${items}</div>
     <div class="cart-total-bar">
       <div class="cart-total-label">Estimated Total</div>

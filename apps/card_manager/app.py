@@ -278,25 +278,54 @@ def get_hold(hold_id):
     if not hold:
         return jsonify({"error": "Not found"}), 404
 
+    # LEFT JOIN raw_cards so sealed/slab items (raw_card_id IS NULL) survive.
+    # Sealed/slab items carry their own title/image/sku/unit_price on hold_items;
+    # raw items pull those fields from raw_cards.
     items = db.query("""
         SELECT hi.id AS hold_item_id, hi.status AS item_status,
-               hi.barcode, hi.pulled_at, hi.resolved_at,
-               hi.shopify_product_id,
+               hi.item_kind, hi.barcode, hi.pulled_at, hi.resolved_at,
+               hi.shopify_product_id, hi.shopify_variant_id,
+               hi.sku AS hi_sku, hi.title AS hi_title,
+               hi.image_url AS hi_image_url, hi.unit_price AS hi_unit_price,
                rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
                rc.condition, rc.current_price, rc.tcgplayer_id,
-               rc.image_url, rc.state AS card_state,
+               rc.image_url AS rc_image_url, rc.state AS card_state,
                sl.bin_label
         FROM hold_items hi
-        JOIN raw_cards rc ON hi.raw_card_id = rc.id
+        LEFT JOIN raw_cards rc ON hi.raw_card_id = rc.id
         LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
         WHERE hi.hold_id = %s
-        ORDER BY sl.bin_label NULLS LAST, rc.card_name
+        ORDER BY hi.item_kind NULLS FIRST,
+                 sl.bin_label NULLS LAST,
+                 COALESCE(rc.card_name, hi.title)
     """, (hold_id,))
 
-    # Build optimized pull list:
-    # Group by (tcgplayer_id, condition), find bin with most copies, pull from there
+    # Normalize the row shape so the frontend can render raw and sealed/slab
+    # the same way — kind-aware where it matters, but with consistent keys.
+    norm_items = []
+    for raw in items:
+        d = dict(raw)
+        kind = (d.get("item_kind") or "raw").lower()
+        if kind in ("sealed", "slab"):
+            d["card_name"]   = d.get("hi_title") or "(Untitled product)"
+            d["image_url"]   = d.get("hi_image_url")
+            d["current_price"] = d.get("hi_unit_price")
+            d["sku"]         = d.get("hi_sku")
+            d["set_name"]    = None
+            d["card_number"] = None
+            d["condition"]   = None
+            d["tcgplayer_id"] = None
+        else:
+            d["image_url"] = d.get("rc_image_url")
+            d["sku"]       = None
+        norm_items.append(d)
+
+    # Build optimized pull list FROM RAW ITEMS ONLY — the bin-grouping logic
+    # is meaningless for sealed/slab (no bins, no condition matching).
     pull_groups = {}
-    for item in items:
+    for item in norm_items:
+        if (item.get("item_kind") or "raw") != "raw":
+            continue
         key = (item["tcgplayer_id"], item["condition"])
         if key not in pull_groups:
             pull_groups[key] = {
@@ -340,10 +369,15 @@ def get_hold(hold_id):
 
         pull_list.append(group)
 
+    # Separate sealed/slab items so the frontend can render them as a
+    # discrete "Sealed / Slabs" section in the hold detail.
+    product_items = [i for i in norm_items if (i.get("item_kind") or "raw") != "raw"]
+
     return jsonify({
-        "hold":      _ser(dict(hold)),
-        "items":     [_ser(dict(i)) for i in items],
-        "pull_list": pull_list,
+        "hold":          _ser(dict(hold)),
+        "items":         [_ser(dict(i)) for i in norm_items],
+        "pull_list":     pull_list,
+        "product_items": [_ser(dict(i)) for i in product_items],
     })
 
 
@@ -399,6 +433,32 @@ def scan_card(hold_id):
     """, (barcode,))
 
     if not scanned:
+        # Not a raw card. Try sealed/slab — match by SKU on this hold's REQUESTED
+        # product items. Sealed/slab go straight REQUESTED → PULLED (no
+        # ACCEPTED/REJECTED step — outcome is decided at the register).
+        prod_match = db.query_one("""
+            SELECT hi.id, hi.title, hi.item_kind, hi.shopify_variant_id
+            FROM hold_items hi
+            WHERE hi.hold_id = %s
+              AND hi.status = 'REQUESTED'
+              AND hi.item_kind IN ('sealed','slab')
+              AND hi.sku = %s
+            LIMIT 1
+        """, (hold_id, barcode))
+        if prod_match:
+            db.execute("""
+                UPDATE hold_items
+                SET status = 'PULLED',
+                    pulled_at = CURRENT_TIMESTAMP,
+                    barcode = %s
+                WHERE id = %s
+            """, (barcode, str(prod_match["id"])))
+            return jsonify({
+                "success":      True,
+                "kind":         prod_match["item_kind"],
+                "card_name":    prod_match["title"],
+                "hold_item_id": str(prod_match["id"]),
+            })
         return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
 
     # Find a REQUESTED hold_item on this hold matching tcgplayer_id + condition
