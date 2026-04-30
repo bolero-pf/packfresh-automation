@@ -3031,18 +3031,23 @@ function renderCart(panel) {
         </div>
       `}
     ` : `
-      <!-- Guest hold request / Champion sign-in -->
-      <div id="champion-section" style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px;">
-        <div style="font-size:0.82rem;color:var(--dim);margin-bottom:8px;">★ <a href="#" onclick="showChampionLogin(event)" style="color:var(--accent);">Champion? Sign in to checkout online</a></div>
-        <div id="champion-login-form" style="display:none;">
-          <div class="form-row">
-            <label class="form-label">Champion Email</label>
-            <input class="form-input" id="champ-email" type="email" placeholder="your@email.com" autocomplete="email">
+      <!-- Guest hold request / Champion sign-in. The Champion CTA only
+           makes sense on remote browsers (no in-store device cookie) —
+           in-store customers pay at the register, not online, so we
+           hide the whole section there. -->
+      ${_mode !== 'instore' ? `
+        <div id="champion-section" style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px;">
+          <div style="font-size:0.82rem;color:var(--dim);margin-bottom:8px;">★ <a href="#" onclick="showChampionLogin(event)" style="color:var(--accent);">Champion? Sign in to checkout online</a></div>
+          <div id="champion-login-form" style="display:none;">
+            <div class="form-row">
+              <label class="form-label">Champion Email</label>
+              <input class="form-input" id="champ-email" type="email" placeholder="your@email.com" autocomplete="email">
+            </div>
+            <div id="champ-error" style="display:none;" class="warning"></div>
+            <button class="btn btn-outline" style="width:100%;" id="champ-verify-btn" onclick="verifyChampion()">Verify Champion Status</button>
           </div>
-          <div id="champ-error" style="display:none;" class="warning"></div>
-          <button class="btn btn-outline" style="width:100%;" id="champ-verify-btn" onclick="verifyChampion()">Verify Champion Status</button>
         </div>
-      </div>
+      ` : ''}
       <div class="form-row">
         <label class="form-label">Your Name *</label>
         <input class="form-input" id="cust-name" type="text" placeholder="e.g. Mark" autocomplete="name">
