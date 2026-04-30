@@ -384,23 +384,27 @@ body.modal-open { overflow: hidden; touch-action: none; }
   background: var(--surface); border-bottom: 1px solid var(--border);
   max-width: 1200px; margin: 0 auto;
 }
-/* Kind tabs (Raw / Sealed / Slabs) — sit above the filter strip. */
+/* Kind tabs (Raw / Sealed / Slabs) — standalone pills above the filter strip.
+   Earlier version used a "merge with bg" trick that got clipped by the
+   filter strip below; pills are simpler and don't fight neighbouring chrome. */
 .kind-tabs {
-  display: flex; gap: 4px; padding: 8px 16px 0;
+  display: flex; gap: 6px; padding: 10px 16px;
   max-width: 1200px; margin: 0 auto;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
 }
 .kind-tab {
   flex: 1; min-height: 44px; padding: 0 14px;
   border: 1px solid var(--border);
   background: var(--surface); color: var(--dim);
   font-family: inherit; font-weight: 700; font-size: 0.92rem;
-  border-radius: 10px 10px 0 0; cursor: pointer;
-  border-bottom: 0;
+  border-radius: 10px; cursor: pointer;
+  line-height: 1;
 }
 .kind-tab.on {
-  background: var(--bg); color: var(--accent);
-  border-color: var(--accent); border-bottom-color: var(--bg);
-  margin-bottom: -1px;
+  background: rgba(232,197,71,0.12);
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .game-pills {
   display: flex; gap: 8px; overflow-x: auto; flex: 1; padding: 2px 0;

@@ -91,6 +91,16 @@ def _ensure_kiosk_tables():
             db.execute("CREATE INDEX IF NOT EXISTS idx_hold_items_sku ON hold_items(sku)")
         except Exception:
             pass
+        # ── inventory_product_cache.sku migration ────────────────────────────
+        # Owned by the inventory service via shared/cache_manager.py, but kiosk
+        # reads from it for the sealed/slab catalog. If the inventory service
+        # hasn't re-deployed yet (or its cache_manager version predates the
+        # column), the kiosk's /api/products query 500s with "column does not
+        # exist". Add it ourselves — purely additive, idempotent.
+        try:
+            db.execute("ALTER TABLE inventory_product_cache ADD COLUMN IF NOT EXISTS sku VARCHAR(200)")
+        except Exception as e:
+            logger.debug(f"inventory_product_cache.sku migration skipped ({e})")
         logger.info("kiosk tables ensured")
     except Exception as e:
         logger.warning(f"_ensure_kiosk_tables warning: {e}")
