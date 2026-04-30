@@ -318,8 +318,13 @@
 
     <!-- Hold Queue -->
     <div class="view active" id="view-holds">
-      <div class="page-title">Hold Queue</div>
-      <div class="page-sub">Active customer holds · auto-refreshes every 30s</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div>
+          <div class="page-title">Hold Queue</div>
+          <div class="page-sub">Active customer holds · sidebar badges auto-refresh, list does not (so your scan focus stays put)</div>
+        </div>
+        <button class="btn btn-sm" onclick="manualRefreshActiveView()" title="Refresh queue contents" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">↻ Refresh</button>
+      </div>
       <div id="holds-list">
         <div class="empty"><div class="spinner"></div></div>
       </div>
@@ -333,8 +338,13 @@
 
     <!-- Missing Cards -->
     <div class="view" id="view-missing">
-      <div class="page-title">Missing Cards</div>
-      <div class="page-sub">Cards that couldn't be found during pulling. Scan to re-shelve, or mark as gone.</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div>
+          <div class="page-title">Missing Cards</div>
+          <div class="page-sub">Cards that couldn't be found during pulling. Scan to re-shelve, or mark as gone.</div>
+        </div>
+        <button class="btn btn-sm" onclick="manualRefreshActiveView()" title="Refresh list" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">↻ Refresh</button>
+      </div>
       <div id="missing-content">
         <div class="empty"><div class="spinner"></div></div>
       </div>
@@ -342,8 +352,13 @@
 
     <!-- Return Queue -->
     <div class="view" id="view-returns">
-      <div class="page-title">Return Queue</div>
-      <div class="page-sub">Cards pending return to storage</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div>
+          <div class="page-title">Return Queue</div>
+          <div class="page-sub">Cards pending return to storage</div>
+        </div>
+        <button class="btn btn-sm" onclick="manualRefreshActiveView()" title="Refresh list" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">↻ Refresh</button>
+      </div>
       <div id="returns-content">
         <div class="empty"><div class="spinner"></div></div>
       </div>
@@ -2153,6 +2168,15 @@ async function removeFeatured(id) {
 }
 
 // ── Polling ───────────────────────────────────────────────────────────────────
+// IMPORTANT: poll updates badge counts ONLY. It must NEVER re-render any
+// view, because the staff scanner depends on document.activeElement +
+// in-progress card rows + scroll position staying put. A new hold arriving
+// pings pfSound.notify() and bumps the badge — staff can click into the
+// queue manually. Use the ↻ refresh button on each view for an explicit
+// full reload.
+let _lastLatestHoldAt = null;
+let _badgeCounts = { holds: 0, returns: 0, missing: 0, active_listings: 0 };
+
 async function refreshBadges() {
   try {
     const d = await get('/api/badges');
@@ -2166,19 +2190,37 @@ async function refreshBadges() {
     set('badge-returns', d.returns);
     set('badge-missing', d.missing);
     set('badge-sell',    d.active_listings);
+
+    // Detect a brand-new hold arriving (latest_hold_at moved forward) and
+    // ping the notify sound. First poll just remembers the timestamp.
+    if (_lastLatestHoldAt !== null && d.latest_hold_at && d.latest_hold_at !== _lastLatestHoldAt) {
+      try { pfSound.notify(); } catch(e) {}
+    }
+    _lastLatestHoldAt = d.latest_hold_at;
+    _badgeCounts = {
+      holds: d.holds, returns: d.returns,
+      missing: d.missing, active_listings: d.active_listings,
+    };
   } catch(e) { /* silent — sidebar nav stays stale rather than flashing errors */ }
 }
 
 function startPolling() {
   refreshBadges();
-  _pollTimer = setInterval(() => {
-    refreshBadges();
-    const activeView = document.querySelector('.view.active')?.id;
-    if (activeView === 'view-holds')   loadHolds();
-    if (activeView === 'view-returns') loadReturns();
-    if (activeView === 'view-missing') loadMissing();
-    if (activeView === 'view-sell')    refreshActiveListings();
-  }, 15000);
+  _pollTimer = setInterval(refreshBadges, 15000);
+}
+
+// Manual full refresh of the active view — explicit user action, safe to
+// blow away activeElement / scroll because the user asked for it.
+function manualRefreshActiveView() {
+  const activeView = document.querySelector('.view.active')?.id;
+  if (activeView === 'view-holds')        loadHolds();
+  else if (activeView === 'view-returns') loadReturns();
+  else if (activeView === 'view-missing') loadMissing();
+  else if (activeView === 'view-sell')    { refreshActiveListings(); renderSell(); }
+  else if (activeView === 'view-display') loadDisplay();
+  else if (activeView === 'view-binders') loadBinders();
+  else if (activeView === 'view-hold-detail') refreshHoldDetail();
+  refreshBadges();
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

@@ -108,8 +108,9 @@ def list_holds():
 
 @app.route("/api/badges")
 def sidebar_badges():
-    """Cheap counts for the sidebar nav badges. Polled from every view so
-    pending work is visible without clicking into each tab."""
+    """Cheap counts for the sidebar nav badges + a "newest hold timestamp"
+    so the client can detect new arrivals and play a notify sound without
+    re-rendering the whole queue. Polled from every view."""
     row = db.query_one("""
         SELECT
           (SELECT COUNT(*) FROM holds
@@ -118,13 +119,19 @@ def sidebar_badges():
           ) AS holds,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_RETURN') AS returns,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'MISSING')        AS missing,
-          (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_SALE')   AS active_listings
+          (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_SALE')   AS active_listings,
+          (SELECT MAX(created_at) FROM holds
+             WHERE status IN ('PENDING','PULLING','READY')
+               AND NOT (cohort = 'champion' AND checkout_status = 'pending')
+          ) AS latest_hold_at
     """)
+    latest = row.get("latest_hold_at") if row else None
     return jsonify({
         "holds":           int(row["holds"] or 0),
         "returns":         int(row["returns"] or 0),
         "missing":         int(row["missing"] or 0),
         "active_listings": int(row["active_listings"] or 0),
+        "latest_hold_at":  latest.isoformat() if latest else None,
     })
 
 
