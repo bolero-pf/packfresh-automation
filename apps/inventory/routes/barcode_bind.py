@@ -226,6 +226,24 @@ def api_assign():
         return jsonify({"error": "shopify_error", "status": resp.status_code,
                         "detail": resp.text[:500]}), 502
 
+    # Clear the barcode from any OTHER variants that had it.
+    cleared = []
+    for dup in duplicates:
+        dup_id = dup["variant_id"]
+        try:
+            dup_url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_VERSION}/variants/{dup_id}.json"
+            dup_resp = requests.put(
+                dup_url, headers=headers, timeout=30,
+                json={"variant": {"id": int(dup_id), "barcode": ""}},
+            )
+            if dup_resp.ok:
+                cleared.append(dup_id)
+                logger.info(f"Cleared barcode {barcode} from variant {dup_id}")
+            else:
+                logger.warning(f"Failed to clear barcode from variant {dup_id}: {dup_resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to clear barcode from variant {dup_id}: {e}")
+
     # Mark the inventory cache as touched so it doesn't re-pull right away.
     try:
         db.execute(
@@ -234,7 +252,8 @@ def api_assign():
     except Exception:
         pass
 
-    return jsonify({"ok": True, "variant_id": variant_id, "barcode": barcode})
+    return jsonify({"ok": True, "variant_id": variant_id, "barcode": barcode,
+                    "cleared_from": cleared})
 
 
 # ─── Inventory adjust (aisle-walk physical audit) ──────────────────────────────
@@ -875,7 +894,7 @@ async function assignBarcode(variantId, variantTitle, force) {
     const list = (data.duplicates || [])
       .map(d => (d.product_title || '?') + ' · ' + (d.variant_title || '')).join('\\n');
     if (confirm('Barcode ' + pendingBarcode + ' is already on:\\n\\n' + list
-                + '\\n\\nAssign anyway?')) {
+                + '\\n\\nAssign anyway? (barcode will be removed from the above)')) {
       return assignBarcode(variantId, variantTitle, true);
     }
     return;
@@ -885,7 +904,10 @@ async function assignBarcode(variantId, variantTitle, force) {
     return;
   }
 
-  toast('Assigned ' + pendingBarcode + ' → ' + variantTitle, 'green');
+  const cleared = (data.cleared_from || []).length;
+  const msg = 'Assigned ' + pendingBarcode + ' → ' + variantTitle
+    + (cleared ? ' (removed from ' + cleared + ' other variant' + (cleared > 1 ? 's' : '') + ')' : '');
+  toast(msg, 'green');
   pushHistory(pendingBarcode, variantTitle, 'assign');
   pendingBarcode = null;
   resetAll();
