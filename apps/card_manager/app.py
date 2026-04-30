@@ -385,6 +385,65 @@ def get_hold(hold_id):
 # Hold Status Transitions
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@app.route("/api/holds/<hold_id>/cancel", methods=["POST"])
+def cancel_hold(hold_id):
+    """
+    Cancel a hold outright — "leave the cards there, just close this out".
+
+    Releases any raw_cards lock held by REQUESTED/PULLED items (state goes
+    back to STORED so they're immediately available again) and marks those
+    items + the hold as CANCELLED.
+
+    Refuses if any item is ACCEPTED — those have Shopify draft listings,
+    so the user must reverse-decision each one first to delete the listing.
+    Items already in terminal states (REJECTED, MISSING, EXPIRED_UNCLAIMED,
+    SOLD, RETURNED, UNRESOLVED, CANCELLED) are left untouched; only the hold
+    itself flips to CANCELLED so it drops off the active queue.
+
+    Idempotent on already-cancelled holds.
+    """
+    hold = db.query_one("SELECT id, status FROM holds WHERE id = %s", (hold_id,))
+    if not hold:
+        return jsonify({"error": "Not found"}), 404
+    if hold["status"] == "CANCELLED":
+        return jsonify({"success": True, "status": "CANCELLED", "noop": True})
+
+    accepted = db.query_one("""
+        SELECT COUNT(*)::int AS n FROM hold_items
+        WHERE hold_id = %s AND status = 'ACCEPTED'
+    """, (hold_id,))
+    if (accepted or {}).get("n"):
+        return jsonify({
+            "error": "Hold has accepted items with active listings. "
+                     "Use 'Return' on each accepted card before cancelling."
+        }), 409
+
+    # Release raw_card locks for any non-terminal raw items
+    db.execute("""
+        UPDATE raw_cards
+           SET state = 'STORED', current_hold_id = NULL
+         WHERE id IN (
+             SELECT raw_card_id FROM hold_items
+              WHERE hold_id = %s
+                AND raw_card_id IS NOT NULL
+                AND status IN ('REQUESTED','PULLED')
+         )
+    """, (hold_id,))
+
+    # Mark the cancellable items as CANCELLED — both raw and sealed/slab.
+    db.execute("""
+        UPDATE hold_items
+           SET status = 'CANCELLED', resolved_at = CURRENT_TIMESTAMP
+         WHERE hold_id = %s
+           AND status IN ('REQUESTED','PULLED')
+    """, (hold_id,))
+
+    # Mark the hold itself
+    db.execute("UPDATE holds SET status = 'CANCELLED' WHERE id = %s", (hold_id,))
+
+    return jsonify({"success": True, "status": "CANCELLED"})
+
+
 @app.route("/api/holds/<hold_id>/status", methods=["POST"])
 def update_hold_status(hold_id):
     """Transition hold status: PENDING→PULLING, PULLING→READY."""
@@ -433,14 +492,17 @@ def scan_card(hold_id):
     """, (barcode,))
 
     if not scanned:
-        # Not a raw card. Try sealed/slab — match by SKU on this hold's REQUESTED
-        # product items. Sealed/slab go straight REQUESTED → PULLED (no
-        # ACCEPTED/REJECTED step — outcome is decided at the register).
+        # Not a raw card. Try sealed/slab — match by SKU on this hold's
+        # REQUESTED **or EXPIRED_UNCLAIMED** product items. Including expired
+        # recovers the case where the customer came back after the 15-min
+        # cleanup cron flipped a sitting REQUESTED item to EXPIRED_UNCLAIMED;
+        # sealed/slab inventory was never decremented anyway, so it's safe to
+        # re-pull. Status goes straight to PULLED.
         prod_match = db.query_one("""
-            SELECT hi.id, hi.title, hi.item_kind, hi.shopify_variant_id
+            SELECT hi.id, hi.title, hi.item_kind, hi.shopify_variant_id, hi.status
             FROM hold_items hi
             WHERE hi.hold_id = %s
-              AND hi.status = 'REQUESTED'
+              AND hi.status IN ('REQUESTED','EXPIRED_UNCLAIMED')
               AND hi.item_kind IN ('sealed','slab')
               AND hi.sku = %s
             LIMIT 1

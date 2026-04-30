@@ -625,10 +625,11 @@ function renderHoldDetail(d) {
         <div style="font-size:0.82rem;color:var(--dim);">${isChampionHold ? esc(hold.shopify_order_number||'') + ' · ' + esc(hold.shipping_name||hold.customer_email||'') : esc(hold.customer_phone||'')} · ${_age(hold.created_at)} · <span class="badge ${badgeCls}">${hold.status}</span></div>
         ${isChampionHold && hold.shipping_address ? `<div style="font-size:0.78rem;color:var(--dim);margin-top:2px;">📦 ${esc(hold.shipping_address)}</div>` : ''}
       </div>
-      <div class="btn-row" style="margin:0;">
+      <div class="btn-row" style="margin:0;flex-wrap:wrap;gap:8px;">
         ${hold.status === 'PENDING' ? `<button class="btn btn-amber" onclick="transitionHold('PULLING')">▶ Start Pulling</button>` : ''}
         ${hold.status === 'PULLING' && allPulled ? `<button class="btn btn-green" onclick="transitionHold('READY')">✓ Mark Ready</button>` : ''}
         ${(hold.status === 'READY' || anyDecided) ? `<button class="btn btn-green" onclick="finishHold()">✓ Finish Hold</button>` : ''}
+        ${hold.status !== 'CANCELLED' ? `<button class="btn" style="background:none;border:1px solid var(--border);color:var(--red);" onclick="cancelHold()">✕ Cancel Hold</button>` : ''}
       </div>
     </div>
   `;
@@ -730,6 +731,11 @@ function renderHoldDetail(d) {
         </div>
         ${item.item_status === 'REQUESTED' ? `
           <button class="btn btn-sm btn-green" style="font-size:0.7rem;padding:4px 10px;" onclick="markProductPulled('${item.hold_item_id}','${esc(item.sku||'')}')">✓ Mark Pulled</button>
+        ` : item.item_status === 'EXPIRED_UNCLAIMED' ? `
+          <div style="display:flex;gap:6px;align-items:center;">
+            <span style="font-size:0.7rem;color:var(--amber);font-weight:600;">EXPIRED</span>
+            <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--amber);color:var(--amber);" onclick="markProductPulled('${item.hold_item_id}','${esc(item.sku||'')}')">↻ Recover &amp; Pull</button>
+          </div>
         ` : item.item_status === 'PULLED' ? `
           <span style="font-size:0.78rem;color:var(--green);font-weight:600;">PULLED</span>
         ` : `<span style="font-size:0.78rem;color:var(--dim);">${item.item_status}</span>`}
@@ -783,6 +789,23 @@ async function transitionHold(status) {
     await post(`/api/holds/${_currentHoldId}/status`, { status });
     await refreshHoldDetail();
     toast(`Hold ${status === 'PULLING' ? 'started — go pull the cards!' : 'marked ready — present to customer'}`, 'green');
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function cancelHold() {
+  // Releases raw_card locks (cards stay in their bins) and marks any
+  // un-resolved items + the hold as CANCELLED. Refuses if any items are
+  // already ACCEPTED — those have Shopify listings and must be reversed
+  // first.
+  if (!await themedConfirm(
+    'Cancel this hold?',
+    'Any cards locked by this hold will be released back to inventory immediately. ' +
+    'This is for "leave the cards there, just close it out" — not for completed sales.'
+  )) return;
+  try {
+    await post(`/api/holds/${_currentHoldId}/cancel`, {});
+    toast('Hold cancelled — cards released.', 'green');
+    setTimeout(() => showView('holds'), 800);
   } catch(e) { toast(e.message, 'red'); }
 }
 
