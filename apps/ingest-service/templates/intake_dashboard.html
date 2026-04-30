@@ -296,15 +296,23 @@
                                 <input type="text" id="intake-customer" value="Walk-in">
                             </div>
                             <div class="form-group">
-                                <label>Offer Percentage (%)</label>
-                                <input type="number" id="intake-offer-pct" value="75" min="1" max="100" step="0.5">
+                                <label>Store Credit %</label>
+                                <input type="number" id="intake-credit-pct" value="75" min="0" max="100" step="0.5">
+                            </div>
+                            <div class="form-group">
+                                <label>Cash %</label>
+                                <input type="number" id="intake-cash-pct" value="65" min="0" max="100" step="0.5">
                             </div>
                             <div class="form-group" style="justify-content:flex-end;">
+                                <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                    <input type="checkbox" id="intake-walkin" checked style="width:auto;"> Walk-In
+                                </label>
                                 <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
                                     <input type="checkbox" id="intake-distribution" style="width:auto;"> Distribution
                                 </label>
                             </div>
                         </div>
+                        <div id="intake-pct-override-bar" style="display:none; padding:8px 12px; margin-bottom:8px; background:var(--surface-2); border:1px solid var(--border); border-radius:6px; font-size:0.85rem; color:var(--text-dim);"></div>
                         <button class="btn btn-primary" onclick="createIntakeSession()">Start Intake Session</button>
                     </div>
 
@@ -1117,23 +1125,242 @@
 
     // ═══════════════════════════════ UNIFIED INTAKE (MANUAL ENTRY) ═══════════════════════════════
 
+    // ═══════════════════════════════ ROLE / OVERRIDE STATE ═══════════════════════════════
+    // Per-session: when a manager types their PIN to authorize an
+    // out-of-policy percentage, we stash the resulting JWT here. New
+    // session → new override (the spec is explicit about no rolling
+    // unlock per browser).
+    let _intakeSetupOverride = null;        // override token + approver for the New Intake form
+    let _sessionOverrides = {};             // sessionId → { token, approver }
+    const ASSOCIATE_DEFAULTS = { cash: 65, credit: 75 };
+    const MANAGER_CAP = 80;
+
+    function _pfRole() {
+        try { return (window._pfUser && window._pfUser.role) || 'associate'; }
+        catch (e) { return 'associate'; }
+    }
+
+    function _outsideAssociate(cashPct, creditPct) {
+        return Number(cashPct) !== ASSOCIATE_DEFAULTS.cash
+            || Number(creditPct) !== ASSOCIATE_DEFAULTS.credit;
+    }
+    function _outsideManager(cashPct, creditPct) {
+        return Number(cashPct) > MANAGER_CAP || Number(creditPct) > MANAGER_CAP;
+    }
+
+    // Promise<{token, approver}> — null if cancelled, throws on PIN failure.
+    async function _promptManagerPin(reason) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay active';
+            overlay.style.cssText = 'z-index:1300; align-items:center;';
+            overlay.innerHTML = `
+                <div class="prompt-modal" role="dialog" aria-modal="true" aria-label="Manager Override">
+                    <h3>🔒 Manager Override</h3>
+                    <p>${reason || 'A manager or owner must approve this offer percentage.'}</p>
+                    <div class="form-group">
+                        <label for="pf-pin-input">PIN</label>
+                        <input id="pf-pin-input" type="password" inputmode="numeric"
+                               pattern="[0-9]*" maxlength="8" autocomplete="off"
+                               style="font-size:1.4rem; letter-spacing:0.4em; text-align:center;">
+                    </div>
+                    <div class="prompt-buttons">
+                        <button id="pf-pin-cancel" class="btn btn-secondary">Cancel</button>
+                        <button id="pf-pin-submit" class="btn btn-primary">Approve</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+            const input = overlay.querySelector('#pf-pin-input');
+            setTimeout(() => input.focus(), 50);
+
+            function cleanup() {
+                overlay.remove();
+                document.removeEventListener('keydown', onKey);
+            }
+            function onKey(e) {
+                if (e.key === 'Escape') { cleanup(); resolve(null); }
+                if (e.key === 'Enter') { e.preventDefault(); submit(); }
+            }
+            document.addEventListener('keydown', onKey);
+            overlay.querySelector('#pf-pin-cancel').addEventListener('click', () => { cleanup(); resolve(null); });
+
+            async function submit() {
+                const pin = (input.value || '').trim();
+                if (pin.length < 4) {
+                    input.focus(); input.select();
+                    if (window.pfSound) try { pfSound.error(); } catch(_) {}
+                    return;
+                }
+                const submitBtn = overlay.querySelector('#pf-pin-submit');
+                submitBtn.disabled = true; submitBtn.textContent = 'Verifying…';
+                try {
+                    const r = await fetch('https://admin.pack-fresh.com/api/verify-pin', {
+                        method: 'POST',
+                        headers: {'Content-Type':'application/json'},
+                        credentials: 'include',
+                        body: JSON.stringify({ pin: pin, action: 'offer_percentage' }),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok || !d.ok) {
+                        cleanup();
+                        if (window.pfBlock) {
+                            pfBlock('Override Denied', 'Invalid PIN', { error: true, sound: 'error' });
+                        } else {
+                            alert('Invalid PIN');
+                        }
+                        resolve(null);
+                        return;
+                    }
+                    cleanup();
+                    if (window.pfSound) try { pfSound.success(); } catch(_) {}
+                    resolve({ token: d.override_token, approver: d.manager });
+                } catch (e) {
+                    cleanup();
+                    if (window.pfBlock) pfBlock('Override Denied', e.message || 'Network error', { error: true, sound: 'error' });
+                    else alert(e.message || 'Network error');
+                    resolve(null);
+                }
+            }
+            overlay.querySelector('#pf-pin-submit').addEventListener('click', submit);
+        });
+    }
+
+    // For a given role + percentages, decide whether we need an override
+    // token before submitting. Returns 'associate' | 'manager' | 'owner'
+    // | 'ok' (no override needed). The label maps to which role's PIN
+    // would unlock the submit.
+    function _overrideNeeded(role, cashPct, creditPct) {
+        role = (role || 'associate').toLowerCase();
+        if (role === 'owner') return 'ok';
+        if (role === 'manager') {
+            return _outsideManager(cashPct, creditPct) ? 'owner' : 'ok';
+        }
+        // associate
+        if (_outsideAssociate(cashPct, creditPct)) return 'manager';
+        return 'ok';
+    }
+
+    function _renderOverrideBar(barId, override, role) {
+        const bar = document.getElementById(barId);
+        if (!bar) return;
+        if (override && override.approver) {
+            const ap = override.approver;
+            bar.style.display = '';
+            bar.innerHTML = `<span style="color:var(--green); font-weight:600;">✓ Override:</span> ${ap.name || 'Manager'} (${ap.role || 'manager'})`;
+        } else if (role === 'associate') {
+            bar.style.display = '';
+            bar.innerHTML = `<span style="color:var(--text-dim);">🔒 Locked at defaults — manager override required to change.</span>`;
+        } else {
+            bar.style.display = 'none';
+        }
+    }
+
+    // Apply role-based read-only state to the New Intake form percentage
+    // inputs. Adds an Override button when applicable.
+    function _applyIntakeRoleLock() {
+        const role = _pfRole();
+        const cash = document.getElementById('intake-cash-pct');
+        const credit = document.getElementById('intake-credit-pct');
+        if (!cash || !credit) return;
+        const wrap = cash.parentElement.parentElement; // form-row
+        // Remove any prior button
+        const existing = document.getElementById('intake-pct-override-btn');
+        if (existing) existing.remove();
+
+        if (role === 'associate' && !(_intakeSetupOverride && _intakeSetupOverride.token)) {
+            cash.value = ASSOCIATE_DEFAULTS.cash;
+            credit.value = ASSOCIATE_DEFAULTS.credit;
+            cash.readOnly = true; credit.readOnly = true;
+            cash.style.opacity = credit.style.opacity = '0.6';
+            // Inject override button
+            const btn = document.createElement('button');
+            btn.id = 'intake-pct-override-btn';
+            btn.className = 'btn btn-sm btn-secondary';
+            btn.style.cssText = 'margin-left:8px;';
+            btn.textContent = '🔒 Manager Override';
+            btn.onclick = async (e) => {
+                e.preventDefault();
+                const ov = await _promptManagerPin('A manager must approve a custom offer percentage for this session.');
+                if (!ov) return;
+                _intakeSetupOverride = ov;
+                cash.readOnly = false; credit.readOnly = false;
+                cash.style.opacity = credit.style.opacity = '1';
+                btn.remove();
+                _renderOverrideBar('intake-pct-override-bar', ov, role);
+            };
+            credit.parentElement.appendChild(btn);
+        } else {
+            cash.readOnly = false; credit.readOnly = false;
+            cash.style.opacity = credit.style.opacity = '1';
+        }
+        _renderOverrideBar('intake-pct-override-bar', _intakeSetupOverride, role);
+    }
+
+    // Run on load + on tab switch back
+    (function _initIntakeRoleLock() {
+        function _go() { try { _applyIntakeRoleLock(); } catch(e) {} }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', _go);
+        } else { _go(); }
+        // The admin bar's _pfUser arrives slightly later — re-apply once
+        setTimeout(_go, 250);
+        setTimeout(_go, 750);
+    })();
+
     async function createIntakeSession() {
         const customer = document.getElementById('intake-customer').value || 'Walk-in';
-        const offerPct = document.getElementById('intake-offer-pct').value || '75';
+        const cashPct = parseFloat(document.getElementById('intake-cash-pct').value) || 65;
+        const creditPct = parseFloat(document.getElementById('intake-credit-pct').value) || 75;
         const isDist = document.getElementById('intake-distribution').checked;
+        const isWalkIn = document.getElementById('intake-walkin').checked;
+
+        // Frontend cap check — server is the authority but we want fast UX
+        // feedback before kicking off the request.
+        const role = _pfRole();
+        const need = _overrideNeeded(role, cashPct, creditPct);
+        if (need !== 'ok' && !(_intakeSetupOverride && _intakeSetupOverride.token)) {
+            const ov = await _promptManagerPin(`A ${need} must approve this offer percentage.`);
+            if (!ov) return;
+            _intakeSetupOverride = ov;
+        }
+
         try {
+            const body = {
+                customer_name: customer,
+                session_type: 'mixed',
+                cash_percentage: cashPct,
+                credit_percentage: creditPct,
+                is_walk_in: isWalkIn,
+                is_distribution: isDist,
+            };
+            if (_intakeSetupOverride && _intakeSetupOverride.token) {
+                body.override_token = _intakeSetupOverride.token;
+            }
             const r = await fetch('/api/intake/create-session', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ customer_name: customer, session_type: 'mixed', offer_percentage: parseFloat(offerPct), is_distribution: isDist }),
+                body: JSON.stringify(body),
             });
             const d = await r.json();
-            if (!r.ok) { alert(d.error); return; }
+            if (!r.ok) {
+                if (window.pfBlock) pfBlock('Cannot Start Session', d.error || 'Unknown error', { error: true, sound: 'error' });
+                else alert(d.error);
+                return;
+            }
             intakeSessionId = d.session.id;
             document.getElementById('intake-setup').style.display = 'none';
             document.getElementById('intake-entry').style.display = 'block';
+            const walkBadge = isWalkIn ? ' \u2022 <span style="background:#7c3aed;color:#fff;padding:1px 6px;border-radius:4px;font-size:0.75rem;">WALK-IN</span>' : '';
             document.getElementById('intake-session-info').innerHTML =
-                'Session started for <strong>' + customer + '</strong> \u2022 Offer: ' + offerPct + '% \u2022 ID: ' + intakeSessionId.slice(0,8) + '...';
+                'Session started for <strong>' + customer + '</strong> \u2022 Credit ' + creditPct + '% / Cash ' + cashPct + '%' + walkBadge + ' \u2022 ID: ' + intakeSessionId.slice(0,8) + '...';
+            // Carry the override token into the session so subsequent edits
+            // in the same session don't re-prompt unless the user changes
+            // values again outside policy.
+            if (_intakeSetupOverride && _intakeSetupOverride.token) {
+                _sessionOverrides[intakeSessionId] = _intakeSetupOverride;
+            }
+            _intakeSetupOverride = null;
+            _applyIntakeRoleLock();
             document.getElementById('intake-sealed-search').focus();
         } catch(err) { alert(err.message); }
     }
@@ -1197,7 +1424,7 @@
             if (!products.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No results found</div>'; return; }
 
             const qty = parseInt(document.getElementById('intake-sealed-qty').value) || 1;
-            const offerPct = parseFloat(document.getElementById('intake-offer-pct').value) || 75;
+            const offerPct = parseFloat(document.getElementById('intake-cash-pct').value) || 65;
             resultsDiv.innerHTML = products.map(p => {
                 const price = p.unopenedPrice || (p.prices ? p.prices.market : null) || 0;
                 const offer = (price * qty * offerPct / 100).toFixed(2);
@@ -1307,7 +1534,7 @@
     }
 
     function intakeCardSearch() {
-        const offerPct = parseFloat(document.getElementById('intake-offer-pct').value) || 75;
+        const offerPct = parseFloat(document.getElementById('intake-cash-pct').value) || 65;
         smartCardSearch(intakeSessionId, offerPct, 'intake');
     }
 
@@ -1508,11 +1735,13 @@
                     } else if (s.fulfillment_method === 'mail') {
                         details = '📬 no tracking';
                     }
+                    const walkBadge = s.is_walk_in === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">WALK-IN</span>' : '';
+                    const accBadge = s.accepted_offer_type ? ` <span class="badge" style="background:var(--green);color:#fff;font-size:0.65rem;">${s.accepted_offer_type.toUpperCase()}</span>` : '';
                     return `<tr>
                     ${isActive ? `<td><input type="checkbox" class="merge-check" data-session-id="${s.id}" data-customer="${s.customer_name || 'Unknown'}" onchange="updateMergeBtn()"></td>` : ''}
-                    <td data-label="Customer">${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''}</td>
+                    <td data-label="Customer">${s.customer_name || 'Unknown'}${s.is_distribution === true ? ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">DIST</span>' : ''}${walkBadge}</td>
                     <td data-label="Type"><span class="badge badge-blue">${s.session_type}</span></td>
-                    <td data-label="Status"><span class="badge" style="${statusStyle}">${statusLabel}</span></td>
+                    <td data-label="Status"><span class="badge" style="${statusStyle}">${statusLabel}</span>${accBadge}</td>
                     <td data-label="Items">${s.item_count || 0}</td>
                     <td data-label="Offer">$${(s.total_offer_amount || 0).toFixed(2)}</td>
                     <td data-label="Details" style="font-size:0.8rem; color:var(--text-dim);">${details}</td>
@@ -1608,38 +1837,55 @@
             const editable = !['received','ingested','cancelled','rejected'].includes(s.status);
             const rejuvenatable = ['cancelled','rejected'].includes(s.status);
 
+            // Resolve cash/credit numbers, falling back to legacy
+            // offer_percentage on rows that predate the split.
+            const _cashPct = (s.cash_percentage != null) ? Number(s.cash_percentage)
+                            : (s.offer_percentage != null ? Number(s.offer_percentage) : 65);
+            const _creditPct = (s.credit_percentage != null) ? Number(s.credit_percentage) : 75;
+            const _cashTotal = (s.total_offer_cash != null) ? Number(s.total_offer_cash)
+                              : Number(s.total_offer_amount || 0);
+            const _creditTotal = (s.total_offer_credit != null) ? Number(s.total_offer_credit)
+                                : (s.credit_percentage != null ? Number(s.total_market_value || 0) * _creditPct / 100 : 0);
+            const _accepted = s.accepted_offer_type;
+            const _isWalkIn = !!s.is_walk_in;
+
             body.innerHTML = `
+                ${_renderStickyActions(sessionId, s, items)}
                 <div class="stats">
                     <div class="stat">
                         <div class="stat-label">Customer</div>
                         <div class="stat-value" style="font-size:1.1rem;">${s.customer_name}</div>
-                        ${s.is_distribution === true ? '<div style="margin-top:4px;"><span class="badge" style="background:#7c3aed;color:#fff;">📦 DISTRIBUTION</span></div>' : ''}
+                        <div style="margin-top:4px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+                            ${s.is_distribution === true ? '<span class="badge" style="background:#7c3aed;color:#fff;">📦 DISTRIBUTION</span>' : ''}
+                            ${_isWalkIn ? '<span class="badge" style="background:#7c3aed;color:#fff;">🚪 WALK-IN</span>' : ''}
+                            ${editable ? `<button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px;" onclick="toggleWalkIn('${sessionId}', ${!_isWalkIn})">${_isWalkIn ? 'Mark Mail/Pickup' : 'Mark Walk-In'}</button>` : ''}
+                        </div>
                     </div>
                     <div class="stat"><div class="stat-label">Type</div><div class="stat-value" style="font-size:1.1rem;"><span class="badge badge-blue">${s.session_type}</span>
                         ${editable ? `<div style="margin-top:6px;"><button class="btn btn-sm" style="font-size:0.75rem;padding:2px 8px;background:${s.is_distribution === true ? '#7c3aed' : 'var(--surface-2)'};color:${s.is_distribution === true ? '#fff' : 'var(--text-dim)'};border:1px solid ${s.is_distribution === true ? '#7c3aed' : 'var(--border)'};" onclick="toggleDistribution('${sessionId}')">${s.is_distribution === true ? '📦 Distribution' : '🤝 Private Purchase'}</button></div>` : ''}
                     </div></div>
                     <div class="stat"><div class="stat-label">Market Value</div><div class="stat-value"><span id="market-value-display">$${(s.total_market_value || 0).toFixed(2)}</span></div></div>
                     <div class="stat">
-                        <div class="stat-label">Offer %</div>
-                        <div class="stat-value" style="display:flex; align-items:center; gap:8px;">
-                            <span id="offer-pct-display">${s.offer_percentage}%</span>
-                            ${editable ? `
-                                <button class="btn btn-sm btn-secondary" style="font-size:0.75rem; padding:2px 8px;" 
-                                        onclick="editOfferPct('${sessionId}', ${s.offer_percentage})">Edit</button>
-                            ` : ''}
+                        <div class="stat-label">Offer Percentages ${_accepted ? '<span class="badge" style="background:var(--green);color:#fff;">' + _accepted.toUpperCase() + ' ACCEPTED</span>' : ''}</div>
+                        <div class="stat-value" style="display:flex; flex-direction:column; gap:4px;">
+                            <div style="display:flex; align-items:center; gap:6px; font-size:0.95rem;">
+                                <span style="color:var(--text-dim); width:60px;">Credit</span>
+                                ${editable && !_accepted ? `<input id="pct-credit-input" type="number" min="0" max="100" step="0.5" value="${_creditPct}" data-orig="${_creditPct}" style="width:70px; padding:4px 6px; font-size:0.9rem;" oninput="onPctEdit('${sessionId}')">` : `<span>${_creditPct}%</span>`}
+                                <span style="color:var(--text-dim); font-size:0.85rem;">→ <strong style="color:${_accepted==='credit'?'var(--green)':'var(--text)'};">$${_creditTotal.toFixed(2)}</strong></span>
+                            </div>
+                            <div style="display:flex; align-items:center; gap:6px; font-size:0.95rem;">
+                                <span style="color:var(--text-dim); width:60px;">Cash</span>
+                                ${editable && !_accepted ? `<input id="pct-cash-input" type="number" min="0" max="100" step="0.5" value="${_cashPct}" data-orig="${_cashPct}" style="width:70px; padding:4px 6px; font-size:0.9rem;" oninput="onPctEdit('${sessionId}')">` : `<span>${_cashPct}%</span>`}
+                                <span style="color:var(--text-dim); font-size:0.85rem;">→ <strong style="color:${_accepted==='cash'?'var(--green)':'var(--text)'};">$${_cashTotal.toFixed(2)}</strong></span>
+                            </div>
+                            ${editable && !_accepted ? `<div id="pct-edit-controls" style="display:none; margin-top:4px; gap:6px; align-items:center; font-size:0.8rem;">
+                                <button class="btn btn-sm btn-primary" style="font-size:0.75rem; padding:3px 8px;" onclick="savePcts('${sessionId}')">Save</button>
+                                <button class="btn btn-sm btn-secondary" style="font-size:0.75rem; padding:3px 8px;" onclick="cancelPctEdit()">Cancel</button>
+                                <span id="pct-override-status" style="color:var(--text-dim);"></span>
+                            </div>` : ''}
                         </div>
                     </div>
-                    <div class="stat">
-                        <div class="stat-label">Offer Total</div>
-                        <div class="stat-value" style="display:flex; align-items:center; gap:8px;">
-                            <span id="offer-total-display">$${(s.total_offer_amount || 0).toFixed(2)}</span>
-                            ${editable ? `
-                                <button class="btn btn-sm btn-secondary" style="font-size:0.75rem; padding:2px 8px;" 
-                                        onclick="editOfferTotal('${sessionId}', ${s.total_offer_amount || 0}, ${s.total_market_value || 0})">Edit</button>
-                            ` : ''}
-                        </div>
-                    </div>
-                </div>
+                </div>${_renderRoleLockBanner(sessionId, s)}
 
                 <!-- Session Sub-tabs -->
                 <div style="display:flex; gap:2px; margin-bottom:16px; border-bottom:1px solid var(--border);">
@@ -1910,8 +2156,18 @@
                             html += "<button class=\"btn btn-success\" onclick=\"transitionSession('" + sessionId + "', 'offer')\">📤 Lock &amp; Offer (" + activeItems.length + " items)</button>";
                         }
                     } else if (s.status === 'offered') {
-                        html += "<button class=\"btn btn-success\" onclick=\"acceptSession('" + sessionId + "', 'pickup')\">🚗 Accepted — Pickup</button>";
-                        html += "<button class=\"btn btn-success\" onclick=\"acceptSession('" + sessionId + "', 'mail')\">📬 Accepted — Mail</button>";
+                        // Per spec: two clear actions — Accept Cash / Accept
+                        // Credit. Walk-in sessions short-circuit to received
+                        // on accept (the customer is at the counter); regular
+                        // sessions still capture pickup vs mail in the
+                        // accept-flow modal.
+                        const _walkBadge = _isWalkIn ? ' <span style="font-size:0.7rem; opacity:0.85;">→ received</span>' : '';
+                        const _credLabel = (s.credit_percentage != null) ? ` ($${_creditTotal.toFixed(2)})` : '';
+                        const _cashLabel = ` ($${_cashTotal.toFixed(2)})`;
+                        if (s.credit_percentage != null) {
+                            html += `<button class="btn btn-success" onclick="acceptOffer('${sessionId}', 'credit')">💳 Accept Credit${_credLabel}${_walkBadge}</button>`;
+                        }
+                        html += `<button class="btn btn-success" onclick="acceptOffer('${sessionId}', 'cash')">💵 Accept Cash${_cashLabel}${_walkBadge}</button>`;
                         html += "<button class=\"btn btn-error\" onclick=\"transitionSession('" + sessionId + "', 'reject')\">❌ Customer Rejected</button>";
                         html += "<button class=\"btn btn-secondary btn-sm\" onclick=\"transitionSession('" + sessionId + "', 'reopen')\">↩ Reopen for Edits</button>";
                     } else if (s.status === 'accepted') {
@@ -4916,6 +5172,224 @@
 
     // ═══════════════════════════════ ACCEPT (PICKUP / MAIL) ═══════════════════════════════
 
+    // ═══════════════════════════════ ACCEPT (CASH / CREDIT) ═══════════════════════════════
+    //
+    // New shape (issue #7): customer picks one of the two offers. For
+    // walk-in sessions we POST without prompting for fulfillment — the
+    // customer's at the counter and the server short-circuits to
+    // 'received'. For mail/pickup sessions we still ask which mode.
+    async function acceptOffer(sessionId, offerType) {
+        if (offerType !== 'cash' && offerType !== 'credit') return;
+        // Look up walk-in via the cached session — fall back to fetching
+        // current state if we don't have it (defensive for cross-tab edits).
+        let isWalkIn = false;
+        try {
+            const r0 = await fetch('/api/intake/session/' + sessionId);
+            const d0 = await r0.json();
+            if (d0 && d0.session) isWalkIn = !!d0.session.is_walk_in;
+        } catch (_) {}
+
+        let body = { offer_type: offerType };
+        if (!isWalkIn) {
+            // Mail/pickup — same flow as the legacy accept, plus offer_type
+            const choice = await themedPrompt({
+                title: (offerType === 'cash' ? '💵' : '💳') + ' Accept ' + offerType.charAt(0).toUpperCase() + offerType.slice(1),
+                message: 'How is the product getting to us?',
+                inputs: [
+                    { type: 'select', label: 'Fulfillment', default: 'pickup', options: [
+                        {value: 'pickup', label: 'Pickup (we go get it)'},
+                        {value: 'mail',   label: 'Mail (customer ships it)'},
+                    ]},
+                    { type: 'text', label: 'Pickup date / tracking (optional)', placeholder: 'YYYY-MM-DD or tracking #' },
+                ],
+                confirmText: 'Confirm Accept',
+            });
+            if (choice === null) return;
+            const [method, extra] = choice;
+            body.fulfillment_method = method;
+            if (method === 'mail') body.tracking_number = extra || '';
+            else body.pickup_date = extra || '';
+        }
+        try {
+            const r = await fetch('/api/intake/session/' + sessionId + '/accept', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(body),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                if (window.pfBlock) pfBlock('Cannot Accept', d.error || 'Unknown error', { error: true, sound: 'error' });
+                else alert(d.error);
+                return;
+            }
+            if (window.pfSound) try { pfSound.success(); } catch(_) {}
+            viewSession(sessionId, true);
+            loadSessions();
+        } catch (err) {
+            if (window.pfBlock) pfBlock('Cannot Accept', err.message, { error: true, sound: 'error' });
+            else alert(err.message);
+        }
+    }
+
+    async function toggleWalkIn(sessionId, value) {
+        try {
+            const r = await fetch('/api/intake/session/' + sessionId + '/walk-in', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ is_walk_in: !!value }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Failed'); return; }
+            viewSession(sessionId, true);
+        } catch(err) { alert(err.message); }
+    }
+
+    // Sticky action toolbar (issue #9). Renders the same primary action
+    // for the current session status at the top of the modal so staff
+    // doesn't have to scroll past hundreds of items to hit Accept /
+    // Reject. The bottom buttons stay (some staff prefer them there).
+    function _renderStickyActions(sessionId, s, items) {
+        const status = s.status;
+        const editable = !['received','ingested','cancelled','rejected'].includes(status);
+        let inner = '';
+        const activeItems = (items || []).filter(i => {
+            const st = i.item_status || 'good';
+            return st === 'good' || st === 'damaged';
+        });
+        const unmappedActive = activeItems.filter(i => !i.is_mapped);
+        const isWalkIn = !!s.is_walk_in;
+        const cashLabel = (s.total_offer_cash != null) ? '$' + Number(s.total_offer_cash).toFixed(2)
+                       : '$' + Number(s.total_offer_amount || 0).toFixed(2);
+        const credLabel = (s.total_offer_credit != null) ? '$' + Number(s.total_offer_credit).toFixed(2) : null;
+
+        if (status === 'in_progress') {
+            if (unmappedActive.length === 0 && activeItems.length > 0) {
+                inner += `<button class="btn btn-success btn-sm" onclick="transitionSession('${sessionId}','offer')">📤 Lock & Offer (${activeItems.length})</button>`;
+            } else if (unmappedActive.length > 0) {
+                inner += `<span style="font-size:0.85rem;color:var(--text-dim);">${unmappedActive.length} item(s) need linking before you can offer</span>`;
+            }
+        } else if (status === 'offered') {
+            if (credLabel) {
+                inner += `<button class="btn btn-success btn-sm" onclick="acceptOffer('${sessionId}','credit')">💳 Accept Credit (${credLabel})</button>`;
+            }
+            inner += `<button class="btn btn-success btn-sm" onclick="acceptOffer('${sessionId}','cash')">💵 Accept Cash (${cashLabel})</button>`;
+            inner += `<button class="btn btn-error btn-sm" onclick="transitionSession('${sessionId}','reject')">❌ Reject</button>`;
+            if (isWalkIn) inner += `<span class="badge" style="background:#7c3aed;color:#fff;">🚪 walk-in → received</span>`;
+        } else if (status === 'accepted') {
+            inner += `<button class="btn btn-success btn-sm" onclick="transitionSession('${sessionId}','receive')">📦 Product Received</button>`;
+            const acc = s.accepted_offer_type ? `<span class="badge" style="background:var(--green);color:#fff;">${s.accepted_offer_type.toUpperCase()}</span>` : '';
+            if (acc) inner += acc;
+        } else if (status === 'received') {
+            inner += '<span style="color:var(--green); font-weight:600; font-size:0.85rem;">✅ Ready for Ingest</span>';
+        }
+        if (editable && status !== 'in_progress') {
+            inner += `<button class="btn btn-secondary btn-sm" onclick="transitionSession('${sessionId}','reopen')">↩ Reopen</button>`;
+        }
+        if (!inner) return '';
+        // Sticky bar sits flush with the modal's top scroll edge so the
+        // primary actions stay visible no matter how far staff scrolls
+        // past hundreds of items. Right padding leaves clearance for the
+        // existing modal-close-sticky button.
+        return `
+            <div class="session-actions" style="position: sticky; top: 0; z-index: 5;
+                 background: var(--surface);
+                 margin: -28px -28px 16px;
+                 padding: 10px 56px 10px 28px;
+                 border-bottom: 1px solid var(--border);
+                 display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                ${inner}
+            </div>`;
+    }
+
+    // ═══════════════════════════════ ROLE LOCK / OVERRIDE — SESSION MODAL ═══════════════════════════════
+    function _renderRoleLockBanner(sessionId, s) {
+        const role = _pfRole();
+        const ov = _sessionOverrides[sessionId];
+        if (role === 'owner' || s.accepted_offer_type) return '';
+        if (ov && ov.approver) {
+            return `<div style="margin-bottom:12px; padding:8px 12px; background:var(--surface-2); border:1px solid var(--green); border-radius:6px; font-size:0.85rem;">
+                <span style="color:var(--green); font-weight:600;">✓ Override:</span> ${ov.approver.name || 'Manager'} (${ov.approver.role || 'manager'}) authorized off-policy percentages on this session.
+            </div>`;
+        }
+        if (role === 'associate') {
+            return `<div style="margin-bottom:12px; padding:8px 12px; background:var(--surface-2); border:1px dashed var(--border); border-radius:6px; font-size:0.85rem; color:var(--text-dim);">
+                🔒 Percentages locked at defaults (Credit ${ASSOCIATE_DEFAULTS.credit}% / Cash ${ASSOCIATE_DEFAULTS.cash}%) — manager override required to change.
+            </div>`;
+        }
+        return '';
+    }
+
+    // Triggered by either percentage <input> in the session modal. Reveals
+    // the Save/Cancel controls when the user changes a value, and (for
+    // associates / out-of-cap managers) requests an override token before
+    // letting them save.
+    function onPctEdit(sessionId) {
+        const cashEl = document.getElementById('pct-cash-input');
+        const credEl = document.getElementById('pct-credit-input');
+        const ctrls = document.getElementById('pct-edit-controls');
+        if (!cashEl || !credEl || !ctrls) return;
+        const dirty = (cashEl.value !== cashEl.dataset.orig) || (credEl.value !== credEl.dataset.orig);
+        ctrls.style.display = dirty ? 'inline-flex' : 'none';
+    }
+
+    function cancelPctEdit() {
+        const cashEl = document.getElementById('pct-cash-input');
+        const credEl = document.getElementById('pct-credit-input');
+        const ctrls = document.getElementById('pct-edit-controls');
+        if (cashEl) cashEl.value = cashEl.dataset.orig;
+        if (credEl) credEl.value = credEl.dataset.orig;
+        if (ctrls) ctrls.style.display = 'none';
+    }
+
+    async function savePcts(sessionId) {
+        const cashEl = document.getElementById('pct-cash-input');
+        const credEl = document.getElementById('pct-credit-input');
+        if (!cashEl || !credEl) return;
+        const cash = parseFloat(cashEl.value);
+        const credit = parseFloat(credEl.value);
+        if (isNaN(cash) || isNaN(credit) || cash < 0 || cash > 100 || credit < 0 || credit > 100) {
+            if (window.pfBlock) pfBlock('Bad Input', 'Enter percentages between 0 and 100.', { error: true, sound: 'error' });
+            else alert('Enter percentages between 0 and 100.');
+            return;
+        }
+        const role = _pfRole();
+        let ov = _sessionOverrides[sessionId] || null;
+        const need = _overrideNeeded(role, cash, credit);
+        if (need !== 'ok' && !(ov && ov.token)) {
+            ov = await _promptManagerPin(`A ${need} must approve these percentages.`);
+            if (!ov) return;
+            _sessionOverrides[sessionId] = ov;
+        }
+        try {
+            const body = { cash_percentage: cash, credit_percentage: credit };
+            if (ov && ov.token) body.override_token = ov.token;
+            const r = await fetch(`/api/intake/session/${sessionId}/offer-percentage`, {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(body),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                if (d.code === 'override_required') {
+                    // Token expired or missing — re-prompt
+                    delete _sessionOverrides[sessionId];
+                    if (window.pfBlock) pfBlock('Override Required', 'Manager approval needed for these percentages.', { error: true, sound: 'error' });
+                    else alert(d.error || 'Override required');
+                    return;
+                }
+                if (window.pfBlock) pfBlock('Cannot Save', d.error || 'Unknown error', { error: true, sound: 'error' });
+                else alert(d.error);
+                return;
+            }
+            if (window.pfSound) try { pfSound.success(); } catch(_) {}
+            viewSession(sessionId, true);
+        } catch (err) {
+            if (window.pfBlock) pfBlock('Cannot Save', err.message, { error: true, sound: 'error' });
+            else alert(err.message);
+        }
+    }
+
+    // ═══════════════════════════════ ACCEPT (LEGACY PICKUP/MAIL) ═══════════════════════════════
     async function acceptSession(sessionId, method) {
         let tracking = null;
         let pickupDate = null;
