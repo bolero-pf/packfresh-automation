@@ -963,9 +963,10 @@ def list_products():
     offset = (page - 1) * 25
 
     # CSV tag exact-match: wrap both sides in commas so 'unsealed' won't
-    # falsely match 'sealed'. Tag case is normalized lower.
+    # falsely match 'sealed'. shared/shopify_client.py joins tags with ", "
+    # (comma+space), so collapse the separator before matching.
     where = ["status = 'ACTIVE'", "shopify_qty > 0",
-             "LOWER(',' || COALESCE(tags,'') || ',') LIKE %s"]
+             "LOWER(',' || REPLACE(COALESCE(tags,''), ', ', ',') || ',') LIKE %s"]
     params: list = [f"%,{tag},%"]
     if q:
         where.append("title ILIKE %s")

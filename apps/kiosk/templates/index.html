@@ -1609,9 +1609,11 @@ const IDLE_FINAL_MS = 10_000;   // 10s grace after warning before reset
 let _idleLast = Date.now();
 let _idleWarning = null;        // overlay element when shown
 let _idleTimer = null;
+let _idleDirty = false;         // true once user touches the screen since last reset
 
 function _onActivity() {
   _idleLast = Date.now();
+  _idleDirty = true;
   if (_idleWarning) _dismissIdleWarning();
 }
 
@@ -1624,6 +1626,7 @@ function startIdleWatch() {
 }
 
 function _idleTick() {
+  if (!_idleDirty) return;  // no activity since last reset → nothing to do
   const now = Date.now();
   const idle = now - _idleLast;
   if (idle >= IDLE_WARN_MS && !_idleWarning) {
@@ -1700,12 +1703,18 @@ function _doIdleReset() {
   const q = document.getElementById('q');
   if (q) q.value = '';
   if (_allowedKinds.includes('raw') && _activeKind !== 'raw') {
-    setActiveKind('raw');
-  } else {
-    doSearch();
+    _activeKind = 'raw';
+    _page = 1;
+    const ac = document.getElementById('active-chips');
+    if (ac) ac.style.display = '';
+    _renderKindTabs();
   }
+  // Clear all active filters (game/era/set/conds/price/colors/types/rarities/sort)
+  // — this also re-renders chips, refreshes the filter button, and runs doSearch().
+  _clearAllActive();
   window.scrollTo(0, 0);
   _idleLast = Date.now();
+  _idleDirty = false;
 }
 
 function setActiveKind(kind) {
