@@ -38,11 +38,69 @@
         .row-btn:disabled { opacity: 0.35; cursor: not-allowed; }
         .applied-tag   { color: #4ade80; font-size: 0.78rem; font-weight: 600; }
         .dismissed-tag { color: var(--text-dim); font-size: 0.78rem; font-style: italic; }
+
+        /* Count badge — loud, like Hold Queue's qty>1 callout. */
+        .count-badge {
+            display: inline-flex; align-items: center; justify-content: center;
+            min-width: 38px; height: 26px; padding: 0 8px;
+            border-radius: 13px; font-weight: 700; font-size: 0.85rem;
+            background: var(--accent); color: #0a0a0f;
+            margin-right: 8px; font-variant-numeric: tabular-nums;
+        }
+        .count-badge.single { background: var(--surface-2); color: var(--text-dim); font-weight: 500; }
+
+        /* Inconsistent-state warning (current_price diverged across copies). */
+        .warn-icon {
+            display: inline-block; margin-left: 6px; cursor: help;
+            color: #fbbf24; font-weight: 700;
+        }
+
+        /* Inline price editor for group apply */
+        .group-price-input {
+            width: 80px; min-height: 32px; padding: 0 8px;
+            border-radius: 6px; font-size: 0.85rem;
+            background: var(--surface); border: 1.5px solid var(--border);
+            color: var(--text); font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums; text-align: right;
+        }
+        .group-price-input:focus { outline: none; border-color: var(--accent); }
+
+        /* Bin chip list */
+        .bin-list { display: inline-flex; gap: 4px; flex-wrap: wrap; max-width: 220px; }
+        .bin-chip {
+            display: inline-block; padding: 1px 6px; border-radius: 4px;
+            background: var(--surface-2); color: var(--text-dim);
+            font-family: var(--font-mono); font-size: 0.72rem;
+        }
+        .bin-more {
+            display: inline-block; padding: 1px 6px; border-radius: 4px;
+            background: var(--surface-2); color: var(--text); cursor: pointer;
+            font-family: var(--font-mono); font-size: 0.72rem;
+            border: 1px dashed var(--border);
+        }
+
+        /* Per-copy detail (expanded view of a divergent / curious group) */
+        .detail-row { background: var(--surface); }
+        .detail-row td { padding: 0; border-bottom: 1px solid var(--border); }
+        .detail-table {
+            width: 100%; border-collapse: collapse; font-size: 0.78rem;
+            margin: 0;
+        }
+        .detail-table th, .detail-table td {
+            padding: 4px 8px; border-bottom: 1px solid var(--border);
+            background: transparent;
+        }
+        .detail-table th { font-size: 0.68rem; }
+        .expand-toggle {
+            background: transparent; border: none; color: var(--text-dim);
+            cursor: pointer; padding: 0 4px; font-size: 0.85rem;
+        }
+        .expand-toggle:hover { color: var(--accent); }
     </style>
 </head>
 <body>
     <a href="/dashboard/raw-runs" style="color:var(--text-dim);font-size:0.85rem;">← all runs</a>
-    <h1 style="margin-top:8px;">Raw Card Run · {{ summary.total }} cards</h1>
+    <h1 style="margin-top:8px;">Raw Card Run · {{ summary.total }} copies in {{ groups|length }} group{{ '' if groups|length == 1 else 's' }}</h1>
     <div class="sub">{{ summary.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }} · run_id={{ run_id }}</div>
 
     <div class="filters">
@@ -52,7 +110,7 @@
         {% endfor %}
     </div>
 
-    {% if not rows %}
+    {% if not groups %}
         <p style="color:var(--text-dim);">No rows match this filter.</p>
     {% else %}
     <table>
@@ -66,49 +124,145 @@
                 <th class="num">New / Suggested $</th>
                 <th class="num">Cache market</th>
                 <th class="num">Cost</th>
+                <th>Bins</th>
                 <th class="num">Δ %</th>
                 <th>Reason</th>
-                <th>Action</th>
+                <th>Apply</th>
             </tr>
         </thead>
         <tbody>
-        {% for r in rows %}
-            {% set act = r.action %}
+        {% for g in groups %}
+            {% set act = g.action %}
             {% set pill_cls = {'auto_applied':'p-auto','flag_overpriced':'p-over','flag_underpriced':'p-under','skip':'p-skip','error':'p-err','ok':'p-ok'}.get(act, 'p-skip') %}
-            <tr data-row-id="{{ r.id }}">
+            {% set inconsistent = (g.distinct_old_prices or 0) > 1 %}
+            {% set has_raw = g.raw_card_ids and (g.raw_card_ids|select|list|length > 0) %}
+            {% set group_id = 'g-' ~ loop.index %}
+            <tr data-group-id="{{ group_id }}"
+                data-row-ids='{{ g.row_ids|tojson }}'
+                data-suggested="{{ '%.2f' % g.suggested_price if g.suggested_price is not none else '' }}">
                 <td><span class="pill {{ pill_cls }}">{{ act }}</span></td>
                 <td>
-                    {{ r.card_name }}
-                    <div class="reason">{{ r.set_name or '' }}{% if r.card_number %} · #{{ r.card_number }}{% endif %}{% if r.barcode %} · {{ r.barcode }}{% endif %}</div>
+                    <span class="count-badge {% if g.copies == 1 %}single{% endif %}" title="{{ g.copies }} cop{{ 'y' if g.copies == 1 else 'ies' }} in this group">× {{ g.copies }}</span>
+                    {{ g.card_name }}
+                    {% if inconsistent %}
+                        <span class="warn-icon" title="Copies in this group have different current_price values (${{ '%.2f' % g.old_price_min }} – ${{ '%.2f' % g.old_price_max }}). Applying will uniformize them.">⚠</span>
+                    {% endif %}
+                    <button class="expand-toggle" data-target="{{ group_id }}-detail" title="Show per-copy breakdown">▾</button>
+                    <div class="reason">{{ g.set_name or '' }}{% if g.card_number %} · #{{ g.card_number }}{% endif %}</div>
                 </td>
-                <td>{{ r.condition or '—' }}</td>
-                <td>{{ r.variant or '—' }}</td>
-                <td class="num">{% if r.old_price is not none %}${{ '%.2f' % r.old_price }}{% else %}—{% endif %}</td>
+                <td>{{ g.condition or '—' }}</td>
+                <td>{{ g.variant or '—' }}</td>
                 <td class="num">
-                    {% if r.new_price is not none %}<strong>${{ '%.2f' % r.new_price }}</strong>
-                    {% elif r.suggested_price is not none %}<em>${{ '%.2f' % r.suggested_price }}</em>
+                    {% if g.old_price_min is not none and g.old_price_max is not none %}
+                        {% if inconsistent %}
+                            <span style="color:#fbbf24;">${{ '%.2f' % g.old_price_min }} – ${{ '%.2f' % g.old_price_max }}</span>
+                        {% else %}
+                            ${{ '%.2f' % g.old_price_min }}
+                        {% endif %}
                     {% else %}—{% endif %}
                 </td>
-                <td class="num">{% if r.cache_market is not none %}${{ '%.2f' % r.cache_market }}{% else %}—{% endif %}</td>
-                <td class="num">{% if r.cost_basis is not none %}${{ '%.2f' % r.cost_basis }}{% else %}—{% endif %}</td>
                 <td class="num">
-                    {% if r.delta_pct is not none %}
-                        {% set d = r.delta_pct %}
+                    {% if g.new_price is not none %}<strong>${{ '%.2f' % g.new_price }}</strong>
+                    {% elif g.suggested_price is not none %}<em>${{ '%.2f' % g.suggested_price }}</em>
+                    {% else %}—{% endif %}
+                </td>
+                <td class="num">{% if g.cache_market is not none %}${{ '%.2f' % g.cache_market }}{% else %}—{% endif %}</td>
+                <td class="num">
+                    {% if g.cost_basis_min is not none and g.cost_basis_max is not none %}
+                        {% if (g.cost_basis_max - g.cost_basis_min) > 0.005 %}
+                            ${{ '%.2f' % g.cost_basis_min }} – ${{ '%.2f' % g.cost_basis_max }}
+                        {% else %}
+                            ${{ '%.2f' % g.cost_basis_min }}
+                        {% endif %}
+                    {% else %}—{% endif %}
+                </td>
+                <td>
+                    {% if g.bin_labels %}
+                        <span class="bin-list">
+                            {% for b in g.bin_labels[:3] %}
+                                <span class="bin-chip">{{ b }}</span>
+                            {% endfor %}
+                            {% if g.bin_labels|length > 3 %}
+                                <span class="bin-more" title="{{ g.bin_labels[3:] | join(', ') }}">+{{ g.bin_labels|length - 3 }} more</span>
+                            {% endif %}
+                        </span>
+                    {% else %}<span style="color:var(--text-dim);">—</span>{% endif %}
+                </td>
+                <td class="num">
+                    {% if g.delta_pct is not none %}
+                        {% set d = g.delta_pct %}
                         <span class="{% if d > 0 %}delta-pos{% elif d < 0 %}delta-neg{% else %}delta-zero{% endif %}">{{ '%+.1f' % d }}%</span>
                     {% else %}—{% endif %}
                 </td>
-                <td class="reason">{{ r.reason or '' }}</td>
+                <td class="reason">{{ g.reason or '' }}</td>
                 <td>
-                    {% if r.apply_status == 'applied' %}
-                        <span class="applied-tag">✓ Applied{% if r.applied_price %} · ${{ '%.2f' % r.applied_price }}{% endif %}</span>
-                    {% elif r.apply_status == 'dismissed' %}
-                        <span class="dismissed-tag">dismissed</span>
-                    {% elif act in ('flag_overpriced', 'flag_underpriced') and r.suggested_price and r.raw_card_id %}
+                    {% set all_applied   = g.apply_statuses and (g.apply_statuses|reject('equalto', 'applied')|list|length == 0) %}
+                    {% set all_dismissed = g.apply_statuses and (g.apply_statuses|reject('equalto', 'dismissed')|list|length == 0) %}
+                    {% if all_applied %}
+                        <span class="applied-tag">✓ Applied{% if g.applied_prices and g.applied_prices[0] %} · ${{ '%.2f' % g.applied_prices[0] }}{% endif %}{% if g.copies > 1 %} ×{{ g.copies }}{% endif %}</span>
+                    {% elif all_dismissed %}
+                        <span class="dismissed-tag">dismissed{% if g.copies > 1 %} ×{{ g.copies }}{% endif %}</span>
+                    {% elif act in ('flag_overpriced', 'flag_underpriced') and g.suggested_price and has_raw %}
                         <div class="row-actions">
-                            <button class="row-btn row-btn-apply" data-act="apply">Apply ${{ '%.2f' % r.suggested_price }}</button>
+                            <span style="color:var(--text-dim);font-size:0.8rem;">$</span>
+                            <input type="number" class="group-price-input" step="0.01" min="0"
+                                   value="{{ '%.2f' % g.suggested_price }}"
+                                   title="Edit to override the suggested price; applies to all {{ g.copies }} cop{{ 'y' if g.copies == 1 else 'ies' }}">
+                            <button class="row-btn row-btn-apply" data-act="apply">
+                                Apply{% if g.copies > 1 %} ×{{ g.copies }}{% endif %}
+                            </button>
                             <button class="row-btn row-btn-dismiss" data-act="dismiss">Dismiss</button>
                         </div>
                     {% else %}—{% endif %}
+                </td>
+            </tr>
+            <tr class="detail-row" id="{{ group_id }}-detail" style="display:none;">
+                <td colspan="12">
+                    <table class="detail-table">
+                        <thead>
+                            <tr>
+                                <th>Barcode</th>
+                                <th class="num">Old $</th>
+                                <th class="num">Cost basis</th>
+                                <th>Apply status</th>
+                                <th class="num">Applied $</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for i in range(g.copies) %}
+                            <tr>
+                                <td style="font-family:var(--font-mono);font-size:0.78rem;">
+                                    {{ g.barcodes[i] or '—' }}
+                                </td>
+                                <td class="num">
+                                    {% if g.old_prices and g.old_prices[i] is not none %}
+                                        ${{ '%.2f' % g.old_prices[i] }}
+                                    {% else %}—{% endif %}
+                                </td>
+                                <td class="num">
+                                    {% if g.cost_bases and g.cost_bases[i] is not none %}
+                                        ${{ '%.2f' % g.cost_bases[i] }}
+                                    {% else %}—{% endif %}
+                                </td>
+                                <td>
+                                    {% set st = g.apply_statuses[i] if g.apply_statuses else 'pending' %}
+                                    {% if st == 'applied' %}
+                                        <span class="applied-tag">applied</span>
+                                    {% elif st == 'dismissed' %}
+                                        <span class="dismissed-tag">dismissed</span>
+                                    {% else %}
+                                        <span style="color:var(--text-dim);">{{ st or 'pending' }}</span>
+                                    {% endif %}
+                                </td>
+                                <td class="num">
+                                    {% if g.applied_prices and g.applied_prices[i] is not none %}
+                                        ${{ '%.2f' % g.applied_prices[i] }}
+                                    {% else %}—{% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
                 </td>
             </tr>
         {% endfor %}
@@ -117,33 +271,64 @@
     {% endif %}
 
     <script>
+    // Expand/collapse per-copy detail.
+    document.addEventListener('click', function(e) {
+        const t = e.target.closest('.expand-toggle');
+        if (!t) return;
+        const target = document.getElementById(t.dataset.target);
+        if (!target) return;
+        const open = target.style.display !== 'none';
+        target.style.display = open ? 'none' : '';
+        t.textContent = open ? '▾' : '▴';
+    });
+
+    // Group apply / dismiss.
     document.addEventListener('click', async function(e) {
         const btn = e.target.closest('.row-btn');
         if (!btn) return;
-        const tr = btn.closest('tr');
-        const rowId = tr && tr.dataset.rowId;
-        if (!rowId) return;
+        const tr = btn.closest('tr[data-group-id]');
+        if (!tr) return;
+        let rowIds;
+        try { rowIds = JSON.parse(tr.dataset.rowIds || '[]'); }
+        catch (_) { rowIds = []; }
+        if (!rowIds.length) return;
+
         const verb = btn.dataset.act === 'apply' ? 'apply' : 'dismiss';
+        const cell = tr.querySelector('td:last-child');
+
+        let body = { row_ids: rowIds };
+        if (verb === 'apply') {
+            const input = tr.querySelector('.group-price-input');
+            const v = input ? parseFloat(input.value) : NaN;
+            if (input && (!isFinite(v) || v <= 0)) {
+                cell.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+                input.style.borderColor = '#f87171';
+                return;
+            }
+            body.price = v;
+        }
+
         tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
         try {
-            const r = await fetch(`/dashboard/raw-runs/row/${rowId}/${verb}`, {
-                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+            const r = await fetch(`/dashboard/raw-runs/group/${verb}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body),
             });
             const d = await r.json();
-            const cell = tr.querySelector('td:last-child');
-            if (!r.ok) {
+            if (!r.ok || !d.ok) {
                 cell.innerHTML = `<span style="color:#f87171; font-size:0.78rem;">${d.error || 'failed'}</span>`;
                 tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
                 return;
             }
+            const copies = rowIds.length;
             if (verb === 'apply') {
-                cell.innerHTML = `<span class="applied-tag">✓ Applied · $${(d.applied_price||0).toFixed(2)}</span>`;
+                cell.innerHTML = `<span class="applied-tag">✓ Applied · $${(d.applied_price||0).toFixed(2)}${copies>1?` ×${d.applied_count||copies}`:''}</span>`;
             } else {
-                cell.innerHTML = '<span class="dismissed-tag">dismissed</span>';
+                cell.innerHTML = `<span class="dismissed-tag">dismissed${copies>1?` ×${copies}`:''}</span>`;
             }
         } catch(err) {
-            tr.querySelector('td:last-child').innerHTML =
-                `<span style="color:#f87171; font-size:0.78rem;">${err.message}</span>`;
+            cell.innerHTML = `<span style="color:#f87171; font-size:0.78rem;">${err.message}</span>`;
             tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
         }
     });

@@ -751,6 +751,8 @@ def raw_run_detail(run_id):
             ARRAY_AGG(id ORDER BY id)            AS row_ids,
             ARRAY_AGG(raw_card_id ORDER BY id)   AS raw_card_ids,
             ARRAY_AGG(barcode ORDER BY id)       AS barcodes,
+            ARRAY_AGG(old_price ORDER BY id)     AS old_prices,
+            ARRAY_AGG(cost_basis ORDER BY id)    AS cost_bases,
             ARRAY_AGG(apply_status ORDER BY id)  AS apply_statuses,
             ARRAY_AGG(applied_price ORDER BY id) AS applied_prices,
             ARRAY_AGG(DISTINCT bin_label) FILTER (WHERE bin_label IS NOT NULL) AS bin_labels
