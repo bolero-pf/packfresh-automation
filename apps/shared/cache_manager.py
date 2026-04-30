@@ -144,6 +144,7 @@ class CacheManager:
                         handle              VARCHAR(500),
                         status              VARCHAR(50),
                         tags                TEXT,
+                        sku                 VARCHAR(200),
                         shopify_price       NUMERIC(10,2),
                         shopify_qty         INTEGER,
                         inventory_item_id   BIGINT,
@@ -203,6 +204,7 @@ class CacheManager:
             migrations += [
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS committed INTEGER DEFAULT 0",
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS unit_cost NUMERIC(10,2)",
+                f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS sku VARCHAR(200)",
             ]
         migrations += [
             f"ALTER TABLE {self._meta_table} ADD COLUMN IF NOT EXISTS last_tool_push_at TIMESTAMP",
@@ -363,14 +365,15 @@ class CacheManager:
             self.db.execute(f"""
                 INSERT INTO {self._cache_table}
                     (shopify_product_id, shopify_variant_id, title, handle, status,
-                     tags, shopify_price, shopify_qty, inventory_item_id,
+                     tags, sku, shopify_price, shopify_qty, inventory_item_id,
                      tcgplayer_id, is_damaged, committed, unit_cost, last_synced)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (shopify_product_id, shopify_variant_id) DO UPDATE SET
                     title             = EXCLUDED.title,
                     handle            = EXCLUDED.handle,
                     status            = EXCLUDED.status,
                     tags              = EXCLUDED.tags,
+                    sku               = EXCLUDED.sku,
                     shopify_price     = EXCLUDED.shopify_price,
                     shopify_qty       = EXCLUDED.shopify_qty,
                     inventory_item_id = EXCLUDED.inventory_item_id,
@@ -383,6 +386,7 @@ class CacheManager:
                 p["shopify_product_id"], p["variant_id"],
                 p["title"], p["handle"], p.get("status", "ACTIVE"),
                 p.get("tags_csv", ""),
+                p.get("sku"),
                 p["shopify_price"], p["shopify_qty"],
                 p.get("inventory_item_id"),
                 p.get("tcgplayer_id"),

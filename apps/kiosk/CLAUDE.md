@@ -1,9 +1,24 @@
-# Kiosk — Raw Card Browser (kiosk/)
-> Customer-facing card browsing + hold/checkout system (kiosk.pack-fresh.com)
+# Kiosk — Customer Browser (kiosk/)
+> Customer-facing browse + hold system (kiosk.pack-fresh.com). Three catalogs:
+> Raw cards (always), plus Sealed and Slabs in in-store mode.
 
 ## Two Cohorts
-1. **Guests** (in-store) — browse + hold request → staff pulls → pay at register
-2. **Champions** (VIP3, remote) — browse + checkout via Shopify Storefront API → native Shopify checkout
+1. **Guests** (in-store iPad) — browse Raw / Sealed / Slabs → hold request → staff pulls → pay at register/POS
+2. **Champions** (VIP3, remote) — browse Raw only → checkout via Shopify Storefront API → native Shopify checkout
+
+## Mode detection (instore vs champion)
+The cohort is determined per-request in `_resolve_kiosk_mode` (sets `g.kiosk_mode`):
+- **`instore`** — request carries the `pf_kiosk_device` HttpOnly cookie that points to a non-revoked row in `kiosk_devices`. Set once via `/activate?token=…` during iPad setup. Legacy `?key=KIOSK_ACCESS_KEY` URL param is still accepted as a fallback.
+- **`champion`** — request carries `X-Champion-Email` header set by the frontend after VIP3 verification.
+- **`None`** — anonymous; locked out except for the gate UI and `/api/champion/identify`.
+
+`_allowed_kinds(mode)` returns `['raw','sealed','slab']` for instore and `['raw']` for champion. Sealed/slab endpoints 403 in champion mode (defense in depth).
+
+## Activation flow
+1. Manager hits `POST /api/admin/mint-activation` (JWT-gated via shared/auth) and gets a one-time `activation_url`.
+2. Staff opens the URL in Kiosk Pro on the iPad once → `/activate` consumes the token, mints a device_id, and sets `pf_kiosk_device` (HttpOnly, Secure, SameSite=Strict, 10y).
+3. Subsequent visits to `/` flow with no token; the cookie alone proves in-store identity.
+4. Devices can be revoked from `POST /api/admin/devices/<id>/revoke`.
 
 ## Key Files
 - **app.py** — Flask routes: browse API, guest holds, Champion identify/checkout, order webhook, cleanup cron
@@ -11,14 +26,31 @@
 - **db.py** — Database connection pool (from shared/)
 
 ## Routes
-- `/api/browse` — aggregated card search with filters
-- `/api/sets`, `/api/eras` — filter metadata
-- `/api/card` — card detail (individual copies)
-- `/api/hold` — guest hold request (name + phone)
+### Customer (kiosk UI)
+- `/` — single-page app
+- `/activate?token=…` — one-time device activation (sets cookie)
+- `/api/mode` — returns `{mode, show_kinds}` for the frontend bootstrap
+- `/api/browse`, `/api/sets`, `/api/eras`, `/api/games`, `/api/filter-meta` — Raw catalog (existing)
+- `/api/card` — Raw card detail (individual copies)
+- `/api/products?kind=sealed|slab` — Sealed/Slab catalog from `inventory_product_cache` (in-store only)
+- `/api/hold` — mixed Raw / Sealed / Slab hold creation (one customer, one cart)
 - `/api/champion/identify` — email → Shopify customer lookup → VIP3 check
-- `/api/checkout` — Champion checkout: create hold + Shopify products + Storefront API cart → checkout URL
-- `/api/webhooks/order-paid` — Shopify orders/create webhook → mark hold as paid
-- `/api/cleanup/abandoned` — expire unpaid Champion holds (cron, every 10 min)
+- `/api/checkout` — Champion checkout (Raw only): hold + temp Shopify products + Storefront cart
+
+### Staff
+- `/staff/pulls` — scan UI (REQUESTED → PULLED → RETURNED/SOLD/UNRESOLVED). JWT-gated.
+- `/api/staff/scan-out` — barcode/SKU → mark PULLED
+- `/api/staff/scan-return` — sealed/slab only → mark RETURNED
+- `/api/staff/pulls` — JSON for the staff page
+
+### Admin
+- `/api/admin/mint-activation` — manager+; returns activation URL
+- `/api/admin/devices` — list devices
+- `/api/admin/devices/<id>/revoke` — revoke a device cookie
+
+### Webhooks / cron
+- `/api/webhooks/order-paid` — matches Champion holds via `variant_id` AND in-store sealed/slab pulls via `sku`
+- `/api/cleanup/abandoned` — Champion expiry (existing); background loop also handles in-store unclaimed REQUESTED + PULLED→UNRESOLVED reconciliation
 
 ## Champion Checkout Flow
 1. Champion enters email → `/api/champion/identify` verifies VIP3 tag via Shopify GraphQL
@@ -33,10 +65,19 @@
 
 ## Database Tables (read-only)
 - `raw_cards` — individual physical cards (state, condition, price, bin, hold)
+- `inventory_product_cache` — Shopify product mirror (read-only here; refreshed by inventory service via `shared/cache_manager.py`). Sealed/Slab catalog reads from this; tag CSV match `LOWER(',' || tags || ',') LIKE '%,sealed,%'` (or `slab`). `sku` column populated by the cache refresh and used as the scan key.
 
 ## Database Tables (write)
 - `holds` — hold requests (customer_name, status, cohort, customer_email, checkout_url, checkout_status)
-- `hold_items` — items in a hold (raw_card_id, barcode, status, shopify_product_id, shopify_variant_id)
+- `hold_items` — items in a hold. Extended for sealed/slab:
+  - `item_kind` — `'raw'` (default) | `'sealed'` | `'slab'`
+  - `raw_card_id` — nullable (NULL for sealed/slab)
+  - `sku`, `title`, `image_url`, `unit_price` — populated for sealed/slab from `inventory_product_cache`
+  - `returned_at`, `returned_by` — set by `/api/staff/scan-return`
+  - `shopify_order_id` — set by the order-paid webhook for SOLD reconciliation
+  - status flow: `REQUESTED → PULLED → SOLD | RETURNED | UNRESOLVED | EXPIRED_UNCLAIMED`
+- `kiosk_devices` — one row per activated iPad (device_id, label, activated_at, last_seen_at, revoked_at)
+- `kiosk_activation_tokens` — one-time tokens (24h TTL); single-use via `used_at`/`used_by_device_id`
 
 ## Environment Variables
 - `SHOPIFY_STORE`, `SHOPIFY_TOKEN` — Admin API (product creation, customer lookup)
@@ -53,4 +94,7 @@
 - Cards shown only if `state = 'STORED'` and `current_hold_id IS NULL`
 - 24 cards per page, server-side pagination
 - Guest holds: 2 hours to READY, Champion holds: 30 minutes to pay
-- Champion state persisted in localStorage (`pf_champion`)
+- Champion state persisted in localStorage (`pf_champion`); device cookie `pf_kiosk_device` is HttpOnly and lives 10y
+- Cart key: raw items keyed on (name, set, condition, variant_key, tcg_id/scrydex_id); sealed/slab keyed on (kind, shopify_variant_id)
+- Idle reset: 90s no-touch → "Still there?" warning → 10s → reset cart, search, champion identity. Device cookie preserved.
+- In-store available_qty for sealed/slab: `shopify_qty − count(active hold_items REQUESTED+PULLED for that variant)` — prevents double-allocation across simultaneous customers
