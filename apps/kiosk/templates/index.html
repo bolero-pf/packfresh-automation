@@ -1683,6 +1683,9 @@ function _onActivity() {
 }
 
 function startIdleWatch() {
+  // Champions are remote — don't wipe their cart / identity on inactivity.
+  // The idle reset only exists to recycle the in-store iPad between walk-ups.
+  if (_mode !== 'instore') return;
   ['touchstart','pointerdown','keydown','scroll'].forEach(ev =>
     document.addEventListener(ev, _onActivity, { passive: true }));
   // Active modals/inputs count as activity too

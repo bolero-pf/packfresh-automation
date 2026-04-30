@@ -96,5 +96,5 @@ The cohort is determined per-request in `_resolve_kiosk_mode` (sets `g.kiosk_mod
 - Guest holds: 2 hours to READY, Champion holds: 30 minutes to pay
 - Champion state persisted in localStorage (`pf_champion`); device cookie `pf_kiosk_device` is HttpOnly and lives 10y
 - Cart key: raw items keyed on (name, set, condition, variant_key, tcg_id/scrydex_id); sealed/slab keyed on (kind, shopify_variant_id)
-- Idle reset: 90s no-touch → "Still there?" warning → 10s → reset cart, search, champion identity. Device cookie preserved.
+- Idle reset (in-store mode only): 90s no-touch → "Still there?" warning → 10s → reset cart, search, champion identity. Device cookie preserved. Champions get no idle watchdog — they're remote, not on a shared iPad.
 - In-store available_qty for sealed/slab: `shopify_qty − count(active hold_items REQUESTED+PULLED for that variant)` — prevents double-allocation across simultaneous customers
