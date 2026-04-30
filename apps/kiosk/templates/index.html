@@ -1745,8 +1745,47 @@ function startIdleWatch() {
   _idleTimer = setInterval(_idleTick, 1000);
 }
 
+// True when there's actually customer-visible state worth wiping. If the
+// kiosk is sitting on the default front page (no picks, no filters, no
+// search, raw tab), prompting "Still there?" annoys the customer for no
+// reason — the reset would be a no-op.
+const _DEFAULT_CONDS = ['NM','LP','MP','HP','DMG'];
+function _hasResettableState() {
+  if (_cart && _cart.length > 0) return true;
+  if (_champion) return true;
+  const q = document.getElementById('q');
+  if (q && q.value.trim()) return true;
+  if (_activeKind && _activeKind !== 'raw') return true;
+  if (_filters) {
+    if (_filters.game || _filters.era || _filters.set) return true;
+    if (_filters.sort && _filters.sort !== 'name_asc') return true;
+    if (_filters.minP || _filters.maxP) return true;
+    if (_filters.conds && (_filters.conds.size !== _DEFAULT_CONDS.length
+        || !_DEFAULT_CONDS.every(c => _filters.conds.has(c)))) return true;
+    if (_filters.colors    && _filters.colors.size)    return true;
+    if (_filters.colorMode && _filters.colorMode !== 'any') return true;
+    if (_filters.cardTypes && _filters.cardTypes.size) return true;
+    if (_filters.rarities  && _filters.rarities.size)  return true;
+  }
+  if (_prodFilters) {
+    if (_prodFilters.game) return true;
+    if (_prodFilters.formats && _prodFilters.formats.size) return true;
+    if (_prodFilters.eras    && _prodFilters.eras.size)    return true;
+    if (_prodFilters.grades  && _prodFilters.grades.size)  return true;
+    if (_prodFilters.minP || _prodFilters.maxP) return true;
+    if (_prodFilters.sort && _prodFilters.sort !== 'name_asc') return true;
+  }
+  return false;
+}
+
 function _idleTick() {
   if (!_idleDirty) return;  // no activity since last reset → nothing to do
+  // Only nag if there's something to actually reset. A customer reading
+  // the front page in default state shouldn't be prompted.
+  if (!_hasResettableState()) {
+    if (_idleWarning) _dismissIdleWarning();
+    return;
+  }
   const now = Date.now();
   const idle = now - _idleLast;
   if (idle >= IDLE_WARN_MS && !_idleWarning) {
