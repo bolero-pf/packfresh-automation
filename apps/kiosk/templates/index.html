@@ -52,9 +52,9 @@ header {
 /* The PNG has a small bit of padding baked in from Canva — small negative
    vertical margins absorb that so the apparent logo height tracks the
    number we set here. */
-.logo-img { display: block; height: 72px; width: auto; margin: -10px 0; }
+.logo-img { display: block; height: 104px; width: auto; margin: -16px 0; }
 @media (max-width: 640px) {
-  .logo-img { height: 60px; margin: -8px 0; }
+  .logo-img { height: 80px; margin: -12px 0; }
   .logo-sub { font-size: 0.62rem; }
   .logo-link { gap: 8px; }
 }
@@ -394,14 +394,11 @@ body.modal-open { overflow: hidden; touch-action: none; }
   background: var(--surface); border-bottom: 1px solid var(--border);
   max-width: 1200px; margin: 0 auto;
 }
-/* Kind tabs (Raw / Sealed / Slabs) — standalone pills above the filter strip.
-   Earlier version used a "merge with bg" trick that got clipped by the
-   filter strip below; pills are simpler and don't fight neighbouring chrome. */
+/* Kind tabs (Raw / Sealed / Slabs) — pills inside the sticky header,
+   between the lockup row and the search bar. */
 .kind-tabs {
-  display: flex; gap: 6px; padding: 10px 16px;
-  max-width: 1200px; margin: 0 auto;
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
+  display: flex; gap: 6px;
+  max-width: 1200px; margin: 10px auto 0;
 }
 .kind-tab {
   flex: 1; min-height: 44px; padding: 0 14px;
@@ -695,21 +692,23 @@ body.modal-open { overflow: hidden; touch-action: none; }
       <span class="logo-sub" id="logo-sub">Card Browser</span>
     </a>
     <button class="cart-btn" onclick="openCart()">
-      🃏 My Picks
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="13" height="16" rx="2"/><path d="M8 4h11a2 2 0 0 1 2 2v14"/></svg>
+      My Picks
       <span class="cart-badge" id="cart-badge">0</span>
     </button>
+  </div>
+  <!-- Kind tabs (Raw / Sealed / Slabs). In Champion mode only Raw renders.
+       Sits directly under the lockup so the customer picks what they're
+       browsing first; the search input below reads as "search within". -->
+  <div class="kind-tabs" id="kind-tabs" style="display:none;">
+    <button class="kind-tab on" data-kind="raw" onclick="setActiveKind('raw')">Raw</button>
+    <button class="kind-tab" data-kind="sealed" onclick="setActiveKind('sealed')">Sealed</button>
+    <button class="kind-tab" data-kind="slab" onclick="setActiveKind('slab')">Slabs</button>
   </div>
   <div class="header-search">
     <input class="search-input" type="text" id="q" placeholder="Search…" oninput="debounce()" autocomplete="off" autocorrect="off">
   </div>
 </header>
-
-<!-- Kind tabs (Raw / Sealed / Slabs). In Champion mode only Raw renders. -->
-<div class="kind-tabs" id="kind-tabs" style="display:none;">
-  <button class="kind-tab on" data-kind="raw" onclick="setActiveKind('raw')">Raw</button>
-  <button class="kind-tab" data-kind="sealed" onclick="setActiveKind('sealed')">Sealed</button>
-  <button class="kind-tab" data-kind="slab" onclick="setActiveKind('slab')">Slabs</button>
-</div>
 
 <!-- Top filter strip: Game pills (always visible) + Filters button.
      Only relevant on the Raw tab — hidden when browsing sealed/slabs. -->
@@ -722,11 +721,11 @@ body.modal-open { overflow: hidden; touch-action: none; }
   </button>
 </div>
 
-<!-- Sealed / Slabs filter strip — kind-aware filter sheet for products. -->
+<!-- Sealed / Slabs filter strip — game pills (first-class, like Raw) +
+     Filters button on the right. Pills render dynamically from the
+     /api/products/filter-meta endpoint per active kind. -->
 <div class="filter-strip" id="prod-filter-strip" style="display:none;">
-  <div style="font-size:0.78rem;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;">
-    <span id="prod-strip-label">Sealed products</span>
-  </div>
+  <div class="game-pills" id="prod-game-pills"></div>
   <button class="filters-btn" id="prod-filters-btn" onclick="openProdFilterSheet()">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
     <span>Filters</span>
@@ -891,6 +890,10 @@ body.modal-open { overflow: hidden; touch-action: none; }
 <script>
 const MAX = 20;
 const KIOSK_ACCESS_KEY = '{{ access_key }}';
+// Inline card-stack glyph reused across empty states / no-image fallbacks /
+// detail placeholders. Sized by the parent (.empty-icon, .no-img, etc) via
+// width:1em / font-size:Xrem so each consumer controls its scale.
+const ICON_CARD_STACK = '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="13" height="16" rx="2"/><path d="M8 4h11a2 2 0 0 1 2 2v14"/></svg>';
 let _cart = [];  // [{card_name, set_name, condition, qty, price, image_url}]
 // Active conditions live on _filters.conds now (set in the bottom-sheet apply flow)
 let _hasAccess = false;
@@ -924,8 +927,8 @@ function checkAccess() {
 function showAccessGate() {
   document.getElementById('grid').innerHTML = `
     <div style="grid-column:1/-1;text-align:center;padding:60px 20px;">
-      <div style="font-size:2rem;margin-bottom:12px;">🃏</div>
-      <div style="font-size:1.2rem;font-weight:700;margin-bottom:8px;">Pack Fresh Card Browser</div>
+      <div style="margin-bottom:12px;color:var(--dim);"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="13" height="16" rx="2"/><path d="M8 4h11a2 2 0 0 1 2 2v14"/></svg></div>
+      <div style="font-size:1.2rem;font-weight:700;margin-bottom:8px;">Commonlands Card Browser</div>
       <div style="color:var(--dim);margin-bottom:20px;">This kiosk is for in-store use. Ask a staff member for access.</div>
       <div style="color:var(--dim);font-size:0.82rem;">Champion? <a href="#" onclick="showChampionAccessLogin(event)" style="color:var(--accent);">Sign in with your email</a></div>
       <div id="gate-champion-form" style="display:none;max-width:300px;margin:16px auto 0;">
@@ -1905,6 +1908,7 @@ function setActiveKind(kind) {
   // kind-specific, and stale state would surface buttons that no longer apply.
   if (kind === 'sealed' || kind === 'slab') {
     _resetProdFilters();
+    loadProdGameMeta();
   }
   _renderKindTabs();
   doSearch();
@@ -1983,7 +1987,7 @@ function renderGrid(cards) {
     const msg = hasFilters
       ? 'No cards match. Try removing a filter.'
       : 'No cards found';
-    grid.innerHTML = `<div class="empty"><div class="empty-icon">🃏</div><p>${msg}</p></div>`;
+    grid.innerHTML = `<div class="empty"><div class="empty-icon">${ICON_CARD_STACK}</div><p>${msg}</p></div>`;
     return;
   }
   // Store card data in a map keyed by index to avoid HTML attribute escaping issues
@@ -1996,7 +2000,7 @@ function renderGrid(cards) {
       `<span class="cond-pill cond-${cond}">${cond} ×${qty}</span>`).join('');
     const img = c.image_url
       ? `<img src="${esc(c.image_url)}" alt="${esc(c.card_name)}" loading="lazy">`
-      : '<div class="no-img">🃏</div>';
+      : `<div class="no-img">${ICON_CARD_STACK}</div>`;
     const price = c.min_price
       ? c.min_price === c.max_price
         ? `$${c.min_price.toFixed(2)}`
@@ -2222,6 +2226,53 @@ function _resetProdFilters() {
     minP: '', maxP: '', sort: 'name_asc',
   };
   _refreshProdFiltersBtn();
+  renderProdGamePills();
+}
+
+// ── Top-strip game pills for sealed/slab (mirrors raw's game-pills) ─────────
+// Pills source from /api/products/filter-meta which already returns game
+// counts faceted against current sealed/slab selections. Single-select; an
+// "All" pill clears the game filter. Pills re-render on kind switch and
+// after each search so counts stay current.
+let _prodGameMeta = [];   // [{key, label, count}, ...] for the active kind
+async function loadProdGameMeta() {
+  if (_activeKind !== 'sealed' && _activeKind !== 'slab') return;
+  try {
+    const d = await get('/api/products/filter-meta?kind=' + encodeURIComponent(_activeKind));
+    _prodGameMeta = (d && d.games) ? d.games : [];
+  } catch(e) { _prodGameMeta = []; }
+  renderProdGamePills();
+}
+function renderProdGamePills() {
+  const strip = document.getElementById('prod-game-pills');
+  if (!strip) return;
+  if (_activeKind !== 'sealed' && _activeKind !== 'slab') {
+    strip.innerHTML = '';
+    return;
+  }
+  const total = _prodGameMeta.reduce((s, g) => s + (g.count || 0), 0);
+  const items = [{ key: '', label: 'All', count: total }, ..._prodGameMeta];
+  const sel = _prodFilters.game || '';
+  strip.innerHTML = items.map(g =>
+    `<span class="game-pill${sel === g.key ? ' active' : ''}" data-game="${esc(g.key)}">
+      ${esc(g.label)}<span class="qty">${g.count}</span>
+    </span>`
+  ).join('');
+  strip.querySelectorAll('.game-pill').forEach(el => {
+    el.addEventListener('click', () => {
+      const newGame = el.getAttribute('data-game');
+      if ((_prodFilters.game || '') === newGame) return;
+      _prodFilters.game = newGame;
+      // Game scope changes → clear era/format/grade since their values are
+      // game-specific (e.g. Pokémon eras don't apply to MTG).
+      _prodFilters.formats = new Set();
+      _prodFilters.eras    = new Set();
+      _prodFilters.grades  = new Set();
+      _refreshProdFiltersBtn();
+      _page = 1;
+      doSearch();
+    });
+  });
 }
 
 // ── Sealed / Slabs grid (reads inventory_product_cache via /api/products) ────
@@ -2453,7 +2504,7 @@ function renderDetail(card, copies, meta) {
   const imgUrl = card.image_url || '';
   const img = imgUrl
     ? `<img src="${esc(imgUrl)}" alt="${esc(card.card_name)}">`
-    : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:3rem;opacity:.2">🃏</div>';
+    : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:3rem;opacity:.2">${ICON_CARD_STACK}</div>`;
   const variantNote = card.variant_label
     ? `<span class="variant-badge" style="vertical-align:middle;margin-left:8px;">${esc(card.variant_label)}</span>`
     : '';
@@ -2889,7 +2940,7 @@ function renderCart(panel) {
         <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeCartPanel()">✕</button>
       </div>
       <div class="empty" style="padding:40px 0;">
-        <div class="empty-icon">🃏</div>
+        <div class="empty-icon">${ICON_CARD_STACK}</div>
         <p>No items selected yet.</p>
       </div>
       <button class="btn btn-outline" onclick="closeCartPanel()">Keep Browsing</button>
