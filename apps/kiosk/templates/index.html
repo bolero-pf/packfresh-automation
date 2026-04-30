@@ -47,15 +47,16 @@ header {
 .header-top { max-width: 1200px; margin: 0 auto; display: flex; gap: 14px; align-items: center; justify-content: space-between; }
 .header-search { max-width: 1200px; margin: 10px auto 0; }
 .logo { font-family: var(--display); font-size: 2rem; letter-spacing: 0.06em; color: var(--accent); white-space: nowrap; line-height: 1; }
-.logo-sub { font-size: 0.65rem; color: var(--dim); letter-spacing: 0.15em; text-transform: uppercase; margin-top: -2px; }
-/* Commonlands logo PNG ships with ~25% whitespace padding around the
-   visible glyphs, so the rendered box is taller than the artwork. The
-   negative vertical margins absorb that padding back into the header
-   so the apparent logo height matches the previous "Pack Fresh" lockup
-   without bloating the bar. */
-.logo-img { display: block; height: 96px; width: auto; margin: -18px 0; }
+.logo-sub { font-size: 0.7rem; color: var(--dim); letter-spacing: 0.15em; text-transform: uppercase; line-height: 1; white-space: nowrap; }
+.logo-link { display: inline-flex; align-items: center; gap: 12px; text-decoration: none; line-height: 0; }
+/* The PNG has a small bit of padding baked in from Canva — small negative
+   vertical margins absorb that so the apparent logo height tracks the
+   number we set here. */
+.logo-img { display: block; height: 72px; width: auto; margin: -10px 0; }
 @media (max-width: 640px) {
-  .logo-img { height: 80px; margin: -14px 0; }
+  .logo-img { height: 60px; margin: -8px 0; }
+  .logo-sub { font-size: 0.62rem; }
+  .logo-link { gap: 8px; }
 }
 
 .search-input {
@@ -689,8 +690,9 @@ body.modal-open { overflow: hidden; touch-action: none; }
 
 <header>
   <div class="header-top">
-    <a href="/" style="text-decoration:none;line-height:0;">
+    <a href="/" class="logo-link">
       <img class="logo-img" src="/static/commonlandslogo.png" alt="Commonlands">
+      <span class="logo-sub" id="logo-sub">Card Browser</span>
     </a>
     <button class="cart-btn" onclick="openCart()">
       🃏 My Picks
@@ -1601,6 +1603,45 @@ let _page = 1;
 let _timer = null;
 let _detail = null;  // current card being viewed
 
+// ── Dynamic page size ───────────────────────────────────────────────────────
+// The grid uses repeat(auto-fill, minmax(...)), so column count varies with
+// viewport width: iPad → 5, desktop → 6, narrow phone → 2-3. Page size is
+// kept at 5 rows × ncols so the last visible row never ends up half-empty.
+const _PAGE_ROWS = 5;
+let _currentPerPage = 25;          // last value sent to the API
+let _resizeTimer = null;
+function _computeColCount() {
+  const grid = document.getElementById('grid');
+  if (!grid) return 5;
+  // After layout, gridTemplateColumns reads as N space-separated track sizes.
+  const tpl = getComputedStyle(grid).gridTemplateColumns || '';
+  const n = tpl.trim() ? tpl.split(/\s+/).length : 0;
+  // Fallback if the grid hasn't been laid out yet (no children, etc).
+  if (n > 0) return n;
+  const cardMin = window.matchMedia('(min-width: 640px)').matches ? 180 : 160;
+  const w = grid.clientWidth || (window.innerWidth - 40);
+  return Math.max(1, Math.floor((w + 14) / (cardMin + 14)));
+}
+function _computePageSize() {
+  return Math.max(1, Math.min(60, _computeColCount() * _PAGE_ROWS));
+}
+function _watchGridResize() {
+  // Re-fetch only when the column count actually changes — pure pixel
+  // resizes (e.g., browser DevTools nudges) shouldn't trigger network.
+  let lastCols = _computeColCount();
+  window.addEventListener('resize', () => {
+    clearTimeout(_resizeTimer);
+    _resizeTimer = setTimeout(() => {
+      const cols = _computeColCount();
+      if (cols !== lastCols) {
+        lastCols = cols;
+        _page = 1;
+        doSearch();
+      }
+    }, 200);
+  });
+}
+
 // ── Boot ─────────────────────────────────────────────────────────────────────
 async function boot() {
   _loadCart();
@@ -1634,6 +1675,8 @@ async function boot() {
   _refreshFiltersBtn();
   _renderActiveChips();
   startIdleWatch();
+  _watchGridResize();
+  _updateLogoSub();
   doSearch();
 }
 
@@ -1785,6 +1828,7 @@ function _doIdleReset() {
     const ac = document.getElementById('active-chips');
     if (ac) ac.style.display = '';
     _renderKindTabs();
+    _updateLogoSub();
   }
   // Clear all active filters (game/era/set/conds/price/colors/types/rarities/sort)
   // — this also re-renders chips, refreshes the filter button, and runs doSearch().
@@ -1795,10 +1839,21 @@ function _doIdleReset() {
   _idleDirty = false;
 }
 
+const _LOGO_SUB_LABELS = {
+  raw:    'Card Browser',
+  sealed: 'Sealed Product Browser',
+  slab:   'Graded Card Browser',
+};
+function _updateLogoSub() {
+  const el = document.getElementById('logo-sub');
+  if (el) el.textContent = _LOGO_SUB_LABELS[_activeKind] || 'Card Browser';
+}
+
 function setActiveKind(kind) {
   if (!_allowedKinds.includes(kind)) return;
   if (_activeKind === kind) return;
   _activeKind = kind;
+  _updateLogoSub();
   // Reset paging + clear search input to avoid carrying a raw query into sealed
   _page = 1;
   const qInput = document.getElementById('q');
@@ -1839,8 +1894,9 @@ async function doSearch(page) {
   }
   const q = document.getElementById('q').value.trim();
   const conds = [..._filters.conds].join(',');
+  _currentPerPage = _computePageSize();
   const params = new URLSearchParams({
-    q, page: _page, sort: _filters.sort, condition: conds,
+    q, page: _page, per_page: _currentPerPage, sort: _filters.sort, condition: conds,
   });
   if (_filters.game) params.set('game', _filters.game);
   if (_filters.set)  params.set('set', _filters.set);
@@ -2138,7 +2194,8 @@ async function doSearchProducts() {
 
   const q = (document.getElementById('q')?.value || '').trim();
   const f = _prodFilters;
-  const params = new URLSearchParams({ kind: _activeKind, page: _page, sort: f.sort || 'name_asc' });
+  _currentPerPage = _computePageSize();
+  const params = new URLSearchParams({ kind: _activeKind, page: _page, per_page: _currentPerPage, sort: f.sort || 'name_asc' });
   if (q)         params.set('q', q);
   if (f.game)    params.set('game', f.game);
   if (f.formats && f.formats.size) params.set('format', [...f.formats].join(','));

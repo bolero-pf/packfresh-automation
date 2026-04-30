@@ -706,7 +706,11 @@ def browse():
     game       = (request.args.get("game") or "").strip().lower()
     sort       = (request.args.get("sort") or "name_asc").strip()
     page       = max(1, int(request.args.get("page", 1)))
-    offset     = (page - 1) * 25
+    # per_page lets the client size pages to its column count so the last
+    # row never ends up half-empty (iPad=5 cols → 25; desktop=6 → 30; etc).
+    # Clamp to keep payloads bounded.
+    per_page   = max(1, min(60, int(request.args.get("per_page", 25))))
+    offset     = (page - 1) * per_page
 
     # Game-aware advanced filters
     colors     = _multi_param("colors")
@@ -848,8 +852,8 @@ def browse():
         ) sub
         GROUP BY card_name, set_name, tcgplayer_id, variant_key
         ORDER BY {order_by}
-        LIMIT 25 OFFSET %s
-    """, tuple(params) + (offset,))
+        LIMIT %s OFFSET %s
+    """, tuple(params) + (per_page, offset))
 
     # Enrich each row with two things from scrydex_price_cache:
     #   1. Image fallback when raw_cards.image_url is missing (esp. JP cards
@@ -922,10 +926,11 @@ def browse():
         })
 
     return jsonify({
-        "cards":  cards,
-        "total":  total,
-        "page":   page,
-        "pages":  max(1, (total + 24) // 25),
+        "cards":     cards,
+        "total":     total,
+        "page":      page,
+        "per_page":  per_page,
+        "pages":     max(1, (total + per_page - 1) // per_page),
     })
 
 
@@ -1064,7 +1069,8 @@ def list_products():
     q    = (request.args.get("q") or "").strip()
     sort = (request.args.get("sort") or "name_asc").strip()
     page = max(1, int(request.args.get("page", 1)))
-    offset = (page - 1) * 25
+    per_page = max(1, min(60, int(request.args.get("per_page", 25))))
+    offset = (page - 1) * per_page
 
     where = ["status = 'ACTIVE'", "shopify_qty > 0"]
     params: list = []
@@ -1156,8 +1162,8 @@ def list_products():
         FROM inventory_product_cache ipc
         WHERE {where_sql}
         ORDER BY {order_by}
-        LIMIT 25 OFFSET %s
-    """, (kind, *params, offset))
+        LIMIT %s OFFSET %s
+    """, (kind, *params, per_page, offset))
 
     products = []
     for r in rows:
@@ -1183,7 +1189,8 @@ def list_products():
         "products": products,
         "total":    total,
         "page":     page,
-        "pages":    max(1, (total + 24) // 25),
+        "per_page": per_page,
+        "pages":    max(1, (total + per_page - 1) // per_page),
     })
 
 
