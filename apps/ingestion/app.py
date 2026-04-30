@@ -2775,19 +2775,38 @@ def auto_route_session(session_id):
 
 @app.route("/api/ingest/session/<session_id>/route-card", methods=["POST"])
 def route_card(session_id):
-    """Set routing destination for a single item — marks item as reviewed."""
+    """Set routing destination for a single item.
+
+    Body params:
+      item_id (required)
+      destination (required)
+      commit (optional, default true) — when false, only updates the
+        destination column WITHOUT marking the item as reviewed. The new
+        scan-driven routing UX uses commit=false on B/S/G/K presses (just a
+        default override) and commit=true on the scan event (the actual
+        commit signal). Backward compatible: callers that omit the flag get
+        the old "set + mark reviewed" behavior.
+    """
     data = request.get_json(silent=True) or {}
     item_id = data.get("item_id")
     destination = data.get("destination")
+    commit = data.get("commit", True)
 
     if not item_id or destination not in ROUTING_DESTINATIONS:
         return jsonify({"error": f"item_id required, destination must be one of {ROUTING_DESTINATIONS}"}), 400
 
-    db.execute("""
-        UPDATE intake_items
-        SET routing_destination = %s, routing_reviewed_at = NOW()
-        WHERE id = %s AND session_id = %s
-    """, (destination, item_id, session_id))
+    if commit:
+        db.execute("""
+            UPDATE intake_items
+            SET routing_destination = %s, routing_reviewed_at = NOW()
+            WHERE id = %s AND session_id = %s
+        """, (destination, item_id, session_id))
+    else:
+        db.execute("""
+            UPDATE intake_items
+            SET routing_destination = %s
+            WHERE id = %s AND session_id = %s
+        """, (destination, item_id, session_id))
 
     return jsonify({"success": True})
 
