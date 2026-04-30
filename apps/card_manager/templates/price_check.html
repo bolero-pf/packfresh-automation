@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pack Fresh · Price Check</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
+<style>
+body {
+  background: var(--bg, #0d0e10);
+  color: var(--text, #e7e8ea);
+  font-family: 'DM Sans', system-ui, sans-serif;
+  margin: 0; min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.pc-card {
+  width: 100%; max-width: 720px;
+  background: var(--surface, #16181c);
+  border: 1.5px solid var(--border, #2a2d33);
+  border-radius: 16px;
+  padding: 32px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.4);
+}
+.pc-title {
+  font-size: 1.6rem; font-weight: 700;
+  margin: 0 0 4px;
+}
+.pc-sub {
+  color: var(--dim, #8a8e98);
+  font-size: 0.95rem; margin-bottom: 24px;
+}
+.pc-input-wrap {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--surface-2, #1d2026);
+  border: 2px dashed var(--accent, #4f7df9);
+  border-radius: 12px;
+  padding: 18px 22px;
+  margin-bottom: 22px;
+}
+.pc-input-wrap .pc-icon { font-size: 2rem; }
+.pc-input-wrap input {
+  flex: 1; background: transparent; border: 0; outline: 0;
+  color: var(--text, #e7e8ea);
+  font-size: 1.15rem; font-family: 'DM Mono', monospace;
+}
+.pc-input-wrap input::placeholder { color: var(--dim, #8a8e98); }
+
+.pc-result {
+  display: none; gap: 22px;
+  background: var(--surface-2, #1d2026);
+  border: 1.5px solid var(--border, #2a2d33);
+  border-radius: 12px;
+  padding: 22px;
+  align-items: stretch;
+}
+.pc-result.show { display: flex; }
+.pc-img {
+  width: 200px; min-width: 200px;
+  aspect-ratio: 2.5/3.5;
+  border-radius: 10px;
+  background: var(--surface, #16181c);
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+.pc-img img { width: 100%; height: 100%; object-fit: contain; }
+.pc-img.sealed { aspect-ratio: 1; }
+.pc-img .no-img { font-size: 4rem; opacity: 0.2; }
+.pc-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+.pc-name { font-size: 1.45rem; font-weight: 700; line-height: 1.25; }
+.pc-meta { color: var(--dim, #8a8e98); font-size: 0.95rem; }
+.pc-meta span { margin-right: 10px; }
+.pc-price {
+  font-family: 'DM Mono', monospace;
+  font-size: 2.6rem; font-weight: 700;
+  color: var(--green, #4ade80);
+  margin-top: 10px;
+}
+.pc-source {
+  font-size: 0.72rem; color: var(--dim, #8a8e98);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  margin-top: 6px;
+}
+.pc-empty {
+  text-align: center; padding: 60px 20px;
+  color: var(--dim, #8a8e98);
+}
+.pc-empty .icon { font-size: 3rem; opacity: 0.3; margin-bottom: 10px; }
+
+@media (max-width: 600px) {
+  .pc-result { flex-direction: column; align-items: center; text-align: center; }
+  .pc-img { width: 60vw; max-width: 220px; min-width: 0; }
+  .pc-info { align-items: center; }
+}
+
+/* Touch/tablet bigger taps */
+@media (max-width: 900px) {
+  .pc-input-wrap input { font-size: 1.4rem; padding: 8px 0; }
+  .pc-input-wrap { padding: 22px 26px; }
+}
+</style>
+</head>
+<body>
+<div class="pc-card">
+  <div class="pc-title">Price Check</div>
+  <div class="pc-sub">Scan any Pack Fresh barcode or sealed product to see its current store price.</div>
+
+  <div class="pc-input-wrap">
+    <span class="pc-icon">🔍</span>
+    <input id="pc-input"
+           placeholder="Scan a barcode…"
+           autocomplete="off"
+           autocorrect="off"
+           autocapitalize="off"
+           spellcheck="false"
+           inputmode="text">
+  </div>
+
+  <div id="pc-result" class="pc-result"></div>
+  <div id="pc-empty" class="pc-empty">
+    <div class="icon">🃏</div>
+    <p>Awaiting scan…</p>
+  </div>
+</div>
+
+<script>
+const inp = document.getElementById('pc-input');
+const resultEl = document.getElementById('pc-result');
+const emptyEl  = document.getElementById('pc-empty');
+
+function focusInput() { try { inp.focus(); } catch(e) {} }
+focusInput();
+window.addEventListener('focus', focusInput);
+// Re-focus aggressively — kiosk-style. Any click/tap that isn't on a button
+// should send focus back to the scanner input.
+document.addEventListener('click', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  setTimeout(focusInput, 0);
+});
+
+function fmtPrice(p) {
+  if (p === null || p === undefined) return '—';
+  const n = parseFloat(p);
+  if (!isFinite(n)) return '—';
+  return '$' + n.toFixed(2);
+}
+
+function showResult(data) {
+  emptyEl.style.display = 'none';
+
+  const isRaw = data.kind === 'raw';
+  const imgClass = isRaw ? '' : 'sealed';
+  const img = data.image_url
+    ? '<img src="' + esc(data.image_url) + '" alt="">'
+    : '<div class="no-img">' + (isRaw ? '🃏' : '📦') + '</div>';
+
+  const meta = [];
+  if (data.set_name)  meta.push('<span>' + esc(data.set_name) + '</span>');
+  if (data.condition) meta.push('<span>· ' + esc(data.condition) + '</span>');
+
+  resultEl.innerHTML =
+    '<div class="pc-img ' + imgClass + '">' + img + '</div>' +
+    '<div class="pc-info">' +
+      '<div class="pc-name">' + esc(data.title) + '</div>' +
+      (meta.length ? '<div class="pc-meta">' + meta.join(' ') + '</div>' : '') +
+      '<div class="pc-price">' + fmtPrice(data.price) + '</div>' +
+      '<div class="pc-source">' + esc(data.source_label) + '</div>' +
+    '</div>';
+  resultEl.classList.add('show');
+}
+
+async function lookup(bc) {
+  try {
+    const r = await fetch('/api/price-check?barcode=' + encodeURIComponent(bc));
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.error || ('HTTP ' + r.status));
+    }
+    const d = await r.json();
+    showResult(d);
+    try { pfSound.success(); } catch(_) {}
+  } catch(err) {
+    resultEl.classList.remove('show');
+    emptyEl.style.display = 'block';
+    await pfBlock('Not found',
+                  'Barcode "' + bc + '" — nothing in our store matches that. If this is a Pack Fresh card, ask staff to check the label.',
+                  { error: true });
+    focusInput();
+  }
+}
+
+inp.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const bc = inp.value.trim();
+  inp.value = '';
+  if (!bc) return;
+  lookup(bc);
+});
+</script>
+</body>
+</html>

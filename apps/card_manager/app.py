@@ -58,7 +58,14 @@ def _ser(d: dict) -> dict:
 
 
 from auth import register_auth_hooks
-register_auth_hooks(app)  # any authenticated user
+# Price-check is a public, read-only kiosk page (cards.pack-fresh.com/price-check/).
+# It exposes only name/set/condition/price/image for whatever a customer scans —
+# no holds, no PII, no edit. Whitelisted from JWT auth via public_paths.
+register_auth_hooks(
+    app,
+    public_paths=('/health', '/ping', '/favicon.ico',
+                  '/price-check', '/price-check/', '/api/price-check'),
+)  # any authenticated user otherwise
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -68,6 +75,135 @@ register_auth_hooks(app)  # any authenticated user
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Public price-check kiosk (no auth, read-only)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/price-check")
+@app.route("/price-check/")
+def price_check_page():
+    """Public, customer-facing barcode scanner. Renders only name/set/
+    condition/price/image for the scanned item. No hold queue, no PII,
+    no auth — whitelisted in register_auth_hooks above."""
+    return render_template("price_check.html")
+
+
+@app.route("/api/price-check")
+def price_check_api():
+    """Resolve a barcode against our owned inventory and return price/image.
+    Order of resolution:
+      1. raw_cards.barcode (a Pack Fresh-printed single)
+      2. Shopify variant by barcode OR sku (sealed inventory we sell)
+    Anything else → 404 'Not found'. We do NOT consult external pricing
+    sources here — if it's not in our DB / Shopify, we don't sell it."""
+    barcode = (request.args.get("barcode") or "").strip()
+    if not barcode:
+        return jsonify({"error": "No barcode provided"}), 400
+
+    # 1) Singles — raw_cards keyed by our printed barcode.
+    raw = db.query_one("""
+        SELECT rc.card_name, rc.set_name, rc.card_number, rc.condition,
+               rc.current_price, rc.image_url, rc.scrydex_id, rc.tcgplayer_id,
+               rc.variant
+        FROM raw_cards rc
+        WHERE rc.barcode = %s
+        LIMIT 1
+    """, (barcode,))
+
+    if raw:
+        # Image fallback to scrydex cache (matches editor behaviour).
+        image_url = raw["image_url"]
+        sid = raw["scrydex_id"]
+        tcg = raw["tcgplayer_id"]
+        if not image_url and (sid or tcg):
+            if sid:
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+                    FROM scrydex_price_cache WHERE scrydex_id = %s
+                """, (sid,))
+            else:
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+                    FROM scrydex_price_cache WHERE tcgplayer_id = %s
+                """, (tcg,))
+            if sx:
+                image_url = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
+
+        # Price is charm-ceiled to .99 so the customer-facing number matches
+        # what kiosks/POS would actually charge.
+        price = charm_ceil_raw(raw.get("current_price") or 0)
+
+        title_parts = [raw["card_name"]]
+        if raw.get("card_number"): title_parts.append(f"#{raw['card_number']}")
+        return jsonify({
+            "kind":         "raw",
+            "title":        " ".join(title_parts),
+            "set_name":     raw.get("set_name") or "",
+            "condition":    raw.get("condition") or "",
+            "image_url":    image_url,
+            "price":        float(price) if price is not None else None,
+            "source_label": "Pack Fresh single",
+        })
+
+    # 2) Sealed — Shopify variant lookup by barcode OR sku.
+    if SHOPIFY_STORE and SHOPIFY_TOKEN:
+        try:
+            from shopify_graphql import shopify_gql
+            query = """
+            query LookupVariant($q: String!) {
+              productVariants(first: 1, query: $q) {
+                edges { node {
+                  id sku barcode title price
+                  product {
+                    title handle status
+                    featuredImage { url }
+                    images(first: 1) { edges { node { url } } }
+                  }
+                } }
+              }
+            }
+            """
+            # Shopify supports `barcode:` and `sku:` filters on productVariants;
+            # OR-combine them so customers can scan either side of a sealed item.
+            esc_bc = barcode.replace('"', '\\"')
+            q = f'barcode:"{esc_bc}" OR sku:"{esc_bc}"'
+            data = shopify_gql(query, {"q": q})
+            edges = (data.get("data", {})
+                         .get("productVariants", {})
+                         .get("edges", []) or [])
+            if edges:
+                v = edges[0]["node"]
+                p = v.get("product") or {}
+                if p.get("status") == "ACTIVE":  # don't surface drafts/archives
+                    img = (p.get("featuredImage") or {}).get("url")
+                    if not img:
+                        ie = ((p.get("images") or {}).get("edges") or [])
+                        if ie:
+                            img = ie[0]["node"]["url"]
+                    title = p.get("title") or "Sealed product"
+                    if v.get("title") and v["title"].lower() != "default title":
+                        title = f"{title} — {v['title']}"
+                    price_raw = v.get("price")
+                    try:
+                        price_val = float(price_raw) if price_raw is not None else None
+                    except (TypeError, ValueError):
+                        price_val = None
+                    return jsonify({
+                        "kind":         "sealed",
+                        "title":        title,
+                        "set_name":     "",
+                        "condition":    "",
+                        "image_url":    img,
+                        "price":        price_val,
+                        "source_label": "Sealed product",
+                    })
+        except Exception as e:
+            logger.warning(f"price-check Shopify lookup failed for {barcode}: {e}")
+            # fall through to 404 — don't expose the error to the public page
+
+    return jsonify({"error": "Not found"}), 404
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
