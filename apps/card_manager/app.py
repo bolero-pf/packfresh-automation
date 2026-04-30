@@ -469,8 +469,12 @@ def finish_hold(hold_id):
 
     accepted = db.query("""
         SELECT hi.id AS hold_item_id, hi.barcode,
+               hi.shopify_product_id AS hi_product_id,
+               hi.shopify_variant_id AS hi_variant_id,
                rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
-               rc.condition, rc.current_price, rc.image_url, rc.tcgplayer_id
+               rc.condition, rc.current_price, rc.image_url, rc.tcgplayer_id,
+               rc.state AS card_state,
+               rc.shopify_product_id AS rc_product_id
         FROM hold_items hi
         JOIN raw_cards rc ON hi.raw_card_id = rc.id
         WHERE hi.hold_id = %s AND hi.status = 'ACCEPTED'
@@ -478,8 +482,44 @@ def finish_hold(hold_id):
 
     results  = []
     errors   = []
+    skipped_already_listed = []
+
+    # Defense-in-depth dedupe by barcode within this push: if the same physical
+    # copy somehow appears on two hold_items rows (e.g. legacy pre-fix data),
+    # only push it once.
+    seen_barcodes = set()
 
     for item in accepted:
+        bc = item["barcode"]
+
+        # Skip if this hold_item already has a Shopify listing — happens when
+        # the customer toggled accept→return→accept; reverseDecision created
+        # the listing during the toggle, so finish_hold must not create a
+        # second one. Just confirm raw_card state is PENDING_SALE and move on.
+        existing_pid = item.get("hi_product_id") or item.get("rc_product_id")
+        if existing_pid and item.get("card_state") == "PENDING_SALE":
+            skipped_already_listed.append({
+                "barcode": bc,
+                "product_id": existing_pid,
+                "card_name": item["card_name"],
+            })
+            seen_barcodes.add(bc)
+            continue
+
+        # Defense-in-depth: skip duplicate barcodes within this push pass.
+        if bc in seen_barcodes:
+            logger.warning(
+                f"finish_hold {hold_id}: duplicate barcode {bc} "
+                f"({item['card_name']}) appeared on multiple ACCEPTED hold_items — "
+                f"skipping second listing. Manual cleanup may be needed."
+            )
+            errors.append({
+                "barcode": bc,
+                "error": "duplicate barcode in this hold — only listed once (manual cleanup may be needed)",
+            })
+            continue
+        seen_barcodes.add(bc)
+
         try:
             listing = _create_raw_listing(item)
             db.execute("""
@@ -505,6 +545,13 @@ def finish_hold(hold_id):
             logger.exception(f"Failed to create listing for {item['barcode']}: {e}")
             errors.append({"barcode": item["barcode"], "error": str(e)})
 
+    if skipped_already_listed:
+        logger.info(
+            f"finish_hold {hold_id}: skipped {len(skipped_already_listed)} item(s) "
+            f"that already had Shopify listings (created via reverseDecision toggle): "
+            f"{[s['barcode'] for s in skipped_already_listed]}"
+        )
+
     # Any items still REQUESTED or PULLED (not yet decided) → auto-reject
     # MISSING items are already resolved — leave them alone
     db.execute("""
@@ -519,17 +566,21 @@ def finish_hold(hold_id):
         WHERE hold_id = %s AND status IN ('REQUESTED','PULLED')
     """, (hold_id,))
 
-    # Close the hold
-    final_status = "ACCEPTED" if results else "RETURNED"
+    # Close the hold. ACCEPTED if anything was listed (newly OR via toggle),
+    # otherwise RETURNED.
+    has_any_listing = bool(results) or bool(skipped_already_listed)
+    final_status = "ACCEPTED" if has_any_listing else "RETURNED"
     db.execute("""
         UPDATE holds SET status = %s, resolved_at = CURRENT_TIMESTAMP WHERE id = %s
     """, (final_status, hold_id))
 
     return jsonify({
-        "success":  True,
-        "created":  len(results),
-        "errors":   errors,
-        "results":  results,
+        "success":               True,
+        "created":               len(results),
+        "already_listed":        len(skipped_already_listed),
+        "errors":                errors,
+        "results":               results,
+        "skipped_already_listed": skipped_already_listed,
     })
 
 
