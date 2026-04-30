@@ -206,6 +206,12 @@ class CacheManager:
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS unit_cost NUMERIC(10,2)",
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS sku VARCHAR(200)",
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS image_url TEXT",
+                # Barcode mirrors variant.barcode from Shopify so sealed/slab
+                # pulls in card_manager can match a physical scan against the
+                # barcode set via the inventory bind tool (SKU and barcode
+                # diverge for sealed/slab, unlike raw cards where they match).
+                f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS barcode VARCHAR(200)",
+                f"CREATE INDEX IF NOT EXISTS idx_{self._cache_table}_barcode ON {self._cache_table}(barcode) WHERE barcode IS NOT NULL",
             ]
         migrations += [
             f"ALTER TABLE {self._meta_table} ADD COLUMN IF NOT EXISTS last_tool_push_at TIMESTAMP",
@@ -366,15 +372,16 @@ class CacheManager:
             self.db.execute(f"""
                 INSERT INTO {self._cache_table}
                     (shopify_product_id, shopify_variant_id, title, handle, status,
-                     tags, sku, shopify_price, shopify_qty, inventory_item_id,
+                     tags, sku, barcode, shopify_price, shopify_qty, inventory_item_id,
                      tcgplayer_id, is_damaged, committed, unit_cost, image_url, last_synced)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (shopify_product_id, shopify_variant_id) DO UPDATE SET
                     title             = EXCLUDED.title,
                     handle            = EXCLUDED.handle,
                     status            = EXCLUDED.status,
                     tags              = EXCLUDED.tags,
                     sku               = EXCLUDED.sku,
+                    barcode           = EXCLUDED.barcode,
                     shopify_price     = EXCLUDED.shopify_price,
                     shopify_qty       = EXCLUDED.shopify_qty,
                     inventory_item_id = EXCLUDED.inventory_item_id,
@@ -389,6 +396,7 @@ class CacheManager:
                 p["title"], p["handle"], p.get("status", "ACTIVE"),
                 p.get("tags_csv", ""),
                 p.get("sku"),
+                p.get("barcode"),
                 p["shopify_price"], p["shopify_qty"],
                 p.get("inventory_item_id"),
                 p.get("tcgplayer_id"),

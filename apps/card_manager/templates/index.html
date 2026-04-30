@@ -96,49 +96,57 @@
   color: var(--dim); font-weight: 600;
 }
 .pull-card-row {
-  display: flex; align-items: stretch; gap: 14px;
+  display: flex; align-items: center; gap: 10px;
   background: var(--s2); border: 1px solid var(--border);
-  border-radius: 10px; padding: 12px 14px; margin-bottom: 8px;
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 5px;
 }
 .pull-card-row.done { border-color: var(--green); background: rgba(52,208,88,0.05); }
 .pull-card-thumb {
-  width: 130px; min-width: 130px; aspect-ratio: 2.5/3.5;
-  border-radius: 6px; overflow: hidden; background: var(--s1);
+  width: 64px; min-width: 64px; aspect-ratio: 2.5/3.5;
+  border-radius: 4px; overflow: hidden; background: var(--s1);
   display: flex; align-items: center; justify-content: center;
 }
 .pull-card-thumb img { width: 100%; height: 100%; object-fit: contain; }
-.pull-card-thumb .no-img { font-size: 2.2rem; opacity: 0.2; }
-.pull-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.pull-card-name { font-size: 1.05rem; font-weight: 700; line-height: 1.25; }
-.pull-card-meta { font-size: 0.78rem; color: var(--dim); display: flex; flex-wrap: wrap; gap: 4px; }
+.pull-card-thumb .no-img { font-size: 1.4rem; opacity: 0.2; }
+.pull-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pull-card-name {
+  font-size: 0.95rem; font-weight: 700; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pull-card-meta { font-size: 0.72rem; color: var(--dim); display: flex; flex-wrap: wrap; gap: 4px; }
 .pull-card-altbins {
-  font-size: 0.72rem; color: var(--dim); margin-top: 2px;
-  display: flex; gap: 6px; flex-wrap: wrap;
+  font-size: 0.68rem; color: var(--dim);
+  display: flex; gap: 4px; flex-wrap: wrap;
 }
 .pull-card-altbins span {
   font-family: var(--mono);
-  background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 4px;
+  background: rgba(255,255,255,0.05); padding: 0 5px; border-radius: 3px;
 }
 .pull-card-count {
   align-self: center; font-family: var(--mono);
-  font-size: 0.95rem; color: var(--dim); font-weight: 600;
-  min-width: 50px; text-align: center;
+  font-size: 0.85rem; color: var(--dim); font-weight: 600;
+  min-width: 40px; text-align: center;
 }
-/* QTY > 1: drastic, impossible-to-miss callout */
+/* QTY > 1: still impossible-to-miss but matches the tighter row height. */
 .pull-qty-loud {
-  align-self: stretch; min-width: 80px;
+  align-self: stretch; min-width: 56px;
   background: var(--amber); color: #000;
-  border-radius: 8px; padding: 10px 14px;
+  border-radius: 6px; padding: 4px 8px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  font-size: 0.7rem; font-weight: 800; letter-spacing: 0.1em;
+  font-size: 0.6rem; font-weight: 800; letter-spacing: 0.1em;
   text-transform: uppercase;
   box-shadow: 0 0 0 2px rgba(232,197,71,0.3);
 }
 .pull-qty-num {
-  font-size: 2.2rem; line-height: 1;
+  font-size: 1.4rem; line-height: 1;
   font-family: var(--mono); font-weight: 800;
-  display: block; margin-top: 2px;
+  display: block; margin-top: 1px;
 }
+/* Per-copy scan rows live inside the row body when qty>1. Inline them so
+   2-3 copies don't blow the row height up. */
+.pull-card-body .scan-items { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+.pull-card-body .scan-item { padding: 2px 8px; font-size: 0.72rem; gap: 6px; }
+.pull-card-body .scan-item .scan-check { width: 14px; height: 14px; font-size: 0.55rem; border-width: 1.5px; }
 
 .bin-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
 .bin-tag {
@@ -708,10 +716,10 @@ function renderHoldDetail(d) {
   }
 
   // Sealed / slab items — always shown regardless of phase, since they have
-  // no decision step and need a way to be marked "picked up". Scan the SKU
-  // (or click Mark Pulled) to flip REQUESTED → PULLED.
+  // no decision step and need a way to be marked "picked up". Scan the
+  // physical barcode (or the legacy SKU) to flip REQUESTED → PULLED.
   if (products.length) {
-    html += `<div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:16px 0 8px;">Sealed &amp; Slabs — scan SKU or tap Mark Pulled</div>`;
+    html += `<div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:16px 0 8px;">Sealed &amp; Slabs — scan barcode or tap Mark Pulled</div>`;
     html += products.map(item => {
       const kindLabel = (item.item_kind === 'slab') ? 'Slab' : 'Sealed';
       const price = parseFloat(item.current_price || 0);
@@ -725,7 +733,9 @@ function renderHoldDetail(d) {
             ${esc(item.card_name)}
           </div>
           <div style="font-size:0.75rem;color:var(--dim);">
-            ${item.sku ? `SKU: <code style="font-family:var(--mono);">${esc(item.sku)}</code>` : ''}
+            ${item.prod_barcode
+                ? `Barcode: <code style="font-family:var(--mono);">${esc(item.prod_barcode)}</code>`
+                : item.sku ? `SKU: <code style="font-family:var(--mono);">${esc(item.sku)}</code>` : ''}
             ${price ? ` · $${price.toFixed(2)}` : ''}
           </div>
         </div>

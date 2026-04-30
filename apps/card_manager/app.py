@@ -28,6 +28,23 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 db.init_pool()
 
+
+def _ensure_columns():
+    """Defensive idempotent column add for inventory_product_cache.barcode.
+    The column is owned by shared/cache_manager.py, but the scan endpoint
+    references it directly — if card_manager deploys before inventory's
+    cache_manager runs the migration, the JOIN would 500. Cheap to retry."""
+    try:
+        db.execute(
+            "ALTER TABLE inventory_product_cache "
+            "ADD COLUMN IF NOT EXISTS barcode VARCHAR(200)"
+        )
+    except Exception as e:
+        logger.debug(f"inventory_product_cache.barcode migration skipped ({e})")
+
+
+_ensure_columns()
+
 SHOPIFY_STORE   = os.environ.get("SHOPIFY_STORE", "")
 SHOPIFY_TOKEN   = os.environ.get("SHOPIFY_TOKEN", "")
 SHOPIFY_VERSION = os.environ.get("SHOPIFY_VERSION", "2025-01")
@@ -287,6 +304,7 @@ def get_hold(hold_id):
                hi.shopify_product_id, hi.shopify_variant_id,
                hi.sku AS hi_sku, hi.title AS hi_title,
                hi.image_url AS hi_image_url, hi.unit_price AS hi_unit_price,
+               ipc.barcode AS prod_barcode,
                rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
                rc.condition, rc.current_price, rc.tcgplayer_id,
                rc.image_url AS rc_image_url, rc.state AS card_state,
@@ -294,6 +312,9 @@ def get_hold(hold_id):
         FROM hold_items hi
         LEFT JOIN raw_cards rc ON hi.raw_card_id = rc.id
         LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN inventory_product_cache ipc
+          ON ipc.shopify_variant_id = hi.shopify_variant_id
+         AND hi.item_kind IN ('sealed','slab')
         WHERE hi.hold_id = %s
         ORDER BY hi.item_kind NULLS FIRST,
                  sl.bin_label NULLS LAST,
@@ -492,21 +513,29 @@ def scan_card(hold_id):
     """, (barcode,))
 
     if not scanned:
-        # Not a raw card. Try sealed/slab — match by SKU on this hold's
-        # REQUESTED **or EXPIRED_UNCLAIMED** product items. Including expired
-        # recovers the case where the customer came back after the 15-min
-        # cleanup cron flipped a sitting REQUESTED item to EXPIRED_UNCLAIMED;
-        # sealed/slab inventory was never decremented anyway, so it's safe to
-        # re-pull. Status goes straight to PULLED.
+        # Not a raw card. Try sealed/slab. Two acceptable scans:
+        #   1) The Shopify SKU we stored on the hold_item (legacy path —
+        #      raw cards have SKU == barcode, but sealed/slab don't).
+        #   2) The Shopify variant.barcode mirrored into
+        #      inventory_product_cache by shared/cache_manager.py. This is
+        #      what staff actually labels their sealed/slab inventory with
+        #      via the inventory bind tool.
+        # Status flips REQUESTED **or EXPIRED_UNCLAIMED** → PULLED. Including
+        # expired recovers the case where the customer came back after the
+        # 15-min cleanup cron flipped a sitting REQUESTED item to
+        # EXPIRED_UNCLAIMED; sealed/slab inventory was never decremented
+        # anyway, so it's safe to re-pull.
         prod_match = db.query_one("""
             SELECT hi.id, hi.title, hi.item_kind, hi.shopify_variant_id, hi.status
             FROM hold_items hi
+            LEFT JOIN inventory_product_cache ipc
+              ON ipc.shopify_variant_id = hi.shopify_variant_id
             WHERE hi.hold_id = %s
               AND hi.status IN ('REQUESTED','EXPIRED_UNCLAIMED')
               AND hi.item_kind IN ('sealed','slab')
-              AND hi.sku = %s
+              AND (hi.sku = %s OR ipc.barcode = %s)
             LIMIT 1
-        """, (hold_id, barcode))
+        """, (hold_id, barcode, barcode))
         if prod_match:
             db.execute("""
                 UPDATE hold_items

@@ -137,7 +137,7 @@ class ShopifyClient:
                 id title handle status tags
                 featuredImage { url }
                 variants(first: 10) {
-                  edges { node { id price sku inventoryQuantity
+                  edges { node { id price sku barcode inventoryQuantity
                     inventoryItem { id
                       unitCost { amount }
                       inventoryLevels(first: 1) {
@@ -206,6 +206,7 @@ class ShopifyClient:
                         "shopify_price":      float(variant["price"]),
                         "shopify_qty":        variant["inventoryQuantity"],
                         "sku":                variant.get("sku"),
+                        "barcode":            variant.get("barcode"),
                         "inventory_item_id":  inv_item_id,
                         "committed":          _extract_committed(variant),
                         "tcgplayer_id":       tcg_id,
