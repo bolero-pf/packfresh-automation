@@ -2660,6 +2660,31 @@ def _expire_unclaimed_instore_requests():
     """, (cutoff,))
 
 
+def _auto_close_fully_resolved_holds():
+    """If every hold_item on an active hold is in a terminal state
+    (EXPIRED_UNCLAIMED / MISSING / REJECTED / SOLD / RETURNED / UNRESOLVED /
+    CANCELLED) — i.e. nothing is REQUESTED, PULLED, or ACCEPTED any more —
+    flip the hold itself to AUTO_EXPIRED so it falls out of the active queue.
+
+    AUTO_EXPIRED is distinct from manual CANCELLED so an auditor can tell
+    "the queue cleaned itself up" from "a staff member explicitly closed
+    this." Both are terminal and excluded from the active hold list.
+
+    Holds with zero hold_items (degenerate state) also auto-close — the
+    NOT IN subquery returns no rows for them, so they match.
+    """
+    db.execute("""
+        UPDATE holds
+           SET status = 'AUTO_EXPIRED'
+         WHERE status IN ('PENDING','PULLING','READY')
+           AND id NOT IN (
+               SELECT DISTINCT hold_id FROM hold_items
+                WHERE status IN ('REQUESTED','PULLED','ACCEPTED')
+                  AND hold_id IS NOT NULL
+           )
+    """)
+
+
 def _flag_unresolved_pulls():
     """PULLED sealed/slab items with no return AND no matching order after
     PULLED_UNRESOLVED_AFTER_HOURS → UNRESOLVED. This is the loss-detection
@@ -2697,6 +2722,11 @@ def _cleanup_loop():
 
             # 3. Unresolved pulls (loss signal)
             _flag_unresolved_pulls()
+
+            # 4. Auto-close holds whose items are now ALL terminal — has to
+            #    run after (2) and (3) so the just-flipped EXPIRED/UNRESOLVED
+            #    items count as terminal in the same loop iteration.
+            _auto_close_fully_resolved_holds()
         except Exception as e:
             logger.warning(f"Background cleanup error: {e}")
 
