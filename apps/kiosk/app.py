@@ -2585,17 +2585,17 @@ def webhook_order_paid():
                 vid = card.get("shopify_variant_id")
                 if pid:
                     try:
-                        # Zero inventory so Shopify doesn't show stale "in stock"
+                        # Zero inventory first to bust Shopify's stale cache,
+                        # then archive. Without the explicit set, variant-level
+                        # inv_quantity can stay at 1 indefinitely after POS sale.
                         if vid:
                             vdata = _shopify_rest("GET", f"/variants/{vid}.json")
                             iid = vdata.get("variant", {}).get("inventory_item_id")
                             if iid:
-                                levels = _shopify_rest("GET", f"/inventory_levels.json?inventory_item_ids={iid}")
-                                for lv in levels.get("inventory_levels", []):
-                                    _shopify_rest("POST", "/inventory_levels/set.json",
-                                                  json={"location_id": lv["location_id"],
-                                                        "inventory_item_id": iid,
-                                                        "available": 0})
+                                _shopify_rest("POST", "/inventory_levels/set.json",
+                                              json={"location_id": 80312369372,
+                                                    "inventory_item_id": iid,
+                                                    "available": 0})
                         _shopify_rest("PUT", f"/products/{pid}.json",
                                       json={"product": {"id": pid, "status": "archived"}})
                     except Exception:
