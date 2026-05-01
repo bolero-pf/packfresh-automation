@@ -2566,8 +2566,34 @@ def webhook_order_paid():
         except Exception as e:
             logger.warning(f"sealed/slab POS match failed: {e}")
 
+    # ── 3. Raw card POS sale: match by barcode (SKU on the listing) ──────────
+    # Card manager creates active listings with SKU = barcode. When sold at POS,
+    # flip raw_cards PENDING_SALE → SOLD and delete the Shopify product.
+    if sealed_slab_skus:  # same SKUs, raw cards use barcode as SKU too
+        try:
+            ph = ",".join(["%s"] * len(sealed_slab_skus))
+            sold_raw = db.query(f"""
+                UPDATE raw_cards
+                SET state = 'SOLD', current_hold_id = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE barcode IN ({ph})
+                  AND state = 'PENDING_SALE'
+                RETURNING id, barcode, shopify_product_id
+            """, tuple(sealed_slab_skus))
+            for card in (sold_raw or []):
+                pid = card.get("shopify_product_id")
+                if pid:
+                    try:
+                        _shopify_rest("PUT", f"/products/{pid}.json",
+                                      json={"product": {"id": pid, "status": "archived"}})
+                    except Exception:
+                        logger.warning(f"Failed to archive raw listing product_id={pid}")
+                logger.info(f"Raw card POS sold: barcode={card['barcode']}")
+        except Exception as e:
+            logger.warning(f"raw card POS match failed: {e}")
+
     if not hold_ids:
-        return jsonify({"ok": True, "kiosk": "sealed_slab_match_attempted"}), 200
+        return jsonify({"ok": True, "kiosk": "pos_match_attempted"}), 200
 
     # Extract order info for staff fulfillment
     shopify_order_id = order.get("id")
