@@ -898,7 +898,7 @@ def _create_raw_listing(item: dict) -> dict:
         "product": {
             "title":       title,
             "body_html":   body,
-            "status":      "draft",
+            "status":      "active",
             "product_type": "Pokemon",
             "vendor":      "Pack Fresh",
             "images":      [{"src": item["image_url"]}] if item.get("image_url") else [],
