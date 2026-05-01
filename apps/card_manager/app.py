@@ -611,7 +611,11 @@ def item_decision(hold_id, hold_item_id):
         return jsonify({"error": "decision must be ACCEPTED or REJECTED"}), 400
 
     item = db.query_one("""
-        SELECT hi.*, rc.id AS card_id FROM hold_items hi
+        SELECT hi.id AS hold_item_id, hi.status AS hi_status,
+               rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url,
+               rc.tcgplayer_id, rc.barcode
+        FROM hold_items hi
         JOIN raw_cards rc ON hi.raw_card_id = rc.id
         WHERE hi.id = %s AND hi.hold_id = %s
     """, (hold_item_id, hold_id))
@@ -629,11 +633,25 @@ def item_decision(hold_id, hold_item_id):
             WHERE id = %s
         """, (str(item["card_id"]),))
     else:
-        # ACCEPTED — listing will be created in the finish step
+        # ACCEPTED — create Shopify listing immediately
+        try:
+            listing = _create_raw_listing(item)
+        except Exception as e:
+            return jsonify({"error": f"Failed to create listing: {e}"}), 500
         db.execute("""
-            UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
+            UPDATE hold_items
+            SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP,
+                shopify_product_id = %s, shopify_variant_id = %s
             WHERE id = %s
-        """, (hold_item_id,))
+        """, (listing["product_id"], listing["variant_id"], hold_item_id))
+        db.execute("""
+            UPDATE raw_cards
+            SET state = 'PENDING_SALE',
+                shopify_product_id = %s,
+                shopify_variant_id = %s,
+                current_hold_id = NULL
+            WHERE id = %s
+        """, (listing["product_id"], listing["variant_id"], str(item["card_id"])))
 
     return jsonify({"success": True, "decision": decision})
 
@@ -899,6 +917,7 @@ def _create_raw_listing(item: dict) -> dict:
             "title":       title,
             "body_html":   body,
             "status":      "active",
+            "published":   False,
             "product_type": "Pokemon",
             "vendor":      "Pack Fresh",
             "images":      [{"src": item["image_url"]}] if item.get("image_url") else [],
