@@ -6,7 +6,7 @@
 <title>Pack Fresh — Browse Cards</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Amatic+SC:wght@700&family=Gaegu:wght@300;400;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Amatic+SC:wght@700&family=Fredoka:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root {
   --bg:       #0B0B09;   /* cl-neutral-900 */
@@ -24,12 +24,12 @@
   --cl-font-amatic-family: "Amatic SC", "Comic Sans MS", "Comic Sans", "Chalkboard SE", "Chalkboard", sans-serif;
   --cl-font-amatic-weight: 700;
   --cl-font-amatic-style:  normal;
-  --cl-font-gaegu-family:  "Gaegu", "Comic Sans MS", "Comic Sans", "Chalkboard SE", "Chalkboard", sans-serif;
-  --cl-font-gaegu-weight:  400;
-  --cl-font-gaegu-style:   normal;
-  --cl-font-body-family:    var(--cl-font-gaegu-family);
-  --cl-font-body-weight:    var(--cl-font-gaegu-weight);
-  --cl-font-body-style:     var(--cl-font-gaegu-style);
+  --cl-font-fredoka-family: "Fredoka", "Comic Sans MS", "Comic Sans", "Chalkboard SE", "Chalkboard", sans-serif;
+  --cl-font-fredoka-weight: 400;
+  --cl-font-fredoka-style:  normal;
+  --cl-font-body-family:    var(--cl-font-fredoka-family);
+  --cl-font-body-weight:    var(--cl-font-fredoka-weight);
+  --cl-font-body-style:     var(--cl-font-fredoka-style);
   --cl-font-heading-family: var(--cl-font-amatic-family);
   --cl-font-heading-weight: var(--cl-font-amatic-weight);
   --cl-font-heading-style:  var(--cl-font-amatic-style);
@@ -440,7 +440,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
   color: var(--text); font-family: var(--sans); font-size: 0.95rem; font-weight: 500;
   cursor: pointer; user-select: none; transition: all 0.15s; white-space: nowrap;
 }
-.game-pill .qty { color: var(--dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.game-pill .qty { color: var(--dim); font-family: var(--mono); font-weight: 500; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 .game-pill.active {
   background: var(--accent); border-color: var(--accent); color: #0B0B09;
 }
@@ -528,8 +528,8 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .chip.on:hover {
   background: var(--accent); border-color: var(--accent);
 }
-.chip .qty { color: var(--dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
-.chip.on .qty { color: rgba(11,11,9,0.7); font-weight: 600; }
+.chip .qty { color: var(--dim); font-family: var(--mono); font-weight: 500; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.chip.on .qty { color: rgba(11,11,9,0.7); font-weight: 700; }
 .chip.cond-NM.on { background: #14532d; border-color: #4ade80; color: #4ade80; }
 .chip.cond-LP.on { background: rgba(223,163,42,0.22); border-color: #DFA32A; color: #DFA32A; }
 .chip.cond-MP.on { background: rgba(251,146,60,0.22); border-color: #fb923c; color: #fb923c; }
@@ -559,7 +559,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .set-row + .set-row { margin-top: 4px; }
 .set-row:hover { background: var(--surface2); }
 .set-row.on { background: rgba(223,163,42,0.12); color: var(--accent); }
-.set-row .qty { color: var(--dim); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+.set-row .qty { color: var(--dim); font-family: var(--mono); font-weight: 500; font-size: 0.82rem; font-variant-numeric: tabular-nums; }
 .set-row.on .qty { color: var(--accent); }
 
 .price-row { display: flex; gap: 10px; align-items: center; }
