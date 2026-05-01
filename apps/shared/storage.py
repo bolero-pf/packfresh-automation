@@ -280,7 +280,7 @@ def get_or_add_bin_for_row(row_label: str, db) -> Optional[dict]:
 
     next_part = (last["max_part"] or 0) + 1
     if next_part > 50:
-        return None  # row is full (50 bins × 100 = 5000 cards)
+        return None  # row is full (50 bins × 50 = 2500 cards)
 
     bin_label = f"{row_label}-{next_part}"
     db.execute("""

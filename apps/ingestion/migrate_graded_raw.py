@@ -95,7 +95,7 @@ if not table_exists("storage_locations"):
             row_id        UUID         NOT NULL REFERENCES storage_rows(id),
             partition_num INTEGER      NOT NULL,
             card_type     VARCHAR(50)  NOT NULL,
-            capacity      INTEGER      NOT NULL DEFAULT 100,
+            capacity      INTEGER      NOT NULL DEFAULT 50,
             current_count INTEGER      NOT NULL DEFAULT 0,
             created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE (row_id, partition_num)
