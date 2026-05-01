@@ -594,17 +594,25 @@ function renderResult(m, barcode, allMatches) {
     matchesHtml =
       '<div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">'
       + '<div class="warn-badge" style="margin-bottom:8px;">⚠ ' + allMatches.length + ' variants share this barcode</div>'
-      + '<table><thead><tr><th>Product</th><th>Variant</th><th>SKU</th><th>Qty</th><th></th></tr></thead><tbody>'
+      + '<table><thead><tr><th>Product</th><th>Variant</th><th>SKU</th><th>Qty</th><th>Adjust</th></tr></thead><tbody>'
       + allMatches.map((v, i) => {
           const isActive = v.variant_id === m.variant_id;
+          const canAdj = !!v.inventory_item_id;
           return '<tr' + (isActive ? ' style="background:var(--s2);"' : '') + '>'
             + '<td>' + esc(v.product_title || '') + '</td>'
             + '<td>' + esc(v.variant_title || '') + '</td>'
             + '<td class="code">' + esc(v.variant_sku || '—') + '</td>'
-            + '<td>' + (v.inventory_quantity == null ? '—' : v.inventory_quantity) + '</td>'
-            + '<td>' + (isActive
+            + '<td id="match-qty-' + i + '" style="font-family:ui-monospace,Menlo,Consolas,monospace;">'
+            +   (v.inventory_quantity == null ? '—' : v.inventory_quantity)
+            + '</td>'
+            + '<td>'
+            +   (canAdj
+                ? '<button class="btn" onclick="adjustMatchQty(' + i + ', -1)">−1</button> '
+                  + '<button class="btn btn-primary" onclick="adjustMatchQty(' + i + ', 1)">+1</button> '
+                : '<span class="muted">— </span>')
+            +   (isActive
                 ? '<span class="success-badge">Selected</span>'
-                : '<button class="btn" onclick="selectMatch(' + i + ')">Use this</button>')
+                : '<button class="btn" onclick="selectMatch(' + i + ')">Focus</button>')
             + '</td></tr>';
         }).join('')
       + '</tbody></table></div>';
@@ -725,6 +733,52 @@ function selectMatch(idx) {
   renderResult(m, lastScannedBarcode, currentMatches);
   loadAdjustHistory(m.variant_id);
   toast('Switched to: ' + (m.product_title || ''), 'green');
+}
+
+// Inline ±1 on a match row — adjusts that variant directly without
+// having to "Focus" it first. Used when the same barcode binds to
+// several variants (mini tins, multi-art collection boxes, etc.).
+async function adjustMatchQty(idx, delta) {
+  const m = currentMatches[idx];
+  if (!m || !m.inventory_item_id) return;
+  const before = (m.inventory_quantity == null) ? null : Number(m.inventory_quantity);
+
+  let data;
+  try {
+    const r = await fetch('/inventory/barcode-bind/api/adjust', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        variant_id:        m.variant_id,
+        product_id:        m.product_id,
+        inventory_item_id: m.inventory_item_id,
+        product_title:     m.product_title,
+        variant_title:     m.variant_title,
+        delta:             delta,
+        qty_before:        Number.isFinite(before) ? before : null,
+        note:              '',
+      }),
+    });
+    data = await r.json();
+  } catch (e) { toast('Network error', 'red'); return; }
+
+  if (!data.ok) { toast(data.error || 'Adjust failed', 'red'); return; }
+
+  const after = (data.qty_after != null) ? Number(data.qty_after)
+              : (Number.isFinite(before) ? before + delta : null);
+  m.inventory_quantity = after;
+  const cell = document.getElementById('match-qty-' + idx);
+  if (cell && after != null) cell.textContent = after;
+
+  // If the user adjusted the currently-focused variant, also keep the big
+  // qty display + adjust history in sync.
+  if (currentVariant && currentVariant.variant_id === m.variant_id) {
+    currentVariant.inventory_quantity = after;
+    const qtyEl = document.getElementById('qty-display');
+    if (qtyEl && after != null) qtyEl.textContent = after;
+    loadAdjustHistory(m.variant_id);
+  }
+  toast((delta > 0 ? '+' : '') + delta + ' → ' + (after == null ? '?' : after)
+        + ' · ' + (m.variant_title || m.product_title || ''), 'green');
 }
 
 let assignMode = 'reassign'; // 'reassign' clears others, 'also' keeps them
@@ -872,66 +926,139 @@ async function loadVariants(productId) {
     const labelTitle = v.variant_title || (v.options || []).map(o => o.value).join(' / ') || 'variant';
     const btnLabel = pendingBarcode ? 'Assign ' + esc(pendingBarcode) : 'Assign';
     return '<tr>'
+      + '<td><input type="checkbox" class="vsel" data-vid="' + esc(v.variant_id)
+      +     '" data-title="' + esc(labelTitle) + '" onchange="updateMultiAssignBar()"></td>'
       + optCells
       + '<td>' + esc(v.variant_sku || '') + '</td>'
       + '<td>' + cur + '</td>'
-      + '<td><button class="btn btn-primary" onclick="assignBarcode(\\'' + esc(v.variant_id)
+      + '<td><button class="btn btn-primary" onclick="assignBarcodeSingle(\\'' + esc(v.variant_id)
         + '\\', \\'' + esc(labelTitle) + '\\')">' + btnLabel + '</button></td>'
       + '</tr>';
   }).join('');
 
+  const multiBtnLabel = pendingBarcode
+    ? 'Assign ' + esc(pendingBarcode) + ' to <span id="multi-assign-count">0</span> selected'
+    : 'Assign to <span id="multi-assign-count">0</span> selected';
+
   document.getElementById('variants-body').innerHTML =
     '<div style="font-weight:600; margin-bottom:6px;">' + esc(data.product.title || '') + '</div>'
-    + '<div class="muted" style="margin-bottom:8px;">Pick the variant for this physical item.</div>'
-    + '<table><thead><tr>' + optionCols + '<th>SKU</th><th>Current barcode</th><th></th></tr></thead>'
+    + '<div class="muted" style="margin-bottom:8px;">Pick a single variant, or check multiple to bind the same barcode to all (mini tins, multi-art collection boxes, etc.).</div>'
+    + '<div id="multi-assign-bar" style="margin-bottom:10px; display:none;">'
+    +   '<button class="btn btn-primary" onclick="assignBarcodeMulti()">' + multiBtnLabel + '</button>'
+    + '</div>'
+    + '<table><thead><tr><th></th>' + optionCols + '<th>SKU</th><th>Current barcode</th><th></th></tr></thead>'
     + '<tbody>' + rows + '</tbody></table>';
 }
 
-async function assignBarcode(variantId, variantTitle, force) {
-  if (!pendingBarcode) { toast('No barcode pending. Re-scan.', 'amber'); return; }
+function updateMultiAssignBar() {
+  const checked = document.querySelectorAll('.vsel:checked');
+  const bar = document.getElementById('multi-assign-bar');
+  const cnt = document.getElementById('multi-assign-count');
+  if (cnt) cnt.textContent = checked.length;
+  if (bar) bar.style.display = checked.length >= 1 ? '' : 'none';
+}
 
-  const clearOthers = assignMode !== 'also';
-  const body = { variant_id: variantId, barcode: pendingBarcode, clear_others: clearOthers };
-  if (force) body.force = true;
-
-  let data, status;
-  try {
-    const r = await fetch('/inventory/barcode-bind/api/assign', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(body),
-    });
-    status = r.status;
-    data = await r.json();
-  } catch (e) {
-    toast('Network error', 'red');
+// Worker for both single and multi-variant assigns.
+// First call honors assignMode (reassign clears existing bindings, also keeps them).
+// Subsequent calls in the same batch force-through duplicates and skip clearing —
+// otherwise we'd wipe the variants we just bound.
+async function assignBarcodeToVariants(variants) {
+  if (!pendingBarcode || !variants.length) {
+    toast('No barcode pending or nothing selected. Re-scan.', 'amber');
     return;
   }
+  const barcodeToAssign = pendingBarcode;
+  const baseClearOthers = assignMode !== 'also';
+  let successCount = 0;
+  const cleared = new Set();
 
-  if (status === 409 && data.error === 'duplicate') {
-    if (assignMode === 'also') {
-      // "Also bind" mode — duplicates are expected, just push through without clearing
-      return assignBarcode(variantId, variantTitle, true);
+  for (let i = 0; i < variants.length; i++) {
+    const v = variants[i];
+    const isFirst = i === 0;
+    const body = {
+      variant_id:   v.variant_id,
+      barcode:      barcodeToAssign,
+      clear_others: baseClearOthers && isFirst,
+    };
+    if (!isFirst) body.force = true;
+
+    let data, status;
+    try {
+      const r = await fetch('/inventory/barcode-bind/api/assign', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      });
+      status = r.status;
+      data = await r.json();
+    } catch (e) {
+      toast('Network error on ' + (v.variant_title || v.variant_id), 'red');
+      continue;
     }
-    const list = (data.duplicates || [])
-      .map(d => (d.product_title || '?') + ' · ' + (d.variant_title || '')).join('\\n');
-    if (confirm('Barcode ' + pendingBarcode + ' is already on:\\n\\n' + list
-                + '\\n\\nAssign anyway? (barcode will be removed from the above)')) {
-      return assignBarcode(variantId, variantTitle, true);
+
+    if (status === 409 && data.error === 'duplicate') {
+      // Confirm only on the very first call when the user is in reassign mode.
+      // Subsequent rows of a multi-select don't get re-prompted.
+      if (isFirst && assignMode !== 'also') {
+        const list = (data.duplicates || [])
+          .map(d => (d.product_title || '?') + ' · ' + (d.variant_title || '')).join('\\n');
+        if (!confirm('Barcode ' + barcodeToAssign + ' is already on:\\n\\n' + list
+                    + '\\n\\nAssign anyway? (barcode will be removed from the above)')) {
+          return;
+        }
+      }
+      body.force = true;
+      try {
+        const r2 = await fetch('/inventory/barcode-bind/api/assign', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(body),
+        });
+        data = await r2.json();
+      } catch (e) {
+        toast('Network error retrying ' + (v.variant_title || v.variant_id), 'red');
+        continue;
+      }
     }
-    return;
-  }
-  if (!data.ok) {
-    toast('Assign failed: ' + (data.error || status), 'red');
-    return;
+
+    if (data && data.ok) {
+      successCount++;
+      (data.cleared_from || []).forEach(id => cleared.add(id));
+      pushHistory(barcodeToAssign, v.variant_title || v.variant_id, 'assign');
+    } else {
+      toast('Assign failed: ' + (v.variant_title || v.variant_id), 'red');
+    }
   }
 
-  const cleared = (data.cleared_from || []).length;
-  const msg = 'Assigned ' + pendingBarcode + ' → ' + variantTitle
-    + (cleared ? ' (removed from ' + cleared + ' other variant' + (cleared > 1 ? 's' : '') + ')' : '');
+  if (!successCount) return;
+
+  const msg = 'Assigned to ' + successCount + ' variant' + (successCount > 1 ? 's' : '')
+    + (cleared.size ? ' (cleared from ' + cleared.size + ')' : '');
   toast(msg, 'green');
-  pushHistory(pendingBarcode, variantTitle, 'assign');
+
+  // Re-lookup the just-bound barcode so the user lands back in the FOUND view
+  // with qty controls + the full variants-sharing-this-barcode list. This is
+  // the part that used to slam them back to a blank scan input.
   pendingBarcode = null;
-  resetAll();
+  document.getElementById('search-card').style.display = 'none';
+  document.getElementById('variants-card').style.display = 'none';
+  document.getElementById('search-results').innerHTML = '';
+  document.getElementById('search-status').textContent = '';
+  document.getElementById('search').value = '';
+  document.getElementById('scan').value = barcodeToAssign;
+  await lookupScan();
+}
+
+function assignBarcodeSingle(variantId, variantTitle) {
+  return assignBarcodeToVariants([{ variant_id: variantId, variant_title: variantTitle }]);
+}
+
+function assignBarcodeMulti() {
+  const checked = Array.from(document.querySelectorAll('.vsel:checked'));
+  if (!checked.length) { toast('Check at least one variant first.', 'amber'); return; }
+  const variants = checked.map(c => ({
+    variant_id:    c.dataset.vid,
+    variant_title: c.dataset.title,
+  }));
+  assignBarcodeToVariants(variants);
 }
 
 function resetAll() {
