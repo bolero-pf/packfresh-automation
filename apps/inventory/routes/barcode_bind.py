@@ -534,6 +534,12 @@ let pendingBarcode = null;
 let currentVariant = null;  // most recent successful lookup match
 let currentMatches = [];    // all variants returned for the last barcode scan
 let lastScannedBarcode = null;
+// Pin mode (rapid-bind for accessories with many variants — sleeves, dice, etc.)
+// When set, the variants card sticks to one product; subsequent scans arm
+// pendingBarcode and the user clicks the right colour/variant to bind.
+let pinnedProductId = null;
+let pinnedProductTitle = '';
+let pinnedBindCount = 0;
 const history = [];
 
 function esc(s) {
@@ -804,6 +810,16 @@ function alsoBindBarcode() {
 async function lookupScan() {
   const barcode = document.getElementById('scan').value.trim();
   if (!barcode) return;
+  // If a product is pinned (rapid bind mode), redirect this scan into the
+  // pinned workspace so we don't tear down the variants list.
+  if (pinnedProductId) {
+    document.getElementById('scan').value = '';
+    const pinInp = document.getElementById('pin-scan');
+    if (pinInp) {
+      pinInp.value = barcode;
+      return pinScanLookup();
+    }
+  }
   setStatus('Looking up…');
   document.getElementById('result-card').style.display = 'none';
   document.getElementById('search-card').style.display = 'none';
@@ -908,6 +924,14 @@ async function loadVariants(productId) {
     return;
   }
 
+  if (String(productId) === String(pinnedProductId)) {
+    renderVariantsPinned(productId, data);
+  } else {
+    renderVariantsDefault(productId, data);
+  }
+}
+
+function renderVariantsDefault(productId, data) {
   const optionNames = data.product.option_names || [];
   const optionCols = optionNames.length
     ? optionNames.map(n => '<th>' + esc(n) + '</th>').join('')
@@ -941,13 +965,86 @@ async function loadVariants(productId) {
     : 'Assign to <span id="multi-assign-count">0</span> selected';
 
   document.getElementById('variants-body').innerHTML =
-    '<div style="font-weight:600; margin-bottom:6px;">' + esc(data.product.title || '') + '</div>'
-    + '<div class="muted" style="margin-bottom:8px;">Pick a single variant, or check multiple to bind the same barcode to all (mini tins, multi-art collection boxes, etc.).</div>'
+    '<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px;">'
+    +   '<div style="font-weight:600;">' + esc(data.product.title || '') + '</div>'
+    +   '<div style="flex:1;"></div>'
+    +   '<button class="btn" style="color:var(--accent2); border-color:var(--accent2);" '
+    +     'onclick="enterPinMode(\\'' + esc(String(productId)) + '\\', \\''
+    +     esc(data.product.title || '') + '\\')">📌 Rapid bind mode</button>'
+    + '</div>'
+    + '<div class="muted" style="margin-bottom:8px;">Pick a single variant, or check multiple to bind the same barcode to all (mini tins, multi-art collection boxes, etc.). For accessories with many distinct UPCs (sleeves, dice, deckboxes), use Rapid bind instead.</div>'
     + '<div id="multi-assign-bar" style="margin-bottom:10px; display:none;">'
     +   '<button class="btn btn-primary" onclick="assignBarcodeMulti()">' + multiBtnLabel + '</button>'
     + '</div>'
     + '<table><thead><tr><th></th>' + optionCols + '<th>SKU</th><th>Current barcode</th><th></th></tr></thead>'
     + '<tbody>' + rows + '</tbody></table>';
+}
+
+function renderVariantsPinned(productId, data) {
+  const optionNames = data.product.option_names || [];
+  const optionCols = optionNames.length
+    ? optionNames.map(n => '<th>' + esc(n) + '</th>').join('')
+    : '<th>Variant</th>';
+
+  let boundCount = 0, totalCount = 0;
+  const rows = data.variants.map(v => {
+    totalCount++;
+    const optCells = optionNames.length
+      ? optionNames.map(n => {
+          const opt = (v.options || []).find(o => o.name === n);
+          return '<td>' + esc(opt ? opt.value : '') + '</td>';
+        }).join('')
+      : '<td>' + esc(v.variant_title || '') + '</td>';
+    const labelTitle = v.variant_title || (v.options || []).map(o => o.value).join(' / ') || 'variant';
+    const isBound = !!v.variant_barcode;
+    if (isBound) boundCount++;
+    const bcCell = isBound
+      ? '<span class="success-badge">✓ <span class="code">' + esc(v.variant_barcode) + '</span></span>'
+      : '<span class="muted">—</span>';
+    const btnLabel = pendingBarcode ? 'Bind ' + esc(pendingBarcode) : 'Bind';
+    const btnClass = isBound ? 'btn' : 'btn btn-primary bind-btn';
+    const btn = '<button class="' + btnClass + '" onclick="assignBarcodeSingle(\\''
+      + esc(v.variant_id) + '\\', \\'' + esc(labelTitle) + '\\')">'
+      + (isBound ? 'Rebind' : btnLabel) + '</button>';
+    return '<tr id="pin-row-' + esc(v.variant_id) + '">'
+      + optCells
+      + '<td>' + esc(v.variant_sku || '') + '</td>'
+      + '<td id="pin-bc-' + esc(v.variant_id) + '">' + bcCell + '</td>'
+      + '<td>' + btn + '</td>'
+      + '</tr>';
+  }).join('');
+
+  const armed = pendingBarcode
+    ? '<span class="warn-badge">Armed: <span class="code">' + esc(pendingBarcode)
+      + '</span> — click the matching variant</span>'
+    : '<span class="muted">Scan a UPC to arm the next bind.</span>';
+
+  document.getElementById('variants-body').innerHTML =
+    '<div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px;">'
+    +   '<div style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--accent2);">📌 Pinned</div>'
+    +   '<div style="font-weight:600;">' + esc(data.product.title || '') + '</div>'
+    +   '<div class="muted">·</div>'
+    +   '<div class="muted">' + boundCount + '/' + totalCount + ' variants have a barcode</div>'
+    +   (pinnedBindCount ? '<div class="muted">·</div><div class="success-badge">' + pinnedBindCount + ' bound this session</div>' : '')
+    +   '<div style="flex:1;"></div>'
+    +   '<button class="btn" onclick="exitPinMode()">Switch product</button>'
+    + '</div>'
+    + '<div class="row" style="margin-bottom:8px;">'
+    +   '<input id="pin-scan" type="text" class="scan-input" autocomplete="off" '
+    +     'placeholder="Scan next variant\\'s UPC…" '
+    +     'onkeydown="if(event.key===\\'Enter\\') pinScanLookup()" '
+    +     'style="font-size:18px; padding:10px 14px;">'
+    +   '<button class="btn" onclick="pinScanLookup()">Look up</button>'
+    + '</div>'
+    + '<div id="pin-armed" style="margin-bottom:10px;">' + armed + '</div>'
+    + '<table><thead><tr>' + optionCols + '<th>SKU</th><th>Current barcode</th><th></th></tr></thead>'
+    + '<tbody>' + rows + '</tbody></table>';
+
+  // Auto-focus the inline scan input — the scanner's keystrokes flow there.
+  setTimeout(() => {
+    const el = document.getElementById('pin-scan');
+    if (el) el.focus();
+  }, 0);
 }
 
 function updateMultiAssignBar() {
@@ -956,6 +1053,99 @@ function updateMultiAssignBar() {
   const cnt = document.getElementById('multi-assign-count');
   if (cnt) cnt.textContent = checked.length;
   if (bar) bar.style.display = checked.length >= 1 ? '' : 'none';
+}
+
+function enterPinMode(productId, productTitle) {
+  pinnedProductId = String(productId);
+  pinnedProductTitle = productTitle || '';
+  pinnedBindCount = 0;
+  pendingBarcode = null;
+  // Clear the other workspace cards — pin mode is a focused single-product view.
+  document.getElementById('result-card').style.display = 'none';
+  document.getElementById('search-card').style.display = 'none';
+  document.getElementById('search-results').innerHTML = '';
+  document.getElementById('search-status').textContent = '';
+  document.getElementById('search').value = '';
+  loadVariants(productId);
+  setStatus('Pinned: ' + pinnedProductTitle + '. Scan UPCs to bind variants.');
+}
+
+function exitPinMode() {
+  pinnedProductId = null;
+  pinnedProductTitle = '';
+  pinnedBindCount = 0;
+  resetAll();
+}
+
+function flashPinRow(variantId) {
+  const row = document.getElementById('pin-row-' + variantId);
+  if (!row) return;
+  const old = row.style.background;
+  row.style.background = 'rgba(45,212,160,0.28)';
+  setTimeout(() => { row.style.background = old; }, 1200);
+}
+
+function refreshPinArmed() {
+  const armedEl = document.getElementById('pin-armed');
+  if (!armedEl) return;
+  armedEl.innerHTML = pendingBarcode
+    ? '<span class="warn-badge">Armed: <span class="code">' + esc(pendingBarcode)
+      + '</span> — click the matching variant</span>'
+    : '<span class="muted">Scan a UPC to arm the next bind.</span>';
+  document.querySelectorAll('.bind-btn').forEach(b => {
+    b.textContent = pendingBarcode ? 'Bind ' + pendingBarcode : 'Bind';
+  });
+}
+
+async function pinScanLookup() {
+  const inp = document.getElementById('pin-scan');
+  if (!inp) return;
+  const barcode = inp.value.trim();
+  if (!barcode) return;
+  inp.value = '';
+  setStatus('Looking up ' + barcode + '…');
+
+  let data;
+  try {
+    const r = await fetch('/inventory/barcode-bind/api/lookup', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ barcode }),
+    });
+    data = await r.json();
+  } catch (e) {
+    toast('Network error', 'red');
+    inp.focus();
+    return;
+  }
+
+  const matches = data.matches || [];
+  // Already on a variant of THIS pinned product — flash the row, no-op.
+  // Lets you re-scan to confirm without binding twice.
+  const inThis = matches.find(v => String(v.product_id) === String(pinnedProductId));
+  if (inThis) {
+    flashPinRow(inThis.variant_id);
+    toast('Already on: ' + (inThis.variant_title || ''), 'amber');
+    pushHistory(barcode, 'already on ' + (inThis.variant_title || ''), 'hit');
+    setStatus('Already bound to ' + (inThis.variant_title || '') + '. Scan next.');
+    inp.focus();
+    return;
+  }
+  // Bound to a different product — confirm the move once, then arm.
+  if (matches.length) {
+    const other = matches[0];
+    if (!confirm('Barcode ' + barcode + ' is currently on:\\n\\n'
+                + (other.product_title || '?') + ' · ' + (other.variant_title || '')
+                + '\\n\\nClick the matching variant of ' + pinnedProductTitle
+                + ' to move it. (The other binding will be cleared.)')) {
+      inp.focus();
+      return;
+    }
+  }
+  pendingBarcode = barcode;
+  assignMode = 'reassign';  // move semantics — clear any prior binding
+  refreshPinArmed();
+  setStatus('Click the matching variant to bind ' + barcode + '.');
+  inp.focus();
 }
 
 // Worker for both single and multi-variant assigns.
@@ -997,8 +1187,9 @@ async function assignBarcodeToVariants(variants) {
 
     if (status === 409 && data.error === 'duplicate') {
       // Confirm only on the very first call when the user is in reassign mode.
-      // Subsequent rows of a multi-select don't get re-prompted.
-      if (isFirst && assignMode !== 'also') {
+      // Subsequent rows of a multi-select don't get re-prompted. In pin mode
+      // pinScanLookup already confirmed the move — skip the second prompt.
+      if (isFirst && assignMode !== 'also' && !pinnedProductId) {
         const list = (data.duplicates || [])
           .map(d => (d.product_title || '?') + ' · ' + (d.variant_title || '')).join('\\n');
         if (!confirm('Barcode ' + barcodeToAssign + ' is already on:\\n\\n' + list
@@ -1034,9 +1225,19 @@ async function assignBarcodeToVariants(variants) {
     + (cleared.size ? ' (cleared from ' + cleared.size + ')' : '');
   toast(msg, 'green');
 
-  // Re-lookup the just-bound barcode so the user lands back in the FOUND view
-  // with qty controls + the full variants-sharing-this-barcode list. This is
-  // the part that used to slam them back to a blank scan input.
+  // Pin mode (rapid bind) — stay on the pinned variants list, refresh it so
+  // the row picks up the new ✓ {barcode}, increment the session counter, and
+  // refocus the pin-scan input so the next UPC is captured immediately.
+  if (pinnedProductId) {
+    pinnedBindCount += successCount;
+    pendingBarcode = null;
+    await loadVariants(pinnedProductId);
+    return;
+  }
+
+  // Default (sealed) mode — re-lookup the just-bound barcode so the user
+  // lands back in the FOUND view with qty controls + the full variants-
+  // sharing-this-barcode list.
   pendingBarcode = null;
   document.getElementById('search-card').style.display = 'none';
   document.getElementById('variants-card').style.display = 'none';
@@ -1078,6 +1279,10 @@ function resetAll() {
 document.body.addEventListener('click', (e) => {
   const tag = e.target.tagName;
   if (tag !== 'INPUT' && tag !== 'BUTTON' && tag !== 'TD' && tag !== 'A' && tag !== 'TR') {
+    if (pinnedProductId) {
+      const pin = document.getElementById('pin-scan');
+      if (pin) { pin.focus(); pin.select(); return; }
+    }
     focusScan();
   }
 });
