@@ -65,7 +65,7 @@ def _best_fit_assign(bins: list[dict], count: int) -> list[dict]:
 
     fits = [b for b in bins if b["available"] >= count]
     if fits:
-        chosen = min(fits, key=lambda b: b["available"])
+        chosen = min(fits, key=lambda b: (b["available"], b.get("partition_num", 0)))
         return [{
             "bin_id":    str(chosen["id"]),
             "bin_label": chosen["bin_label"],
@@ -73,7 +73,7 @@ def _best_fit_assign(bins: list[dict], count: int) -> list[dict]:
         }]
 
     # Distribute: largest free-space first.
-    sorted_bins = sorted(bins, key=lambda b: b["available"], reverse=True)
+    sorted_bins = sorted(bins, key=lambda b: (-b["available"], b.get("partition_num", 0)))
     assignments = []
     remaining = count
     for b in sorted_bins:
@@ -110,7 +110,8 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
     # (e.g. C/D were seeded by the original migration but Sean only built A
     # and B in the warehouse).
     bins = db.query("""
-        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
+        SELECT sl.id, sl.bin_label, sl.partition_num, sl.capacity,
+               sl.current_count,
                (sl.capacity - sl.current_count) AS available
         FROM storage_locations sl
         JOIN storage_rows sr ON sl.row_id = sr.id
