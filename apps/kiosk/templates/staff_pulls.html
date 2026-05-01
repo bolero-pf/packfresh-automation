@@ -6,16 +6,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {
-    --bg: #0e1118;
-    --panel: #161a25;
-    --border: #2a2f42;
-    --text: #e7e9ee;
-    --dim: #8f95a4;
-    --accent: #e8c547;
-    --green: #46a96f;
-    --yellow: #d8a02a;
-    --red: #c75151;
-    --blue: #4f7df9;
+    --bg: #0B0B09;       /* cl-neutral-900 */
+    --panel: #171514;    /* cl-neutral-800 */
+    --border: #3B3938;   /* cl-neutral-600 */
+    --text: #FDF5E4;     /* cl-gold-50 */
+    --dim: #838180;      /* cl-neutral-300 */
+    --accent: #DFA32A;   /* cl-gold-500 — Commonlands logo gold */
+    --green: #1D9B79;    /* cl-teal-500 */
+    --yellow: #FFB829;   /* cl-gold-400 */
+    --red: #942120;      /* cl-red-500 */
+    --blue: #1A488E;     /* cl-blue-500 */
   }
   * { box-sizing: border-box; }
   body {
@@ -57,8 +57,8 @@
     border-radius: 8px; font-weight: 600;
     display: none;
   }
-  .scan-status.ok { background: rgba(70,169,111,0.15); color: var(--green); display: block; }
-  .scan-status.err { background: rgba(199,81,81,0.15); color: var(--red); display: block; }
+  .scan-status.ok { background: rgba(29,155,121,0.15); color: var(--green); display: block; }
+  .scan-status.err { background: rgba(148,33,32,0.15); color: var(--red); display: block; }
   .hold {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -88,9 +88,9 @@
     text-transform: uppercase;
     flex-shrink: 0; width: 50px; text-align: center;
   }
-  .item .kind.raw    { background: rgba(79,125,249,0.2); color: var(--blue); }
-  .item .kind.sealed { background: rgba(232,197,71,0.2); color: var(--accent); }
-  .item .kind.slab   { background: rgba(70,169,111,0.2); color: var(--green); }
+  .item .kind.raw    { background: rgba(26,72,142,0.2); color: var(--blue); }
+  .item .kind.sealed { background: rgba(223,163,42,0.2); color: var(--accent); }
+  .item .kind.slab   { background: rgba(29,155,121,0.2); color: var(--green); }
   .item .title { flex: 1; }
   .item .barcode { color: var(--dim); font-family: ui-monospace, monospace; font-size: 0.78rem; }
   .item .status {
@@ -98,9 +98,9 @@
     padding: 3px 8px; border-radius: 4px;
     text-transform: uppercase;
   }
-  .item .status.REQUESTED { background: rgba(216,160,42,0.2); color: var(--yellow); }
-  .item .status.PULLED    { background: rgba(70,169,111,0.2); color: var(--green); }
-  .item .status.UNRESOLVED { background: rgba(199,81,81,0.2); color: var(--red); }
+  .item .status.REQUESTED { background: rgba(255,184,41,0.2); color: var(--yellow); }
+  .item .status.PULLED    { background: rgba(29,155,121,0.2); color: var(--green); }
+  .item .status.UNRESOLVED { background: rgba(148,33,32,0.2); color: var(--red); }
   .empty {
     text-align: center; padding: 60px 20px; color: var(--dim);
   }

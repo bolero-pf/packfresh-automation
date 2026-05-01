@@ -6,15 +6,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {
-    --bg: #0e1118;
-    --panel: #161a25;
-    --border: #2a2f42;
-    --text: #e7e9ee;
-    --dim: #8f95a4;
-    --accent: #e8c547;
-    --green: #46a96f;
-    --red: #c75151;
-    --blue: #4f7df9;
+    --bg: #0B0B09;       /* cl-neutral-900 */
+    --panel: #171514;    /* cl-neutral-800 */
+    --border: #3B3938;   /* cl-neutral-600 */
+    --text: #FDF5E4;     /* cl-gold-50 */
+    --dim: #838180;      /* cl-neutral-300 */
+    --accent: #DFA32A;   /* cl-gold-500 — Commonlands logo gold */
+    --green: #1D9B79;    /* cl-teal-500 */
+    --red: #942120;      /* cl-red-500 */
+    --blue: #1A488E;     /* cl-blue-500 */
   }
   * { box-sizing: border-box; }
   body {
@@ -49,7 +49,7 @@
   }
   input[type=text]:focus { border-color: var(--accent); }
   button {
-    background: var(--accent); color: #16110a;
+    background: var(--accent); color: #0B0B09;
     border: none; border-radius: 6px;
     padding: 10px 18px;
     font-family: inherit; font-weight: 700; font-size: 0.92rem;
@@ -66,8 +66,8 @@
   }
   .activation-result {
     margin-top: 14px; padding: 14px;
-    background: rgba(70,169,111,0.08);
-    border: 1px solid rgba(70,169,111,0.4);
+    background: rgba(29,155,121,0.08);
+    border: 1px solid rgba(29,155,121,0.4);
     border-radius: 8px;
   }
   .activation-result code {
@@ -175,7 +175,7 @@ function copyUrl() {
   const code = $('act-url');
   if (!code) return;
   navigator.clipboard.writeText(code.textContent).then(() => {
-    code.style.background = 'rgba(70,169,111,0.15)';
+    code.style.background = 'rgba(29,155,121,0.15)';
     setTimeout(() => { code.style.background = ''; }, 800);
   });
 }

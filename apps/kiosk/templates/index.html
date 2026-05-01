@@ -5,21 +5,36 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Pack Fresh — Browse Cards</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Amatic+SC:wght@700&family=Gaegu:wght@300;400;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg:       #0a0a0f;
-  --surface:  #111118;
-  --surface2: #1a1a24;
-  --border:   #2a2a38;
-  --accent:   #e8c547;    /* gold — premium card shop feel */
-  --accent2:  #4fc3f7;   /* blue for secondary actions */
+  --bg:       #0B0B09;   /* cl-neutral-900 */
+  --surface:  #171514;   /* cl-neutral-800 */
+  --surface2: #232120;   /* cl-neutral-700 */
+  --border:   #3B3938;   /* cl-neutral-600 */
+  --accent:   #DFA32A;   /* cl-gold-500 — Commonlands logo gold */
+  --accent2:  #12BC8F;   /* cl-teal-300 — secondary actions */
   --green:    #4ade80;
   --red:      #f87171;
-  --text:     #f0f0f8;
-  --dim:      #9494b0;
-  --sans:     'DM Sans', sans-serif;
-  --display:  'Bebas Neue', sans-serif;
+  --text:     #FDF5E4;   /* cl-gold-50 — warm off-white */
+  --dim:      #838180;   /* cl-neutral-300 */
+  /* Commonlands brand font stacks — fallbacks chain to iOS Chalkboard SE
+     so iPads stay on-brand even if the Google webfont fails to load. */
+  --cl-font-amatic-family: "Amatic SC", "Comic Sans MS", "Comic Sans", "Chalkboard SE", "Chalkboard", sans-serif;
+  --cl-font-amatic-weight: 700;
+  --cl-font-amatic-style:  normal;
+  --cl-font-gaegu-family:  "Gaegu", "Comic Sans MS", "Comic Sans", "Chalkboard SE", "Chalkboard", sans-serif;
+  --cl-font-gaegu-weight:  400;
+  --cl-font-gaegu-style:   normal;
+  --cl-font-body-family:    var(--cl-font-gaegu-family);
+  --cl-font-body-weight:    var(--cl-font-gaegu-weight);
+  --cl-font-body-style:     var(--cl-font-gaegu-style);
+  --cl-font-heading-family: var(--cl-font-amatic-family);
+  --cl-font-heading-weight: var(--cl-font-amatic-weight);
+  --cl-font-heading-style:  var(--cl-font-amatic-style);
+  --sans:     var(--cl-font-body-family);
+  --display:  var(--cl-font-heading-family);
   --mono:     'DM Mono', monospace;
   --r:        12px;
   --touch:    56px;   /* minimum tap target */
@@ -39,7 +54,7 @@ body {
 /* ── Header ── */
 header {
   position: sticky; top: 0; z-index: 50;
-  background: linear-gradient(180deg, rgba(10,10,15,0.98) 0%, rgba(10,10,15,0.92) 100%);
+  background: linear-gradient(180deg, rgba(11,11,9,0.98) 0%, rgba(11,11,9,0.92) 100%);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
   padding: 14px 20px;
@@ -128,7 +143,7 @@ header {
   border-radius: 20px; letter-spacing: 0.04em;
 }
 .cond-NM  { background: rgba(74,222,128,0.15); color: var(--green); }
-.cond-LP  { background: rgba(232,197,71,0.15); color: var(--accent); }
+.cond-LP  { background: rgba(223,163,42,0.15); color: var(--accent); }
 .cond-MP  { background: rgba(251,146,60,0.15); color: #fb923c; }
 .cond-HP  { background: rgba(248,113,113,0.15); color: var(--red); }
 .cond-DMG { background: rgba(248,113,113,0.25); color: var(--red); }
@@ -285,17 +300,17 @@ body.modal-open { overflow: hidden; touch-action: none; }
   background: transparent; color: var(--accent); border-radius: 8px;
   font-weight: 700; font-size: 0.9rem; cursor: pointer; text-align: center;
 }
-.copy-add-btn:active { background: rgba(232,197,71,0.15); }
+.copy-add-btn:active { background: rgba(223,163,42,0.15); }
 .copy-qty-bar {
   display: flex; align-items: center; justify-content: center; gap: 16px;
-  padding: 6px; background: rgba(232,197,71,0.08); border-radius: 8px;
+  padding: 6px; background: rgba(223,163,42,0.08); border-radius: 8px;
 }
 .copy-qty-bar .qty-btn {
   width: 36px; height: 36px; border-radius: 50%; border: 1.5px solid var(--accent);
   background: transparent; color: var(--accent); font-size: 1.2rem; font-weight: 700;
   cursor: pointer; display: flex; align-items: center; justify-content: center;
 }
-.copy-qty-bar .qty-btn:active { background: rgba(232,197,71,0.2); }
+.copy-qty-bar .qty-btn:active { background: rgba(223,163,42,0.2); }
 .copy-qty-bar .qty-val { font-size: 1.1rem; font-weight: 700; min-width: 28px; text-align: center; }
 .copy-check { width: 24px; height: 24px; border-radius: 50%;
   border: 2px solid var(--border); display: flex; align-items: center;
@@ -409,7 +424,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
   line-height: 1;
 }
 .kind-tab.on {
-  background: rgba(232,197,71,0.12);
+  background: rgba(223,163,42,0.12);
   color: var(--accent);
   border-color: var(--accent);
 }
@@ -427,9 +442,9 @@ body.modal-open { overflow: hidden; touch-action: none; }
 }
 .game-pill .qty { color: var(--dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 .game-pill.active {
-  background: var(--accent); border-color: var(--accent); color: #0a0a0f;
+  background: var(--accent); border-color: var(--accent); color: #0B0B09;
 }
-.game-pill.active .qty { color: rgba(10,10,15,0.65); }
+.game-pill.active .qty { color: rgba(11,11,9,0.65); }
 
 .filters-btn {
   flex-shrink: 0; min-height: 44px; padding: 0 18px;
@@ -442,7 +457,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .filters-btn .badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px;
-  background: var(--accent); color: #0a0a0f;
+  background: var(--accent); color: #0B0B09;
   font-size: 0.78rem; font-weight: 700; font-variant-numeric: tabular-nums;
 }
 
@@ -508,15 +523,15 @@ body.modal-open { overflow: hidden; touch-action: none; }
   border-color: rgba(240, 240, 248, 0.45);
 }
 .chip.on {
-  background: var(--accent); border-color: var(--accent); color: #0a0a0f;
+  background: var(--accent); border-color: var(--accent); color: #0B0B09;
 }
 .chip.on:hover {
   background: var(--accent); border-color: var(--accent);
 }
 .chip .qty { color: var(--dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
-.chip.on .qty { color: rgba(10,10,15,0.7); font-weight: 600; }
+.chip.on .qty { color: rgba(11,11,9,0.7); font-weight: 600; }
 .chip.cond-NM.on { background: #14532d; border-color: #4ade80; color: #4ade80; }
-.chip.cond-LP.on { background: rgba(232,197,71,0.22); border-color: #e8c547; color: #e8c547; }
+.chip.cond-LP.on { background: rgba(223,163,42,0.22); border-color: #DFA32A; color: #DFA32A; }
 .chip.cond-MP.on { background: rgba(251,146,60,0.22); border-color: #fb923c; color: #fb923c; }
 .chip.cond-HP.on { background: rgba(248,113,113,0.22); border-color: #f87171; color: #f87171; }
 .chip.cond-DMG.on { background: rgba(185,28,28,0.22); border-color: #b91c1c; color: #f87171; }
@@ -543,7 +558,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
 }
 .set-row + .set-row { margin-top: 4px; }
 .set-row:hover { background: var(--surface2); }
-.set-row.on { background: rgba(232,197,71,0.12); color: var(--accent); }
+.set-row.on { background: rgba(223,163,42,0.12); color: var(--accent); }
 .set-row .qty { color: var(--dim); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
 .set-row.on .qty { color: var(--accent); }
 
@@ -571,7 +586,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
 }
 .sheet-apply {
   flex: 1; min-height: 56px; border-radius: 12px; border: none;
-  background: var(--accent); color: #0a0a0f;
+  background: var(--accent); color: #0B0B09;
   font-family: var(--sans); font-size: 1.05rem; font-weight: 700;
   cursor: pointer; transition: opacity 0.15s;
 }
@@ -591,7 +606,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
   transition: background 0.12s, color 0.12s;
 }
 .mode-toggle .mode-btn.on {
-  background: var(--accent); color: #0a0a0f;
+  background: var(--accent); color: #0B0B09;
 }
 .mode-toggle .mode-btn + .mode-btn { border-left: 1.5px solid rgba(240,240,248,0.18); }
 .mode-toggle .mode-btn.on + .mode-btn,
@@ -627,17 +642,17 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .active-chips .ac-chip {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 10px 4px 12px; border-radius: 14px;
-  background: rgba(232,197,71,0.14);
-  border: 1px solid rgba(232,197,71,0.45);
+  background: rgba(223,163,42,0.14);
+  border: 1px solid rgba(223,163,42,0.45);
   color: var(--accent); font-size: 0.78rem; font-weight: 600;
 }
 .active-chips .ac-chip .ac-x {
   cursor: pointer; font-weight: 700;
   width: 18px; height: 18px; border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center;
-  background: rgba(232,197,71,0.25);
+  background: rgba(223,163,42,0.25);
 }
-.active-chips .ac-chip .ac-x:active { background: rgba(232,197,71,0.45); }
+.active-chips .ac-chip .ac-x:active { background: rgba(223,163,42,0.45); }
 .active-chips .ac-clear {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 4px 10px; border-radius: 14px; cursor: pointer;
@@ -683,7 +698,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
 <body>
 
 <!-- Champion status bar -->
-<div id="champion-bar" style="display:none;align-items:center;gap:8px;padding:4px 16px;background:rgba(232,197,71,0.08);border-bottom:1px solid rgba(232,197,71,0.15);font-size:0.82rem;line-height:1;"></div>
+<div id="champion-bar" style="display:none;align-items:center;gap:8px;padding:4px 16px;background:rgba(223,163,42,0.08);border-bottom:1px solid rgba(223,163,42,0.15);font-size:0.82rem;line-height:1;"></div>
 
 <header>
   <div class="header-top">
@@ -2964,7 +2979,7 @@ function renderCart(panel) {
         <div class="cart-item-info">
           <div class="cart-item-name">${esc(c.title)}</div>
           <div class="cart-item-sub">
-            <span class="cond-pill" style="background:rgba(232,197,71,0.18);color:var(--accent);">${kindLabel}</span>
+            <span class="cond-pill" style="background:rgba(223,163,42,0.18);color:var(--accent);">${kindLabel}</span>
             · $${price.toFixed(2)} ea · <strong style="color:var(--accent);">$${subtotal.toFixed(2)}</strong>
           </div>
         </div>
@@ -3014,7 +3029,7 @@ function renderCart(panel) {
     </div>
     ${_champion && _champion.verified ? `
       <!-- Champion checkout -->
-      <div style="background:rgba(232,197,71,0.08);border:1px solid rgba(232,197,71,0.25);border-radius:8px;padding:12px;margin-bottom:12px;">
+      <div style="background:rgba(223,163,42,0.08);border:1px solid rgba(223,163,42,0.25);border-radius:8px;padding:12px;margin-bottom:12px;">
         <div style="font-weight:700;color:var(--accent);margin-bottom:4px;">★ Champion</div>
         <div style="font-size:0.82rem;color:var(--dim);">Browsing as ${esc(_champion.email)}</div>
       </div>
