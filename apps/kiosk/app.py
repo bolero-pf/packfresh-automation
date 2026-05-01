@@ -2568,7 +2568,7 @@ def webhook_order_paid():
 
     # ── 3. Raw card POS sale: match by barcode (SKU on the listing) ──────────
     # Card manager creates active listings with SKU = barcode. When sold at POS,
-    # flip raw_cards PENDING_SALE → SOLD and delete the Shopify product.
+    # flip raw_cards PENDING_SALE → SOLD, zero out inventory, and archive.
     if sealed_slab_skus:  # same SKUs, raw cards use barcode as SKU too
         try:
             ph = ",".join(["%s"] * len(sealed_slab_skus))
@@ -2578,16 +2578,28 @@ def webhook_order_paid():
                     updated_at = CURRENT_TIMESTAMP
                 WHERE barcode IN ({ph})
                   AND state = 'PENDING_SALE'
-                RETURNING id, barcode, shopify_product_id
+                RETURNING id, barcode, shopify_product_id, shopify_variant_id
             """, tuple(sealed_slab_skus))
             for card in (sold_raw or []):
                 pid = card.get("shopify_product_id")
+                vid = card.get("shopify_variant_id")
                 if pid:
                     try:
+                        # Zero inventory so Shopify doesn't show stale "in stock"
+                        if vid:
+                            vdata = _shopify_rest("GET", f"/variants/{vid}.json")
+                            iid = vdata.get("variant", {}).get("inventory_item_id")
+                            if iid:
+                                levels = _shopify_rest("GET", f"/inventory_levels.json?inventory_item_ids={iid}")
+                                for lv in levels.get("inventory_levels", []):
+                                    _shopify_rest("POST", "/inventory_levels/set.json",
+                                                  json={"location_id": lv["location_id"],
+                                                        "inventory_item_id": iid,
+                                                        "available": 0})
                         _shopify_rest("PUT", f"/products/{pid}.json",
                                       json={"product": {"id": pid, "status": "archived"}})
                     except Exception:
-                        logger.warning(f"Failed to archive raw listing product_id={pid}")
+                        logger.warning(f"Failed to clean up raw listing product_id={pid}")
                 logger.info(f"Raw card POS sold: barcode={card['barcode']}")
         except Exception as e:
             logger.warning(f"raw card POS match failed: {e}")
