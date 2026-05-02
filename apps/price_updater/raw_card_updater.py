@@ -5,7 +5,9 @@ For every raw card in stock (state IN ('STORED','DISPLAY'), not on hold):
 DISPLAY cards (binders) need nightly repricing too — they're customer-
 facing via kiosk and POS rings them up at current_price just like STORED.
   1. Look up market price in scrydex_price_cache by
-     (tcgplayer_id, variant, condition, price_type='raw').
+     (scrydex_id, variant, condition, price_type='raw'), falling back to
+     tcgplayer_id when no scrydex_id is bound. Scrydex IDs are more
+     specific (TCG IDs can collide across variants or be orphaned).
   2. Floor at cost_basis (never sell below cost).
   3. Charm-ceil round to a customer-friendly .99 price.
   4. Compare to raw_cards.current_price:
@@ -116,7 +118,7 @@ def _record(db_module, run_id: str, started_at: datetime, entry: dict):
                        f"for {entry.get('barcode')}: {e}")
 
 
-# Look up market_price for a (tcgplayer_id, variant, condition) tuple.
+# Look up market_price for a (scrydex_id|tcgplayer_id, variant, condition) tuple.
 # Variant normalization: strip non-alphanumerics and lowercase so the three
 # conventions in raw_cards.variant ("Alt Art", "altArt", "alt art") all
 # collapse to the same key ("altart") and match the camelCase convention
@@ -126,7 +128,7 @@ def _record(db_module, run_id: str, started_at: datetime, entry: dict):
 # `currency` column: Scrydex sends JP-marketplace raw prices in JPY; the
 # CASE expression converts to USD inline so the returned market_price is
 # always USD regardless of the source row's currency.
-_CACHE_LOOKUP_SQL = """
+_CACHE_LOOKUP_SQL_TEMPLATE = """
     SELECT
         CASE WHEN currency = 'JPY'
              THEN ROUND(market_price::numeric * %s::numeric, 2)
@@ -134,9 +136,9 @@ _CACHE_LOOKUP_SQL = """
         CASE WHEN currency = 'JPY'
              THEN ROUND(low_price::numeric * %s::numeric, 2)
              ELSE low_price END AS low_price,
-        scrydex_id, variant
+        scrydex_id, tcgplayer_id, variant
     FROM scrydex_price_cache
-    WHERE tcgplayer_id = %s
+    WHERE {key_clause}
       AND product_type = 'card'
       AND price_type   = 'raw'
       AND UPPER(condition) = UPPER(%s)
@@ -155,20 +157,40 @@ _CACHE_LOOKUP_SQL = """
     LIMIT 1
 """
 
+_CACHE_LOOKUP_BY_SCRYDEX = _CACHE_LOOKUP_SQL_TEMPLATE.format(key_clause="scrydex_id = %s")
+_CACHE_LOOKUP_BY_TCG     = _CACHE_LOOKUP_SQL_TEMPLATE.format(key_clause="tcgplayer_id = %s")
+
 # Matches shared/price_cache.py and ingestion/app.py. Override via env var
 # when the yen moves materially.
 _JPY_USD_RATE = float(os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
 
 
-def _lookup_cache_price(db_module, tcgplayer_id, condition, variant) -> dict | None:
-    if not tcgplayer_id or not condition:
+def _lookup_cache_price(db_module, scrydex_id, tcgplayer_id, condition, variant) -> dict | None:
+    """Scrydex-first lookup with TCG fallback.
+
+    A row's tcgplayer_id may be a stale/secondary SKU that has no
+    scrydex_price_cache entry, while its scrydex_id resolves cleanly.
+    Try the more-specific key first.
+    """
+    if not condition:
         return None
-    rows = db_module.query(
-        _CACHE_LOOKUP_SQL,
-        (_JPY_USD_RATE, _JPY_USD_RATE, int(tcgplayer_id),
-         condition, variant, variant, variant),
-    )
-    return rows[0] if rows else None
+    if scrydex_id:
+        rows = db_module.query(
+            _CACHE_LOOKUP_BY_SCRYDEX,
+            (_JPY_USD_RATE, _JPY_USD_RATE, scrydex_id,
+             condition, variant, variant, variant),
+        )
+        if rows:
+            return rows[0]
+    if tcgplayer_id:
+        rows = db_module.query(
+            _CACHE_LOOKUP_BY_TCG,
+            (_JPY_USD_RATE, _JPY_USD_RATE, int(tcgplayer_id),
+             condition, variant, variant, variant),
+        )
+        if rows:
+            return rows[0]
+    return None
 
 
 def _apply_db_price(db_module, raw_card_id: str, new_price: float) -> None:
@@ -232,18 +254,20 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             "old_price":   float(card["current_price"]) if card["current_price"] is not None else None,
         }
 
-        if not card["tcgplayer_id"]:
-            entry.update({"action": "skip", "reason": "no tcgplayer_id"})
+        if not card["tcgplayer_id"] and not card["scrydex_id"]:
+            entry.update({"action": "skip", "reason": "no scrydex_id or tcgplayer_id"})
             stats["skip"] += 1
             _record(db_module, run_id, started_at, entry)
             continue
 
         cache = _lookup_cache_price(
-            db_module, card["tcgplayer_id"], card["condition"], card["variant"])
+            db_module, card["scrydex_id"], card["tcgplayer_id"],
+            card["condition"], card["variant"])
         if not cache or cache.get("market_price") is None:
             entry.update({
                 "action": "skip",
-                "reason": (f"no cache price for tcg={card['tcgplayer_id']} "
+                "reason": (f"no cache price for scrydex={card['scrydex_id']!r} "
+                           f"tcg={card['tcgplayer_id']} "
                            f"variant={card['variant']!r} cond={card['condition']!r}"),
             })
             stats["skip"] += 1
