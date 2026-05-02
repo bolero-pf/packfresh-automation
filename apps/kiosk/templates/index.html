@@ -608,9 +608,17 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .chip.on:hover {
   background: var(--accent); border-color: var(--accent);
 }
-/* Stay in sans for the count — mono has a different x-height that floated
-   the number above the label baseline once we shrank the chip font. */
-.chip .qty { color: var(--dim); font-weight: 500; font-size: 0.7rem; font-variant-numeric: tabular-nums; opacity: 0.85; }
+/* Filter-chip count formatting follows the standard faceted-search pattern
+   used by eBay / Amazon / etc.: parenthesized count, slightly dimmer than
+   the label, same font as the chip text so the baseline aligns. The parens
+   signal "this is a count" without adding a separate badge that would
+   compete with the label visually. */
+.chip .qty {
+  color: var(--dim); font-weight: 500; font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.chip .qty::before { content: '('; }
+.chip .qty::after  { content: ')'; }
 .chip.on .qty { color: rgba(11,11,9,0.7); font-weight: 700; }
 .chip.cond-NM.on { background: #14532d; border-color: #4ade80; color: #4ade80; }
 .chip.cond-LP.on { background: rgba(223,163,42,0.22); border-color: #DFA32A; color: #DFA32A; }
@@ -2775,8 +2783,11 @@ function renderDetail(card, copies, meta) {
   const img = imgUrl
     ? `<img src="${esc(imgUrl)}" alt="${esc(card.card_name)}">`
     : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:3rem;opacity:.2">${ICON_CARD_STACK}</div>`;
+  // Detail-panel title is 1.6rem display font, so the .variant-badge default
+  // (0.78rem) reads as tiny noise next to the name. Bump it to 1rem with
+  // matching padding so it actually reads as a tag.
   const variantNote = card.variant_label
-    ? `<span class="variant-badge" style="vertical-align:middle;margin-left:8px;">${esc(card.variant_label)}</span>`
+    ? `<span class="variant-badge" style="vertical-align:middle;margin-left:10px;font-size:1rem;padding:4px 11px;border-radius:8px;">${esc(card.variant_label)}</span>`
     : '';
 
   // Group copies by condition for qty selection
