@@ -1370,9 +1370,23 @@ def list_eras():
 @app.route("/api/games")
 def list_games():
     """Return distinct games (IPs) currently in stock with available counts.
-    Powers the kiosk's top-level game filter."""
+    Powers the kiosk's top-level game filter.
+
+    Count is DISTINCT TILES (matching /api/browse total), not physical
+    cards — a customer who clicks "Pokémon (306)" expects to see 306 tiles
+    on the next screen, not 410 (which would be the per-row count where
+    the same card with NM + LP copies counts twice). Tile fold rule mirrors
+    /api/browse: variant of NULL/normal/holofoil collapses to one bucket.
+    """
     rows = db.query("""
-        SELECT COALESCE(game, 'pokemon') AS game, COUNT(*) AS qty
+        SELECT COALESCE(game, 'pokemon') AS game,
+               COUNT(DISTINCT (
+                   card_name,
+                   set_name,
+                   tcgplayer_id,
+                   CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
+                        THEN '' ELSE variant END
+               )) AS qty
         FROM raw_cards
         WHERE state = 'STORED' AND current_hold_id IS NULL
         GROUP BY COALESCE(game, 'pokemon')

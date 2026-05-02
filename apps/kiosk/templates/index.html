@@ -582,9 +582,15 @@ body.modal-open { overflow: hidden; touch-action: none; }
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
 }
 .chip {
-  min-height: 44px; padding: 0 14px;
+  min-height: 44px; padding: 6px 12px;
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  min-width: 0; overflow: hidden; white-space: nowrap;
+  min-width: 0;
+  /* Allow long labels (e.g. "Special Illustration Rare") to wrap to a
+     second line inside the chip rather than getting centered-clipped to
+     "cial Illustration Rar". Within a row, all chips stretch to the height
+     of the tallest one, so the row stays visually aligned. */
+  text-align: center; line-height: 1.15;
+  word-break: keep-all; overflow-wrap: break-word;
   /* Off-state: outline button feel — clearly tappable, not blending with surface */
   background: rgba(240, 240, 248, 0.04);
   border: 1.5px solid rgba(240, 240, 248, 0.28);
