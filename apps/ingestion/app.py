@@ -3326,6 +3326,7 @@ def push_plan(session_id):
           JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE ii.session_id = %s
            AND ii.routing_destination = 'storage'
+           AND ii.item_status NOT IN ('missing', 'rejected')
            AND rc.bin_id IS NULL
            AND rc.state IN ('BARCODED', 'BARCODED_STORAGE', 'ROUTED_STORAGE')
          ORDER BY ii.routing_reviewed_at ASC NULLS LAST, rc.created_at ASC
@@ -3373,6 +3374,7 @@ def push_plan(session_id):
           JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE ii.session_id = %s
            AND ii.routing_destination = 'display'
+           AND ii.item_status NOT IN ('missing', 'rejected')
            AND rc.bin_id IS NULL
            AND rc.state IN ('BARCODED', 'BARCODED_DISPLAY', 'ROUTED_BINDER')
          ORDER BY ii.routing_reviewed_at ASC NULLS LAST, rc.created_at ASC
@@ -3478,7 +3480,7 @@ def push_batch(session_id):
 
     cards = db.query("""
         SELECT rc.id, rc.barcode, rc.state, rc.bin_id, rc.intake_item_id,
-               ii.session_id, ii.routing_destination
+               ii.session_id, ii.routing_destination, ii.item_status
           FROM raw_cards rc
           JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE rc.barcode = ANY(%s)
@@ -3492,6 +3494,8 @@ def push_batch(session_id):
             errors.append(f"{bc}: not found")
         elif str(c["session_id"]) != session_id:
             errors.append(f"{bc}: not in this session")
+        elif c.get("item_status") in ("missing", "rejected"):
+            errors.append(f"{bc}: item marked {c['item_status']}")
         elif c["routing_destination"] != expected_dest:
             errors.append(f"{bc}: routed '{c['routing_destination']}', "
                           f"bin {bin_row['bin_label']} expects '{expected_dest}'")
