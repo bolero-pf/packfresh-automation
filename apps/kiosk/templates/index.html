@@ -78,11 +78,23 @@ header {
   width: 100%; height: var(--touch);
   background: var(--surface2); border: 1.5px solid var(--border);
   border-radius: var(--r); color: var(--text);
-  padding: 0 18px; font-family: var(--sans); font-size: 1rem; outline: none;
+  padding: 0 52px 0 18px; font-family: var(--sans); font-size: 1rem; outline: none;
   transition: border-color 0.2s;
 }
 .search-input:focus { border-color: var(--accent); }
 .search-input::placeholder { color: var(--dim); }
+.header-search { position: relative; }
+.search-clear {
+  position: absolute; top: 50%; right: 10px; transform: translateY(-50%);
+  width: 36px; height: 36px; border-radius: 50%; border: none; padding: 0;
+  background: var(--surface); color: var(--dim);
+  font-family: var(--sans); font-size: 1.4rem; line-height: 1; cursor: pointer;
+  display: none; align-items: center; justify-content: center;
+}
+.search-clear:hover, .search-clear:active {
+  background: var(--border); color: var(--text);
+}
+.header-search.has-value .search-clear { display: flex; }
 
 /* Cart button */
 .cart-btn {
@@ -142,6 +154,16 @@ header {
   font-size: 0.65rem; font-weight: 700; padding: 2px 7px;
   border-radius: 20px; letter-spacing: 0.04em;
 }
+
+/* Pills + price share one row at the bottom of the card body — pills wrap on
+   the left, price stays anchored to the upper right. Larger price font and
+   right-alignment shorten the visible card height vs. price-on-its-own-row. */
+.card-pricerow {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin-top: auto; padding-top: 6px;
+}
+.card-pricerow .cond-pills { margin-top: 0; flex: 1 1 auto; min-width: 0; }
+.card-pricerow .card-price { margin-top: 0; padding-top: 0; flex-shrink: 0; }
 .cond-NM  { background: rgba(74,222,128,0.15); color: var(--green); }
 .cond-LP  { background: rgba(223,163,42,0.15); color: var(--accent); }
 .cond-MP  { background: rgba(251,146,60,0.15); color: #fb923c; }
@@ -155,7 +177,7 @@ header {
   letter-spacing: 0.02em; vertical-align: middle;
 }
 
-.card-price { font-family: var(--mono); font-size: 0.88rem; color: var(--accent); margin-top: auto; padding-top: 6px; }
+.card-price { font-family: var(--mono); font-size: 1.05rem; font-weight: 700; color: var(--accent); margin-top: auto; padding-top: 6px; }
 
 /* ── Pagination ── */
 .pagination { display: flex; gap: 8px; justify-content: center; margin-top: 28px; flex-wrap: wrap; }
@@ -681,7 +703,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
 /* Cart total bar */
 .cart-total-bar {
   background: var(--surface2); border-top: 1.5px solid var(--border);
-  padding: 12px 0; display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 16px;
 }
 .cart-total-label { font-size: 0.82rem; color: var(--dim); }
@@ -720,8 +742,9 @@ body.modal-open { overflow: hidden; touch-action: none; }
     <button class="kind-tab" data-kind="sealed" onclick="setActiveKind('sealed')">Sealed</button>
     <button class="kind-tab" data-kind="slab" onclick="setActiveKind('slab')">Slabs</button>
   </div>
-  <div class="header-search">
-    <input class="search-input" type="text" id="q" placeholder="Search…" oninput="debounce()" autocomplete="off" autocorrect="off">
+  <div class="header-search" id="header-search">
+    <input class="search-input" type="text" id="q" placeholder="Search…" oninput="debounce(); _toggleSearchClear()" autocomplete="off" autocorrect="off">
+    <button type="button" class="search-clear" id="search-clear" onclick="clearSearch()" aria-label="Clear search">×</button>
   </div>
 </header>
 
@@ -1117,7 +1140,11 @@ async function loadGames() {
         // Refresh meta cache so the next sheet open / chip-render uses the
         // correct labels for the new game.
         _filterMeta = null;
-        loadGames();          // re-render pills with new active state
+        // Optimistic active-state toggle — loadGames() is async and the user
+        // shouldn't have to wait for /api/games before seeing the pill light up.
+        strip.querySelectorAll('.game-pill').forEach(p =>
+          p.classList.toggle('active', p.getAttribute('data-game') === newGame));
+        loadGames();          // refresh counts (re-renders pills)
         loadSetsForFilters(); // refresh available sets for this game
         _refreshFiltersBtn();
         doSearch();
@@ -1535,6 +1562,7 @@ function _readUrlState() {
   if (p.has('q')) {
     const qInput = document.getElementById('q');
     if (qInput) qInput.value = p.get('q');
+    _toggleSearchClear();
   }
   // Don't strip the URL here — boot() does the access-key clean-up later.
 }
@@ -1881,6 +1909,7 @@ function _doIdleReset() {
   // Reset search + filters back to Raw default
   const q = document.getElementById('q');
   if (q) q.value = '';
+  _toggleSearchClear();
   if (_allowedKinds.includes('raw') && _activeKind !== 'raw') {
     _activeKind = 'raw';
     _page = 1;
@@ -1943,6 +1972,23 @@ async function loadEras() {
 function debounce() {
   clearTimeout(_timer);
   _timer = setTimeout(() => doSearch(), 400);
+}
+
+function _toggleSearchClear() {
+  const wrap = document.getElementById('header-search');
+  const q = document.getElementById('q');
+  if (!wrap || !q) return;
+  wrap.classList.toggle('has-value', !!q.value);
+}
+
+function clearSearch() {
+  const q = document.getElementById('q');
+  if (!q) return;
+  q.value = '';
+  _toggleSearchClear();
+  clearTimeout(_timer);
+  doSearch();
+  q.focus();
 }
 
 async function doSearch(page) {
@@ -2034,8 +2080,10 @@ function renderGrid(cards) {
       <div class="card-body">
         <div class="card-name">${esc(c.card_name)}${variantBadge}</div>
         <div class="card-set">${esc(c.set_name||'')}</div>
-        <div class="cond-pills">${pills}</div>
-        ${price ? `<div class="card-price">${price}</div>` : ''}
+        <div class="card-pricerow">
+          <div class="cond-pills">${pills}</div>
+          ${price ? `<div class="card-price">${price}</div>` : ''}
+        </div>
       </div>
     </div>`;
   }).join('');
@@ -2285,6 +2333,10 @@ function renderProdGamePills() {
       _prodFilters.formats = new Set();
       _prodFilters.eras    = new Set();
       _prodFilters.grades  = new Set();
+      // Re-render the pills strip so the new active state is visible —
+      // doSearch() updates the grid but didn't touch the pills, leaving
+      // the previously-active pill highlighted.
+      renderProdGamePills();
       _refreshProdFiltersBtn();
       _page = 1;
       doSearch();
@@ -2346,8 +2398,10 @@ function renderProductsGrid(products) {
       <div class="card-img">${imgInner}</div>
       <div class="card-body">
         <div class="card-name">${esc(p.title)}</div>
-        <div class="cond-pills"><span class="cond-pill">${esc(qtyLabel)}</span></div>
-        ${price ? `<div class="card-price">${price}</div>` : ''}
+        <div class="card-pricerow">
+          <div class="cond-pills"><span class="cond-pill">${esc(qtyLabel)}</span></div>
+          ${price ? `<div class="card-price">${price}</div>` : ''}
+        </div>
       </div>
     </div>`;
   }).join('');
