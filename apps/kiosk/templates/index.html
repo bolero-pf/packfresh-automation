@@ -2292,7 +2292,14 @@ function renderGrid(cards) {
   window._cardCache = {};
   grid.innerHTML = cards.map((c, idx) => {
     window._cardCache[idx] = c;
-    const conds = Object.entries(c.conditions || {})
+    // Tile pills show TOTAL coverage (stored + display) so a card sitting
+    // only in a binder still surfaces its NM/LP availability on the tile.
+    // Cart eligibility logic still keys off c.conditions (STORED only) —
+    // detail panel splits cartable rows from "ask staff" rows.
+    const allConds = {};
+    Object.entries(c.conditions || {}).forEach(([k,v]) => allConds[k] = (allConds[k]||0) + v);
+    Object.entries(c.display_conditions || {}).forEach(([k,v]) => allConds[k] = (allConds[k]||0) + v);
+    const conds = Object.entries(allConds)
       .sort(([a],[b]) => ['NM','LP','MP','HP','DMG'].indexOf(a) - ['NM','LP','MP','HP','DMG'].indexOf(b));
     const pills = conds.map(([cond, qty]) =>
       `<span class="cond-pill cond-${cond}">${cond} ×${qty}</span>`).join('');

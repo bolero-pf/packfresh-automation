@@ -822,9 +822,14 @@ def browse():
     # so single-variant cards stay in one tile. variant_raw is preserved for
     # display when a card has multiple printings in Scrydex.
     #
-    # STORED copies feed the conditions json (cartable). DISPLAY copies feed
-    # display_qty + display_locations (informational, customer can see them
-    # but not add to picks — they're already on the floor).
+    # Two condition aggregations per tile:
+    #   conditions          → STORED only (drives cart eligibility / +Add)
+    #   display_conditions  → DISPLAY only (frontend merges with the above
+    #                         so the tile shows full condition coverage,
+    #                         but cart logic still keys off conditions)
+    # Inner subquery groups by (state, condition) only — no bin_label —
+    # otherwise jsonb_object_agg sees duplicate keys when a card sits in
+    # multiple bins and only the last write is kept.
     rows = db.query(f"""
         SELECT
             card_name,
@@ -841,28 +846,25 @@ def browse():
             MAX(max_price) AS max_price,
             MAX(created_at) AS created_at,
             jsonb_object_agg(condition, cond_qty) FILTER (WHERE state='STORED') AS conditions,
-            array_remove(array_agg(DISTINCT bin_label) FILTER (WHERE state='DISPLAY'), NULL) AS display_locations
+            jsonb_object_agg(condition, cond_qty) FILTER (WHERE state='DISPLAY') AS display_conditions
         FROM (
-            SELECT rc.card_name, rc.set_name, rc.tcgplayer_id, rc.scrydex_id,
-                   rc.state,
-                   rc.variant AS variant_raw,
-                   CASE WHEN rc.variant IS NULL OR LOWER(rc.variant) IN ('normal','holofoil')
+            SELECT card_name, set_name, tcgplayer_id, scrydex_id,
+                   state,
+                   variant AS variant_raw,
+                   CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
                         THEN ''
-                        ELSE rc.variant
+                        ELSE variant
                    END AS variant_key,
-                   rc.image_url,
-                   rc.condition,
-                   sl.bin_label,
+                   image_url,
+                   condition,
                    COUNT(*) AS cond_qty,
-                   MIN(rc.current_price) AS min_price,
-                   MAX(rc.current_price) AS max_price,
-                   MAX(rc.created_at) AS created_at
-            FROM raw_cards rc
-            LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+                   MIN(current_price) AS min_price,
+                   MAX(current_price) AS max_price,
+                   MAX(created_at) AS created_at
+            FROM raw_cards
             WHERE {where}
-            GROUP BY rc.card_name, rc.set_name, rc.tcgplayer_id, rc.scrydex_id,
-                     rc.state, variant_raw, variant_key, rc.image_url,
-                     rc.condition, sl.bin_label
+            GROUP BY card_name, set_name, tcgplayer_id, scrydex_id,
+                     state, variant_raw, variant_key, image_url, condition
         ) sub
         GROUP BY card_name, set_name, tcgplayer_id, variant_key
         ORDER BY {order_by}
@@ -934,16 +936,17 @@ def browse():
             "variant_label": variant_label,
             "image_url":     image_url,
             "total_qty":     int(r["total_qty"] or 0),
-            # available_qty = STORED copies (cartable). display_qty = DISPLAY
-            # copies (informational only, customer can see them but can't add
-            # to picks). display_locations gives the per-tile bin labels so
-            # the front of the tile can say "On display: Binder-1".
-            "available_qty":     int(r["available_qty"] or 0),
-            "display_qty":       int(r["display_qty"] or 0),
-            "display_locations": list(r["display_locations"] or []),
-            "min_price":     float(r["min_price"]) if r["min_price"] else None,
-            "max_price":     float(r["max_price"]) if r["max_price"] else None,
-            "conditions":    r["conditions"] or {},
+            # conditions: STORED counts (drives cart eligibility).
+            # display_conditions: DISPLAY counts (frontend merges with the
+            # above for the tile pill display so location stays out of the
+            # cascade — see renderGrid). Per-copy locations live on the
+            # detail panel via /api/card.
+            "available_qty":      int(r["available_qty"] or 0),
+            "display_qty":        int(r["display_qty"] or 0),
+            "min_price":          float(r["min_price"]) if r["min_price"] else None,
+            "max_price":          float(r["max_price"]) if r["max_price"] else None,
+            "conditions":         r["conditions"] or {},
+            "display_conditions": r["display_conditions"] or {},
         })
 
     return jsonify({
