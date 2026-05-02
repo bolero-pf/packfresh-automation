@@ -2660,6 +2660,9 @@ def webhook_order_paid():
     order = request.get_json(silent=True) or {}
     line_items = order.get("line_items", [])
     shopify_order_id = order.get("id")
+    order_name = order.get("name") or shopify_order_id
+    logger.info(f"order-paid webhook: order={order_name}, {len(line_items)} line items, "
+                f"skus={[i.get('sku') for i in line_items]}")
 
     # ── 1. Champion raw checkout: match by variant_id (existing path) ────────
     hold_ids = set()
@@ -2674,18 +2677,18 @@ def webhook_order_paid():
             if hold_item:
                 hold_ids.add(str(hold_item["hold_id"]))
 
-    # ── 2. In-store sealed/slab POS sale: match by line-item SKU ─────────────
-    # When staff rings up a PULLED sealed/slab item at POS, the Shopify order's
-    # line_item.sku is the same SKU recorded on the hold_item. Mark it SOLD so
-    # UNRESOLVED reconciliation doesn't flag it later. Best-effort — logs only.
-    sealed_slab_skus: list[str] = []
+    # ── 2. POS sale: match by line-item SKU ───────────────────────────────────
+    # Covers sealed/slab hold items AND raw card active listings.
+    # Card manager creates raw listings with SKU = barcode; sealed/slab hold
+    # items have their Shopify SKU recorded on the hold_item row.
+    order_skus: list[str] = []
     for item in line_items:
         sku = (item.get("sku") or "").strip()
         if sku:
-            sealed_slab_skus.append(sku)
-    if sealed_slab_skus:
+            order_skus.append(sku)
+    if order_skus:
         try:
-            ph = ",".join(["%s"] * len(sealed_slab_skus))
+            ph = ",".join(["%s"] * len(order_skus))
             db.execute(f"""
                 UPDATE hold_items
                 SET status = 'SOLD', shopify_order_id = %s
@@ -2693,16 +2696,15 @@ def webhook_order_paid():
                   AND item_kind IN ('sealed','slab')
                   AND status = 'PULLED'
                   AND shopify_order_id IS NULL
-            """, (shopify_order_id, *sealed_slab_skus))
+            """, (shopify_order_id, *order_skus))
         except Exception as e:
             logger.warning(f"sealed/slab POS match failed: {e}")
 
     # ── 3. Raw card POS sale: match by barcode (SKU on the listing) ──────────
-    # Card manager creates active listings with SKU = barcode. When sold at POS,
-    # flip raw_cards PENDING_SALE → SOLD, zero out inventory, and archive.
-    if sealed_slab_skus:  # same SKUs, raw cards use barcode as SKU too
+    # Flip raw_cards PENDING_SALE → SOLD, zero out inventory, and archive.
+    if order_skus:
         try:
-            ph = ",".join(["%s"] * len(sealed_slab_skus))
+            ph = ",".join(["%s"] * len(order_skus))
             sold_raw = db.query(f"""
                 UPDATE raw_cards
                 SET state = 'SOLD', current_hold_id = NULL,
@@ -2710,7 +2712,7 @@ def webhook_order_paid():
                 WHERE barcode IN ({ph})
                   AND state = 'PENDING_SALE'
                 RETURNING id, barcode, shopify_product_id, shopify_variant_id
-            """, tuple(sealed_slab_skus))
+            """, tuple(order_skus))
             for card in (sold_raw or []):
                 pid = card.get("shopify_product_id")
                 vid = card.get("shopify_variant_id")
