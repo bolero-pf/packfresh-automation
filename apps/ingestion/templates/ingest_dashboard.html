@@ -3595,6 +3595,12 @@ function _renderPushScanWidget() {
         return;
     }
 
+    // Skip past any steps that became empty (all their barcodes got scanned
+    // into other bins of the same destination).
+    while (_pushIndex < _pushPlan.length && _pushPlan[_pushIndex].expected_barcodes.length === 0) {
+        _pushIndex++;
+    }
+
     if (_pushIndex >= _pushPlan.length) {
         slot.innerHTML = `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
             <h2 style="margin:0; color:var(--green);">✓ All bins placed</h2>
@@ -3605,6 +3611,7 @@ function _renderPushScanWidget() {
     }
 
     const target = _pushPlan[_pushIndex];
+    const expectedCount = target.expected_barcodes.length;
     const remaining = target.expected_barcodes.filter(bc => !_pushPending.includes(bc));
     const pendingHtml = _pushPending.length
         ? `<div style="margin-top:10px; font-size:0.78rem;">
@@ -3612,11 +3619,10 @@ function _renderPushScanWidget() {
               ${_pushPending.map(bc => `<code style="background:var(--surface-2); padding:2px 6px; border-radius:3px; margin:2px 4px 2px 0; display:inline-block; font-size:0.74rem;">${bc}</code>`).join('')}
            </div>`
         : '';
-    const ready = _pushPending.length === target.count;
     const sendBtn = `<button class="btn btn-success" onclick="_pushSendBatch()"
         ${_pushPending.length === 0 ? 'disabled' : ''}
-        style="font-size:1rem; padding:10px 22px; font-weight:700;${ready ? '' : ' opacity:0.85;'}">
-        ✓ SEND ${_pushPending.length} TO ${target.bin_label}${ready ? '' : ` (expected ${target.count})`}
+        style="font-size:1rem; padding:10px 22px; font-weight:700;">
+        ✓ SEND ${_pushPending.length} TO ${target.bin_label}
     </button>`;
     const destLabel = target.destination === 'display' ? 'Binder' : 'Storage';
 
@@ -3626,10 +3632,10 @@ function _renderPushScanWidget() {
                 <h2 style="margin:0;">📦 Place into ${target.bin_label}</h2>
                 <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
                     Bin ${_pushIndex + 1} of ${_pushPlan.length} · ${destLabel} (${target.card_type}) ·
-                    expecting <strong>${target.count}</strong> card${target.count === 1 ? '' : 's'}
+                    expecting <strong>${expectedCount}</strong> card${expectedCount === 1 ? '' : 's'}
                 </p>
                 <div style="margin-top:8px; font-size:0.85rem;">
-                    Scanned: <strong>${_pushPending.length} / ${target.count}</strong>${remaining.length ? `, remaining: ${remaining.length}` : ''}
+                    Scanned: <strong>${_pushPending.length}</strong>${remaining.length ? `, remaining: ${remaining.length}` : ''}
                 </div>
             </div>
         </div>
@@ -3672,11 +3678,34 @@ function _pushHandleScan(barcode) {
         _pushShowWarning(`${bcHl} already scanned for this bin.`, 'info');
         return;
     }
-    if (!target.expected_barcodes.includes(barcode)) {
-        _pushShowWarning(`✗ ${bcHl} doesn't belong in ${target.bin_label}. Wrong pile, or routed elsewhere.`);
+    // Accept any barcode routed to the same destination (storage/display),
+    // not just the ones the plan assigned to this specific bin.
+    // All storage bins are fungible, all binder bins are fungible.
+    const dest = target.destination;
+    const sameDestBarcodes = new Set();
+    for (const step of _pushPlan) {
+        if (step.destination === dest) {
+            for (const bc of step.expected_barcodes) sameDestBarcodes.add(bc);
+        }
+    }
+    if (!sameDestBarcodes.has(barcode)) {
+        const destLabel = dest === 'display' ? 'binder' : 'storage';
+        _pushShowWarning(`✗ ${bcHl} is not routed to ${destLabel}.`);
         return;
     }
     _pushPending.push(barcode);
+    // If this barcode was planned for a different bin, remove it from that
+    // bin's expected list so counts stay accurate and it won't be expected
+    // twice.
+    for (const step of _pushPlan) {
+        if (step === target) continue;
+        const idx = step.expected_barcodes.indexOf(barcode);
+        if (idx !== -1) {
+            step.expected_barcodes.splice(idx, 1);
+            step.count = step.expected_barcodes.length;
+            break;
+        }
+    }
     _renderPushScanWidget();
 }
 
@@ -3701,8 +3730,9 @@ function _pushShowWarning(msg, kind) {
 async function _pushSendBatch() {
     if (_pushPending.length === 0) return;
     const target = _pushPlan[_pushIndex];
-    if (_pushPending.length < target.count) {
-        if (!confirm(`Only ${_pushPending.length} of ${target.count} expected cards scanned. Send partial batch? Remaining cards will reappear in a recomputed plan.`)) return;
+    const expCount = target.expected_barcodes.length;
+    if (_pushPending.length < expCount) {
+        if (!confirm(`Only ${_pushPending.length} of ${expCount} expected cards scanned. Send partial batch? Remaining cards will reappear in a recomputed plan.`)) return;
     }
     try {
         const r = await fetch(`/api/ingest/session/${_pushSessionId}/push-batch`, {
