@@ -1740,16 +1740,13 @@ async function finalizeSetOut() {
 }
 
 // ── Display: Return All flow ──────────────────────────────────────────────────
-let _returnScannedDisplay = [];
+// No JS array — DOM is the single source of truth for scanned cards.
 
 async function openReturnAll(caseId) {
+  // If already in return mode with scans, don't reset
+  if (_displayMode === 'return' && document.getElementById('return-scan-list')?.querySelectorAll('[data-barcode]').length) return;
   _displayMode = 'return';
-  _returnScannedDisplay = [];
   document.getElementById('display-overlay').classList.add('active');
-  renderReturnScanStep();
-}
-
-function renderReturnScanStep() {
   document.getElementById('display-overlay-content').innerHTML = `
     <div style="font-size:1.2rem;font-weight:700;margin-bottom:6px;">Return Display Cards to Storage</div>
     <div style="font-size:0.82rem;color:var(--dim);margin-bottom:14px;">
@@ -1759,7 +1756,7 @@ function renderReturnScanStep() {
       <div class="stat-box"><div class="stat-label">Scanned</div><div class="stat-val" style="color:var(--green);" id="return-scan-count">0</div></div>
     </div>
     <div id="return-scan-list" style="max-height:420px;overflow-y:auto;">
-      <div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:30px;">Scan a card to begin.</div>
+      <div id="return-scan-placeholder" style="color:var(--dim);font-size:0.85rem;text-align:center;padding:30px;">Scan a card to begin.</div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
       <button class="btn" onclick="closeDisplayOverlay()">Cancel</button>
@@ -1768,30 +1765,13 @@ function renderReturnScanStep() {
   `;
 }
 
-function appendReturnCard(card) {
+function _returnCount() {
   const list = document.getElementById('return-scan-list');
-  if (!list) return;
-  // Clear placeholder on first card
-  if (_returnScannedDisplay.length === 1) list.innerHTML = '';
-  const idx = _returnScannedDisplay.length - 1;
-  const row = document.createElement('div');
-  row.setAttribute('data-barcode', card.barcode);
-  row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(74,222,128,0.06);border:1px solid var(--green);border-radius:6px;margin-bottom:5px;';
-  row.innerHTML = `
-    ${card.image_url?`<img src="${esc(card.image_url)}" style="width:30px;aspect-ratio:2.5/3.5;object-fit:contain;">`:''}
-    <div style="flex:1;">
-      <div style="font-weight:600;font-size:0.88rem;">${esc(card.card_name)}</div>
-      <div style="font-size:0.72rem;color:var(--dim);">${esc(card.condition||'')} · ${esc(card.set_name||'')} · $${parseFloat(card.current_price||0).toFixed(2)}</div>
-    </div>
-    <button class="btn btn-sm" style="color:var(--red);background:none;border:none;" onclick="undoReturnScan('${esc(card.barcode)}')">×</button>
-  `;
-  list.appendChild(row);
-  updateReturnCount();
+  return list ? list.querySelectorAll('[data-barcode]').length : 0;
 }
 
-function updateReturnCount() {
-  const list = document.getElementById('return-scan-list');
-  const n = list ? list.querySelectorAll('[data-barcode]').length : 0;
+function _updateReturnUI() {
+  const n = _returnCount();
   const counter = document.getElementById('return-scan-count');
   if (counter) counter.textContent = n;
   const btn = document.getElementById('return-finalize-btn');
@@ -1803,18 +1783,33 @@ function updateReturnCount() {
 
 async function handleReturnScan(barcode) {
   const list = document.getElementById('return-scan-list');
-  if (_returnScannedDisplay.some(c => c.barcode === barcode) ||
-      (list && list.querySelector(`[data-barcode="${barcode}"]`))) {
+  if (!list) return;
+  if (list.querySelector(`[data-barcode="${barcode}"]`)) {
     flash('green');
     toast('Already scanned', 'green');
     return;
   }
   try {
     const d = await post('/api/display/return/scan', { barcode });
-    _returnScannedDisplay.push(d.card);
+    // Remove placeholder if present
+    const ph = document.getElementById('return-scan-placeholder');
+    if (ph) ph.remove();
+    // Append card row
+    const row = document.createElement('div');
+    row.setAttribute('data-barcode', d.card.barcode);
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(74,222,128,0.06);border:1px solid var(--green);border-radius:6px;margin-bottom:5px;';
+    row.innerHTML = `
+      ${d.card.image_url?`<img src="${esc(d.card.image_url)}" style="width:30px;aspect-ratio:2.5/3.5;object-fit:contain;">`:''}
+      <div style="flex:1;">
+        <div style="font-weight:600;font-size:0.88rem;">${esc(d.card.card_name)}</div>
+        <div style="font-size:0.72rem;color:var(--dim);">${esc(d.card.condition||'')} · ${esc(d.card.set_name||'')} · $${parseFloat(d.card.current_price||0).toFixed(2)}</div>
+      </div>
+      <button class="btn btn-sm" style="color:var(--red);background:none;border:none;" onclick="undoReturnScan('${esc(d.card.barcode)}')">×</button>
+    `;
+    list.appendChild(row);
     flash('green');
     toast(`↩ ${d.card.card_name}`, 'green');
-    appendReturnCard(d.card);
+    _updateReturnUI();
   } catch(e) {
     flash('red');
     toast(`✕ ${e.message}`, 'red');
@@ -1822,25 +1817,20 @@ async function handleReturnScan(barcode) {
 }
 
 function undoReturnScan(barcode) {
-  _returnScannedDisplay = _returnScannedDisplay.filter(c => c.barcode !== barcode);
   const list = document.getElementById('return-scan-list');
   if (list) {
     const row = list.querySelector(`[data-barcode="${barcode}"]`);
     if (row) row.remove();
   }
-  if (_returnScannedDisplay.length === 0 && list) {
-    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:30px;">Scan a card to begin.</div>';
+  if (_returnCount() === 0 && list) {
+    list.innerHTML = '<div id="return-scan-placeholder" style="color:var(--dim);font-size:0.85rem;text-align:center;padding:30px;">Scan a card to begin.</div>';
   }
-  updateReturnCount();
+  _updateReturnUI();
 }
 
 async function finalizeReturn() {
-  // Read barcodes from the DOM as the source of truth
-  let barcodes = _returnScannedDisplay.map(c => c.barcode);
-  if (!barcodes.length) {
-    const list = document.getElementById('return-scan-list');
-    if (list) barcodes = [...list.querySelectorAll('[data-barcode]')].map(el => el.getAttribute('data-barcode'));
-  }
+  const list = document.getElementById('return-scan-list');
+  const barcodes = list ? [...list.querySelectorAll('[data-barcode]')].map(el => el.getAttribute('data-barcode')) : [];
   if (!barcodes.length) return;
   try {
     const d = await post('/api/display/return/finalize', { barcodes });
@@ -1873,7 +1863,6 @@ function closeDisplayOverlay() {
   _setOutScanned = [];
   _setOutSuggestions = [];
   _setOutCaseId = null;
-  _returnScannedDisplay = [];
   _binderFillScanned = [];
   _binderFillSuggestions = [];
   _binderFillId = null;
