@@ -195,6 +195,13 @@ header {
 .cond-MP  { background: rgba(251,146,60,0.15); color: #fb923c; }
 .cond-HP  { background: rgba(248,113,113,0.15); color: var(--red); }
 .cond-DMG { background: rgba(248,113,113,0.25); color: var(--red); }
+/* DISPLAY state — visible in the catalog but not cartable. Distinct from
+   the condition pills so customers don't read the location pill as a
+   condition. Slightly desaturated tile so it's obvious at a glance. */
+.cond-display { background: rgba(192,132,252,0.18); color: #c084fc; padding: 3px 9px; }
+.card.display-only { opacity: 0.78; }
+.card.display-only:hover { opacity: 1; }
+.display-note { font-size: 0.7rem; color: var(--dim); font-style: italic; margin-top: 2px; }
 
 .variant-badge {
   display: inline-block; font-size: 0.78rem; font-weight: 700;
@@ -364,6 +371,14 @@ body.modal-open { overflow: hidden; touch-action: none; }
   border: 2px solid var(--border); display: flex; align-items: center;
   justify-content: center; font-size: 0.8rem; flex-shrink: 0; }
 .copy-row.selected .copy-check { background: var(--accent); border-color: var(--accent); color: #000; }
+/* DISPLAY copy rows — visible info, not cartable. Slightly muted so they
+   read as a different mode than the cartable rows above. */
+.copy-row.display-only-row { background: rgba(192,132,252,0.06); border-color: rgba(192,132,252,0.35); cursor: default; }
+.copy-display-note {
+  display: block; padding: 8px; border-radius: 8px;
+  background: rgba(192,132,252,0.12); color: #c084fc;
+  font-size: 0.8rem; font-weight: 600; text-align: center;
+}
 
 /* Qty controls */
 .qty-row { display: flex; align-items: center; gap: 14px; margin: 16px 0; }
@@ -2306,14 +2321,34 @@ function renderGrid(cards) {
     const variantBadge = c.variant_label
       ? `<div class="card-variant">${esc(c.variant_label)}</div>`
       : '';
-    return `<div class="card" onclick="openDetail(window._cardCache[${idx}])">
+    // Display-state copies are visible to the customer but not cartable.
+    // Three tile variants:
+    //   - STORED only: existing layout (pills + price).
+    //   - DISPLAY only (available_qty===0): swap pills row for a location
+    //     pill with the binder/case label so the tile clearly reads as
+    //     "look here, not pickable."
+    //   - Mixed: keep STORED pills + a small "+N on display" line under
+    //     them, so customers see the cartable option AND know there's
+    //     another copy out front to inspect.
+    const availQty = c.available_qty ?? c.total_qty ?? 0;
+    const dispQty  = c.display_qty || 0;
+    const dispLocs = (c.display_locations || []).join(', ');
+    const displayOnly = availQty === 0 && dispQty > 0;
+    const dispBadge = (!displayOnly && dispQty > 0)
+      ? `<div class="display-note">+${dispQty} on display${dispLocs ? ' · ' + esc(dispLocs) : ''}</div>`
+      : '';
+    const pillRow = displayOnly
+      ? `<span class="cond-pill cond-display">On display${dispLocs ? ' · ' + esc(dispLocs) : ''}</span>`
+      : pills;
+    return `<div class="card${displayOnly ? ' display-only' : ''}" onclick="openDetail(window._cardCache[${idx}])">
       <div class="card-img">${img}</div>
       <div class="card-body">
         <div class="card-name">${esc(c.card_name)}</div>
         ${variantBadge}
         <div class="card-set">${esc(c.set_name||'')}</div>
+        ${dispBadge}
         <div class="card-pricerow">
-          <div class="cond-pills">${pills}</div>
+          <div class="cond-pills">${pillRow}</div>
           ${price ? `<div class="card-price">${price}</div>` : ''}
         </div>
       </div>
@@ -2818,9 +2853,14 @@ function renderDetail(card, copies, meta) {
     ? `<span class="variant-badge" style="vertical-align:middle;margin-left:10px;font-size:1rem;padding:4px 11px;border-radius:8px;">${esc(card.variant_label)}</span>`
     : '';
 
-  // Group copies by condition for qty selection
+  // Group STORED copies by condition for qty selection. DISPLAY copies are
+  // tracked separately — they're customer-visible (so we show them so people
+  // know the card exists) but not cartable, so they get their own info-only
+  // rows under the cartable conditions.
+  const storedCopies  = copies.filter(c => (c.state || 'STORED') === 'STORED');
+  const displayCopies = copies.filter(c => c.state === 'DISPLAY');
   const byCondition = {};
-  copies.forEach(c => {
+  storedCopies.forEach(c => {
     if (!byCondition[c.condition]) byCondition[c.condition] = [];
     byCondition[c.condition].push(c);
   });
@@ -2852,6 +2892,22 @@ function renderDetail(card, copies, meta) {
           <div class="copy-price">$${avgPrice > 0 ? avgPrice.toFixed(2) : '—'}</div>
         </div>
         ${actionHtml}
+      </div>`;
+    }).join('') +
+    // Each DISPLAY copy renders as its own info row — customers can see
+    // condition + location (binder / case label) and ask staff to bring
+    // it over. No qty stepper / add button: it's not cartable.
+    displayCopies.map(c => {
+      const cond = c.condition || 'NM';
+      const price = parseFloat(c.current_price) || 0;
+      const loc = c.location || 'On Display';
+      return `<div class="copy-row display-only-row">
+        <div class="copy-info">
+          <div class="copy-cond"><span class="cond-pill cond-${cond}">${cond}</span></div>
+          <div class="copy-num">On display · ${esc(loc)}${c.card_number ? ' · #'+esc(c.card_number) : ''}</div>
+          <div class="copy-price">$${price > 0 ? price.toFixed(2) : '—'}</div>
+        </div>
+        <div class="copy-action"><span class="copy-display-note">Ask staff</span></div>
       </div>`;
     }).join('');
 

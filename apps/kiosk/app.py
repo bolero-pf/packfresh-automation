@@ -720,7 +720,11 @@ def browse():
     card_types = _multi_param("card_type")
     rarities   = _multi_param("card_rarity")
 
-    filters = ["state = 'STORED'", "current_hold_id IS NULL"]
+    # Include DISPLAY-state cards alongside STORED so customers can see
+    # what's in the binders / glass cases. Cart eligibility is split out
+    # in the per-tile aggregation below — DISPLAY copies surface as
+    # "in display" info only, not as add-to-cart conditions.
+    filters = ["state IN ('STORED', 'DISPLAY')", "current_hold_id IS NULL"]
     params  = []
 
     if game:
@@ -758,7 +762,7 @@ def browse():
         # show up automatically.
         all_sets = db.query(
             "SELECT DISTINCT set_name FROM raw_cards "
-            "WHERE state='STORED' AND set_name IS NOT NULL"
+            "WHERE state IN ('STORED','DISPLAY') AND set_name IS NOT NULL"
         )
         era_sets = [r["set_name"] for r in all_sets if _classify_era(r["set_name"]) == era]
         if era_sets:
@@ -817,6 +821,10 @@ def browse():
     # variant_key is the *bucket* value: NULL/normal/holofoil all fold to ''
     # so single-variant cards stay in one tile. variant_raw is preserved for
     # display when a card has multiple printings in Scrydex.
+    #
+    # STORED copies feed the conditions json (cartable). DISPLAY copies feed
+    # display_qty + display_locations (informational, customer can see them
+    # but not add to picks — they're already on the floor).
     rows = db.query(f"""
         SELECT
             card_name,
@@ -826,29 +834,35 @@ def browse():
             MAX(variant_raw) AS variant_raw,
             variant_key,
             MAX(image_url) AS image_url,
+            SUM(cond_qty) FILTER (WHERE state='STORED') AS available_qty,
+            SUM(cond_qty) FILTER (WHERE state='DISPLAY') AS display_qty,
             SUM(cond_qty) AS total_qty,
             MIN(min_price) AS min_price,
             MAX(max_price) AS max_price,
             MAX(created_at) AS created_at,
-            jsonb_object_agg(condition, cond_qty) AS conditions
+            jsonb_object_agg(condition, cond_qty) FILTER (WHERE state='STORED') AS conditions,
+            array_remove(array_agg(DISTINCT bin_label) FILTER (WHERE state='DISPLAY'), NULL) AS display_locations
         FROM (
-            SELECT card_name, set_name, tcgplayer_id, scrydex_id,
-                   variant AS variant_raw,
-                   CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
+            SELECT rc.card_name, rc.set_name, rc.tcgplayer_id, rc.scrydex_id,
+                   rc.state,
+                   rc.variant AS variant_raw,
+                   CASE WHEN rc.variant IS NULL OR LOWER(rc.variant) IN ('normal','holofoil')
                         THEN ''
-                        ELSE variant
+                        ELSE rc.variant
                    END AS variant_key,
-                   image_url,
-                   condition,
+                   rc.image_url,
+                   rc.condition,
+                   sl.bin_label,
                    COUNT(*) AS cond_qty,
-                   MIN(current_price) AS min_price,
-                   MAX(current_price) AS max_price,
-                   MAX(created_at) AS created_at
-            FROM raw_cards
+                   MIN(rc.current_price) AS min_price,
+                   MAX(rc.current_price) AS max_price,
+                   MAX(rc.created_at) AS created_at
+            FROM raw_cards rc
+            LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
             WHERE {where}
-              AND state = 'STORED'
-            GROUP BY card_name, set_name, tcgplayer_id, scrydex_id,
-                     variant_raw, variant_key, image_url, condition
+            GROUP BY rc.card_name, rc.set_name, rc.tcgplayer_id, rc.scrydex_id,
+                     rc.state, variant_raw, variant_key, rc.image_url,
+                     rc.condition, sl.bin_label
         ) sub
         GROUP BY card_name, set_name, tcgplayer_id, variant_key
         ORDER BY {order_by}
@@ -919,7 +933,14 @@ def browse():
             "variant_key":   variant_key,
             "variant_label": variant_label,
             "image_url":     image_url,
-            "total_qty":     r["total_qty"],
+            "total_qty":     int(r["total_qty"] or 0),
+            # available_qty = STORED copies (cartable). display_qty = DISPLAY
+            # copies (informational only, customer can see them but can't add
+            # to picks). display_locations gives the per-tile bin labels so
+            # the front of the tile can say "On display: Binder-1".
+            "available_qty":     int(r["available_qty"] or 0),
+            "display_qty":       int(r["display_qty"] or 0),
+            "display_locations": list(r["display_locations"] or []),
             "min_price":     float(r["min_price"]) if r["min_price"] else None,
             "max_price":     float(r["max_price"]) if r["max_price"] else None,
             "conditions":    r["conditions"] or {},
@@ -1338,7 +1359,7 @@ def products_filter_meta():
 def list_sets():
     era = (request.args.get("era") or "").strip()
     game = (request.args.get("game") or "").strip().lower()
-    where = ["state = 'STORED'", "set_name IS NOT NULL", "current_hold_id IS NULL"]
+    where = ["state IN ('STORED','DISPLAY')", "set_name IS NOT NULL", "current_hold_id IS NULL"]
     params: list = []
     if game:
         where.append("game = %s")
@@ -1371,7 +1392,7 @@ def list_eras():
     so picking 'Rarity = IR' shrinks each era's count to 'IR cards in this
     era,' the way Rarity / Energy already shrink against each other.
     """
-    where = ["state = 'STORED'", "set_name IS NOT NULL", "current_hold_id IS NULL",
+    where = ["state IN ('STORED', 'DISPLAY')", "set_name IS NOT NULL", "current_hold_id IS NULL",
              "game = 'pokemon'"]
     params: list = []
 
@@ -1459,7 +1480,7 @@ def list_games():
                         THEN '' ELSE variant END
                )) AS qty
         FROM raw_cards
-        WHERE state = 'STORED' AND current_hold_id IS NULL
+        WHERE state IN ('STORED', 'DISPLAY') AND current_hold_id IS NULL
         GROUP BY COALESCE(game, 'pokemon')
         ORDER BY qty DESC
     """)
@@ -1639,7 +1660,7 @@ def filter_meta():
                         ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
                       JOIN scrydex_card_meta m
                         ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
-                     WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL
+                     WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL
                        AND rc.game = %s
                            {where_extra}
                 """, (sx_game, game, *where_params))
@@ -1654,7 +1675,7 @@ def filter_meta():
                   JOIN scrydex_card_meta m
                     ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
                   JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
-                 WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+                 WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                        {extra_w}
                  GROUP BY elem
             """, (sx_game, game, *extra_p))
@@ -1671,7 +1692,7 @@ def filter_meta():
                         ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
                       JOIN scrydex_card_meta m
                         ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
-                     WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+                     WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                        AND jsonb_array_length({field}) = 0
                            {extra_w}
                 """, (sx_game, game, *extra_p))
@@ -1700,7 +1721,7 @@ def filter_meta():
                   JOIN scrydex_card_meta m
                     ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
                   JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
-                 WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+                 WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                        {extra_w}
                  GROUP BY elem
             """, (sx_game, game, *extra_p))
@@ -1712,7 +1733,7 @@ def filter_meta():
                     ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
                   JOIN scrydex_card_meta m
                     ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
-                 WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+                 WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                    AND {field} IS NOT NULL
                        {extra_w}
                  GROUP BY {field}
@@ -1738,7 +1759,7 @@ def filter_meta():
                 ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
               JOIN scrydex_card_meta m
                 ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
-             WHERE rc.state = 'STORED' AND rc.current_hold_id IS NULL AND rc.game = %s
+             WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                AND rc.rarity IS NOT NULL AND rc.rarity <> ''
                    {extra_w}
              GROUP BY rc.rarity
@@ -1747,7 +1768,7 @@ def filter_meta():
     else:
         rarity_rows = db.query("""
             SELECT rarity AS k, COUNT(*) AS n FROM raw_cards
-             WHERE state='STORED' AND current_hold_id IS NULL AND game = %s
+             WHERE state IN ('STORED','DISPLAY') AND current_hold_id IS NULL AND game = %s
                AND rarity IS NOT NULL AND rarity <> ''
              GROUP BY rarity
              ORDER BY n DESC
@@ -1811,22 +1832,29 @@ def card_detail():
         id_filter = "AND tcgplayer_id = %s"
         extra.append(tcgplayer_id)
 
+    # Include DISPLAY copies alongside STORED so the detail panel can show
+    # "1 in Binder-1" alongside the cartable conditions. The frontend keys
+    # off rc.state to decide which copies render with a qty stepper vs.
+    # an info-only line.
     copies = db.query(f"""
-        SELECT id, barcode, card_name, set_name, card_number,
-               condition, current_price, image_url, variant,
-               tcgplayer_id, scrydex_id, rarity,
-               COALESCE(game, 'pokemon') AS game
-        FROM raw_cards
-        WHERE card_name = %s AND set_name = %s
-          AND state = 'STORED' AND current_hold_id IS NULL
-          {variant_filter}
-          {id_filter}
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.variant,
+               rc.tcgplayer_id, rc.scrydex_id, rc.rarity,
+               rc.state, sl.bin_label AS location,
+               COALESCE(rc.game, 'pokemon') AS game
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+        WHERE rc.card_name = %s AND rc.set_name = %s
+          AND rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL
+          {variant_filter.replace('variant', 'rc.variant')}
+          {id_filter.replace('scrydex_id', 'rc.scrydex_id').replace('tcgplayer_id', 'rc.tcgplayer_id')}
         ORDER BY
-            CASE condition
+            CASE rc.state WHEN 'STORED' THEN 0 ELSE 1 END,
+            CASE rc.condition
                 WHEN 'NM'  THEN 1 WHEN 'LP'  THEN 2 WHEN 'MP' THEN 3
                 WHEN 'HP'  THEN 4 WHEN 'DMG' THEN 5 ELSE 9
             END,
-            current_price DESC
+            rc.current_price DESC
     """, (card_name, set_name, variant, *extra))
 
     # Image fallback to Scrydex cache when raw_cards.image_url is missing
