@@ -3694,9 +3694,12 @@ function _pushHandleScan(barcode) {
         return;
     }
     _pushPending.push(barcode);
-    // If this barcode was planned for a different bin, remove it from that
-    // bin's expected list so counts stay accurate and it won't be expected
-    // twice.
+    // If this barcode was planned for a different bin, move it: remove from
+    // that bin's expected list and add to the current bin so remaining count
+    // decrements properly.
+    if (!target.expected_barcodes.includes(barcode)) {
+        target.expected_barcodes.push(barcode);
+    }
     for (const step of _pushPlan) {
         if (step === target) continue;
         const idx = step.expected_barcodes.indexOf(barcode);
