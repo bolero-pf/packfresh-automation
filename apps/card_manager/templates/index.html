@@ -874,7 +874,14 @@ document.addEventListener('keydown', e => {
     const barcode = _scanBuffer.trim();
     _scanBuffer = '';
     clearTimeout(_scanTimer);
-    if (barcode.length >= 6) handleScan(barcode);
+    if (barcode.length >= 6) {
+      // Stop the scanner's terminating Enter from also activating any
+      // focused button (e.g. the "↩ Return cards" / "+ Set Out" button
+      // that opened the current overlay), which would re-run its handler
+      // and wipe the in-progress scan state.
+      e.preventDefault();
+      handleScan(barcode);
+    }
     return;
   }
 
