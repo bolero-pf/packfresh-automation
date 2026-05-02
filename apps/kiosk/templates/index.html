@@ -576,26 +576,20 @@ body.modal-open { overflow: hidden; touch-action: none; }
   font-size: 0.72rem; color: var(--dim); text-transform: uppercase;
   letter-spacing: 0.1em; margin-bottom: 10px; font-weight: 600;
 }
-/* Grid layout so chips inside a row are equal width — flex-wrap was
-   producing ragged 4-row stacks where one chip's extra width pushed the
-   rest of its row to wrap. auto-fill picks the column count from the
-   sheet width; chips that share a row are uniform. min-width is wide
-   enough to fit every chip's full label + count on one line (longest
-   we have after SIR/IR abbreviations is "Shiny Ultra Rare (99)"), so we
-   never get the centered-label-with-orphaned-paren wrap artifact. */
+/* Content-sized chips with flex-wrap — same pattern as eBay/Amazon facets.
+   Sizing chips to a uniform grid cell wide enough for the longest label
+   wasted huge amounts of space when 13/15 rarities are short. With
+   white-space: nowrap on the chip, label + paren count always stay on
+   one line, so the centered-text-with-orphaned-paren wrap artifact can't
+   happen. Rows pack tight; chip widths vary within a row. */
 .chip-row {
-  display: grid; gap: 8px;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  display: flex; flex-wrap: wrap; gap: 8px;
 }
 .chip {
-  min-height: 44px; padding: 4px 12px;
+  min-height: 44px; padding: 4px 14px;
   display: inline-flex; align-items: center; justify-content: center; gap: 4px;
-  min-width: 0;
-  /* nowrap so label + paren count always read on a single line — the cell
-     width above is sized to fit the longest chip we render. */
   text-align: center; line-height: 1.1;
   white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis;
   /* Off-state: outline button feel — clearly tappable, not blending with surface */
   background: rgba(240, 240, 248, 0.04);
   border: 1.5px solid rgba(240, 240, 248, 0.28);

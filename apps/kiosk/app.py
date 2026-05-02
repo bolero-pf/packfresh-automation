@@ -1352,17 +1352,32 @@ def list_sets():
 @app.route("/api/eras")
 def list_eras():
     """Return available eras based on Pokemon sets currently in stock.
-    Era classification is Pokemon-only; non-Pokemon games skip this filter."""
+    Era classification is Pokemon-only; non-Pokemon games skip this filter.
+
+    Count is distinct card tiles per era (matching /api/browse), not the
+    number of sets in that era — a chip that says 'Mega Evolution (4)'
+    needs to mean 4 cards (the same number that lands on the next screen),
+    not '4 sets that classify to ME'.
+    """
     where = ["state = 'STORED'", "set_name IS NOT NULL", "current_hold_id IS NULL",
              "game = 'pokemon'"]
     rows = db.query(f"""
-        SELECT DISTINCT set_name FROM raw_cards
+        SELECT set_name,
+               COUNT(DISTINCT (
+                   card_name,
+                   set_name,
+                   tcgplayer_id,
+                   CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
+                        THEN '' ELSE variant END
+               )) AS tiles
+        FROM raw_cards
         WHERE {' AND '.join(where)}
+        GROUP BY set_name
     """)
     era_counts = {}
     for r in rows:
         era = _classify_era(r["set_name"])
-        era_counts[era] = era_counts.get(era, 0) + 1
+        era_counts[era] = era_counts.get(era, 0) + int(r["tiles"])
     eras = [{"name": k, "set_count": v} for k, v in sorted(era_counts.items())]
     return jsonify({"eras": eras})
 
