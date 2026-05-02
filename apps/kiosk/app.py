@@ -1667,12 +1667,20 @@ def filter_meta():
              GROUP BY rarity
              ORDER BY n DESC
         """, (game,))
+    rarity_options = [
+        {"value": r["k"], "label": r["k"], "qty": int(r["n"])}
+        for r in rarity_rows
+    ]
+    # Pokemon: sort by collector tier (Common → Uncommon → Rare → ... → Promo)
+    # rather than by qty. With 15+ Pokemon rarities the count order looks
+    # random — tier order reads as a logical progression so the rarity wall
+    # is easier to scan.
+    if game == "pokemon":
+        from rarity import pokemon_tier_index
+        rarity_options.sort(key=lambda o: pokemon_tier_index(o["value"]))
     out["filters"]["rarity"] = {
         "label":   "Rarity",
-        "options": [
-            {"value": r["k"], "label": r["k"], "qty": int(r["n"])}
-            for r in rarity_rows
-        ],
+        "options": rarity_options,
     }
 
     return jsonify(out)

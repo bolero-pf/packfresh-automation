@@ -36,6 +36,7 @@ try:
 except ImportError as e:
     logger.error(f"storage import failed: {e} — raw card push will not work")
     assign_bins = release_bins = _canonical_card_type = assign_display = get_binder_capacity = None
+from rarity import canonicalize_rarity
 try:
     from barcode_gen import generate_barcode_id, generate_barcode_image
 except ImportError as e:
@@ -1672,7 +1673,7 @@ def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
             )
         """, (
             barcode_id, tcg_id, sx_id, card_name, set_name,
-            ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
+            ppt_card_number or item.get("card_number"), condition, canonicalize_rarity(item.get("rarity")),
             state, cost, charm_ceil_raw(item.get("market_price", cost)),
             image_url,
             item.get("variance") or item.get("variant"), card_type,
@@ -1924,7 +1925,7 @@ def _push_raw_item(item: dict) -> dict:
                 )
             """, (
                 barcode_id, tcg_id, sx_id, card_name, set_name,
-                ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
+                ppt_card_number or item.get("card_number"), condition, canonicalize_rarity(item.get("rarity")),
                 cost, charm_ceil_raw(item.get("market_price", cost)),
                 bin_id, image_url,
                 # intake_items stores it as 'variance', raw_cards as 'variant';
@@ -2069,7 +2070,7 @@ def _push_raw_to_display(item: dict) -> dict:
                 )
             """, (
                 barcode_id, tcg_id, sx_id, card_name, set_name,
-                ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
+                ppt_card_number or item.get("card_number"), condition, canonicalize_rarity(item.get("rarity")),
                 cost, charm_ceil_raw(item.get("market_price", cost)),
                 bin_id, image_url,
                 item.get("variance") or item.get("variant"),
@@ -2144,7 +2145,7 @@ def _push_raw_to_grade(item: dict) -> dict:
             )
         """, (
             barcode_id, tcg_id, sx_id, card_name, set_name,
-            ppt_card_number or item.get("card_number"), condition, item.get("rarity"),
+            ppt_card_number or item.get("card_number"), condition, canonicalize_rarity(item.get("rarity")),
             cost, charm_ceil_raw(item.get("market_price", cost)),
             image_url,
             item.get("variance") or item.get("variant"),
