@@ -1782,15 +1782,25 @@ function _updateReturnUI() {
 }
 
 async function handleReturnScan(barcode) {
-  const list = document.getElementById('return-scan-list');
-  if (!list) return;
-  if (list.querySelector(`[data-barcode="${barcode}"]`)) {
+  // Check duplicate against live DOM before the network call
+  const listBefore = document.getElementById('return-scan-list');
+  if (listBefore?.querySelector(`[data-barcode="${barcode}"]`)) {
     flash('green');
     toast('Already scanned', 'green');
     return;
   }
   try {
     const d = await post('/api/display/return/scan', { barcode });
+    // Re-query DOM AFTER await — the overlay may have been rebuilt while
+    // the network request was in flight.
+    const list = document.getElementById('return-scan-list');
+    if (!list) return;
+    // Still a duplicate? (another concurrent scan may have added it)
+    if (list.querySelector(`[data-barcode="${d.card.barcode}"]`)) {
+      flash('green');
+      toast('Already scanned', 'green');
+      return;
+    }
     // Remove placeholder if present
     const ph = document.getElementById('return-scan-placeholder');
     if (ph) ph.remove();
