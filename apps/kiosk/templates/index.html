@@ -488,11 +488,14 @@ body.modal-open { overflow: hidden; touch-action: none; }
   color: var(--text); font-family: var(--sans); font-size: 0.95rem; font-weight: 500;
   cursor: pointer; user-select: none; transition: all 0.15s; white-space: nowrap;
 }
-.game-pill .qty { color: var(--dim); font-family: var(--mono); font-weight: 500; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+/* Match the in-sheet chip pattern: parenthesized count, sans baseline. */
+.game-pill .qty { color: var(--dim); font-weight: 500; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.game-pill .qty::before { content: '('; }
+.game-pill .qty::after  { content: ')'; }
 .game-pill.active {
   background: var(--accent); border-color: var(--accent); color: #0B0B09;
 }
-.game-pill.active .qty { color: rgba(11,11,9,0.65); }
+.game-pill.active .qty { color: rgba(11,11,9,0.7); font-weight: 700; }
 
 .filters-btn {
   flex-shrink: 0; min-height: 44px; padding: 0 18px;
@@ -576,21 +579,23 @@ body.modal-open { overflow: hidden; touch-action: none; }
 /* Grid layout so chips inside a row are equal width — flex-wrap was
    producing ragged 4-row stacks where one chip's extra width pushed the
    rest of its row to wrap. auto-fill picks the column count from the
-   sheet width; chips that share a row are uniform. */
+   sheet width; chips that share a row are uniform. min-width is wide
+   enough to fit every chip's full label + count on one line (longest
+   we have after SIR/IR abbreviations is "Shiny Ultra Rare (99)"), so we
+   never get the centered-label-with-orphaned-paren wrap artifact. */
 .chip-row {
   display: grid; gap: 8px;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
 }
 .chip {
   min-height: 44px; padding: 4px 12px;
   display: inline-flex; align-items: center; justify-content: center; gap: 4px;
   min-width: 0;
-  /* Smaller font + tight line-height keep the row compact when long labels
-     (e.g. "Special Illustration Rare") have to wrap. 44px min-height
-     preserves the tap target without making the row tall when text fits. */
+  /* nowrap so label + paren count always read on a single line — the cell
+     width above is sized to fit the longest chip we render. */
   text-align: center; line-height: 1.1;
-  word-break: keep-all; overflow-wrap: break-word; white-space: normal;
-  overflow: hidden;
+  white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
   /* Off-state: outline button feel — clearly tappable, not blending with surface */
   background: rgba(240, 240, 248, 0.04);
   border: 1.5px solid rgba(240, 240, 248, 0.28);
@@ -705,26 +710,30 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .mode-toggle .mode-btn.on + .mode-btn,
 .mode-toggle .mode-btn:has(+ .mode-btn.on) { border-left-color: transparent; }
 
-/* MTG color chips — colored pip on the chip when on */
+/* MTG color chips — colored pip on the chip when on. Default border is
+   light so dark pips (B / Black) read against the dark site background;
+   light pips (W / Yellow) explicitly set a darker border so they stand
+   out on the chip surface. */
 .chip-color {
   display: inline-flex; align-items: center; gap: 6px;
 }
 .chip-color .pip {
   width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
-  border: 1px solid rgba(0,0,0,0.25);
+  border: 1.5px solid rgba(255,255,255,0.45);
+  box-sizing: border-box;
 }
-.pip-W  { background: #f8f3d4; }
-.pip-U  { background: #2196f3; border-color: rgba(255,255,255,0.4); }
-.pip-B  { background: #2a2a2a; border-color: rgba(255,255,255,0.4); }
-.pip-R  { background: #e53935; border-color: rgba(255,255,255,0.4); }
-.pip-G  { background: #43a047; border-color: rgba(255,255,255,0.4); }
-.pip-C  { background: linear-gradient(135deg, #cccccc 0%, #999999 100%); }
-.pip-Red    { background: #e53935; }
-.pip-Green  { background: #43a047; }
-.pip-Blue   { background: #2196f3; }
-.pip-Purple { background: #8e24aa; }
-.pip-Black  { background: #2a2a2a; border-color: rgba(255,255,255,0.4); }
-.pip-Yellow { background: #fdd835; border-color: rgba(0,0,0,0.35); }
+.chip-color .pip-W  { background: #f8f3d4; border-color: rgba(0,0,0,0.45); }
+.chip-color .pip-U  { background: #2196f3; }
+.chip-color .pip-B  { background: #2a2a2a; }
+.chip-color .pip-R  { background: #e53935; }
+.chip-color .pip-G  { background: #43a047; }
+.chip-color .pip-C  { background: linear-gradient(135deg, #cccccc 0%, #999999 100%); }
+.chip-color .pip-Red    { background: #e53935; }
+.chip-color .pip-Green  { background: #43a047; }
+.chip-color .pip-Blue   { background: #2196f3; }
+.chip-color .pip-Purple { background: #8e24aa; }
+.chip-color .pip-Black  { background: #2a2a2a; }
+.chip-color .pip-Yellow { background: #fdd835; border-color: rgba(0,0,0,0.45); }
 
 /* Selected-filter chips strip above results */
 .active-chips {
