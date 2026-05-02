@@ -195,13 +195,6 @@ header {
 .cond-MP  { background: rgba(251,146,60,0.15); color: #fb923c; }
 .cond-HP  { background: rgba(248,113,113,0.15); color: var(--red); }
 .cond-DMG { background: rgba(248,113,113,0.25); color: var(--red); }
-/* DISPLAY state — visible in the catalog but not cartable. Distinct from
-   the condition pills so customers don't read the location pill as a
-   condition. Slightly desaturated tile so it's obvious at a glance. */
-.cond-display { background: rgba(192,132,252,0.18); color: #c084fc; padding: 3px 9px; }
-.card.display-only { opacity: 0.78; }
-.card.display-only:hover { opacity: 1; }
-.display-note { font-size: 0.7rem; color: var(--dim); font-style: italic; margin-top: 2px; }
 
 .variant-badge {
   display: inline-block; font-size: 0.78rem; font-weight: 700;
@@ -2321,34 +2314,18 @@ function renderGrid(cards) {
     const variantBadge = c.variant_label
       ? `<div class="card-variant">${esc(c.variant_label)}</div>`
       : '';
-    // Display-state copies are visible to the customer but not cartable.
-    // Three tile variants:
-    //   - STORED only: existing layout (pills + price).
-    //   - DISPLAY only (available_qty===0): swap pills row for a location
-    //     pill with the binder/case label so the tile clearly reads as
-    //     "look here, not pickable."
-    //   - Mixed: keep STORED pills + a small "+N on display" line under
-    //     them, so customers see the cartable option AND know there's
-    //     another copy out front to inspect.
-    const availQty = c.available_qty ?? c.total_qty ?? 0;
-    const dispQty  = c.display_qty || 0;
-    const dispLocs = (c.display_locations || []).join(', ');
-    const displayOnly = availQty === 0 && dispQty > 0;
-    const dispBadge = (!displayOnly && dispQty > 0)
-      ? `<div class="display-note">+${dispQty} on display${dispLocs ? ' · ' + esc(dispLocs) : ''}</div>`
-      : '';
-    const pillRow = displayOnly
-      ? `<span class="cond-pill cond-display">On display${dispLocs ? ' · ' + esc(dispLocs) : ''}</span>`
-      : pills;
-    return `<div class="card${displayOnly ? ' display-only' : ''}" onclick="openDetail(window._cardCache[${idx}])">
+    // Tile rendering is intentionally identical for STORED-only, mixed,
+    // and DISPLAY-only cards — the cascade of tiles shouldn't read as
+    // "some are different, some are dimmed." The location / availability
+    // split lives in the detail panel instead.
+    return `<div class="card" onclick="openDetail(window._cardCache[${idx}])">
       <div class="card-img">${img}</div>
       <div class="card-body">
         <div class="card-name">${esc(c.card_name)}</div>
         ${variantBadge}
         <div class="card-set">${esc(c.set_name||'')}</div>
-        ${dispBadge}
         <div class="card-pricerow">
-          <div class="cond-pills">${pillRow}</div>
+          <div class="cond-pills">${pills}</div>
           ${price ? `<div class="card-price">${price}</div>` : ''}
         </div>
       </div>
