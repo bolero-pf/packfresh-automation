@@ -1403,7 +1403,7 @@ def display_finalize_set_out():
 
 @app.route("/api/display/return/scan", methods=["POST"])
 def display_scan_return():
-    """Validate a barcode for the Return-to-Storage flow. Card must be in DISPLAY."""
+    """Validate a barcode for the Return-to-Storage flow. Accepts DISPLAY or STORED cards."""
     barcode = (request.get_json() or {}).get("barcode", "").strip()
     if not barcode:
         return jsonify({"error": "No barcode provided"}), 400
@@ -1418,8 +1418,8 @@ def display_scan_return():
     """, (barcode,))
     if not card:
         return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
-    if card["state"] != "DISPLAY":
-        return jsonify({"error": f"Card is {card['state']}, not on display", "barcode": barcode, "card_name": card["card_name"]}), 409
+    if card["state"] not in ("DISPLAY", "STORED"):
+        return jsonify({"error": f"Card is {card['state']}, can't return to storage", "barcode": barcode, "card_name": card["card_name"]}), 409
 
     return jsonify({"success": True, "card": _ser(dict(card))})
 
@@ -1437,10 +1437,10 @@ def display_finalize_return():
     cards = db.query("""
         SELECT id, barcode, card_name, COALESCE(game, 'pokemon') AS game
         FROM raw_cards
-        WHERE barcode = ANY(%s) AND state = 'DISPLAY'
+        WHERE barcode = ANY(%s) AND state IN ('DISPLAY', 'STORED')
     """, (barcodes,))
     if not cards:
-        return jsonify({"error": "None of the scanned cards are currently on display"}), 400
+        return jsonify({"error": "None of the scanned cards can be returned to storage"}), 400
 
     by_game = defaultdict(list)
     for c in cards:
