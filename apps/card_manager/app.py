@@ -1598,7 +1598,41 @@ def sell_active_listings():
         WHERE rc.state = 'PENDING_SALE'
         ORDER BY rc.updated_at DESC NULLS LAST
     """)
-    return jsonify({"cards": [_ser(dict(r)) for r in rows]})
+
+    # Auto-heal: if the Shopify product is already archived or gone,
+    # the card was sold but the DB update didn't commit (e.g. webhook
+    # used db.query instead of db.execute). Mark it SOLD now.
+    clean = []
+    live = []
+    for r in rows:
+        pid = r.get("shopify_product_id")
+        if pid:
+            try:
+                prod = _shopify("GET", f"/products/{pid}.json").get("product", {})
+                if prod.get("status") == "archived":
+                    db.execute("""
+                        UPDATE raw_cards
+                        SET state = 'SOLD', current_hold_id = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (str(r["id"]),))
+                    logger.info(f"Auto-healed PENDING_SALE → SOLD: {r['barcode']} (product archived)")
+                    clean.append(r["barcode"])
+                    continue
+            except Exception:
+                # Product deleted or API error — also means it's gone
+                db.execute("""
+                    UPDATE raw_cards
+                    SET state = 'SOLD', current_hold_id = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (str(r["id"]),))
+                logger.info(f"Auto-healed PENDING_SALE → SOLD: {r['barcode']} (product gone)")
+                clean.append(r["barcode"])
+                continue
+        live.append(_ser(dict(r)))
+
+    return jsonify({"cards": live})
 
 
 @app.route("/api/sell/pull-listing", methods=["POST"])
