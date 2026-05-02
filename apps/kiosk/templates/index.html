@@ -50,6 +50,14 @@ body {
   font-size: 16px;
   overscroll-behavior: none;
 }
+/* Themed scrollbar for the main page — matches the slim style we use
+   inside the bottom-sheet so the kiosk doesn't show a chunky native
+   scrollbar when the grid runs long. */
+html { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+html::-webkit-scrollbar { width: 8px; height: 8px; }
+html::-webkit-scrollbar-track { background: transparent; }
+html::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+html::-webkit-scrollbar-thumb:hover { background: var(--dim); }
 
 /* ── Header ── */
 header {
@@ -565,10 +573,18 @@ body.modal-open { overflow: hidden; touch-action: none; }
   font-size: 0.72rem; color: var(--dim); text-transform: uppercase;
   letter-spacing: 0.1em; margin-bottom: 10px; font-weight: 600;
 }
-.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Grid layout so chips inside a row are equal width — flex-wrap was
+   producing ragged 4-row stacks where one chip's extra width pushed the
+   rest of its row to wrap. auto-fill picks the column count from the
+   sheet width; chips that share a row are uniform. */
+.chip-row {
+  display: grid; gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+}
 .chip {
-  min-height: 44px; padding: 0 16px;
-  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 44px; padding: 0 14px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-width: 0; overflow: hidden; white-space: nowrap;
   /* Off-state: outline button feel — clearly tappable, not blending with surface */
   background: rgba(240, 240, 248, 0.04);
   border: 1.5px solid rgba(240, 240, 248, 0.28);
@@ -650,15 +666,18 @@ body.modal-open { overflow: hidden; touch-action: none; }
 }
 .sheet-apply:disabled { opacity: 0.55; }
 
-/* Segmented Any/Exactly toggle for MTG/OP color identity */
+/* Segmented Any/Exactly toggle for MTG/OP color identity. Lives on its
+   own row above the chips (not floated into the section title) so it
+   reads as a control over the chip set, not as a separate header element. */
 .mode-toggle {
-  display: inline-flex; align-items: stretch;
+  display: inline-flex; align-self: flex-start; align-items: stretch;
+  margin-bottom: 10px;
   border: 1.5px solid rgba(240,240,248,0.28); border-radius: 16px;
   background: rgba(240,240,248,0.04);
-  overflow: hidden; font-family: var(--sans); font-size: 0.78rem;
+  overflow: hidden; font-family: var(--sans); font-size: 0.82rem;
 }
 .mode-toggle .mode-btn {
-  padding: 4px 12px; min-height: 28px;
+  padding: 6px 16px; min-height: 32px;
   background: transparent; color: var(--text); border: none;
   cursor: pointer; font-weight: 600; letter-spacing: 0.02em;
   transition: background 0.12s, color 0.12s;
@@ -887,19 +906,28 @@ body.modal-open { overflow: hidden; touch-action: none; }
       <button class="clear-link" onclick="clearAllFilters()">Clear all</button>
     </div>
     <div class="sheet-body">
+      <!-- Order: broad → narrow → long-list. Game/Era frame the catalog,
+           game-specific facets narrow within it, then universal filters
+           (Condition, Price, Sort), then the scrollable Set list at the
+           bottom so its inner scroll doesn't sit between everything else. -->
       <div class="sheet-section">
         <div class="sheet-section-title">Game</div>
         <div class="chip-row" id="sheet-games"></div>
       </div>
 
+      <div class="sheet-section" id="sheet-era-section" style="display:none;">
+        <div class="sheet-section-title">Era (Pokémon)</div>
+        <div class="chip-row" id="sheet-eras"></div>
+      </div>
+
       <!-- ── Game-specific advanced filters (color / type / rarity) ── -->
       <!-- Each section is conditionally shown based on the selected game's schema -->
       <div class="sheet-section" id="sheet-colors-section" style="display:none;">
-        <div class="sheet-section-title" id="sheet-colors-title" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div class="sheet-section-title" id="sheet-colors-title">
           <span id="sheet-colors-label">Color</span>
-          <span class="mode-toggle" id="sheet-color-mode" style="display:none;text-transform:none;letter-spacing:0;font-weight:600;">
-            <button type="button" class="mode-btn on" data-mode="any" onclick="setSheetColorMode('any')">Any</button><button type="button" class="mode-btn" data-mode="exactly" onclick="setSheetColorMode('exactly')">Exactly</button>
-          </span>
+        </div>
+        <div class="mode-toggle" id="sheet-color-mode" style="display:none;">
+          <button type="button" class="mode-btn on" data-mode="any" onclick="setSheetColorMode('any')">Any</button><button type="button" class="mode-btn" data-mode="exactly" onclick="setSheetColorMode('exactly')">Exactly</button>
         </div>
         <div class="chip-row" id="sheet-colors"></div>
       </div>
@@ -912,15 +940,6 @@ body.modal-open { overflow: hidden; touch-action: none; }
         <div class="chip-row" id="sheet-rarities"></div>
       </div>
 
-      <div class="sheet-section" id="sheet-era-section" style="display:none;">
-        <div class="sheet-section-title">Era (Pokémon)</div>
-        <div class="chip-row" id="sheet-eras"></div>
-      </div>
-      <div class="sheet-section">
-        <div class="sheet-section-title">Set</div>
-        <input class="set-search-input" id="set-search-input" placeholder="Search sets…" oninput="renderSetList()" autocomplete="off">
-        <div class="set-list" id="sheet-sets"></div>
-      </div>
       <div class="sheet-section">
         <div class="sheet-section-title">Condition</div>
         <div class="chip-row" id="sheet-conds">
@@ -929,6 +948,14 @@ body.modal-open { overflow: hidden; touch-action: none; }
           <span class="chip cond-MP on" data-cond="MP" onclick="toggleSheetCond(this)">MP</span>
           <span class="chip cond-HP on" data-cond="HP" onclick="toggleSheetCond(this)">HP</span>
           <span class="chip cond-DMG on" data-cond="DMG" onclick="toggleSheetCond(this)">DMG</span>
+        </div>
+      </div>
+      <div class="sheet-section">
+        <div class="sheet-section-title">Price</div>
+        <div class="price-row">
+          <input class="price-input" id="price-min" type="number" inputmode="numeric" min="0" step="1" placeholder="Min $">
+          <span class="price-dash">—</span>
+          <input class="price-input" id="price-max" type="number" inputmode="numeric" min="0" step="1" placeholder="Max $">
         </div>
       </div>
       <div class="sheet-section">
@@ -941,12 +968,9 @@ body.modal-open { overflow: hidden; touch-action: none; }
         </div>
       </div>
       <div class="sheet-section">
-        <div class="sheet-section-title">Price</div>
-        <div class="price-row">
-          <input class="price-input" id="price-min" type="number" inputmode="numeric" min="0" step="1" placeholder="Min $">
-          <span class="price-dash">—</span>
-          <input class="price-input" id="price-max" type="number" inputmode="numeric" min="0" step="1" placeholder="Max $">
-        </div>
+        <div class="sheet-section-title">Set</div>
+        <input class="set-search-input" id="set-search-input" placeholder="Search sets…" oninput="renderSetList()" autocomplete="off">
+        <div class="set-list" id="sheet-sets"></div>
       </div>
     </div>
     <div class="sheet-footer">
@@ -1377,8 +1401,10 @@ function _refreshSheetEraVisibility() {
   const sec = document.getElementById('sheet-era-section');
   if (!sec) return;
   const g = _draft ? _draft.game : _filters.game;
-  // Era only meaningful for Pokemon (or All, which still includes Pokemon)
-  sec.style.display = (g === 'pokemon' || g === '') ? '' : 'none';
+  // Era is a Pokemon-only concept (Sword & Shield, Sun & Moon, etc.).
+  // Showing it under "All" was confusing — non-Pokemon cards get filtered
+  // out when an era is selected, which surprises users browsing all games.
+  sec.style.display = (g === 'pokemon') ? '' : 'none';
 }
 
 function renderGameChips() {
@@ -2051,13 +2077,18 @@ function _doIdleReset() {
     try { localStorage.removeItem('pf_champion'); } catch(e) {}
     updateChampionUI();
   }
-  // Close any open overlays
+  // Close any open overlays. Sheet overlays use the 'open' class instead
+  // of 'active', so we strip both — otherwise the filter sheet stays
+  // visible after an idle reset (and the user comes back to a half-reset
+  // UI on a kiosk that should look fresh).
   document.body.classList.remove('modal-open');
-  ['cart-overlay','detail-overlay','filter-sheet-overlay','confirm-overlay','lightbox']
+  ['cart-overlay','detail-overlay','filter-sheet-overlay','prod-filter-sheet-overlay','confirm-overlay','lightbox']
     .forEach(id => {
       const el = document.getElementById(id);
-      if (el) el.classList.remove('active');
+      if (el) el.classList.remove('active', 'open');
     });
+  // Drop any open sort popovers as well
+  document.querySelectorAll('.sort-wrap.open').forEach(el => el.classList.remove('open'));
   // Reset search + filters back to Raw default
   const q = document.getElementById('q');
   if (q) q.value = '';
