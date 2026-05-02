@@ -156,14 +156,17 @@ header {
 }
 
 /* Pills + price share one row at the bottom of the card body — pills wrap on
-   the left, price stays anchored to the upper right. Larger price font and
-   right-alignment shorten the visible card height vs. price-on-its-own-row. */
+   the left, price stays anchored on the right. Center-align so a 1.05rem
+   price reads level with the much shorter condition pills. */
 .card-pricerow {
-  display: flex; align-items: flex-start; gap: 8px;
+  display: flex; align-items: center; gap: 8px;
   margin-top: auto; padding-top: 6px;
 }
 .card-pricerow .cond-pills { margin-top: 0; flex: 1 1 auto; min-width: 0; }
-.card-pricerow .card-price { margin-top: 0; padding-top: 0; flex-shrink: 0; }
+.card-pricerow .card-price {
+  margin-top: 0; padding-top: 0; flex-shrink: 0;
+  white-space: nowrap;
+}
 .cond-NM  { background: rgba(74,222,128,0.15); color: var(--green); }
 .cond-LP  { background: rgba(223,163,42,0.15); color: var(--accent); }
 .cond-MP  { background: rgba(251,146,60,0.15); color: #fb923c; }
@@ -475,6 +478,24 @@ body.modal-open { overflow: hidden; touch-action: none; }
   color: var(--text); font-family: var(--sans); font-size: 0.95rem; font-weight: 500;
   cursor: pointer;
 }
+.sort-wrap { position: relative; flex-shrink: 0; }
+.sort-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 60;
+  min-width: 200px; background: var(--surface);
+  border: 1.5px solid var(--border); border-radius: 12px;
+  padding: 6px; display: none; flex-direction: column; gap: 2px;
+  box-shadow: 0 12px 28px rgba(0,0,0,0.5);
+}
+.sort-wrap.open .sort-menu { display: flex; }
+.sort-option {
+  background: transparent; border: none; color: var(--text);
+  padding: 12px 14px; border-radius: 8px;
+  text-align: left; cursor: pointer;
+  font-family: var(--sans); font-size: 0.95rem;
+  min-height: 44px;
+}
+.sort-option:hover { background: var(--surface2); }
+.sort-option.on { background: rgba(223,163,42,0.14); color: var(--accent); font-weight: 700; }
 .filters-btn.has-active { border-color: var(--accent); color: var(--accent); }
 .filters-btn .badge {
   display: inline-flex; align-items: center; justify-content: center;
@@ -752,6 +773,18 @@ body.modal-open { overflow: hidden; touch-action: none; }
      Only relevant on the Raw tab — hidden when browsing sealed/slabs. -->
 <div class="filter-strip" id="raw-filter-strip">
   <div class="game-pills" id="game-pills"></div>
+  <div class="sort-wrap" id="sort-wrap">
+    <button class="filters-btn" id="sort-btn" onclick="toggleSortMenu(event, 'raw')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M7 4v16M3 8l4-4 4 4M17 20V4M21 16l-4 4-4-4"/></svg>
+      <span id="sort-btn-label">Name A–Z</span>
+    </button>
+    <div class="sort-menu" id="sort-menu">
+      <button type="button" class="sort-option" data-sort="name_asc"   onclick="setRawSort('name_asc')">Name A–Z</button>
+      <button type="button" class="sort-option" data-sort="price_asc"  onclick="setRawSort('price_asc')">Price: Low to High</button>
+      <button type="button" class="sort-option" data-sort="price_desc" onclick="setRawSort('price_desc')">Price: High to Low</button>
+      <button type="button" class="sort-option" data-sort="newest"     onclick="setRawSort('newest')">Newest</button>
+    </div>
+  </div>
   <button class="filters-btn" id="filters-btn" onclick="openFilterSheet()">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
     <span>Filters</span>
@@ -764,6 +797,17 @@ body.modal-open { overflow: hidden; touch-action: none; }
      /api/products/filter-meta endpoint per active kind. -->
 <div class="filter-strip" id="prod-filter-strip" style="display:none;">
   <div class="game-pills" id="prod-game-pills"></div>
+  <div class="sort-wrap" id="prod-sort-wrap">
+    <button class="filters-btn" id="prod-sort-btn" onclick="toggleSortMenu(event, 'prod')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M7 4v16M3 8l4-4 4 4M17 20V4M21 16l-4 4-4-4"/></svg>
+      <span id="prod-sort-btn-label">Name A–Z</span>
+    </button>
+    <div class="sort-menu" id="prod-sort-menu">
+      <button type="button" class="sort-option" data-sort="name_asc"   onclick="setProdSort('name_asc')">Name A–Z</button>
+      <button type="button" class="sort-option" data-sort="price_asc"  onclick="setProdSort('price_asc')">Price: Low to High</button>
+      <button type="button" class="sort-option" data-sort="price_desc" onclick="setProdSort('price_desc')">Price: High to Low</button>
+    </div>
+  </div>
   <button class="filters-btn" id="prod-filters-btn" onclick="openProdFilterSheet()">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
     <span>Filters</span>
@@ -1110,6 +1154,77 @@ function _refreshFiltersBtn() {
   }
 }
 
+// ── Sort: top-strip button + popover ────────────────────────────────────────
+// Sort lives on the strip (not buried inside the filter sheet) because
+// changing sort is a high-frequency action — customers compare price low/high
+// constantly while browsing. The bottom-sheet still has a Sort section so
+// "open filters, change sort, apply" still works; the two stay in sync via
+// _filters.sort.
+const _RAW_SORT_LABELS = {
+  name_asc:   'Name A–Z',
+  price_asc:  'Price: Low to High',
+  price_desc: 'Price: High to Low',
+  newest:     'Newest',
+};
+const _PROD_SORT_LABELS = {
+  name_asc:   'Name A–Z',
+  price_asc:  'Price: Low to High',
+  price_desc: 'Price: High to Low',
+};
+
+function _refreshSortBtn() {
+  const lbl = document.getElementById('sort-btn-label');
+  if (lbl) lbl.textContent = _RAW_SORT_LABELS[_filters.sort] || 'Name A–Z';
+  document.querySelectorAll('#sort-menu .sort-option').forEach(el => {
+    el.classList.toggle('on', el.getAttribute('data-sort') === _filters.sort);
+  });
+}
+
+function _refreshProdSortBtn() {
+  const lbl = document.getElementById('prod-sort-btn-label');
+  if (lbl) lbl.textContent = _PROD_SORT_LABELS[_prodFilters.sort] || 'Name A–Z';
+  document.querySelectorAll('#prod-sort-menu .sort-option').forEach(el => {
+    el.classList.toggle('on', el.getAttribute('data-sort') === _prodFilters.sort);
+  });
+}
+
+function _closeAllSortMenus() {
+  document.querySelectorAll('.sort-wrap.open').forEach(el => el.classList.remove('open'));
+}
+
+function toggleSortMenu(e, scope) {
+  e.stopPropagation();
+  const wrapId = scope === 'prod' ? 'prod-sort-wrap' : 'sort-wrap';
+  const wrap = document.getElementById(wrapId);
+  const wasOpen = wrap.classList.contains('open');
+  _closeAllSortMenus();
+  if (!wasOpen) wrap.classList.add('open');
+}
+
+// Click-outside dismisses the sort popover. Stop-propagation in toggleSortMenu
+// prevents the same click from immediately closing the menu it just opened.
+document.addEventListener('click', _closeAllSortMenus);
+
+function setRawSort(sort) {
+  if (_filters.sort === sort) { _closeAllSortMenus(); return; }
+  _filters.sort = sort;
+  _refreshSortBtn();
+  _refreshFiltersBtn();
+  _writeUrlState();
+  _closeAllSortMenus();
+  doSearch();
+}
+
+function setProdSort(sort) {
+  if (_prodFilters.sort === sort) { _closeAllSortMenus(); return; }
+  _prodFilters.sort = sort;
+  _refreshProdSortBtn();
+  _refreshProdFiltersBtn();
+  _closeAllSortMenus();
+  _page = 1;
+  doSearch();
+}
+
 // ── Game pills (top strip) — single-select, fires search immediately ─────────
 async function loadGames() {
   try {
@@ -1237,6 +1352,7 @@ function applyFilterSheet() {
   // Re-render the top-strip game pills so the active state matches
   loadGames();
   _refreshFiltersBtn();
+  _refreshSortBtn();
   _renderActiveChips();
   _writeUrlState();
   doSearch();
@@ -1518,6 +1634,7 @@ function _clearAllActive() {
   _filters.sort = 'name_asc';
   loadGames();
   _refreshFiltersBtn();
+  _refreshSortBtn();
   _renderActiveChips();
   _writeUrlState();
   doSearch();
@@ -1721,6 +1838,8 @@ async function boot() {
     catch(e) { _filterMeta = null; }
   }
   _refreshFiltersBtn();
+  _refreshSortBtn();
+  _refreshProdSortBtn();
   _renderActiveChips();
   startIdleWatch();
   _watchGridResize();
@@ -2064,10 +2183,13 @@ function renderGrid(cards) {
     const img = c.image_url
       ? `<img src="${esc(c.image_url)}" alt="${esc(c.card_name)}" loading="lazy">`
       : `<div class="no-img">${ICON_CARD_STACK}</div>`;
+    // Tile is narrow — a "$14.99 – $15.99" range chews the whole row and
+     // overlaps the condition pills. The detail panel still shows the full
+    // breakdown, so on the tile we collapse to "$min+".
     const price = c.min_price
       ? c.min_price === c.max_price
         ? `$${c.min_price.toFixed(2)}`
-        : `$${c.min_price.toFixed(2)} – $${c.max_price.toFixed(2)}`
+        : `$${c.min_price.toFixed(2)}+`
       : '';
     // variant_label only appears when the card has multiple printings in
     // Scrydex — single-variant cards stay uncluttered. Filtering uses
@@ -2281,6 +2403,8 @@ function applyProdFilterSheet() {
   Object.assign(_prodFilters, _prodDraft);
   closeProdFilterSheet({ target: { id: 'prod-filter-sheet-overlay' } });
   _refreshProdFiltersBtn();
+  _refreshProdSortBtn();
+  renderProdGamePills();
   _page = 1;
   doSearch();
 }
@@ -2291,6 +2415,7 @@ function _resetProdFilters() {
     minP: '', maxP: '', sort: 'name_asc',
   };
   _refreshProdFiltersBtn();
+  _refreshProdSortBtn();
   renderProdGamePills();
 }
 
