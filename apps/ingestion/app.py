@@ -3347,7 +3347,7 @@ def push_plan(session_id):
         bin_caps = {str(r["id"]): (r["capacity"] or 0) - (r["current_count"] or 0)
                     for r in db.query("""
                         SELECT id, capacity, current_count
-                          FROM storage_locations WHERE id = ANY(%s)
+                          FROM storage_locations WHERE id = ANY(%s::uuid[])
                     """, (bin_ids,))}
 
         idx = 0
@@ -3388,7 +3388,7 @@ def push_plan(session_id):
         binder_caps = {str(r["id"]): (r["capacity"] or 0) - (r["current_count"] or 0)
                        for r in db.query("""
                            SELECT id, capacity, current_count
-                             FROM storage_locations WHERE id = ANY(%s)
+                             FROM storage_locations WHERE id = ANY(%s::uuid[])
                        """, (binder_ids,))}
 
         idx = 0
