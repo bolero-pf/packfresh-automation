@@ -3611,8 +3611,11 @@ function _renderPushScanWidget() {
     }
 
     const target = _pushPlan[_pushIndex];
-    const expectedCount = target.expected_barcodes.length;
-    const remaining = target.expected_barcodes.filter(bc => !_pushPending.includes(bc));
+    // Count all unscanned same-destination cards across ALL bins (not just this one)
+    const dest = target.destination;
+    const allSameDestRemaining = _pushPlan
+        .filter(s => s.destination === dest)
+        .reduce((n, s) => n + s.expected_barcodes.filter(bc => !_pushPending.includes(bc)).length, 0);
     const pendingHtml = _pushPending.length
         ? `<div style="margin-top:10px; font-size:0.78rem;">
               <span style="color:var(--text-dim);">Pending in this batch:</span><br>
@@ -3631,11 +3634,10 @@ function _renderPushScanWidget() {
             <div>
                 <h2 style="margin:0;">📦 Place into ${target.bin_label}</h2>
                 <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
-                    Bin ${_pushIndex + 1} of ${_pushPlan.length} · ${destLabel} (${target.card_type}) ·
-                    expecting <strong>${expectedCount}</strong> card${expectedCount === 1 ? '' : 's'}
+                    Bin ${_pushIndex + 1} of ${_pushPlan.length} · ${destLabel} (${target.card_type})
                 </p>
                 <div style="margin-top:8px; font-size:0.85rem;">
-                    Scanned: <strong>${_pushPending.length}</strong>${remaining.length ? `, remaining: ${remaining.length}` : ''}
+                    Scanned: <strong>${_pushPending.length}</strong> · ${allSameDestRemaining} ${destLabel.toLowerCase()} cards remaining
                 </div>
             </div>
         </div>
@@ -3694,12 +3696,8 @@ function _pushHandleScan(barcode) {
         return;
     }
     _pushPending.push(barcode);
-    // If this barcode was planned for a different bin, move it: remove from
-    // that bin's expected list and add to the current bin so remaining count
-    // decrements properly.
-    if (!target.expected_barcodes.includes(barcode)) {
-        target.expected_barcodes.push(barcode);
-    }
+    // Remove from whichever other bin had it planned so it won't be
+    // expected there too.
     for (const step of _pushPlan) {
         if (step === target) continue;
         const idx = step.expected_barcodes.indexOf(barcode);
@@ -3733,10 +3731,6 @@ function _pushShowWarning(msg, kind) {
 async function _pushSendBatch() {
     if (_pushPending.length === 0) return;
     const target = _pushPlan[_pushIndex];
-    const expCount = target.expected_barcodes.length;
-    if (_pushPending.length < expCount) {
-        if (!confirm(`Only ${_pushPending.length} of ${expCount} expected cards scanned. Send partial batch? Remaining cards will reappear in a recomputed plan.`)) return;
-    }
     try {
         const r = await fetch(`/api/ingest/session/${_pushSessionId}/push-batch`, {
             method: 'POST',
