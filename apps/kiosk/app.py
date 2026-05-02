@@ -1076,6 +1076,14 @@ def list_products():
     params: list = []
     # Always require the kind tag (sealed or slab)
     _add_bucket_clause(where, params, [kind], {kind: [tag]})
+    # Exclude items that are also tagged 'accessories'. Shopify gets
+    # ambiguous: Chessex dice / Gamegenic playmats / sleeves all carry
+    # the 'sealed' tag because they ship in shrink wrap, but they aren't
+    # TCG sealed product. The 'accessories' tag reliably marks them.
+    if kind == "sealed":
+        acc_frag, acc_pat = _csv_tag_clause("accessories")
+        where.append(f"NOT ({acc_frag})")
+        params.append(acc_pat)
     if q:
         where.append("title ILIKE %s")
         params.append(f"%{q}%")
