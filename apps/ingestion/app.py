@@ -3342,6 +3342,14 @@ def push_plan(session_id):
         except ValueError as e:
             return jsonify({"error": f"Cannot plan storage for {ctype}: {e}"}), 400
 
+        # Look up available capacity for each assigned bin
+        bin_ids = [a["bin_id"] for a in assignments]
+        bin_caps = {str(r["id"]): (r["capacity"] or 0) - (r["current_count"] or 0)
+                    for r in db.query("""
+                        SELECT id, capacity, current_count
+                          FROM storage_locations WHERE id = ANY(%s)
+                    """, (bin_ids,))}
+
         idx = 0
         for a in assignments:
             slice_cards = cards[idx:idx + a["count"]]
@@ -3352,6 +3360,7 @@ def push_plan(session_id):
                 "bin_label": a["bin_label"],
                 "card_type": ctype,
                 "count": a["count"],
+                "bin_available": bin_caps.get(a["bin_id"], a["count"]),
                 "expected_barcodes": [c["barcode"] for c in slice_cards],
                 "raw_card_ids": [str(c["id"]) for c in slice_cards],
             })
@@ -3375,6 +3384,13 @@ def push_plan(session_id):
         except Exception as e:
             return jsonify({"error": f"Cannot plan binder: {e}"}), 400
 
+        binder_ids = [a["bin_id"] for a in assignments]
+        binder_caps = {str(r["id"]): (r["capacity"] or 0) - (r["current_count"] or 0)
+                       for r in db.query("""
+                           SELECT id, capacity, current_count
+                             FROM storage_locations WHERE id = ANY(%s)
+                       """, (binder_ids,))}
+
         idx = 0
         for a in assignments:
             slice_cards = display_cards[idx:idx + a["count"]]
@@ -3385,6 +3401,7 @@ def push_plan(session_id):
                 "bin_label": a["bin_label"],
                 "card_type": "binder",
                 "count": a["count"],
+                "bin_available": binder_caps.get(a["bin_id"], a["count"]),
                 "expected_barcodes": [c["barcode"] for c in slice_cards],
                 "raw_card_ids": [str(c["id"]) for c in slice_cards],
             })

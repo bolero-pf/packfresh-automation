@@ -3637,7 +3637,7 @@ function _renderPushScanWidget() {
                     Bin ${_pushIndex + 1} of ${_pushPlan.length} · ${destLabel} (${target.card_type})
                 </p>
                 <div style="margin-top:8px; font-size:0.85rem;">
-                    Scanned: <strong>${_pushPending.length}</strong> · ${allSameDestRemaining} ${destLabel.toLowerCase()} cards remaining
+                    Scanned: <strong>${_pushPending.length} / ${target.bin_available || target.count}</strong> (bin capacity) · ${allSameDestRemaining} ${destLabel.toLowerCase()} cards remaining
                 </div>
             </div>
         </div>
@@ -3678,6 +3678,12 @@ function _pushHandleScan(barcode) {
     const bcHl = `<span class="push-warn-bc">${barcode}</span>`;
     if (_pushPending.includes(barcode)) {
         _pushShowWarning(`${bcHl} already scanned for this bin.`, 'info');
+        return;
+    }
+    // Enforce bin capacity
+    const binCap = target.bin_available || target.count;
+    if (_pushPending.length >= binCap) {
+        _pushShowWarning(`✗ ${target.bin_label} is full (${binCap} slots). Send this batch, then continue with the next bin.`);
         return;
     }
     // Accept any barcode routed to the same destination (storage/display),
