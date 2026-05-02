@@ -1756,32 +1756,57 @@ function renderReturnScanStep() {
       Scan every card you're pulling off display. When you're done, we'll batch-assign them to storage bins in one shot.
     </div>
     <div class="stats-bar" style="margin-bottom:14px;">
-      <div class="stat-box"><div class="stat-label">Scanned</div><div class="stat-val" style="color:var(--green);">${_returnScannedDisplay.length}</div></div>
+      <div class="stat-box"><div class="stat-label">Scanned</div><div class="stat-val" style="color:var(--green);" id="return-scan-count">0</div></div>
     </div>
-    <div style="max-height:420px;overflow-y:auto;">
-      ${_returnScannedDisplay.length === 0
-        ? '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:30px;">Scan a card to begin.</div>'
-        : _returnScannedDisplay.map((c,i) => `
-            <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(74,222,128,0.06);border:1px solid var(--green);border-radius:6px;margin-bottom:5px;">
-              ${c.image_url?`<img src="${esc(c.image_url)}" style="width:30px;aspect-ratio:2.5/3.5;object-fit:contain;">`:''}
-              <div style="flex:1;">
-                <div style="font-weight:600;font-size:0.88rem;">${esc(c.card_name)}</div>
-                <div style="font-size:0.72rem;color:var(--dim);">${esc(c.condition||'')} · ${esc(c.set_name||'')} · $${parseFloat(c.current_price||0).toFixed(2)}</div>
-              </div>
-              <button class="btn btn-sm" style="color:var(--red);background:none;border:none;" onclick="undoReturnScan(${i})">×</button>
-            </div>
-          `).join('')}
+    <div id="return-scan-list" style="max-height:420px;overflow-y:auto;">
+      <div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:30px;">Scan a card to begin.</div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
       <button class="btn" onclick="closeDisplayOverlay()">Cancel</button>
-      <button class="btn btn-green" onclick="finalizeReturn()" ${_returnScannedDisplay.length===0?'disabled':''}>Store ${_returnScannedDisplay.length} Card${_returnScannedDisplay.length===1?'':'s'}</button>
+      <button class="btn btn-green" id="return-finalize-btn" onclick="finalizeReturn()" disabled>Store 0 Cards</button>
     </div>
   `;
 }
 
+function appendReturnCard(card) {
+  const list = document.getElementById('return-scan-list');
+  if (!list) return;
+  // Clear placeholder on first card
+  if (_returnScannedDisplay.length === 1) list.innerHTML = '';
+  const idx = _returnScannedDisplay.length - 1;
+  const row = document.createElement('div');
+  row.setAttribute('data-barcode', card.barcode);
+  row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(74,222,128,0.06);border:1px solid var(--green);border-radius:6px;margin-bottom:5px;';
+  row.innerHTML = `
+    ${card.image_url?`<img src="${esc(card.image_url)}" style="width:30px;aspect-ratio:2.5/3.5;object-fit:contain;">`:''}
+    <div style="flex:1;">
+      <div style="font-weight:600;font-size:0.88rem;">${esc(card.card_name)}</div>
+      <div style="font-size:0.72rem;color:var(--dim);">${esc(card.condition||'')} · ${esc(card.set_name||'')} · $${parseFloat(card.current_price||0).toFixed(2)}</div>
+    </div>
+    <button class="btn btn-sm" style="color:var(--red);background:none;border:none;" onclick="undoReturnScan('${esc(card.barcode)}')">×</button>
+  `;
+  list.appendChild(row);
+  updateReturnCount();
+}
+
+function updateReturnCount() {
+  const list = document.getElementById('return-scan-list');
+  const n = list ? list.querySelectorAll('[data-barcode]').length : 0;
+  const counter = document.getElementById('return-scan-count');
+  if (counter) counter.textContent = n;
+  const btn = document.getElementById('return-finalize-btn');
+  if (btn) {
+    btn.disabled = n === 0;
+    btn.textContent = `Store ${n} Card${n===1?'':'s'}`;
+  }
+}
+
 async function handleReturnScan(barcode) {
-  if (_returnScannedDisplay.some(c => c.barcode === barcode)) {
+  const list = document.getElementById('return-scan-list');
+  if (_returnScannedDisplay.some(c => c.barcode === barcode) ||
+      (list && list.querySelector(`[data-barcode="${barcode}"]`))) {
     flash('green');
+    toast('Already scanned', 'green');
     return;
   }
   try {
@@ -1789,24 +1814,36 @@ async function handleReturnScan(barcode) {
     _returnScannedDisplay.push(d.card);
     flash('green');
     toast(`↩ ${d.card.card_name}`, 'green');
-    renderReturnScanStep();
+    appendReturnCard(d.card);
   } catch(e) {
     flash('red');
     toast(`✕ ${e.message}`, 'red');
   }
 }
 
-function undoReturnScan(idx) {
-  _returnScannedDisplay.splice(idx, 1);
-  renderReturnScanStep();
+function undoReturnScan(barcode) {
+  _returnScannedDisplay = _returnScannedDisplay.filter(c => c.barcode !== barcode);
+  const list = document.getElementById('return-scan-list');
+  if (list) {
+    const row = list.querySelector(`[data-barcode="${barcode}"]`);
+    if (row) row.remove();
+  }
+  if (_returnScannedDisplay.length === 0 && list) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:30px;">Scan a card to begin.</div>';
+  }
+  updateReturnCount();
 }
 
 async function finalizeReturn() {
-  if (!_returnScannedDisplay.length) return;
+  // Read barcodes from the DOM as the source of truth
+  let barcodes = _returnScannedDisplay.map(c => c.barcode);
+  if (!barcodes.length) {
+    const list = document.getElementById('return-scan-list');
+    if (list) barcodes = [...list.querySelectorAll('[data-barcode]')].map(el => el.getAttribute('data-barcode'));
+  }
+  if (!barcodes.length) return;
   try {
-    const d = await post('/api/display/return/finalize', {
-      barcodes: _returnScannedDisplay.map(c => c.barcode),
-    });
+    const d = await post('/api/display/return/finalize', { barcodes });
     // Show full-screen result (mirrors the existing Return Queue store result)
     document.getElementById('display-overlay-content').innerHTML = `
       <div style="font-size:1.1rem;font-weight:700;color:var(--green);margin-bottom:18px;">
