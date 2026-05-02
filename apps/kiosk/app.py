@@ -2705,14 +2705,16 @@ def webhook_order_paid():
     if order_skus:
         try:
             ph = ",".join(["%s"] * len(order_skus))
-            sold_raw = db.query(f"""
-                UPDATE raw_cards
-                SET state = 'SOLD', current_hold_id = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE barcode IN ({ph})
-                  AND state = 'PENDING_SALE'
-                RETURNING id, barcode, shopify_product_id, shopify_variant_id
-            """, tuple(order_skus))
+            with db.get_cursor(commit=True) as cur:
+                cur.execute(f"""
+                    UPDATE raw_cards
+                    SET state = 'SOLD', current_hold_id = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE barcode IN ({ph})
+                      AND state = 'PENDING_SALE'
+                    RETURNING id, barcode, shopify_product_id, shopify_variant_id
+                """, tuple(order_skus))
+                sold_raw = cur.fetchall()
             for card in (sold_raw or []):
                 pid = card.get("shopify_product_id")
                 vid = card.get("shopify_variant_id")
