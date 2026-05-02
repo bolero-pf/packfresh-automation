@@ -37,6 +37,23 @@ POKEMON_TIER_ORDER = [
     "Promo",
 ]
 
+# Compact display labels for chips. Filtering still keys off the full name
+# (sent as `value`); only the on-chip text changes. Common community
+# abbreviations so collectors recognize them at a glance and the chip
+# doesn't have to wrap to two lines.
+POKEMON_RARITY_DISPLAY = {
+    "Special Illustration Rare": "SIR",
+    "Illustration Rare":         "IR",
+}
+
+
+def pokemon_chip_label(rarity):
+    """Return the on-chip display string for a Pokemon rarity (abbreviated
+    when there's a known short form, otherwise the original)."""
+    if not rarity:
+        return rarity
+    return POKEMON_RARITY_DISPLAY.get(rarity, rarity)
+
 
 def canonicalize_rarity(rarity, game=None):
     """Return the canonical form of a rarity string for storage.

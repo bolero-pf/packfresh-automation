@@ -166,7 +166,7 @@ header {
    aligns with name/set instead of dangling off the end of a wrapped name. */
 .card-variant {
   align-self: flex-start; max-width: 100%; box-sizing: border-box;
-  font-size: 0.6rem; font-weight: 700; padding: 1px 6px; border-radius: 4px;
+  font-size: 0.7rem; font-weight: 700; padding: 2px 8px; border-radius: 5px;
   background: rgba(192,132,252,0.18); color: #c084fc;
   letter-spacing: 0.02em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -197,8 +197,8 @@ header {
 .cond-DMG { background: rgba(248,113,113,0.25); color: var(--red); }
 
 .variant-badge {
-  display: inline-block; font-size: 0.6rem; font-weight: 700;
-  padding: 1px 6px; border-radius: 4px; margin-left: 6px;
+  display: inline-block; font-size: 0.78rem; font-weight: 700;
+  padding: 3px 9px; border-radius: 6px; margin-left: 6px;
   background: rgba(192,132,252,0.18); color: #c084fc;
   letter-spacing: 0.02em; vertical-align: middle;
 }
@@ -608,7 +608,9 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .chip.on:hover {
   background: var(--accent); border-color: var(--accent);
 }
-.chip .qty { color: var(--dim); font-family: var(--mono); font-weight: 500; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+/* Stay in sans for the count — mono has a different x-height that floated
+   the number above the label baseline once we shrank the chip font. */
+.chip .qty { color: var(--dim); font-weight: 500; font-size: 0.7rem; font-variant-numeric: tabular-nums; opacity: 0.85; }
 .chip.on .qty { color: rgba(11,11,9,0.7); font-weight: 700; }
 .chip.cond-NM.on { background: #14532d; border-color: #4ade80; color: #4ade80; }
 .chip.cond-LP.on { background: rgba(223,163,42,0.22); border-color: #DFA32A; color: #DFA32A; }

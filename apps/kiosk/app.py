@@ -1681,17 +1681,24 @@ def filter_meta():
              GROUP BY rarity
              ORDER BY n DESC
         """, (game,))
-    rarity_options = [
-        {"value": r["k"], "label": r["k"], "qty": int(r["n"])}
-        for r in rarity_rows
-    ]
-    # Pokemon: sort by collector tier (Common → Uncommon → Rare → ... → Promo)
-    # rather than by qty. With 15+ Pokemon rarities the count order looks
-    # random — tier order reads as a logical progression so the rarity wall
-    # is easier to scan.
+    # Pokemon: abbreviate the long names ("Special Illustration Rare" → "SIR"),
+    # sort by collector tier (Common → Uncommon → Rare → ... → Promo) rather
+    # than by qty. With 15+ Pokemon rarities the count order looks random —
+    # tier order reads as a clear progression. `value` stays the full name so
+    # the filter query matches the underlying rarity strings unchanged; only
+    # the on-chip `label` is abbreviated.
     if game == "pokemon":
-        from rarity import pokemon_tier_index
+        from rarity import pokemon_tier_index, pokemon_chip_label
+        rarity_options = [
+            {"value": r["k"], "label": pokemon_chip_label(r["k"]), "qty": int(r["n"])}
+            for r in rarity_rows
+        ]
         rarity_options.sort(key=lambda o: pokemon_tier_index(o["value"]))
+    else:
+        rarity_options = [
+            {"value": r["k"], "label": r["k"], "qty": int(r["n"])}
+            for r in rarity_rows
+        ]
     out["filters"]["rarity"] = {
         "label":   "Rarity",
         "options": rarity_options,
