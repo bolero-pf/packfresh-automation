@@ -1358,9 +1358,57 @@ def list_eras():
     number of sets in that era — a chip that says 'Mega Evolution (4)'
     needs to mean 4 cards (the same number that lands on the next screen),
     not '4 sets that classify to ME'.
+
+    Faceted: respects all the same filters as /api/browse EXCEPT era itself,
+    so picking 'Rarity = IR' shrinks each era's count to 'IR cards in this
+    era,' the way Rarity / Energy already shrink against each other.
     """
     where = ["state = 'STORED'", "set_name IS NOT NULL", "current_hold_id IS NULL",
              "game = 'pokemon'"]
+    params: list = []
+
+    # Same filter param surface as /api/browse, minus `era`
+    q          = (request.args.get("q") or "").strip()
+    set_name   = (request.args.get("set") or "").strip()
+    conditions = [c.strip().upper() for c in (request.args.get("condition") or "").split(",") if c.strip()]
+    min_price  = request.args.get("min_price", type=float)
+    max_price  = request.args.get("max_price", type=float)
+    colors     = _multi_param("colors")
+    color_mode = (request.args.get("color_mode") or "any").strip().lower()
+    if color_mode not in ("any", "exactly"):
+        color_mode = "any"
+    card_types = _multi_param("card_type")
+    rarities   = _multi_param("card_rarity")
+
+    if q:
+        where.append("(card_name ILIKE %s OR set_name ILIKE %s OR card_number ILIKE %s)")
+        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+    if set_name:
+        where.append("set_name = %s")
+        params.append(set_name)
+    if conditions:
+        valid = [c for c in conditions if c in ("NM", "LP", "MP", "HP", "DMG")]
+        if valid:
+            cph = ",".join(["%s"] * len(valid))
+            where.append(f"condition IN ({cph})")
+            params += valid
+    if min_price is not None:
+        where.append("current_price >= %s")
+        params.append(min_price)
+    if max_price is not None:
+        where.append("current_price <= %s")
+        params.append(max_price)
+    if rarities:
+        ph = ",".join(["%s"] * len(rarities))
+        where.append(f"LOWER(rarity) IN ({ph})")
+        params += [r.lower() for r in rarities]
+    meta_clause, meta_params = _build_meta_filter_subquery(
+        "pokemon", colors, color_mode, card_types, rarities,
+    )
+    if meta_clause:
+        where.append(meta_clause)
+        params += meta_params
+
     rows = db.query(f"""
         SELECT set_name,
                COUNT(DISTINCT (
@@ -1373,8 +1421,8 @@ def list_eras():
         FROM raw_cards
         WHERE {' AND '.join(where)}
         GROUP BY set_name
-    """)
-    era_counts = {}
+    """, tuple(params))
+    era_counts: dict = {}
     for r in rows:
         era = _classify_era(r["set_name"])
         era_counts[era] = era_counts.get(era, 0) + int(r["tiles"])

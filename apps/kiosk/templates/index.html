@@ -1502,8 +1502,12 @@ function refreshFacetCounts() {
   if (_filterMetaRefreshTimer) clearTimeout(_filterMetaRefreshTimer);
   _filterMetaRefreshTimer = setTimeout(async () => {
     _filterMetaRefreshTimer = null;
-    await loadFilterMetaForDraft();
+    // Pull color/type/rarity counts AND era counts in parallel so the
+    // sheet's chip badges all reflect the same selection state after one
+    // round-trip cycle.
+    await Promise.all([loadFilterMetaForDraft(), loadEras()]);
     renderAdvancedFilterSections();
+    renderEraChips();
   }, 220);
 }
 
@@ -2164,8 +2168,29 @@ function setActiveKind(kind) {
 
 let _eraCache = [];
 async function loadEras() {
+  // Era counts are faceted against the current draft selection — picking a
+  // rarity, color, etc. re-shrinks every era's count to "this many cards in
+  // that era match." Same pattern as Rarity ↔ Color ↔ Card Type via
+  // /api/filter-meta. Filters are sourced from _draft when the sheet is
+  // open (the user's in-progress, unapplied selection) and from _filters
+  // otherwise (initial sheet open or post-apply refresh).
+  const f = _draft || _filters || {};
+  const p = new URLSearchParams();
+  if (f.colors && f.colors.size) {
+    p.set('colors', Array.from(f.colors).join(','));
+    if (f.colorMode === 'exactly') p.set('color_mode', 'exactly');
+  }
+  if (f.cardTypes && f.cardTypes.size) p.set('card_type',   Array.from(f.cardTypes).join(','));
+  if (f.rarities  && f.rarities.size)  p.set('card_rarity', Array.from(f.rarities).join(','));
+  if (f.conds     && f.conds.size && f.conds.size !== 5) p.set('condition', Array.from(f.conds).join(','));
+  if (f.minP) p.set('min_price', f.minP);
+  if (f.maxP) p.set('max_price', f.maxP);
+  if (f.set)  p.set('set', f.set);
+  const q = (document.getElementById('q')?.value || '').trim();
+  if (q) p.set('q', q);
+  const qs = p.toString();
   try {
-    const d = await get('/api/eras');
+    const d = await get('/api/eras' + (qs ? '?' + qs : ''));
     _eraCache = d.eras || [];
   } catch(e) { _eraCache = []; }
 }
