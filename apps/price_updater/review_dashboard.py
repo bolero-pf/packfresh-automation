@@ -985,6 +985,151 @@ def raw_run_dismiss_row(row_id):
     return jsonify({"ok": True})
 
 
+# ── Manual scrydex rebind for raw_cards the updater can't price ──────────
+#
+# Surfaces in-stock raw_cards whose (scrydex_id|tcgplayer_id, variant,
+# condition) doesn't resolve in scrydex_price_cache. The candidate query
+# mirrors raw_card_updater._lookup_cache_price exactly, so a row appears
+# here iff the nightly run would skip it. Operator picks the right
+# (scrydex_id, variant) via the search modal; we update raw_cards in
+# place for every physical copy of that identity.
+
+_REBIND_CANDIDATES_SQL = """
+SELECT
+    i.card_name,
+    i.set_name,
+    i.card_number,
+    i.condition,
+    COALESCE(i.variant, '') AS variant,
+    i.tcgplayer_id,
+    i.scrydex_id,
+    COUNT(*)                          AS copies,
+    ARRAY_AGG(i.id::text ORDER BY i.created_at) AS raw_card_ids,
+    MIN(i.current_price)              AS price_min,
+    MAX(i.current_price)              AS price_max,
+    MAX(i.image_url)                  AS image_url
+FROM raw_cards i
+WHERE i.state IN ('STORED', 'DISPLAY')
+  AND i.current_hold_id IS NULL
+  AND i.is_graded = FALSE
+  AND NOT EXISTS (
+    SELECT 1 FROM scrydex_price_cache c
+    WHERE c.product_type = 'card' AND c.price_type = 'raw'
+      AND c.market_price IS NOT NULL
+      AND UPPER(c.condition) = UPPER(i.condition)
+      AND CASE WHEN c.variant IS NULL
+                 OR regexp_replace(LOWER(c.variant), '[^a-z0-9]', '', 'g') IN ('normal','holofoil')
+               THEN ''
+               ELSE regexp_replace(LOWER(c.variant), '[^a-z0-9]', '', 'g')
+          END
+        = CASE WHEN i.variant IS NULL
+                 OR regexp_replace(LOWER(i.variant), '[^a-z0-9]', '', 'g') IN ('normal','holofoil')
+               THEN ''
+               ELSE regexp_replace(LOWER(i.variant), '[^a-z0-9]', '', 'g')
+          END
+      AND ((i.scrydex_id IS NOT NULL AND c.scrydex_id = i.scrydex_id)
+           OR (i.scrydex_id IS NULL AND i.tcgplayer_id IS NOT NULL
+               AND c.tcgplayer_id = i.tcgplayer_id))
+  )
+GROUP BY i.card_name, i.set_name, i.card_number, i.condition,
+         COALESCE(i.variant, ''), i.tcgplayer_id, i.scrydex_id
+ORDER BY i.card_name, i.set_name, i.card_number
+"""
+
+
+@app.route('/dashboard/raw-rebind')
+def raw_rebind_list():
+    """List in-stock raw_cards the nightly updater can't price, grouped by
+    identity, so an operator can manually pick the right scrydex variant."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+    groups = shared_db.query(_REBIND_CANDIDATES_SQL)
+    return render_template("raw_rebind.html", groups=groups)
+
+
+@app.route('/api/raw-rebind/search', methods=["GET"])
+def api_raw_rebind_search():
+    """Search scrydex_price_cache for candidate (scrydex_id, variant) tuples
+    that could be bound to a raw_card. Returns one row per
+    (scrydex_id, variant) with NM market price, image, and the canonical
+    tcgplayer_id Scrydex publishes for that printing."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+
+    name = (request.args.get("name") or "").strip()
+    set_name = (request.args.get("set") or "").strip()
+    number = (request.args.get("number") or "").strip()
+    if not name and not set_name and not number:
+        return jsonify({"ok": False, "error": "provide at least one of name/set/number"}), 400
+
+    where = ["product_type = 'card'", "price_type = 'raw'", "market_price IS NOT NULL"]
+    params: list = []
+    if name:
+        where.append("LOWER(product_name) LIKE %s")
+        params.append(f"%{name.lower()}%")
+    if set_name:
+        where.append("LOWER(expansion_name) LIKE %s")
+        params.append(f"%{set_name.lower()}%")
+    if number:
+        where.append("(card_number = %s OR card_number LIKE %s)")
+        params.append(number)
+        params.append(f"{number}/%")
+
+    sql = f"""
+        SELECT scrydex_id,
+               MAX(product_name)    AS product_name,
+               MAX(expansion_name)  AS expansion_name,
+               MAX(card_number)     AS card_number,
+               variant,
+               (ARRAY_AGG(tcgplayer_id) FILTER (WHERE tcgplayer_id IS NOT NULL))[1] AS tcgplayer_id,
+               MAX(market_price) FILTER (WHERE condition = 'NM') AS nm_price,
+               MAX(COALESCE(image_medium, image_small, image_large)) AS image_url
+        FROM scrydex_price_cache
+        WHERE {' AND '.join(where)}
+        GROUP BY scrydex_id, variant
+        ORDER BY MAX(expansion_name), MAX(card_number), variant
+        LIMIT 40
+    """
+    rows = shared_db.query(sql, tuple(params))
+    return jsonify({"ok": True, "results": [dict(r) for r in rows]})
+
+
+@app.route('/api/raw-rebind/apply', methods=["POST"])
+def api_raw_rebind_apply():
+    """Bind a list of raw_cards to a chosen (scrydex_id, variant). Writes
+    raw_cards.scrydex_id and raw_cards.variant; leaves tcgplayer_id alone
+    so we don't lose provenance for the original PPT mapping."""
+    from flask import jsonify
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+
+    body = request.get_json(silent=True) or {}
+    raw_card_ids = body.get("raw_card_ids") or []
+    scrydex_id   = (body.get("scrydex_id") or "").strip()
+    variant      = (body.get("variant") or "").strip()
+
+    if not raw_card_ids or not isinstance(raw_card_ids, list):
+        return jsonify({"ok": False, "error": "raw_card_ids required"}), 400
+    if not scrydex_id or not variant:
+        return jsonify({"ok": False, "error": "scrydex_id and variant required"}), 400
+
+    try:
+        updated = shared_db.execute(
+            """UPDATE raw_cards
+                  SET scrydex_id = %s, variant = %s
+                WHERE id = ANY(%s::uuid[])
+                  AND state IN ('STORED','DISPLAY')""",
+            (scrydex_id, variant, raw_card_ids),
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"DB update failed: {e}"}), 502
+    return jsonify({"ok": True, "updated": updated})
+
+
 @app.route('/dashboard/slab-backfill')
 def slab_backfill_page():
     """Page that runs the slab tcg_id backfill in dry-run mode and shows

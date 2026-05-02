@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Raw Card Rebind</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
+    <style>
+        body { padding: 24px; max-width: 1400px; margin: 0 auto; }
+        h1 { font-size: 1.4rem; margin-bottom: 4px; }
+        .sub { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th, td { border-bottom: 1px solid var(--border); padding: 10px 8px; text-align: left; vertical-align: top; }
+        th { background: var(--surface); color: var(--text-dim); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+        tr:hover td { background: var(--surface-2); }
+        .num { font-family: var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; }
+        .mono { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-dim); }
+        .empty { padding: 40px; text-align: center; color: var(--text-dim); border: 1px dashed var(--border); border-radius: 8px; }
+        .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; background: var(--surface-2); color: var(--text-dim); }
+        .pill.copies { background: rgba(79,125,249,0.18); color: #7aadff; }
+        .thumb { width: 48px; height: 66px; object-fit: cover; border-radius: 4px; background: var(--surface-2); }
+
+        .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; }
+        .modal-bg.show { display: flex; }
+        .modal { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; max-width: 900px; width: 92%; max-height: 86vh; overflow: hidden; display: flex; flex-direction: column; }
+        .modal-head { padding: 16px 18px; border-bottom: 1px solid var(--border); display: flex; gap: 12px; align-items: center; }
+        .modal-head h2 { font-size: 1.05rem; margin: 0; flex: 1; }
+        .modal-body { padding: 14px 18px; overflow-y: auto; flex: 1; }
+        .modal-foot { padding: 10px 18px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+
+        .search-row { display: grid; grid-template-columns: 2fr 1.5fr 0.7fr auto; gap: 8px; margin-bottom: 14px; }
+        .search-row input { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; color: var(--text); font-family: var(--font-sans); }
+
+        .results { display: grid; gap: 8px; }
+        .result { display: grid; grid-template-columns: 60px 1fr auto; gap: 12px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; transition: background 80ms; }
+        .result:hover { background: var(--surface-2); }
+        .result img { width: 56px; height: 78px; object-fit: cover; border-radius: 4px; background: var(--surface-2); }
+        .result .meta { font-size: 0.88rem; }
+        .result .meta .name { font-weight: 600; }
+        .result .meta .sub2 { color: var(--text-dim); font-size: 0.82rem; margin-top: 2px; }
+        .result .price { font-family: var(--font-mono); font-weight: 600; }
+
+        .toast { position: fixed; bottom: 24px; right: 24px; padding: 10px 14px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border); color: var(--text); font-size: 0.9rem; opacity: 0; transition: opacity 200ms; }
+        .toast.show { opacity: 1; }
+        .toast.ok  { border-color: rgba(34,197,94,0.5); }
+        .toast.err { border-color: rgba(239,68,68,0.5); }
+    </style>
+</head>
+<body>
+    <div style="display:flex; gap:16px; align-items:center; margin-bottom:16px; padding-bottom:10px; border-bottom:1px solid var(--border); font-size:0.88rem; font-weight:600;">
+        <a href="/dashboard/review" style="color:var(--accent);">Price Review</a>
+        <a href="/dashboard/slab-runs" style="color:var(--accent);">Slab Runs</a>
+        <a href="/dashboard/raw-runs" style="color:var(--accent);">Raw Runs</a>
+        <a href="/dashboard/raw-rebind" style="color:var(--text-dim);">Raw Rebind</a>
+        <a href="/dashboard/runlog" style="color:var(--accent);">Live Log</a>
+    </div>
+
+    <h1>Raw Card Rebind</h1>
+    <div class="sub">
+        In-stock raw cards the nightly updater can't price. Click <em>Find match</em> to
+        search the Scrydex catalog and bind the right printing — every physical copy of
+        the same identity is updated together.
+    </div>
+
+    {% if not groups %}
+        <div class="empty">Nothing to rebind. Every in-stock raw card resolves cleanly. ✓</div>
+    {% else %}
+    <table>
+        <thead>
+            <tr>
+                <th></th>
+                <th>Card</th>
+                <th>Set</th>
+                <th>#</th>
+                <th>Cond</th>
+                <th>Variant</th>
+                <th>Current binding</th>
+                <th class="num">Price</th>
+                <th class="num">Copies</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for g in groups %}
+            <tr data-name="{{ g.card_name }}"
+                data-set="{{ g.set_name }}"
+                data-number="{{ g.card_number or '' }}"
+                data-ids='{{ g.raw_card_ids|tojson }}'>
+                <td>
+                    {% if g.image_url %}
+                        <img class="thumb" src="{{ g.image_url }}" alt="">
+                    {% else %}
+                        <div class="thumb"></div>
+                    {% endif %}
+                </td>
+                <td><strong>{{ g.card_name }}</strong></td>
+                <td>{{ g.set_name }}</td>
+                <td class="mono">{{ g.card_number or '—' }}</td>
+                <td class="mono">{{ g.condition }}</td>
+                <td class="mono">{{ g.variant or '—' }}</td>
+                <td class="mono">
+                    {% if g.scrydex_id %}sx={{ g.scrydex_id }}<br>{% endif %}
+                    {% if g.tcgplayer_id %}tcg={{ g.tcgplayer_id }}{% endif %}
+                    {% if not g.scrydex_id and not g.tcgplayer_id %}<em>none</em>{% endif %}
+                </td>
+                <td class="num mono">
+                    {% if g.price_min is not none %}
+                        {% if g.price_min == g.price_max %}
+                            ${{ '%.2f'|format(g.price_min) }}
+                        {% else %}
+                            ${{ '%.2f'|format(g.price_min) }}–${{ '%.2f'|format(g.price_max) }}
+                        {% endif %}
+                    {% else %}—{% endif %}
+                </td>
+                <td class="num"><span class="pill copies">{{ g.copies }}</span></td>
+                <td>
+                    <button class="btn btn-primary btn-sm find-match">Find match</button>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <div class="modal-bg" id="modal">
+        <div class="modal">
+            <div class="modal-head">
+                <h2 id="modal-title">Find match</h2>
+                <button class="btn btn-secondary btn-sm" id="modal-close">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="search-row">
+                    <input type="text" id="q-name"   placeholder="Card name">
+                    <input type="text" id="q-set"    placeholder="Set name">
+                    <input type="text" id="q-number" placeholder="Card #">
+                    <button class="btn btn-primary" id="q-search">Search</button>
+                </div>
+                <div id="results" class="results"></div>
+                <div id="results-empty" class="empty" style="display:none;">No matches. Try loosening the search.</div>
+            </div>
+            <div class="modal-foot">
+                <span class="mono" id="apply-status"></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+    const modal = document.getElementById('modal');
+    const modalTitle = document.getElementById('modal-title');
+    const qName = document.getElementById('q-name');
+    const qSet  = document.getElementById('q-set');
+    const qNum  = document.getElementById('q-number');
+    const results = document.getElementById('results');
+    const resultsEmpty = document.getElementById('results-empty');
+    const applyStatus = document.getElementById('apply-status');
+    const toast = document.getElementById('toast');
+    let activeRow = null;
+    let activeIds = [];
+
+    function showToast(msg, kind) {
+        toast.textContent = msg;
+        toast.className = 'toast show ' + (kind || '');
+        setTimeout(() => toast.classList.remove('show'), 2400);
+    }
+
+    document.querySelectorAll('.find-match').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const tr = btn.closest('tr');
+            activeRow = tr;
+            activeIds = JSON.parse(tr.dataset.ids);
+            qName.value = tr.dataset.name || '';
+            qSet.value  = tr.dataset.set  || '';
+            qNum.value  = tr.dataset.number || '';
+            modalTitle.textContent = `Find match: ${tr.dataset.name} — ${tr.dataset.set} #${tr.dataset.number}`;
+            results.innerHTML = '';
+            resultsEmpty.style.display = 'none';
+            applyStatus.textContent = '';
+            modal.classList.add('show');
+            doSearch();
+        });
+    });
+
+    document.getElementById('modal-close').addEventListener('click', () => modal.classList.remove('show'));
+    modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('show'); });
+
+    document.getElementById('q-search').addEventListener('click', doSearch);
+    [qName, qSet, qNum].forEach(inp => {
+        inp.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+    });
+
+    async function doSearch() {
+        const params = new URLSearchParams();
+        if (qName.value.trim())  params.set('name',   qName.value.trim());
+        if (qSet.value.trim())   params.set('set',    qSet.value.trim());
+        if (qNum.value.trim())   params.set('number', qNum.value.trim());
+        results.innerHTML = '<div class="mono">Searching…</div>';
+        resultsEmpty.style.display = 'none';
+        try {
+            const r = await fetch('/api/raw-rebind/search?' + params.toString());
+            const d = await r.json();
+            if (!d.ok) {
+                results.innerHTML = `<div class="mono" style="color:#f87171;">${d.error || 'Search failed'}</div>`;
+                return;
+            }
+            renderResults(d.results || []);
+        } catch (err) {
+            results.innerHTML = `<div class="mono" style="color:#f87171;">${err.message}</div>`;
+        }
+    }
+
+    function renderResults(rows) {
+        results.innerHTML = '';
+        if (!rows.length) {
+            resultsEmpty.style.display = 'block';
+            return;
+        }
+        for (const r of rows) {
+            const div = document.createElement('div');
+            div.className = 'result';
+            const img = r.image_url ? `<img src="${r.image_url}" alt="">` : `<img>`;
+            const price = r.nm_price != null ? `$${Number(r.nm_price).toFixed(2)}` : '—';
+            div.innerHTML = `
+                ${img}
+                <div class="meta">
+                    <div class="name">${r.product_name || ''} <span class="mono" style="color:var(--text-dim);">#${r.card_number || ''}</span></div>
+                    <div class="sub2">${r.expansion_name || ''} · variant <strong>${r.variant}</strong> · scrydex_id <span class="mono">${r.scrydex_id}</span>${r.tcgplayer_id ? ` · tcg <span class="mono">${r.tcgplayer_id}</span>` : ''}</div>
+                </div>
+                <div class="price">${price}<br><span class="mono" style="font-size:0.7rem; color:var(--text-dim);">NM</span></div>
+            `;
+            div.addEventListener('click', () => applyBind(r));
+            results.appendChild(div);
+        }
+    }
+
+    async function applyBind(r) {
+        if (!confirm(`Bind ${activeIds.length} copy(ies) to ${r.scrydex_id} / ${r.variant}?`)) return;
+        applyStatus.textContent = 'Applying…';
+        try {
+            const resp = await fetch('/api/raw-rebind/apply', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    raw_card_ids: activeIds,
+                    scrydex_id:   r.scrydex_id,
+                    variant:      r.variant,
+                }),
+            });
+            const d = await resp.json();
+            if (!d.ok) {
+                applyStatus.textContent = '';
+                showToast(d.error || 'Apply failed', 'err');
+                return;
+            }
+            modal.classList.remove('show');
+            if (activeRow) activeRow.style.transition = 'opacity 300ms';
+            if (activeRow) activeRow.style.opacity = '0.3';
+            showToast(`Bound ${d.updated} copy(ies). Reloading…`, 'ok');
+            setTimeout(() => window.location.reload(), 800);
+        } catch (err) {
+            applyStatus.textContent = '';
+            showToast(err.message, 'err');
+        }
+    }
+    </script>
+</body>
+</html>
