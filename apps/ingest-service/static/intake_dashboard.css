@@ -78,18 +78,24 @@ th { font-size: 0.8rem; }
 /* ─── SESSION VIEW ─── */
 /* Full-width page section that takes over when a session is open. The
  * tab nav above is hidden via body.session-active so the session has the
- * full container width to work with. */
+ * full container width to work with. The shared admin bar (← Console)
+ * is position:sticky;top:0 with ~32px height — the inner sticky action
+ * bar must offset by that amount or it slides behind the admin bar.
+ * We expose --pf-admin-bar-h so future tweaks to the bar height update
+ * everything that depends on it. */
+:root { --pf-admin-bar-h: 32px; }
 #session-view {
     display: none;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 24px 28px;
-    margin-top: 16px;
+    margin: 24px auto;
 }
 #session-view.active { display: block; }
 body.session-active .tabs,
 body.session-active .tab-content { display: none !important; }
+.session-actions { top: var(--pf-admin-bar-h) !important; }
 
 /* ─── MODAL (overrides) ─── */
 .modal-overlay {

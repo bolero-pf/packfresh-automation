@@ -1181,20 +1181,19 @@ async function viewSession(sessionId, _preserveScroll) {
                 })()}
 
                 ${editable ? (() => {
-                    const showSealed = s.session_type === 'sealed' || s.session_type === 'mixed';
-                    const showRaw = s.session_type === 'raw' || s.session_type === 'mixed';
-                    const showToggle = showSealed && showRaw;
+                    // Always render both Add-Item subsections regardless of
+                    // session_type — staff often need to drop a card into a
+                    // sealed-imported session (and vice versa) without
+                    // re-creating the session as 'mixed'.
                     let addHtml = '<div style="margin-bottom:16px; padding:12px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">';
                     addHtml += '<h4 style="margin-bottom:10px; font-size:0.95rem;">➕ Add Item</h4>';
-                    if (showToggle) {
-                        addHtml += '<div style="display:flex; gap:4px; margin-bottom:10px;">';
-                        addHtml += '<button class="btn btn-sm btn-primary" id="session-add-type-sealed" onclick="switchSessionAddType(\'sealed\')">Sealed Product</button>';
-                        addHtml += '<button class="btn btn-sm btn-secondary" id="session-add-type-card" onclick="switchSessionAddType(\'card\')">Individual Card</button>';
-                        addHtml += '</div>';
-                    }
+                    addHtml += '<div style="display:flex; gap:4px; margin-bottom:10px;">';
+                    addHtml += '<button class="btn btn-sm btn-primary" id="session-add-type-sealed" onclick="switchSessionAddType(\'sealed\')">Sealed Product</button>';
+                    addHtml += '<button class="btn btn-sm btn-secondary" id="session-add-type-card" onclick="switchSessionAddType(\'card\')">Individual Card</button>';
+                    addHtml += '</div>';
                     const _sid = sessionId;
                     const _opct = s.offer_percentage;
-                    if (showSealed) {
+                    {
                         addHtml += '<div id="session-add-sealed">';
                         addHtml += '<div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">';
                         addHtml += '<div class="form-group" style="flex:2; min-width:180px; margin:0;"><label>Search Prices</label>';
@@ -1215,7 +1214,7 @@ async function viewSession(sessionId, _preserveScroll) {
                         addHtml += '<button class="btn btn-success btn-sm" onclick="submitManualSealedAdd(\'' + _sid + '\', ' + _opct + ')">Add</button>';
                         addHtml += '</div></div></div>';
                     }
-                    if (showRaw) {
+                    {
                         addHtml += '<div id="session-add-card" style="display:none;">';
                         // Graded toggle — mirrors the New Intake form so users can enter
                         // a PSA/BGS/CGC/SGC card directly without the "add raw → change to graded" detour.
