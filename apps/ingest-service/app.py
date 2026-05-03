@@ -43,9 +43,8 @@ import time
 import requests as _requests
 from decimal import Decimal, InvalidOperation
 
-from flask import Flask, Blueprint, request, jsonify, render_template, send_file, Response, g
+from flask import Flask, request, jsonify, render_template, send_file, Response, g
 from flask_cors import CORS
-from functools import wraps
 
 import db
 from price_provider import PriceProvider, PriceError, create_price_provider
@@ -101,72 +100,20 @@ else:
 
 cache_mgr = CacheManager(db, shopify, table_prefix="inventory_", cache_all_products=True)
 
+# ── Auth ──────────────────────────────────────────────────────────
+# Blanket JWT cookie auth on everything except /health, /ping, /pf-static.
+# Any authenticated user (any role) can reach the dashboard and APIs;
+# manager-only actions are gated per-route via the manager-override token
+# mechanism (see shared/auth.py decode_override_token).
+from auth import register_auth_hooks
+register_auth_hooks(app)
+
 # Register shared breakdown blueprint (replaces breakdown-cache, provider search, store-prices routes)
 from breakdown_routes import create_breakdown_blueprint
 app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: pricing))
 
-# Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
-# In Docker: WORKDIR=/app, shared/ is at /app/shared/ (not ../shared/)
-_pf_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared", "static")
-if not os.path.isdir(_pf_dir):
-    _pf_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared", "static")
-_pf_static = Blueprint(
-    "pf_static", __name__,
-    static_folder=_pf_dir,
-    static_url_path="/pf-static",
-)
-app.register_blueprint(_pf_static)
-
 # Ingest service URL — used to proxy listing creation requests
 INGEST_INTERNAL_URL = os.getenv("INGEST_INTERNAL_URL", "").rstrip("/")
-
-# ── Auth ──────────────────────────────────────────────────────────
-DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
-DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "secret")
-
-def check_auth(user, pwd):
-    return user == DASHBOARD_USER and pwd == DASHBOARD_PASS
-
-def authenticate():
-    return Response(
-        "🚫 Access Denied. You must provide valid credentials.", 401,
-        {"WWW-Authenticate": 'Basic realm="Login Required"'}
-    )
-
-def requires_auth(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if getattr(g, 'user', None):
-            return f(*args, **kwargs)  # JWT already validated
-        auth = request.authorization
-        if not auth or not check_auth(auth.username, auth.password):
-            return authenticate()
-        return f(*args, **kwargs)
-    return decorated
-
-
-@app.before_request
-def _check_jwt_auth():
-    """Validate JWT cookie from admin portal."""
-    if request.path in ('/health', '/ping', '/favicon.ico') or request.path.startswith(('/static', '/pf-static')):
-        return
-    try:
-        from auth import require_auth as jwt_auth
-        result = jwt_auth()
-        if result is None:
-            return None  # JWT valid — skip old basic auth
-    except Exception:
-        pass
-
-@app.after_request
-def _add_admin_bar(response):
-    try:
-        from auth import inject_admin_bar, get_current_user
-        if get_current_user():
-            return inject_admin_bar(response)
-    except Exception:
-        pass
-    return response
 
 # Initialize DB pool on first request
 @app.before_request
@@ -187,7 +134,6 @@ def close_db(exception):
 # ==========================================
 
 @app.route("/")
-@requires_auth
 def index():
     return render_template("intake_dashboard.html")
 

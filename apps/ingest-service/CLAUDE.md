@@ -2,9 +2,8 @@
 > This is the **intake** service despite the directory name. See root CLAUDE.md.
 
 ## Key Files
-- **app.py** — Flask routes and API endpoints. `/api/intake/sessions` is the main session listing endpoint (~line 589)
+- **app.py** — Flask routes and API endpoints
 - **intake.py** — Business logic for sessions (create, list, update offers, add items)
-- **ingestion_app.py** — Ingestion-side logic (push items, partial ingestion)
 - **schema.sql** — DB schema
 - **templates/intake_dashboard.html** — Main dashboard UI (single-page app with tabs)
 

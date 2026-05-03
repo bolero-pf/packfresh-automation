@@ -1,0 +1,240 @@
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+
+/* ─── HEADER ─── */
+header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 0;
+    margin-bottom: 24px;
+}
+header .container { display: flex; align-items: center; gap: 16px; }
+.logo { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px; }
+.logo span { color: var(--accent); }
+header .status { margin-left: auto; font-size: 0.85rem; color: var(--text-dim); }
+.status-dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 6px;
+}
+.status-dot.ok { background: var(--green); }
+.status-dot.warn { background: var(--amber); }
+
+/* ─── TABS ─── */
+.tabs {
+    display: flex; gap: 4px; margin-bottom: 24px;
+    border-bottom: 1px solid var(--border); padding-bottom: 0;
+}
+.tab {
+    padding: 10px 20px; background: none; border: none;
+    border-bottom: 2px solid transparent; cursor: pointer;
+    font-size: 0.9rem; font-weight: 500; color: var(--text-dim);
+    transition: all 0.15s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.subtab-content { /* shown/hidden via JS */ }
+
+/* ─── CARDS (overrides) ─── */
+.card { padding: 24px; margin-bottom: 20px; }
+.card h2 { font-size: 1.2rem; font-weight: 600; margin-bottom: 16px; }
+
+/* ─── FORMS ─── */
+.form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+label { font-size: 0.85rem; font-weight: 500; text-transform: none; letter-spacing: normal; }
+input, select, textarea { padding: 10px 12px; font-size: 0.95rem; }
+input[type="file"] { padding: 8px; }
+input[type="file"]::file-selector-button {
+    background: var(--accent); color: #fff; border: none;
+    padding: 6px 14px; border-radius: 4px; cursor: pointer;
+    margin-right: 10px; font-size: 0.85rem;
+}
+
+/* ─── BUTTONS (overrides) ─── */
+.btn { padding: 10px 20px; font-size: 0.9rem; }
+.btn-sm { padding: 6px 12px; font-size: 0.82rem; }
+
+/* ─── STATS ─── */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 20px; }
+.stat {
+    background: var(--surface-2); border-radius: 8px; padding: 16px;
+    border: 1px solid var(--border);
+}
+.stat-label { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
+.stat-value { font-size: 1.6rem; font-weight: 700; }
+
+/* ─── BADGES (overrides) ─── */
+.badge { font-size: 0.78rem; text-transform: none; letter-spacing: normal; }
+
+/* ─── ALERTS (overrides) ─── */
+.alert { margin-bottom: 16px; font-size: 0.9rem; }
+
+/* ─── TABLE (overrides) ─── */
+th, td { font-size: 0.88rem; }
+th { font-size: 0.8rem; }
+.row-unmapped { background: var(--amber-bg); }
+
+/* ─── MODAL (overrides) ─── */
+.modal-overlay {
+    align-items: flex-start;
+    backdrop-filter: blur(4px);
+    padding: 40px 20px;
+    overflow-y: auto;
+}
+/* Mapping modal must stack ABOVE session modal */
+#mapping-modal { z-index: 1100; }
+/* Themed prompt/confirm modal stacks above everything */
+#themed-prompt-overlay { z-index: 1200; align-items: center; }
+.modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 28px; width: 90%; max-width: 640px;
+    max-height: 85vh; overflow-y: auto; position: relative;
+}
+.modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.modal-header h3 { font-size: 1.2rem; }
+.modal-close {
+    background: none; border: none; color: var(--text-dim);
+    font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1;
+}
+/* Sticky close button that follows scroll */
+.modal-close-sticky {
+    position: sticky; top: 0; float: right;
+    background: var(--surface-2); border: 1px solid var(--border);
+    color: var(--text); font-size: 1.3rem; cursor: pointer;
+    width: 36px; height: 36px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 10; margin-top: -8px; margin-right: -8px;
+    transition: all 0.15s;
+}
+.modal-close-sticky:hover { background: var(--red); color: #fff; border-color: var(--red); }
+
+/* Action dropdown — fixed position to avoid overflow issues */
+.action-dropdown {
+    display: none; position: fixed;
+    z-index: 1050; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px; min-width: 200px; width: auto; max-width: 260px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.action-dropdown.show { display: block !important; }
+.action-dropdown button {
+    display: block; width: 100%; text-align: left; font-size: 0.8rem;
+    background: none; color: var(--text); padding: 8px 10px;
+    border: none; border-radius: 4px; cursor: pointer;
+    white-space: nowrap;
+}
+.action-dropdown button:hover { background: var(--surface); }
+.action-dropdown hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+
+/* Themed prompt modal */
+.prompt-modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; width: 90%; max-width: 420px;
+}
+.prompt-modal h3 { font-size: 1.1rem; margin-bottom: 12px; }
+.prompt-modal p { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 16px; }
+.prompt-modal input, .prompt-modal textarea {
+    width: 100%; margin-bottom: 12px;
+}
+.prompt-modal .prompt-buttons {
+    display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;
+}
+.divider { text-align: center; color: var(--text-dim); margin: 16px 0; font-size: 0.85rem; position: relative; }
+.divider::before, .divider::after {
+    content: ''; position: absolute; top: 50%; height: 1px;
+    background: var(--border); width: 40%;
+}
+.divider::before { left: 0; }
+.divider::after { right: 0; }
+
+/* ─── SEARCH RESULTS ─── */
+.search-result {
+    padding: 12px; border: 1px solid var(--border); border-radius: 6px;
+    margin-top: 8px; cursor: pointer; transition: all 0.15s;
+}
+.search-result:hover { border-color: var(--accent); background: var(--surface-2); }
+.search-result h4 { font-size: 0.95rem; margin-bottom: 4px; }
+.search-result p { font-size: 0.82rem; color: var(--text-dim); }
+
+/* ─── LOADING ─── */
+.loading { text-align: center; padding: 40px; color: var(--text-dim); }
+.spinner {
+    display: inline-block; width: 20px; height: 20px;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── RESPONSIVE ─── */
+@media (max-width: 768px) {
+    .container { padding: 10px; }
+    .form-row { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: 1fr 1fr; }
+    .stat { padding: 10px; }
+    .stat-value { font-size: 1.2rem; }
+
+    /* Modal fills screen on mobile */
+    .modal-overlay { padding: 10px; }
+    .modal { max-width: 100%; padding: 16px; max-height: 92vh; }
+    .prompt-modal { max-width: 100%; padding: 16px; }
+
+    /* Table: make it scrollable but keep action column visible */
+    table { font-size: 0.8rem; }
+    th, td { padding: 8px 6px; }
+    
+    /* Stack tab bar and allow scroll */
+    .tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+    .tab { white-space: nowrap; padding: 8px 12px; font-size: 0.82rem; }
+
+    /* Bigger touch targets */
+    .btn { min-height: 40px; padding: 10px 16px; }
+    .btn-sm { min-height: 34px; padding: 8px 12px; }
+    .action-dropdown button { padding: 12px 10px; font-size: 0.85rem; }
+    .search-result { padding: 14px; }
+
+    /* Session detail: hide less important columns */
+    .hide-mobile { display: none; }
+
+    header .container { flex-wrap: wrap; }
+    .logo { font-size: 1.2rem; }
+
+    /* Action dropdown → bottom sheet */
+    .action-dropdown {
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        top: auto !important;
+        border-radius: 12px 12px 0 0;
+        min-width: auto !important;
+        max-width: none !important;
+        width: auto !important;
+        padding: 8px 8px 20px;
+        max-height: 60vh;
+        overflow-y: auto;
+        z-index: 99999 !important;
+        box-shadow: 0 -4px 24px rgba(0,0,0,0.5);
+    }
+    .action-dropdown button { min-height: 48px; white-space: normal; }
+
+    /* Modal: full-width, no horizontal overflow */
+    .modal {
+        max-width: 100% !important;
+        width: 100% !important;
+        padding: 12px !important;
+        border-radius: 8px;
+    }
+    .modal-overlay { padding: 4px !important; }
+    .modal-close-sticky { width: 40px; height: 40px; font-size: 1.4rem; }
+
+    /* Prevent horizontal scroll inside modal */
+    .modal table { table-layout: auto; }
+    .modal .name-cell { max-width: 200px; overflow-wrap: break-word; word-break: break-word; }
+
+    /* Card headers */
+    .card h2 { font-size: 1.05rem; }
+}
+
+@media (max-width: 480px) {
+    .stats { grid-template-columns: 1fr; }
+}
