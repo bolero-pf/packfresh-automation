@@ -5037,41 +5037,65 @@ function renderMetaStats(panel, data) {
     const t = data.totals || {};
     const cats = data.categories || [];
     if (!cats.length) {
-        panel.innerHTML = '';  // empty session → nothing to show
+        panel.innerHTML = '';
         return;
     }
 
+    // Header — REAL margin uses sell_value (store price where listed,
+    // market price as fallback) vs paid cash/credit. The tautological
+    // 'offer percentage' margin is intentionally not shown.
     const headerStats = `
         <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:baseline; padding:10px 14px; background:var(--surface-2); border:1px solid var(--border); border-radius:8px 8px 0 0; border-bottom:none;">
-            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">SKUs</span> <strong style="font-size:1rem;">${t.sku_count || 0}</strong></div>
+            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">SKUs</span> <strong style="font-size:1rem;">${t.sku_count || 0}</strong>${t.in_store_count != null ? ` <span style="color:var(--text-dim); font-size:0.78rem;">(${t.in_store_count} in store · ${_fmtPct(t.in_store_pct)})</span>` : ''}</div>
             <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Units</span> <strong style="font-size:1rem;">${t.qty || 0}</strong></div>
             <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Market</span> <strong style="font-size:1rem;">${_fmt$short(t.market_value)}</strong></div>
-            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Cash Offer</span> <strong style="font-size:1rem;">${_fmt$short(t.cash_offer)}</strong> <span style="color:${_marginColor(t.avg_margin_cash_pct)}; font-size:0.8rem;">(${_fmtPct(t.avg_margin_cash_pct)} margin)</span></div>
-            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Credit Offer</span> <strong style="font-size:1rem;">${_fmt$short(t.credit_offer)}</strong> <span style="color:${_marginColor(t.avg_margin_credit_pct)}; font-size:0.8rem;">(${_fmtPct(t.avg_margin_credit_pct)} margin)</span></div>
+            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Sell Value</span> <strong style="font-size:1rem;">${_fmt$short(t.sell_value)}</strong>${t.store_listed_value > 0 ? ` <span style="color:var(--text-dim); font-size:0.78rem;">(${_fmt$short(t.store_listed_value)} listed · rest est.)</span>` : ''}</div>
+            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Cash Margin</span> <strong style="font-size:1rem; color:${_marginColor(t.margin_cash_pct)};">${_fmtPct(t.margin_cash_pct)}</strong> <span style="color:var(--text-dim); font-size:0.78rem;">paid ${_fmt$short(t.cash_offer)}</span></div>
+            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Credit Margin</span> <strong style="font-size:1rem; color:${_marginColor(t.margin_credit_pct)};">${_fmtPct(t.margin_credit_pct)}</strong> <span style="color:var(--text-dim); font-size:0.78rem;">paid ${_fmt$short(t.credit_offer)}</span></div>
         </div>`;
 
-    const rows = cats.map(c => {
-        // Visualise category share with an inline bar in the % cell
+    const rows = cats.map((c, ci) => {
         const pct = Number(c.share_of_market_pct) || 0;
         const barWidth = Math.min(100, pct);
-        return `<tr>
-            <td style="padding:6px 12px;"><strong>${c.label}</strong></td>
-            <td style="padding:6px 12px; text-align:right; color:var(--text-dim);">${c.sku_count}</td>
-            <td style="padding:6px 12px; text-align:right; color:var(--text-dim);">${c.qty}</td>
-            <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.market_value)}</td>
-            <td style="padding:6px 12px; min-width:120px;">
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <div style="flex:1; height:6px; background:var(--surface); border-radius:3px; overflow:hidden;">
-                        <div style="height:100%; width:${barWidth}%; background:var(--accent);"></div>
+        const inStoreCoverage = c.sku_count > 0
+            ? Math.round((c.in_store_count || 0) / c.sku_count * 100)
+            : 0;
+        const storeBadge = c.in_store_count > 0
+            ? `<span style="font-size:0.7rem; color:var(--text-dim);">${c.in_store_count}/${c.sku_count} in store</span>`
+            : `<span style="font-size:0.7rem; color:var(--amber);">est. (none in store)</span>`;
+        const detailRows = (c.items || []).map(it => `
+            <tr style="background:var(--surface-2);">
+                <td colspan="2" style="padding:4px 12px 4px 24px; font-size:0.78rem;">${it.name || '?'}</td>
+                <td style="padding:4px 12px; text-align:right; font-size:0.78rem; color:var(--text-dim);">${it.qty}</td>
+                <td style="padding:4px 12px; text-align:right; font-size:0.78rem;">${_fmt$(it.market_price)}<small style="color:var(--text-dim);"> ea</small></td>
+                <td style="padding:4px 12px; font-size:0.78rem;">${it.in_store ? '<span style="color:var(--green);">listed</span>' : '<span style="color:var(--text-dim);">not listed</span>'}</td>
+                <td style="padding:4px 12px; text-align:right; font-size:0.78rem;">${it.store_price != null ? _fmt$(it.store_price) : '—'}</td>
+                <td colspan="3" style="padding:4px 12px; text-align:right; font-size:0.78rem; color:var(--text-dim);">paid ${_fmt$(it.offer_price)}</td>
+            </tr>`).join('');
+        return `<tr class="meta-cat-row" data-ci="${ci}" style="cursor:pointer;">
+                <td style="padding:6px 12px;"><span class="meta-twirl" style="display:inline-block; width:12px; color:var(--text-dim);">▸</span> <strong>${c.label}</strong><br>${storeBadge}</td>
+                <td style="padding:6px 12px; text-align:right; color:var(--text-dim);">${c.sku_count}</td>
+                <td style="padding:6px 12px; text-align:right; color:var(--text-dim);">${c.qty}</td>
+                <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.market_value)}</td>
+                <td style="padding:6px 12px; min-width:120px;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <div style="flex:1; height:6px; background:var(--surface); border-radius:3px; overflow:hidden;">
+                            <div style="height:100%; width:${barWidth}%; background:var(--accent);"></div>
+                        </div>
+                        <span style="font-size:0.78rem; color:var(--text-dim); width:42px; text-align:right;">${_fmtPct(pct)}</span>
                     </div>
-                    <span style="font-size:0.78rem; color:var(--text-dim); width:42px; text-align:right;">${_fmtPct(pct)}</span>
-                </div>
-            </td>
-            <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.cash_offer)}</td>
-            <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.credit_offer)}</td>
-            <td style="padding:6px 12px; text-align:right; color:${_marginColor(c.avg_margin_cash_pct)};">${_fmtPct(c.avg_margin_cash_pct)}</td>
-            <td style="padding:6px 12px; text-align:right; color:${_marginColor(c.avg_margin_credit_pct)};">${_fmtPct(c.avg_margin_credit_pct)}</td>
-        </tr>`;
+                </td>
+                <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.sell_value)}</td>
+                <td style="padding:6px 12px; text-align:right; color:${_marginColor(c.margin_cash_pct)};">${_fmtPct(c.margin_cash_pct)}</td>
+                <td style="padding:6px 12px; text-align:right; color:${_marginColor(c.margin_credit_pct)};">${_fmtPct(c.margin_credit_pct)}</td>
+            </tr>
+            <tr class="meta-cat-detail" data-ci="${ci}" style="display:none;">
+                <td colspan="8" style="padding:0;">
+                    <table style="width:100%; border-collapse:collapse;">
+                        ${detailRows || '<tr><td style="padding:6px 24px; font-size:0.78rem; color:var(--text-dim);">No items.</td></tr>'}
+                    </table>
+                </td>
+            </tr>`;
     }).join('');
 
     panel.innerHTML = `
@@ -5087,8 +5111,7 @@ function renderMetaStats(panel, data) {
                             <th style="padding:6px 12px; text-align:right;">Units</th>
                             <th style="padding:6px 12px; text-align:right;">Market</th>
                             <th style="padding:6px 12px;">Share</th>
-                            <th style="padding:6px 12px; text-align:right;">Cash</th>
-                            <th style="padding:6px 12px; text-align:right;">Credit</th>
+                            <th style="padding:6px 12px; text-align:right;">Sell</th>
                             <th style="padding:6px 12px; text-align:right;">Cash Margin</th>
                             <th style="padding:6px 12px; text-align:right;">Credit Margin</th>
                         </tr>
@@ -5097,6 +5120,21 @@ function renderMetaStats(panel, data) {
                 </table>
             </div>
         </details>`;
+
+    // Click a category row to expand its item list. Particularly useful
+    // for 'Other' so staff can see exactly which products fell through
+    // the tag taxonomy.
+    panel.querySelectorAll('.meta-cat-row').forEach(row => {
+        row.addEventListener('click', () => {
+            const ci = row.dataset.ci;
+            const detail = panel.querySelector(`.meta-cat-detail[data-ci="${ci}"]`);
+            if (!detail) return;
+            const open = detail.style.display !== 'none';
+            detail.style.display = open ? 'none' : '';
+            const twirl = row.querySelector('.meta-twirl');
+            if (twirl) twirl.textContent = open ? '▸' : '▾';
+        });
+    });
 }
 
 // Enrich offer tab rows with live breakdown summary badges (uses shared renderBreakdownBadge)
