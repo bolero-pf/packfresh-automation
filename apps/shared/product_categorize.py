@@ -24,18 +24,22 @@ from typing import Iterable
 #
 # Raw/Graded are handled before this list since they key off product_type.
 SEALED_RULES = [
-    ("ETB",                  {"etb"},                  ("elite trainer box",)),
-    ("Build & Battle",       {"buildbattle"},          ("build & battle", "build and battle", "build battle box")),
-    ("Blister",              {"blister"},              ("blister",)),
-    ("Sleeved Booster Pack", {"sleeved"},              ("sleeved booster",)),
-    ("Booster Bundle",       {"booster bundle"},       ("booster bundle",)),
-    ("Booster Box",          {"booster box"},          ("booster box",)),
-    ("Booster Pack",         {"booster pack"},         ("booster pack",)),
-    ("Premium Collection",   {"premium collection"},   ("premium collection", "ultra premium")),
-    ("Collection",           {"collection"},           ("collection",)),
-    ("Tin",                  {"tin"},                  (" tin", "tin ")),
-    ("Trainer Kit",          {"trainer kit"},          ("trainer kit",)),
-    ("Theme Deck",           {"theme deck", "deck"},   ("theme deck",)),
+    ("ETB",                  {"etb"},                            ("elite trainer box",)),
+    ("Build & Battle",       {"buildbattle"},                    ("build & battle", "build and battle", "build battle box")),
+    ("Blister",              {"blister"},                        ("blister",)),
+    ("Sleeved Booster Pack", {"sleeved"},                        ("sleeved booster",)),
+    ("Booster Bundle",       {"booster bundle"},                 ("booster bundle",)),
+    ("Booster Box",          {"booster box"},                    ("booster box",)),
+    ("Booster Pack",         {"booster pack"},                   ("booster pack",)),
+    ("Premium Collection",   {"premium collection"},             ("premium collection", "ultra premium")),
+    # Collection Box is the bulk of our 'collection' SKUs — V Box, VMAX
+    # Box, promo collection boxes, etc. Match it before generic
+    # 'collection' so the catchall doesn't swallow it.
+    ("Collection Box",       {"collection box"},                 ("collection box",)),
+    ("Collection",           {"collection"},                     ("collection",)),
+    ("Tin",                  {"tin"},                            (" tin", "tin ")),
+    ("Trainer Kit",          {"trainer kit"},                    ("trainer kit",)),
+    ("Theme Deck",           {"theme deck", "deck"},             ("theme deck",)),
 ]
 
 
@@ -89,6 +93,7 @@ DISPLAY_ORDER = [
     "Build & Battle",
     "Booster Bundle",
     "Premium Collection",
+    "Collection Box",
     "Collection",
     "Blister",
     "Sleeved Booster Pack",
