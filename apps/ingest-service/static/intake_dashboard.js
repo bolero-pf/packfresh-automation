@@ -147,7 +147,8 @@ document.getElementById('csv-upload-form').addEventListener('submit', async (e) 
     const form = new FormData();
     form.append('file', document.getElementById('csv-file').files[0]);
     form.append('customer_name', document.getElementById('csv-customer').value);
-    form.append('offer_percentage', document.getElementById('csv-offer-pct').value);
+    form.append('cash_percentage', document.getElementById('csv-cash-pct').value);
+    form.append('credit_percentage', document.getElementById('csv-credit-pct').value);
     form.append('is_distribution', document.getElementById('csv-distribution').checked ? '1' : '0');
 
     try {
@@ -199,7 +200,8 @@ document.getElementById('html-paste-form').addEventListener('submit', async (e) 
         const payload = {
             html: htmlContent,
             customer_name: document.getElementById('html-customer').value,
-            offer_percentage: document.getElementById('html-offer-pct').value,
+            cash_percentage: document.getElementById('html-cash-pct').value,
+            credit_percentage: document.getElementById('html-credit-pct').value,
             is_distribution: document.getElementById('html-distribution').checked,
         };
         let r = await fetch('/api/intake/upload-collectr-html', {
@@ -329,7 +331,8 @@ async function submitGenericCsv() {
         const form = new FormData();
         form.append('file', _genericCsvFile);
         form.append('customer_name', document.getElementById('generic-customer').value);
-        form.append('offer_percentage', document.getElementById('generic-offer-pct').value);
+        form.append('cash_percentage', document.getElementById('generic-cash-pct').value);
+        form.append('credit_percentage', document.getElementById('generic-credit-pct').value);
         form.append('is_distribution', document.getElementById('generic-distribution').checked ? '1' : '0');
         form.append('column_mapping', JSON.stringify(_genericCsvMapping));
 
@@ -379,7 +382,6 @@ async function submitGenericCsv() {
 let _intakeSetupOverride = null;        // override token + approver for the New Intake form
 let _sessionOverrides = {};             // sessionId → { token, approver }
 const ASSOCIATE_DEFAULTS = { cash: 65, credit: 75 };
-const MANAGER_CAP = 80;
 
 function _pfRole() {
     try { return (window._pfUser && window._pfUser.role) || 'associate'; }
@@ -389,9 +391,6 @@ function _pfRole() {
 function _outsideAssociate(cashPct, creditPct) {
     return Number(cashPct) !== ASSOCIATE_DEFAULTS.cash
         || Number(creditPct) !== ASSOCIATE_DEFAULTS.credit;
-}
-function _outsideManager(cashPct, creditPct) {
-    return Number(cashPct) > MANAGER_CAP || Number(creditPct) > MANAGER_CAP;
 }
 
 // Promise<{token, approver}> — null if cancelled, throws on PIN failure.
@@ -472,16 +471,15 @@ async function _promptManagerPin(reason) {
 }
 
 // For a given role + percentages, decide whether we need an override
-// token before submitting. Returns 'associate' | 'manager' | 'owner'
-// | 'ok' (no override needed). The label maps to which role's PIN
-// would unlock the submit.
+// token before submitting. Returns 'manager' (associate needs a manager
+// PIN) or 'ok' (everyone else, or associate inside defaults).
+//
+// Per the role-friction policy: managers and owners ("admin" users)
+// have ZERO friction — no caps, no PIN prompts. Only associates get
+// gated, and only when their values diverge from the canonical defaults.
 function _overrideNeeded(role, cashPct, creditPct) {
     role = (role || 'associate').toLowerCase();
-    if (role === 'owner') return 'ok';
-    if (role === 'manager') {
-        return _outsideManager(cashPct, creditPct) ? 'owner' : 'ok';
-    }
-    // associate
+    if (role !== 'associate') return 'ok';
     if (_outsideAssociate(cashPct, creditPct)) return 'manager';
     return 'ok';
 }
@@ -4551,18 +4549,16 @@ function _renderStickyActions(sessionId, s, items) {
 function _renderRoleLockBanner(sessionId, s) {
     const role = _pfRole();
     const ov = _sessionOverrides[sessionId];
-    if (role === 'owner' || s.accepted_offer_type) return '';
+    // Managers and owners are admin-equivalent: no banners, no caps, no friction.
+    if (role !== 'associate' || s.accepted_offer_type) return '';
     if (ov && ov.approver) {
         return `<div style="margin-bottom:12px; padding:8px 12px; background:var(--surface-2); border:1px solid var(--green); border-radius:6px; font-size:0.85rem;">
             <span style="color:var(--green); font-weight:600;">✓ Override:</span> ${ov.approver.name || 'Manager'} (${ov.approver.role || 'manager'}) authorized off-policy percentages on this session.
         </div>`;
     }
-    if (role === 'associate') {
-        return `<div style="margin-bottom:12px; padding:8px 12px; background:var(--surface-2); border:1px dashed var(--border); border-radius:6px; font-size:0.85rem; color:var(--text-dim);">
-            🔒 Percentages locked at defaults (Credit ${ASSOCIATE_DEFAULTS.credit}% / Cash ${ASSOCIATE_DEFAULTS.cash}%) — manager override required to change.
-        </div>`;
-    }
-    return '';
+    return `<div style="margin-bottom:12px; padding:8px 12px; background:var(--surface-2); border:1px dashed var(--border); border-radius:6px; font-size:0.85rem; color:var(--text-dim);">
+        🔒 Percentages locked at defaults (Credit ${ASSOCIATE_DEFAULTS.credit}% / Cash ${ASSOCIATE_DEFAULTS.cash}%) — manager override required to change.
+    </div>`;
 }
 
 // Triggered by either percentage <input> in the session modal. Reveals

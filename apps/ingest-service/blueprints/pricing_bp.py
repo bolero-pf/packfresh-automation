@@ -17,6 +17,7 @@ from helpers import (
     _effective_caps_from_role,
     _validate_offer_caps,
     _log_override_if_present,
+    enforce_offer_caps,
     OVERRIDE_ACTION,
     ASSOCIATE_DEFAULT_CASH,
     ASSOCIATE_DEFAULT_CREDIT,
@@ -49,6 +50,7 @@ bp = Blueprint("pricing", __name__)
 
 
 @bp.route("/api/intake/session/<session_id>/offer-percentage", methods=["POST"])
+@enforce_offer_caps
 def update_offer_percentage(session_id):
     """Update offer percentages and recalculate item offers.
 
@@ -80,9 +82,7 @@ def update_offer_percentage(session_id):
     if cash_pct is None and credit_pct is None:
         return jsonify({"error": "No percentage provided"}), 400
 
-    cap_err = _validate_offer_caps(data, cash_pct, credit_pct, session_id=session_id)
-    if cap_err:
-        return jsonify(cap_err), 403
+    # Cap validation runs in the @enforce_offer_caps decorator before this body.
 
     try:
         session = intake.update_session_percentages(

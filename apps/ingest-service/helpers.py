@@ -1,7 +1,8 @@
 """Shared helpers for intake blueprints."""
 import logging
-from decimal import Decimal
-from flask import g
+from decimal import Decimal, InvalidOperation
+from functools import wraps
+from flask import g, request, jsonify
 
 import db
 
@@ -28,15 +29,15 @@ def _serialize(obj):
 
 # ── Offer-percentage role caps + override token validation ─────────────
 #
-# Server is the authority on percentage caps. The frontend renders
-# associate inputs as read-only and offers a "Manager Override" button,
-# but a malicious associate could still hit the API directly. These
-# helpers enforce role policy on every endpoint that writes a
-# percentage.
+# Server is the authority on percentage caps. Associates are pinned to the
+# canonical defaults (65/75) unless a manager-or-better override token is
+# attached. Managers and owners are unrestricted — the policy is "ADMIN
+# users have zero friction; only associates need a PIN."
 OVERRIDE_ACTION = "offer_percentage"
 ASSOCIATE_DEFAULT_CASH = Decimal("65")
 ASSOCIATE_DEFAULT_CREDIT = Decimal("75")
-MANAGER_CAP = Decimal("80")
+# Kept for backward import compatibility — managers are no longer capped at 80%.
+MANAGER_CAP = Decimal("100")
 
 
 def _decode_override(data: dict):
@@ -64,10 +65,8 @@ def _effective_caps_from_role(user_role: str, override_payload):
         if rank.get(override_payload.get("role", ""), 0) > rank.get(role, 0):
             eff_role = override_payload.get("role")
 
-    if eff_role == "owner":
+    if eff_role in ("owner", "manager"):
         return (Decimal("0"), Decimal("100"), Decimal("0"), Decimal("100"))
-    if eff_role == "manager":
-        return (Decimal("0"), MANAGER_CAP, Decimal("0"), MANAGER_CAP)
     return (ASSOCIATE_DEFAULT_CASH, ASSOCIATE_DEFAULT_CASH,
             ASSOCIATE_DEFAULT_CREDIT, ASSOCIATE_DEFAULT_CREDIT)
 
@@ -121,3 +120,59 @@ def _log_override_if_present(data: dict, session_id: str,
         ))
     except Exception as e:
         logger.warning(f"session_overrides insert failed: {e}")
+
+
+# ── Cap-enforcement decorator ──────────────────────────────────────────
+#
+# Wraps any route that writes session percentages so the cap policy is
+# applied *before* the route runs. JSON bodies and multipart-form bodies
+# (file uploads) are both supported — file uploads is critical because
+# the three CSV/HTML upload endpoints set initial cash/credit percentages
+# from form fields and previously bypassed validation entirely.
+#
+# The decorator stashes the merged request data on g.percentage_data so
+# routes can pass it to _log_override_if_present after they have a
+# session_id without re-parsing.
+
+def _coerce_decimal(v):
+    if v is None or v == "":
+        return None
+    try:
+        return Decimal(str(v))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _gather_request_data() -> dict:
+    """Merge JSON + form into a single dict. JSON wins on key conflicts."""
+    data = {}
+    if request.form:
+        data.update(request.form.to_dict())
+    j = request.get_json(silent=True)
+    if isinstance(j, dict):
+        data.update(j)
+    return data
+
+
+def enforce_offer_caps(fn):
+    """Reject the request if the caller's role can't submit the percentages
+    in the request body. Owners and managers pass through with no cap;
+    associates are pinned to ASSOCIATE_DEFAULT_* unless a valid manager
+    override token is attached. The legacy `offer_percentage` parameter is
+    treated as a synonym for `cash_percentage` when no explicit cash value
+    is supplied.
+    """
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        data = _gather_request_data()
+        cash_pct = _coerce_decimal(data.get("cash_percentage"))
+        credit_pct = _coerce_decimal(data.get("credit_percentage"))
+        if cash_pct is None:
+            cash_pct = _coerce_decimal(data.get("offer_percentage"))
+        if cash_pct is not None or credit_pct is not None:
+            err = _validate_offer_caps(data, cash_pct, credit_pct)
+            if err:
+                return jsonify(err), 403
+        g.percentage_data = data  # for downstream _log_override_if_present
+        return fn(*args, **kwargs)
+    return wrapper

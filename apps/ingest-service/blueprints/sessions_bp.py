@@ -17,6 +17,7 @@ from helpers import (
     _effective_caps_from_role,
     _validate_offer_caps,
     _log_override_if_present,
+    enforce_offer_caps,
     OVERRIDE_ACTION,
     ASSOCIATE_DEFAULT_CASH,
     ASSOCIATE_DEFAULT_CREDIT,
@@ -54,6 +55,7 @@ import io, csv
 
 
 @bp.route("/api/intake/upload-collectr", methods=["POST"])
+@enforce_offer_caps
 def upload_collectr():
     """Upload and parse a Collectr CSV export."""
     if "file" not in request.files:
@@ -62,19 +64,17 @@ def upload_collectr():
     file = request.files["file"]
     customer_name = request.form.get("customer_name", "").strip() or "Unknown"
     try:
-        offer_pct = Decimal(request.form.get("offer_percentage", "75"))
+        legacy_pct = request.form.get("offer_percentage")
         cash_raw = request.form.get("cash_percentage")
         credit_raw = request.form.get("credit_percentage")
-        cash_pct = Decimal(cash_raw) if cash_raw else offer_pct
-        credit_pct = Decimal(credit_raw) if credit_raw else None
+        cash_pct = (Decimal(cash_raw) if cash_raw
+                    else Decimal(legacy_pct) if legacy_pct
+                    else ASSOCIATE_DEFAULT_CASH)
+        credit_pct = Decimal(credit_raw) if credit_raw else ASSOCIATE_DEFAULT_CREDIT
+        offer_pct = cash_pct  # item math stays cash-denominated
     except InvalidOperation:
         return jsonify({"error": "Invalid percentage"}), 400
     force_product_type = request.form.get("force_product_type")  # 'raw' or 'sealed' or None
-
-    # Item-level offer math stays denominated in cash (the operational
-    # baseline) until a customer picks an offer type. The credit
-    # projection is recomputed live on read.
-    offer_pct = cash_pct
 
     # Read file
     try:
@@ -188,6 +188,7 @@ def upload_collectr():
 
 
 @bp.route("/api/intake/upload-collectr-html", methods=["POST"])
+@enforce_offer_caps
 def upload_collectr_html():
     """Parse pasted Collectr HTML (from portfolio page) into a session.
     If session_id is provided, appends items to that existing session instead of creating new.
@@ -199,15 +200,16 @@ def upload_collectr_html():
     existing_session_id = data.get("session_id")
     force_product_type = data.get("force_product_type")  # 'raw' or 'sealed' or None
     try:
-        offer_pct = Decimal(str(data.get("offer_percentage", "75")))
+        legacy_raw = data.get("offer_percentage")
         cash_raw = data.get("cash_percentage")
         credit_raw = data.get("credit_percentage")
-        cash_pct = Decimal(str(cash_raw)) if cash_raw is not None else offer_pct
-        credit_pct = Decimal(str(credit_raw)) if credit_raw is not None else None
+        cash_pct = (Decimal(str(cash_raw)) if cash_raw is not None
+                    else Decimal(str(legacy_raw)) if legacy_raw is not None
+                    else ASSOCIATE_DEFAULT_CASH)
+        credit_pct = Decimal(str(credit_raw)) if credit_raw is not None else ASSOCIATE_DEFAULT_CREDIT
+        offer_pct = cash_pct  # item math stays cash-denominated
     except InvalidOperation:
         return jsonify({"error": "Invalid percentage"}), 400
-    # Item math stays cash-denominated (see upload_collectr).
-    offer_pct = cash_pct
 
     if not html_content:
         return jsonify({"error": "No HTML content provided"}), 400
@@ -344,6 +346,7 @@ def preview_csv():
 
 
 @bp.route("/api/intake/upload-generic-csv", methods=["POST"])
+@enforce_offer_caps
 def upload_generic_csv():
     """Upload a generic CSV with flexible column mapping."""
     if "file" not in request.files:
@@ -352,14 +355,16 @@ def upload_generic_csv():
     file = request.files["file"]
     customer_name = request.form.get("customer_name", "").strip() or "Unknown"
     try:
-        offer_pct = Decimal(request.form.get("offer_percentage", "75"))
+        legacy_pct = request.form.get("offer_percentage")
         cash_raw = request.form.get("cash_percentage")
         credit_raw = request.form.get("credit_percentage")
-        cash_pct = Decimal(cash_raw) if cash_raw else offer_pct
-        credit_pct = Decimal(credit_raw) if credit_raw else None
+        cash_pct = (Decimal(cash_raw) if cash_raw
+                    else Decimal(legacy_pct) if legacy_pct
+                    else ASSOCIATE_DEFAULT_CASH)
+        credit_pct = Decimal(credit_raw) if credit_raw else ASSOCIATE_DEFAULT_CREDIT
+        offer_pct = cash_pct  # item math stays cash-denominated
     except InvalidOperation:
         return jsonify({"error": "Invalid percentage"}), 400
-    offer_pct = cash_pct  # item math stays cash-denominated
     force_product_type = request.form.get("force_product_type")  # 'raw' or 'sealed' or None
 
     # Get column overrides from form (JSON string)
@@ -488,6 +493,7 @@ def upload_generic_csv():
 
 
 @bp.route("/api/intake/create-session", methods=["POST"])
+@enforce_offer_caps
 def create_session():
     """Create an empty intake session (for manual raw card entry).
 
@@ -501,21 +507,15 @@ def create_session():
     customer_name = data.get("customer_name", "Walk-in")
     session_type = data.get("session_type", "raw")
     try:
-        # Cash defaults 65%, credit 75% (per the role-policy spec)
         legacy_pct = data.get("offer_percentage")
-        cash_raw = data.get("cash_percentage", legacy_pct if legacy_pct is not None else "65")
-        credit_raw = data.get("credit_percentage", "75")
+        cash_raw = data.get("cash_percentage", legacy_pct if legacy_pct is not None else str(ASSOCIATE_DEFAULT_CASH))
+        credit_raw = data.get("credit_percentage", str(ASSOCIATE_DEFAULT_CREDIT))
         cash_pct = Decimal(str(cash_raw)) if cash_raw is not None else None
         credit_pct = Decimal(str(credit_raw)) if credit_raw is not None else None
     except InvalidOperation:
         return jsonify({"error": "Invalid percentage"}), 400
 
-    # Server-side role-policy check (issue #8b — see _validate_offer_caps).
-    # An associate can only create with the canonical defaults; managers
-    # are capped at 80; owner uncapped. Override tokens unlock as usual.
-    cap_err = _validate_offer_caps(data, cash_pct, credit_pct, session_id=None)
-    if cap_err:
-        return jsonify(cap_err), 403
+    # Cap validation runs in the @enforce_offer_caps decorator.
 
     is_walk_in = data.get("is_walk_in")
     if is_walk_in is None:
