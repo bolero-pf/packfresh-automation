@@ -176,6 +176,7 @@ document.getElementById('csv-upload-form').addEventListener('submit', async (e) 
     form.append('cash_percentage', document.getElementById('csv-cash-pct').value);
     form.append('credit_percentage', document.getElementById('csv-credit-pct').value);
     form.append('is_distribution', document.getElementById('csv-distribution').checked ? '1' : '0');
+    if (_csvImportOverride && _csvImportOverride.token) form.append('override_token', _csvImportOverride.token);
 
     try {
         let r = await fetch('/api/intake/upload-collectr', { method: 'POST', body: form });
@@ -230,6 +231,7 @@ document.getElementById('html-paste-form').addEventListener('submit', async (e) 
             credit_percentage: document.getElementById('html-credit-pct').value,
             is_distribution: document.getElementById('html-distribution').checked,
         };
+        if (_htmlImportOverride && _htmlImportOverride.token) payload.override_token = _htmlImportOverride.token;
         let r = await fetch('/api/intake/upload-collectr-html', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -361,6 +363,7 @@ async function submitGenericCsv() {
         form.append('credit_percentage', document.getElementById('generic-credit-pct').value);
         form.append('is_distribution', document.getElementById('generic-distribution').checked ? '1' : '0');
         form.append('column_mapping', JSON.stringify(_genericCsvMapping));
+        if (_genericImportOverride && _genericImportOverride.token) form.append('override_token', _genericImportOverride.token);
 
         let r = await fetch('/api/intake/upload-generic-csv', { method: 'POST', body: form });
         let d = await r.json();
@@ -534,54 +537,85 @@ function _renderOverrideBar(barId, override, role) {
     }
 }
 
-// Apply role-based read-only state to the New Intake form percentage
-// inputs. Adds an Override button when applicable.
-function _applyIntakeRoleLock() {
+// Per-form override state for the four entry surfaces. New Intake
+// uses _intakeSetupOverride (declared earlier with a different scope);
+// the three import forms get their own slots.
+let _csvImportOverride = null;
+let _genericImportOverride = null;
+let _htmlImportOverride = null;
+
+// Apply role-based read-only state + manager-override button to one
+// entry form. Generic so the same code locks New Intake and the three
+// import forms (Collectr CSV / Generic CSV / HTML Paste) — earlier I
+// only locked the Manual Entry inputs and the import forms were left
+// editable, which Sean (rightly) flagged as an unprotected bypass.
+function _applyFormRoleLock(cfg) {
     const role = _pfRole();
-    const cash = document.getElementById('intake-cash-pct');
-    const credit = document.getElementById('intake-credit-pct');
+    const cash = document.getElementById(cfg.cashId);
+    const credit = document.getElementById(cfg.creditId);
     if (!cash || !credit) return;
-    const wrap = cash.parentElement.parentElement; // form-row
-    // Remove any prior button
-    const existing = document.getElementById('intake-pct-override-btn');
+    const ov = cfg.getOverride();
+    // Remove any prior override button before re-rendering
+    const existing = document.getElementById(cfg.btnId);
     if (existing) existing.remove();
 
-    if (role === 'associate' && !(_intakeSetupOverride && _intakeSetupOverride.token)) {
+    if (role === 'associate' && !(ov && ov.token)) {
         cash.value = ASSOCIATE_DEFAULTS.cash;
         credit.value = ASSOCIATE_DEFAULTS.credit;
         cash.readOnly = true; credit.readOnly = true;
         cash.style.opacity = credit.style.opacity = '0.6';
-        // Inject override button
         const btn = document.createElement('button');
-        btn.id = 'intake-pct-override-btn';
+        btn.id = cfg.btnId;
+        btn.type = 'button';  // critical for non-form-element-wrapped buttons; without this they submit forms
         btn.className = 'btn btn-sm btn-secondary';
-        btn.style.cssText = 'margin-left:8px;';
+        btn.style.cssText = 'margin-left:8px; align-self:flex-end;';
         btn.textContent = '🔒 Manager Override';
         btn.onclick = async (e) => {
             e.preventDefault();
-            const ov = await _promptManagerPin('A manager must approve a custom offer percentage for this session.');
-            if (!ov) return;
-            _intakeSetupOverride = ov;
+            const newOv = await _promptManagerPin('A manager must approve a custom offer percentage.');
+            if (!newOv) return;
+            cfg.setOverride(newOv);
             cash.readOnly = false; credit.readOnly = false;
             cash.style.opacity = credit.style.opacity = '1';
             btn.remove();
-            _renderOverrideBar('intake-pct-override-bar', ov, role);
+            _renderOverrideBar(cfg.barId, newOv, role);
         };
+        // Place the button next to the credit input so it's visually
+        // associated with the percentage controls.
         credit.parentElement.appendChild(btn);
     } else {
         cash.readOnly = false; credit.readOnly = false;
         cash.style.opacity = credit.style.opacity = '1';
     }
-    _renderOverrideBar('intake-pct-override-bar', _intakeSetupOverride, role);
+    _renderOverrideBar(cfg.barId, ov, role);
 }
 
-// Run on load + on tab switch back
-(function _initIntakeRoleLock() {
-    function _go() { try { _applyIntakeRoleLock(); } catch(e) {} }
+const _ENTRY_FORM_LOCKS = [
+    { cashId: 'intake-cash-pct',  creditId: 'intake-credit-pct',  btnId: 'intake-pct-override-btn',  barId: 'intake-pct-override-bar',
+      getOverride: () => _intakeSetupOverride, setOverride: (ov) => { _intakeSetupOverride = ov; } },
+    { cashId: 'csv-cash-pct',     creditId: 'csv-credit-pct',     btnId: 'csv-pct-override-btn',     barId: 'csv-pct-override-bar',
+      getOverride: () => _csvImportOverride,    setOverride: (ov) => { _csvImportOverride = ov; } },
+    { cashId: 'generic-cash-pct', creditId: 'generic-credit-pct', btnId: 'generic-pct-override-btn', barId: 'generic-pct-override-bar',
+      getOverride: () => _genericImportOverride, setOverride: (ov) => { _genericImportOverride = ov; } },
+    { cashId: 'html-cash-pct',    creditId: 'html-credit-pct',    btnId: 'html-pct-override-btn',    barId: 'html-pct-override-bar',
+      getOverride: () => _htmlImportOverride,    setOverride: (ov) => { _htmlImportOverride = ov; } },
+];
+
+function _applyAllEntryRoleLocks() {
+    _ENTRY_FORM_LOCKS.forEach(cfg => { try { _applyFormRoleLock(cfg); } catch(e) {} });
+}
+
+// Back-compat alias — older call sites still reference _applyIntakeRoleLock.
+function _applyIntakeRoleLock() { _applyAllEntryRoleLocks(); }
+
+(function _initEntryRoleLocks() {
+    function _go() { _applyAllEntryRoleLocks(); }
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', _go);
     } else { _go(); }
-    // The admin bar's _pfUser arrives slightly later — re-apply once
+    // _pfUser is server-rendered now (shared/auth.py admin bar) so it's
+    // present on the first synchronous run; the retries are kept as
+    // belt-and-suspenders against re-renders or late style-loads.
     setTimeout(_go, 250);
     setTimeout(_go, 750);
 })();
