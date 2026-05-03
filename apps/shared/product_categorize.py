@@ -1,45 +1,56 @@
 """Canonical product categorizer for sealed + raw intake items.
 
-The single source of truth is the Shopify product tag set. The bulk
-editor in /inventory/ keeps tags consistent across the catalog, so
-classification just reads them. When tags are missing (cache hasn't
-been synced yet, or item never matched a Shopify product), we fall
-back to product-name regex.
+Source of truth: the Shopify product tag set. Sean keeps tags consistent
+via the bulk editor in /inventory/. When tags are missing (cache cold,
+or item never matched a Shopify product), we fall back to product-name
+substring matching on the same vocabulary.
 
-Sean's exclusion rules — a "plain" booster pack is the tag set
-{booster pack} minus {sleeved, blister, buildbattle, booster bundle}.
-The ordering of checks below encodes that: more-specific categories
-match first so a Sleeved Booster Pack never falls through to Booster
-Pack.
+Pack Fresh tag taxonomy — these are NOT disjoint. A PCETB carries both
+'pcetb' and 'etb'. A blister carries both 'blister' and 'booster pack'.
+The 'booster pack' tag is an umbrella applied to anything that is, or
+contains, a booster pack — Sean uses it as a 'lower-priced items' label
+for a PMAX advertising campaign, so its semantics are 'cheap product'
+rather than 'literally just a booster pack.'
+
+A plain 'Booster Pack' is therefore by absentia: tagged 'booster pack'
+but NOT (blister, sleeved, buildbattle, booster bundle, booster box,
+collection box, etb, pcetb). Rule ordering below encodes that — more-
+specific categories match first, so the Booster Pack rule only ever
+sees rows that escaped every more-specific bucket.
 
 Returns a stable string label suitable for grouping and display.
 """
 
 from typing import Iterable
 
-# Display labels in priority order (more-specific → more-general).
-# Each entry: (label, tag_predicates, name_predicates)
+# (label, tag_predicates, name_predicates)
 #   tag_predicates: any tag in this set ⇒ match
-#   name_predicates: any substring (lowercased) ⇒ match
+#   name_predicates: any substring (lowercased) ⇒ match (only used when
+#                    tags are absent — once a product is tagged the tag
+#                    set is authoritative)
 #
-# Raw/Graded are handled before this list since they key off product_type.
+# Raw / Graded are handled before this list (they key off product_type).
 SEALED_RULES = [
+    # PCETB before ETB so 'pcetb' wins when both tags are present.
+    ("PCETB",                {"pcetb"},                          ("premium collection etb", "pcetb")),
     ("ETB",                  {"etb"},                            ("elite trainer box",)),
+    # Build & Battle and Booster Bundle don't have confirmed canonical
+    # tags yet — Sean said he'll add 'booster bundle' via the bulk
+    # editor when ready. Until then they match by name when tags are
+    # absent and otherwise fall through to Booster Pack (which is fine
+    # given the umbrella semantics).
     ("Build & Battle",       {"buildbattle"},                    ("build & battle", "build and battle", "build battle box")),
+    ("Booster Bundle",       {"booster bundle"},                 ("booster bundle",)),
     ("Blister",              {"blister"},                        ("blister",)),
     ("Sleeved Booster Pack", {"sleeved"},                        ("sleeved booster",)),
-    ("Booster Bundle",       {"booster bundle"},                 ("booster bundle",)),
     ("Booster Box",          {"booster box"},                    ("booster box",)),
-    ("Booster Pack",         {"booster pack"},                   ("booster pack",)),
-    ("Premium Collection",   {"premium collection"},             ("premium collection", "ultra premium")),
-    # Collection Box is the bulk of our 'collection' SKUs — V Box, VMAX
-    # Box, promo collection boxes, etc. Match it before generic
-    # 'collection' so the catchall doesn't swallow it.
     ("Collection Box",       {"collection box"},                 ("collection box",)),
-    ("Collection",           {"collection"},                     ("collection",)),
+    # Tin isn't in Sean's stated canonical list but it's a real product
+    # form factor; left here so it surfaces if the tag does exist. If
+    # nobody tags 'tin' the rule is harmless — it just never fires.
     ("Tin",                  {"tin"},                            (" tin", "tin ")),
-    ("Trainer Kit",          {"trainer kit"},                    ("trainer kit",)),
-    ("Theme Deck",           {"theme deck", "deck"},             ("theme deck",)),
+    # By-absentia bucket — caught here only if no more-specific rule above claimed it.
+    ("Booster Pack",         {"booster pack"},                   ("booster pack",)),
 ]
 
 

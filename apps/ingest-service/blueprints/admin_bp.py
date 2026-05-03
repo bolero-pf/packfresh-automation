@@ -203,6 +203,50 @@ def cache_invalidate():
 
 
 
+@bp.route("/api/admin/tag-frequencies")
+def tag_frequencies():
+    """Tag-distribution snapshot for the categorizer.
+
+    Splits inventory_product_cache.tags (CSV strings) into individual
+    tags and counts product rows per tag. Used to verify which tags
+    actually exist + how often, so the categorizer rules can be
+    tightened to real data instead of guesses. Pure read; no writes.
+
+    Query params:
+        min_count   — drop tags appearing fewer than N times (default 1)
+        limit       — cap on rows returned (default 200)
+    """
+    try:
+        min_count = int(request.args.get("min_count", 1))
+        limit = int(request.args.get("limit", 200))
+    except (TypeError, ValueError):
+        min_count, limit = 1, 200
+
+    try:
+        rows = db.query("""
+            SELECT lower(trim(tag)) AS tag, COUNT(*) AS cnt
+            FROM inventory_product_cache,
+                 LATERAL unnest(string_to_array(tags, ',')) AS tag
+            WHERE tags IS NOT NULL AND tags <> ''
+              AND (is_damaged = false OR is_damaged IS NULL)
+            GROUP BY 1
+            HAVING COUNT(*) >= %s
+            ORDER BY cnt DESC, tag ASC
+            LIMIT %s
+        """, (min_count, limit))
+    except Exception as e:
+        logger.warning(f"tag_frequencies query failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    total = db.query_one(
+        "SELECT COUNT(*) AS n FROM inventory_product_cache WHERE is_damaged = false OR is_damaged IS NULL"
+    ) or {"n": 0}
+    return jsonify({
+        "total_products": total["n"],
+        "tags": [{"tag": r["tag"], "count": r["cnt"]} for r in rows],
+    })
+
+
 @bp.route("/api/cache/refresh", methods=["POST"])
 def cache_refresh():
     """Manual full cache refresh trigger from UI."""
