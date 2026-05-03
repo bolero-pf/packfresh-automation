@@ -745,30 +745,25 @@ def session_meta_stats(session_id):
                 if tcg in cache_by_tcg and r.get("is_damaged"):
                     continue
                 cache_by_tcg[tcg] = r
-            # Sealed breakdown predictions — per-unit value if you broke
-            # the sealed item into its component cards. best_variant_store
-            # is preferred (uses our own listed prices) and falls back to
-            # best_variant_market when components aren't all in store.
+            # Sealed breakdown predictions — per-unit market value if
+            # you broke the sealed item into its component cards. The
+            # store-priced equivalent (best_variant_store) is computed
+            # JIT by the breakdown engine, not stored, so meta-stats
+            # uses the denormalized market value as the breakdown sell
+            # estimate. Plenty close for a 'is this collection a good
+            # buy?' read; the Store tab still surfaces store-priced BD
+            # numbers when staff drill in.
             for r in db.query(
-                f"""SELECT sbc.tcgplayer_id,
-                          sbc.best_variant_market,
-                          (SELECT total_component_store FROM sealed_breakdown_variants sbv
-                            WHERE sbv.cache_id = sbc.id
-                              AND sbv.total_component_market = sbc.best_variant_market
-                            LIMIT 1) AS best_variant_store
-                   FROM sealed_breakdown_cache sbc
-                   WHERE sbc.tcgplayer_id IN ({ph})""",
+                f"""SELECT tcgplayer_id, best_variant_market
+                    FROM sealed_breakdown_cache
+                    WHERE tcgplayer_id IN ({ph})
+                      AND best_variant_market IS NOT NULL
+                      AND best_variant_market > 0""",
                 tuple(tcg_ids),
             ):
                 tcg = r.get("tcgplayer_id")
-                if not tcg:
-                    continue
-                store_val = r.get("best_variant_store")
-                market_val = r.get("best_variant_market")
-                # Pick whichever is real and bigger (non-null)
-                vals = [float(v) for v in (store_val, market_val) if v is not None]
-                if vals:
-                    bd_by_tcg[int(tcg)] = max(vals)
+                if tcg and r.get("best_variant_market"):
+                    bd_by_tcg[int(tcg)] = float(r["best_variant_market"])
         if shopify_ids:
             ph = ",".join(["%s"] * len(shopify_ids))
             for r in db.query(
