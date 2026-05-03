@@ -992,12 +992,12 @@ function renderReturns(cards, recentBatches) {
   recentBatches = recentBatches || [];
 
   const recentHtml = `
-    <div style="margin-bottom:28px;">
-      <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;">
-        Recently Stored — Last 24hrs
-      </div>
+    <details style="margin-top:32px;">
+      <summary style="cursor:pointer;font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;">
+        Recently Stored — Last 24hrs (${recentBatches.length})
+      </summary>
       ${recentBatches.length === 0
-        ? '<div style="font-size:0.82rem;color:var(--dim);">Nothing stored in the last 24 hours.</div>'
+        ? '<div style="font-size:0.82rem;color:var(--dim);margin-top:10px;">Nothing stored in the last 24 hours.</div>'
         : recentBatches.map(b => `
             <div style="display:flex;align-items:flex-start;gap:12px;padding:10px 14px;
                  background:var(--s1);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
@@ -1011,16 +1011,15 @@ function renderReturns(cards, recentBatches) {
             </div>
           `).join('')
       }
-    </div>
+    </details>
   `;
 
   if (!cards.length) {
-    el.innerHTML = recentHtml + '<div class="empty"><div class="empty-icon">✅</div><p>No cards pending return</p></div>';
+    el.innerHTML = '<div class="empty"><div class="empty-icon">✅</div><p>No cards pending return</p></div>' + recentHtml;
     return;
   }
 
   el.innerHTML = `
-    ${recentHtml}
     <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;">Pending Return (${cards.length})</div>
     <div class="stats-bar">
       <div class="stat-box"><div class="stat-label">To Return</div><div class="stat-val" style="color:var(--amber);">${cards.length}</div></div>
@@ -1044,6 +1043,7 @@ function renderReturns(cards, recentBatches) {
         </div>
       `).join('')}
     </div>
+    ${recentHtml}
   `;
 }
 
