@@ -32,24 +32,30 @@ from typing import Iterable
 # Raw / Graded are handled before this list (they key off product_type).
 SEALED_RULES = [
     # PCETB before ETB so 'pcetb' wins when both tags are present.
-    ("PCETB",                {"pcetb"},                          ("premium collection etb", "pcetb")),
-    ("ETB",                  {"etb"},                            ("elite trainer box",)),
+    ("PCETB",                {"pcetb"},                          ("premium collection etb", " pcetb ")),
+    # Both-side word-boundary 'etb' — short enough to false-positive on
+    # 'EtbBox' or similar typos if matched as a bare substring.
+    ("ETB",                  {"etb"},                            ("elite trainer box", " etb ")),
+    # Case (booster-box case) — sits above Booster Box because a Case
+    # row may also carry 'booster box'. 19 SKUs in production today.
+    ("Case",                 {"case"},                           ("booster box case",)),
     # Build & Battle and Booster Bundle don't have confirmed canonical
-    # tags yet — Sean said he'll add 'booster bundle' via the bulk
-    # editor when ready. Until then they match by name when tags are
-    # absent and otherwise fall through to Booster Pack (which is fine
-    # given the umbrella semantics).
+    # tags yet — Sean will add 'booster bundle' via the bulk editor
+    # when ready. Until then they match by name when tags are absent
+    # and otherwise fall through to Booster Pack (which is fine given
+    # the umbrella semantics).
     ("Build & Battle",       {"buildbattle"},                    ("build & battle", "build and battle", "build battle box")),
     ("Booster Bundle",       {"booster bundle"},                 ("booster bundle",)),
     ("Blister",              {"blister"},                        ("blister",)),
     ("Sleeved Booster Pack", {"sleeved"},                        ("sleeved booster",)),
     ("Booster Box",          {"booster box"},                    ("booster box",)),
     ("Collection Box",       {"collection box"},                 ("collection box",)),
-    # Tin isn't in Sean's stated canonical list but it's a real product
-    # form factor; left here so it surfaces if the tag does exist. If
-    # nobody tags 'tin' the rule is harmless — it just never fires.
     ("Tin",                  {"tin"},                            (" tin", "tin ")),
-    # By-absentia bucket — caught here only if no more-specific rule above claimed it.
+    # By-absentia bucket — only catches rows that escaped every more-
+    # specific rule above. Sean uses 'booster pack' as an umbrella tag
+    # (applied to blister/sleeved/buildbattle/etc.) for a lower-priced-
+    # items PMAX advertising campaign, so this bucket represents
+    # 'a bare booster pack with no other form factor context.'
     ("Booster Pack",         {"booster pack"},                   ("booster pack",)),
 ]
 
@@ -99,19 +105,17 @@ def classify_item(item: dict, tags_csv: str = "") -> str:
 # Display order for charts/badges so all consumers render the same
 # left-to-right. Roughly value-density first.
 DISPLAY_ORDER = [
+    "Case",
     "Booster Box",
+    "PCETB",
     "ETB",
     "Build & Battle",
     "Booster Bundle",
-    "Premium Collection",
     "Collection Box",
-    "Collection",
     "Blister",
     "Sleeved Booster Pack",
     "Booster Pack",
     "Tin",
-    "Trainer Kit",
-    "Theme Deck",
     "Graded",
     "Raw",
     "Other",
