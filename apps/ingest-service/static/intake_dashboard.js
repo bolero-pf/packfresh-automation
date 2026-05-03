@@ -1273,9 +1273,20 @@ async function viewSession(sessionId, _preserveScroll) {
                         const isDamaged = status === 'damaged';
                         const isChild = !!i.parent_item_id;
                         const rowStyle = isDead ? 'opacity:0.45; text-decoration:line-through;' : isBrokenDown ? 'opacity:0.35; text-decoration:line-through;' : isDamaged ? 'background:rgba(255,170,0,0.08);' : '';
+                        // Linked-status badge: differentiate TCG-linked from Store-only-linked
+                        // so a Find-in-Store action that saves shopify_product_id without a
+                        // tcgplayer_id stops rendering as "Linked TCG#null".
+                        const _linkedBadge = (i) => {
+                            if (i.tcgplayer_id) return `<span class="badge badge-green">Linked</span><br><small style="color:var(--text-dim);">TCG#${i.tcgplayer_id}</small>`;
+                            if (i.shopify_product_id) {
+                                const nm = (i.shopify_product_name || '').slice(0, 32);
+                                return `<span class="badge" style="background:#7c3aed;color:#fff;">Store</span>${nm ? `<br><small style="color:var(--text-dim);">${nm}</small>` : ''}`;
+                            }
+                            return '';
+                        };
                         const statusBadge = status === 'good'
-                            ? (i.is_mapped ? `<span class="badge badge-green">Linked</span><br><small style="color:var(--text-dim);">TCG#${i.tcgplayer_id}</small>` : '<span class="badge badge-amber">Needs Link</span>')
-                            : status === 'damaged' ? `<span class="badge" style="background:#b45309;color:#fff;">Damaged</span>${i.is_mapped ? '<br><small style="color:var(--text-dim);">TCG#'+i.tcgplayer_id+'</small>' : ''}`
+                            ? (i.is_mapped ? _linkedBadge(i) || '<span class="badge badge-green">Linked</span>' : '<span class="badge badge-amber">Needs Link</span>')
+                            : status === 'damaged' ? `<span class="badge" style="background:#b45309;color:#fff;">Damaged</span>${i.is_mapped ? '<br>' + _linkedBadge(i) : ''}`
                             : status === 'missing' ? '<span class="badge" style="background:#666;color:#fff;">Missing</span>'
                             : isBrokenDown ? '<span class="badge" style="background:var(--surface-2);color:var(--text-dim);">Broken Down</span>'
                             : '<span class="badge" style="background:#666;color:#fff;">Rejected</span>';

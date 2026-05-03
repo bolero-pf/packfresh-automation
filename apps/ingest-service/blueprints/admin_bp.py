@@ -248,7 +248,15 @@ def shopify_session_store_check(session_id):
     truly_unlinked = [i for i in active_items if not i.get("tcgplayer_id") and not i.get("shopify_product_id")]
 
     tcg_ids = list(set(i["tcgplayer_id"] for i in linked_tcg))
-    shopify_ids = list(set(str(i["shopify_product_id"]) for i in linked_shopify_only))
+    # Also pull every shopify_product_id we know about — items in linked_tcg
+    # may carry a shopify_product_id from a prior Find-in-Store link, and
+    # the cache row keyed by that shopify_product_id won't necessarily match
+    # the item's tcgplayer_id (CN/JP listings, custom titles, etc.). We fall
+    # back to the shopify_product_id match so the Store tab still shows the
+    # link instead of "Not Found".
+    shopify_ids_only = list(set(str(i["shopify_product_id"]) for i in linked_shopify_only))
+    tcg_with_shopify = [str(i["shopify_product_id"]) for i in linked_tcg if i.get("shopify_product_id")]
+    shopify_ids = list(set(shopify_ids_only + tcg_with_shopify))
 
     if not tcg_ids and not shopify_ids and not truly_unlinked:
         return jsonify({"items": [], "cache_hit_rate": 0})
@@ -345,6 +353,15 @@ def shopify_session_store_check(session_id):
         else:
             # Normal item — use non-damaged variant
             sd = normal_variant
+
+        # Fallback: a Find-in-Store action can attach a shopify_product_id
+        # to an item whose tcgplayer_id never matched the cache (CN/JP
+        # listings, custom titles). Honour the shopify link so the Store
+        # tab shows it as found instead of "Not Found".
+        if sd is None and item.get("shopify_product_id"):
+            sd = shopify_direct_map.get(str(item["shopify_product_id"]))
+            if sd:
+                store_note = "Matched by store link"
 
         result_items.append({
             "item_id": item["id"], "product_name": item.get("product_name"), "tcgplayer_id": tcg_id,
