@@ -813,17 +813,23 @@ def session_meta_stats(session_id):
         unit_bd = bd_by_tcg.get(item["tcgplayer_id"]) if item.get("tcgplayer_id") else None
         item_bd = (unit_bd * qty) if unit_bd else 0.0
 
-        # Best-case sell: max of store, breakdown, market — represents
-        # 'if you played this collection optimally, what would it be
-        # worth?' Margin is computed against this so the headline number
-        # answers 'is this collection a good buy?'
+        # 'Achievable sell-as-sealed' price: when listed, that's our
+        # store price (the actual sticker we'd charge); when not listed,
+        # we fall back to market_price as a planning proxy. The external
+        # market_price is *not* the achievable sell for listed items —
+        # we'd never sell above our own listing.
         unit_store = store_price if (store_price and store_price > 0) else 0.0
-        unit_best = max(unit_store, unit_bd or 0.0, unit_market)
+        unit_sealed_sell = unit_store if unit_store > 0 else unit_market
+        unit_best = max(unit_sealed_sell, unit_bd or 0.0)
         item_sell = unit_best * qty
-        # 'best strategy' = how the optimal sell broke down for this row
-        if unit_bd and unit_bd >= unit_store and unit_bd >= unit_market:
+
+        # Best strategy:
+        #   breakdown — bd value beats whatever we'd get sealed
+        #   store     — listed and selling sealed beats breakdown
+        #   market    — not listed; market_price is just an estimate
+        if unit_bd and unit_bd >= unit_sealed_sell:
             best_strategy = "breakdown"
-        elif unit_store and unit_store >= unit_market:
+        elif unit_store > 0:
             best_strategy = "store"
         else:
             best_strategy = "market"
