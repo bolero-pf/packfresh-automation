@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import bcrypt
 from flask import Blueprint, Flask, request, jsonify, redirect, render_template, make_response
+from flask_cors import CORS
 
 import db
 from auth import (
@@ -23,6 +24,31 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
+
+# Cross-origin requests from staff subdomains. /api/verify-pin is the
+# load-bearing one — staff services call it from their own subdomains
+# (offers., inventory., cards., etc.) to mint manager-override tokens.
+# Credentials must be allowed so the pf_auth JWT cookie rides along.
+CORS(
+    app,
+    resources={r"/api/*": {
+        "origins": [
+            "https://offers.pack-fresh.com",
+            "https://ingest.pack-fresh.com",
+            "https://inventory.pack-fresh.com",
+            "https://cards.pack-fresh.com",
+            "https://prices.pack-fresh.com",
+            "https://screening.pack-fresh.com",
+            "https://vip.pack-fresh.com",
+            "https://drops.pack-fresh.com",
+            "https://analytics.pack-fresh.com",
+            "https://kiosk.pack-fresh.com",
+            "https://admin.pack-fresh.com",
+        ],
+        "supports_credentials": True,
+    }},
+)
+
 db.init_pool()
 
 # Manager-override PIN column — additive migration so existing deploys
