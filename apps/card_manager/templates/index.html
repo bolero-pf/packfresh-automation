@@ -725,7 +725,10 @@ function renderHoldDetail(d) {
                     <div class="scan-check">${item.item_status === 'PULLED' || item.item_status === 'ACCEPTED' ? '✓' : item.item_status === 'REJECTED' ? '✕' : item.item_status === 'MISSING' ? '⚠' : ''}</div>
                     <span style="font-family:var(--mono);font-size:0.72rem;flex:1;">${esc(item.barcode || '—')}</span>
                     <span style="font-size:0.72rem;color:var(--dim);">${esc(item.bin_label||'')}</span>
-                    ${item.item_status === 'REQUESTED' ? `<button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:2px 8px;" onclick="markMissing('${item.hold_item_id}')">Can't Find</button>` : ''}
+                    ${item.item_status === 'REQUESTED' ? `
+                      <button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;" title="Reprint label with a new barcode if the current one won't scan" onclick="regenerateAndPrint('${item.card_id}','${esc(item.card_name||'')}')">🆕 New BC</button>
+                      <button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:2px 8px;" onclick="markMissing('${item.hold_item_id}')">Can't Find</button>
+                    ` : ''}
                     ${item.item_status === 'MISSING' ? '<span style="font-size:0.68rem;color:var(--red);font-weight:600;">MISSING</span>' : ''}
                   </div>
                 `).join('')}
@@ -1064,6 +1067,8 @@ function renderReturns(cards, recentBatches) {
             <div style="font-size:0.75rem;color:var(--dim);">${esc(c.condition)} · ${esc(c.last_bin||'no bin')}</div>
           </div>
           <div class="return-barcode">${esc(c.barcode)}</div>
+          <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 8px;" title="Reprint with a new barcode if the current label won't scan"
+                  onclick="event.stopPropagation();regenerateAndPrint('${c.id}','${esc(c.card_name)}')">🆕 New BC</button>
           <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--green);color:var(--green);"
                   onclick="event.stopPropagation();sellInstead('${esc(c.barcode)}')">💵 Sell instead</button>
         </div>
@@ -1174,6 +1179,8 @@ function renderMissing(cards) {
           <div style="font-size:0.75rem;color:var(--dim);">${esc(c.condition)} · Last bin: ${esc(c.last_bin||'unknown')} · ${_fmtTime(c.updated_at)}</div>
         </div>
         <div style="font-family:var(--mono);font-size:0.72rem;color:var(--dim);">${esc(c.barcode)}</div>
+        <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 8px;" title="Reprint with a new barcode if the current label won't scan"
+                onclick="regenerateAndPrint('${c.id}','${esc(c.card_name)}')">🆕 New BC</button>
         <button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:4px 10px;"
                 onclick="markGone('${c.id}','${esc(c.card_name)}')">Mark Gone</button>
       </div>
@@ -1468,6 +1475,7 @@ function renderEditorDetail(card, copies, availableVariants) {
         <button class="btn btn-sm" onclick="refreshCopyPrice('${esc(String(c.id))}')">↻ Refresh price</button>
         <button class="btn btn-sm" onclick="openRelink('${esc(String(c.id))}')">🔗 Relink</button>
         <button class="btn btn-sm" onclick="reprintCopy('${esc(String(c.id))}')">🖨 Reprint</button>
+        <button class="btn btn-sm" onclick="regenerateAndPrint('${esc(String(c.id))}','${esc(c.card_name||'')}')">🆕 New Barcode</button>
         ${(c.state === 'STORED' || c.state === 'DISPLAY') ? `
           <button class="btn btn-sm" style="border-color:var(--red);color:var(--red);"
                   onclick="markCopyMissing('${esc(String(c.id))}','${esc(c.barcode||'')}')">🚫 Mark Missing</button>
@@ -1568,6 +1576,38 @@ function reprintCopy(copyId) {
   // GET endpoint returns the PNG directly — open in a new tab so the
   // browser can render + print it without us round-tripping base64 over JSON.
   window.open(`/api/editor/copies/${copyId}/barcode-image`, '_blank');
+}
+
+// Centralized "this label won't scan" handler — generates a new barcode in
+// the DB, then opens the new label in a print tab. Same backend regardless
+// of which surface called it (editor, hold pull, returns, missing, set-out,
+// binder fill) so the UX is uniform.
+async function regenerateAndPrint(copyId, name) {
+  if (!await themedConfirm('New Barcode',
+      `Generate a new barcode for ${name || 'this card'} and open the label to print? Apply the new label to the physical card.`)) return;
+  try {
+    const d = await post(`/api/cards/${copyId}/regenerate-barcode`, {});
+    toast(`New barcode: ${d.new_barcode}`, 'green');
+    // The image URL is keyed on copy id, not barcode — cache-bust so the
+    // browser fetches the freshly-rendered PNG instead of the old label.
+    window.open(`/api/editor/copies/${copyId}/barcode-image?v=${encodeURIComponent(d.new_barcode)}`, '_blank');
+    // Refresh whichever surface called us so the new barcode is visible.
+    const v = document.querySelector('.view.active')?.id;
+    if (v === 'view-missing')        loadMissing();
+    else if (v === 'view-returns')   loadReturns();
+    else if (v === 'view-editor')    refreshEditorDetail();
+    else if (v === 'view-display' && _displayMode === 'set-out') {
+      const r = await get('/api/display/set-out/suggest?count=' + (_setOutSuggestions.length || 50));
+      _setOutSuggestions = r.suggestions || _setOutSuggestions;
+      renderSetOutScanStep();
+    }
+    else if (v === 'view-binders' && _displayMode === 'binder-fill') {
+      const r = await get(`/api/binders/${_binderFillId}/fill-suggest?count=${_binderFillSuggestions.length || 50}`);
+      _binderFillSuggestions = r.suggestions || _binderFillSuggestions;
+      renderBinderFillScanStep();
+    }
+    else if (v === 'view-hold-detail') refreshHoldDetail();
+  } catch(e) { toast(e.message, 'red'); }
 }
 
 function _userCanUnmarkMissing() {
@@ -1825,6 +1865,7 @@ function renderSetOutScanStep() {
                     <div style="font-size:0.68rem;color:var(--dim);">${esc(s.condition||'')} · ${esc(s.set_name||'')}</div>
                   </div>
                   <div style="font-family:var(--mono);font-size:0.72rem;color:var(--accent);">$${parseFloat(s.current_price||0).toFixed(2)}</div>
+                  <button class="btn btn-sm" style="font-size:0.62rem;padding:1px 6px;" title="Bad barcode? Print a new label" onclick="regenerateAndPrint('${s.id}','${esc(s.card_name)}')">🆕</button>
                 </div>`;
               }).join('')}
             </div>
@@ -2183,6 +2224,7 @@ function renderBinderFillScanStep() {
                     <div style="font-size:0.68rem;color:var(--dim);">${esc(s.condition||'')} · ${esc(s.set_name||'')}</div>
                   </div>
                   <div style="font-family:var(--mono);font-size:0.72rem;color:var(--accent);">$${parseFloat(s.current_price||0).toFixed(2)}</div>
+                  <button class="btn btn-sm" style="font-size:0.62rem;padding:1px 6px;" title="Bad barcode? Print a new label" onclick="regenerateAndPrint('${s.id}','${esc(s.card_name)}')">🆕</button>
                 </div>`;
               }).join('')}
             </div>

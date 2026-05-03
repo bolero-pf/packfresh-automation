@@ -18,7 +18,7 @@ from flask import Flask, render_template, request, jsonify, g
 
 import db
 from storage import assign_bins, assign_display_case, get_display_case_capacity, get_binder_capacity
-from barcode_gen import generate_barcode_image
+from barcode_gen import generate_barcode_image, generate_barcode_id
 from price_rounding import charm_ceil_raw
 from decimal import Decimal
 
@@ -3018,6 +3018,53 @@ def editor_unmark_missing(copy_id):
         WHERE id::text = %s
     """, (new_state, copy_id))
     return jsonify({"success": True, "state": new_state, "card_name": card["card_name"]})
+
+
+@app.route("/api/cards/<copy_id>/regenerate-barcode", methods=["POST"])
+def regenerate_card_barcode(copy_id):
+    """Replace the barcode on a raw_cards row with a freshly-generated ID
+    when the existing label is damaged/won't scan. Caller is expected to
+    print a new label (GET /api/editor/copies/<copy_id>/barcode-image)
+    and apply it to the physical card.
+
+    Cascades to hold_items.barcode for any open hold_item attached to this
+    copy — kiosk's staff scan-out endpoint matches on hi.barcode, so a
+    silent update would orphan in-flight holds.
+    """
+    card = db.query_one("""
+        SELECT id, barcode, card_name FROM raw_cards WHERE id::text = %s
+    """, (copy_id,))
+    if not card:
+        return jsonify({"error": "Copy not found"}), 404
+
+    # Loop briefly to avoid the (extremely unlikely) collision with an
+    # existing barcode. 5 tries against ~37^6 = 2.5B suffix space is plenty.
+    new_bc = None
+    for _ in range(5):
+        candidate = generate_barcode_id()
+        existing = db.query_one("SELECT 1 FROM raw_cards WHERE barcode = %s", (candidate,))
+        if not existing:
+            new_bc = candidate
+            break
+    if not new_bc:
+        return jsonify({"error": "Could not generate a unique barcode"}), 500
+
+    old_bc = card["barcode"]
+    db.execute("""
+        UPDATE raw_cards SET barcode = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (new_bc, copy_id))
+    db.execute("""
+        UPDATE hold_items SET barcode = %s
+        WHERE raw_card_id::text = %s
+    """, (new_bc, copy_id))
+
+    return jsonify({
+        "success":     True,
+        "card_name":   card["card_name"],
+        "old_barcode": old_bc,
+        "new_barcode": new_bc,
+    })
 
 
 @app.route("/api/editor/copies/<copy_id>/barcode-image")
