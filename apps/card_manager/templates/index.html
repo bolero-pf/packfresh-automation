@@ -10,7 +10,8 @@
 <script src="/pf-static/pf_ui.js"></script>
 <style>
 /* Layout */
-.shell { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
+body { display: flex; flex-direction: column; overflow: hidden; }
+.shell { display: grid; grid-template-columns: 220px 1fr; flex: 1; min-height: 0; }
 
 /* Sidebar */
 .sidebar {
