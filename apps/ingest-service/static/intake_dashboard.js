@@ -71,7 +71,12 @@ document.addEventListener('keydown', (e) => {
         const tp = document.getElementById('themed-prompt-overlay');
         if (tp.classList.contains('active')) { tp.classList.remove('active'); return; }
         const relink = document.getElementById('relink-modal');
-        if (relink && relink.classList.contains('active')) { closeModal('relink-modal'); return; }
+        if (relink && relink.classList.contains('active')) {
+            closeModal('relink-modal');
+            if (window._relinkLinkedCount > 0) viewSession(currentSessionId, true);
+            window._relinkLinkedCount = 0;
+            return;
+        }
         const mapping = document.getElementById('mapping-modal');
         if (mapping.classList.contains('active')) { closeModal('mapping-modal'); return; }
         const session = document.getElementById('session-view');
@@ -1105,6 +1110,8 @@ async function viewSession(sessionId, _preserveScroll) {
         const d = await r.json();
         const s = d.session;
         const items = d.items;
+        window._sessionItems = items;
+        window._sessionMeta = s;
         const editable = !['received','ingested','cancelled','rejected'].includes(s.status);
         const rejuvenatable = ['cancelled','rejected'].includes(s.status);
 
@@ -1350,9 +1357,9 @@ async function viewSession(sessionId, _preserveScroll) {
                                         const linkLabel = i.is_mapped ? 'Relink' : 'Link';
                                         const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
                                         if (i.product_type === 'raw') {
-                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${s.offer_percentage},'${(i.set_name||'').replace(/'/g,"\\'")}','${(i.card_number||'').replace(/'/g,"\\'")}',${i.is_graded||false},'${(i.grade_company||'')}','${(i.grade_value||'')}','${i.condition||i.listing_condition||'NM'}',${i.quantity||1},${i.market_price||0})">${linkLabel}</button> `;
+                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}')">${linkLabel}</button> `;
                                         } else {
-                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMapping('${i.id}','${(i.product_name||'').replace(/'/g,"\\'")}','${(i.set_name||'').replace(/'/g,"\\'")}','${i.product_type||'sealed'}',${i.market_price||0})">${linkLabel}</button> `;
+                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMappingFromSession('${i.id}')">${linkLabel}</button> `;
                                         }
                                         btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button><div class="action-dropdown">';
                                         if (!i.is_graded && i.product_type !== 'raw') {
@@ -1363,10 +1370,10 @@ async function viewSession(sessionId, _preserveScroll) {
                                         btns += `<button onclick="editQuantity('${i.id}','${sessionId}',${i.quantity})">Change Qty (${i.quantity})</button>`;
                                         if (i.product_type === 'raw') {
                                             if (i.is_graded) {
-                                                btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},true,'${i.grade_company||''}','${i.grade_value||''}')">&#x1F3C5; Change Grade (${i.grade_company} ${i.grade_value})</button>`;
+                                                btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'").replace(/"/g,'&quot;')}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},true,'${i.grade_company||''}','${i.grade_value||''}')">&#x1F3C5; Change Grade (${i.grade_company} ${i.grade_value})</button>`;
                                             } else {
-                                                btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'")}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},false,'','')">✨ Mark as Graded</button>`;
-                                                btns += `<button onclick="editCondition('${i.id}','${sessionId}','${i.condition || i.listing_condition || 'NM'}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},'${(i.product_name||'').replace(/'/g,"\\'")}${i.set_name ? ' · '+i.set_name.replace(/'/g,"\\'") : ''}')">${condBadgeHtml(i.condition || i.listing_condition || 'NM')} Change Condition</button>`;
+                                                btns += `<hr><button onclick="openMarkGraded('${i.id}','${sessionId}','${(i.product_name||'').replace(/'/g,"\\'").replace(/"/g,'&quot;')}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},false,'','')">✨ Mark as Graded</button>`;
+                                                btns += `<button onclick="editCondition('${i.id}','${sessionId}','${i.condition || i.listing_condition || 'NM'}',${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : null},'${(i.product_name||'').replace(/'/g,"\\'").replace(/"/g,'&quot;')}${i.set_name ? ' · '+i.set_name.replace(/'/g,"\\'").replace(/"/g,'&quot;') : ''}')">${condBadgeHtml(i.condition || i.listing_condition || 'NM')} Change Condition</button>`;
                                             }
                                         }
 
@@ -1509,6 +1516,13 @@ async function viewSession(sessionId, _preserveScroll) {
     } catch(err) {
         body.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
+}
+
+function openMappingFromSession(itemId) {
+    const items = window._sessionItems || [];
+    const i = items.find(x => String(x.id) === String(itemId));
+    if (!i) { alert('Item not found in session'); return; }
+    openMapping(i.id, i.product_name || '', i.set_name || '', i.product_type || 'sealed', i.market_price || 0);
 }
 
 // ═══════════════════════════════ MAPPING ═══════════════════════════════
@@ -2534,7 +2548,7 @@ function renderStoreCheck() {
                             ? '<a href="https://admin.shopify.com/store/' + (window.__shopifyStoreHandle||'') + '/products/' + i.shopify_product_id + '/variants/' + i.shopify_variant_id + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" title="Edit this variant in Shopify admin">Admin &#x2197;</a>'
                             : ''}
                         ${!i.tcgplayer_id
-                            ? '<button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="openMapping(\'' + i.id + '\',\'' + (i.product_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.set_name||'').replace(/'/g,"\\\\'") + '\',\'' + (i.product_type||'sealed') + '\',' + (i.market_price||0) + ')" title="Link this item to a TCGPlayer product">&#x1F517; Link</button>'
+                            ? '<button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="openMapping(\'' + i.id + '\',\'' + (i.product_name||'').replace(/'/g,"\\\\'").replace(/"/g,'&quot;') + '\',\'' + (i.set_name||'').replace(/'/g,"\\\\'").replace(/"/g,'&quot;') + '\',\'' + (i.product_type||'sealed') + '\',' + (i.market_price||0) + ')" title="Link this item to a TCGPlayer product">&#x1F517; Link</button>'
                             : ''}
                         ${i.tcgplayer_id
                             ? '<button class="btn btn-sm btn-secondary find-in-store-btn" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" data-tcg="' + i.tcgplayer_id + '" data-name="' + (i.product_name||'').replace(/"/g,'&amp;quot;') + '" data-item="' + i.id + '" data-offer="' + (i.offer_price||0) + '" data-market="' + (i.market_price||0) + '" title="Search your store cache to find this listing">&#x1F50D; Find</button>'
@@ -3191,18 +3205,37 @@ async function editCondition(itemId, sessionId, currentCond, tcgplayerId, cardNa
     renderTiles();
 }
 
-async function relinkRawCard(itemId, sessionId, cardName, offerPct, setName, cardNumber, isGraded, gradeCompany, gradeValue, condition, quantity, currentPrice) {
-    window._relinkState = { itemId, sessionId, cardName, setName: setName||'', cardNumber: cardNumber||'', isGraded: !!isGraded, gradeCompany: gradeCompany||'', gradeValue: gradeValue||'', condition: condition||'NM', quantity: parseInt(quantity)||1, currentPrice: parseFloat(currentPrice)||0 };
+async function relinkRawCard(itemId, sessionId) {
+    const items = window._sessionItems || [];
+    const i = items.find(x => String(x.id) === String(itemId));
+    if (!i) { alert('Item not found in session'); return; }
+    // Initialize linked count on first entry into the flow
+    if (!window._relinkLinkedCount) window._relinkLinkedCount = 0;
+    window._relinkState = {
+        itemId, sessionId,
+        cardName: i.product_name || '', setName: i.set_name || '',
+        cardNumber: i.card_number || '', isGraded: !!i.is_graded,
+        gradeCompany: i.grade_company || '', gradeValue: i.grade_value || '',
+        condition: i.condition || i.listing_condition || 'NM',
+        quantity: parseInt(i.quantity) || 1, currentPrice: parseFloat(i.market_price) || 0,
+    };
     _relinkShowSearch();
     openModal('relink-modal');
-    // Auto-fire search immediately — we already have name + set from the import
     _relinkDoSearch();
 }
 
 function _relinkShowSearch() {
     const rs = window._relinkState;
     const body = document.getElementById('relink-body');
-    document.getElementById('relink-title').textContent = '\u{1f517} Relink: ' + rs.cardName + (rs.cardNumber ? ' #'+rs.cardNumber : '') + (rs.isGraded ? ' ['+rs.gradeCompany+' '+rs.gradeValue+']' : '') + (rs.quantity > 1 ? ' (×' + rs.quantity + ')' : '');
+    // Count remaining unmapped raw items for progress display
+    const allItems = window._sessionItems || [];
+    const unmappedRaw = allItems.filter(x => !x.is_mapped && x.product_type === 'raw' && ['good','damaged'].includes(x.item_status || 'good'));
+    const remaining = unmappedRaw.length;
+    const linked = window._relinkLinkedCount || 0;
+    const hasQueue = remaining > 1 || (remaining === 1 && linked > 0);
+    let titleText = '\u{1f517} Link: ' + rs.cardName + (rs.cardNumber ? ' #'+rs.cardNumber : '') + (rs.isGraded ? ' ['+rs.gradeCompany+' '+rs.gradeValue+']' : '') + (rs.quantity > 1 ? ' (\u00d7' + rs.quantity + ')' : '');
+    if (hasQueue) titleText += ` (${remaining} remaining)`;
+    document.getElementById('relink-title').textContent = titleText;
     body.innerHTML = `
         <div class="form-group"><label>Card Name</label>
             <input type="text" id="relink-search" value="${rs.cardName.replace(/"/g,'&quot;')}" placeholder="e.g. Charizard ex"></div>
@@ -3217,10 +3250,82 @@ function _relinkShowSearch() {
         </div>
         <button class="btn btn-primary" id="relink-search-btn" style="width:100%;">Search</button>
         <button class="btn btn-secondary" id="relink-manual-btn" style="width:100%;margin-top:6px;font-size:0.8rem;">💲 Manual Price (no TCGPlayer ID)</button>
+        ${hasQueue ? `<div style="display:flex;gap:8px;margin-top:6px;">
+            <button class="btn btn-secondary" id="relink-skip-btn" style="flex:1;font-size:0.8rem;">⏭ Skip</button>
+            <button class="btn btn-secondary" id="relink-done-btn" style="flex:1;font-size:0.8rem;">✓ Done for now</button>
+        </div>` : ''}
         <div id="relink-results" style="margin-top:12px;"></div>`;
     document.getElementById('relink-search-btn').addEventListener('click', _relinkDoSearch);
     document.getElementById('relink-manual-btn').addEventListener('click', _relinkManualPrice);
     document.getElementById('relink-search').addEventListener('keydown', function(e) { if (e.key === 'Enter') _relinkDoSearch(); });
+    const skipBtn = document.getElementById('relink-skip-btn');
+    if (skipBtn) skipBtn.addEventListener('click', () => _relinkAdvanceOrClose(rs.sessionId, true));
+    const doneBtn = document.getElementById('relink-done-btn');
+    if (doneBtn) doneBtn.addEventListener('click', () => {
+        closeModal('relink-modal');
+        const lc = window._relinkLinkedCount || 0;
+        if (lc > 0) {
+            const toast = document.createElement('div');
+            toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--green);color:#000;padding:10px 18px;border-radius:8px;font-size:0.85rem;font-weight:600;z-index:9999;';
+            toast.textContent = '\u2713 Linked ' + lc + ' item' + (lc > 1 ? 's' : '');
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3500);
+        }
+        window._relinkLinkedCount = 0;
+        viewSession(currentSessionId, true);
+    });
+}
+
+async function _relinkAdvanceOrClose(sessionId, isSkip) {
+    // Re-fetch session to get fresh is_mapped state (handles sibling auto-linking)
+    try {
+        const r = await fetch('/api/intake/session/' + sessionId);
+        const d = await r.json();
+        window._sessionItems = d.items || [];
+        window._sessionMeta = d.session || {};
+    } catch(e) { /* proceed with stale data */ }
+
+    const items = window._sessionItems || [];
+    const unmapped = items.filter(x =>
+        !x.is_mapped && x.product_type === 'raw' &&
+        ['good','damaged'].includes(x.item_status || 'good')
+    );
+
+    if (unmapped.length > 0) {
+        // Show brief toast for the just-linked item
+        if (!isSkip) {
+            const toast = document.createElement('div');
+            toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--green);color:#000;padding:10px 18px;border-radius:8px;font-size:0.85rem;font-weight:600;z-index:9999;transition:opacity 0.3s;';
+            toast.textContent = '\u2713 Linked — ' + unmapped.length + ' remaining';
+            document.body.appendChild(toast);
+            setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 2000);
+        }
+        // Load next unmapped item
+        const next = unmapped[0];
+        window._relinkState = {
+            itemId: next.id, sessionId,
+            cardName: next.product_name || '', setName: next.set_name || '',
+            cardNumber: next.card_number || '', isGraded: !!next.is_graded,
+            gradeCompany: next.grade_company || '', gradeValue: next.grade_value || '',
+            condition: next.condition || next.listing_condition || 'NM',
+            quantity: parseInt(next.quantity) || 1, currentPrice: parseFloat(next.market_price) || 0,
+        };
+        _relinkShowSearch();
+        _relinkDoSearch();
+    } else {
+        // All done
+        closeModal('relink-modal');
+        const lc = window._relinkLinkedCount || 0;
+        if (lc > 0) {
+            const toast = document.createElement('div');
+            toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--green);color:#000;padding:10px 18px;border-radius:8px;font-size:0.85rem;font-weight:600;z-index:9999;';
+            toast.textContent = '\u2713 All items linked!' + (lc > 1 ? ' (' + lc + ' total)' : '');
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3500);
+        }
+        window._relinkLinkedCount = 0;
+        viewSession(sessionId, true);
+    }
 }
 
 async function _relinkManualPrice() {
@@ -3291,8 +3396,8 @@ async function _relinkManualPrice() {
                     body: JSON.stringify({ condition: cond, session_id: rs.sessionId }),
                 });
             }
-            closeModal('relink-modal');
-            viewSession(rs.sessionId, true);
+            window._relinkLinkedCount = (window._relinkLinkedCount || 0) + 1;
+            await _relinkAdvanceOrClose(rs.sessionId);
         } catch(err) { body.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
     });
 }
@@ -3590,8 +3695,8 @@ function _relinkRenderConditions(selectedCond) {
                     body: JSON.stringify({ session_id: rs.sessionId, grade_company: company, grade_value: gradeVal, market_price: price }),
                 });
             }
-            closeModal('relink-modal');
-            viewSession(rs.sessionId, true);
+            window._relinkLinkedCount = (window._relinkLinkedCount || 0) + 1;
+            await _relinkAdvanceOrClose(rs.sessionId);
         } catch(err) { body.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
     });
 }
