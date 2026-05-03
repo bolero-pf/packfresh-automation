@@ -690,7 +690,7 @@ let _currentStage = 'verify';  // 'verify' | 'breakdown' | 'route' | 'push'
 let _currentSessionData = null;
 // Persisted to localStorage so it survives page refresh — critical for resuming
 // routing sessions at the right card (resume index is sort-dependent).
-let _currentSortBy = (typeof localStorage !== 'undefined' && localStorage.getItem('pf_sort_by')) || 'alpha';
+let _currentSortBy = (typeof localStorage !== 'undefined' && localStorage.getItem('pf_sort_by')) || 'intake';
 function _setSort(v) {
     _currentSortBy = v;
     try { localStorage.setItem('pf_sort_by', v); } catch(e) {}
@@ -725,6 +725,7 @@ function _classifyProductType(item) {
 function _sortItems(items) {
     const sorted = [...items];
     if (_currentSortBy === 'alpha') sorted.sort((a, b) => (a.product_name || '').localeCompare(b.product_name || ''));
+    else if (_currentSortBy === 'intake') sorted.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
     else if (_currentSortBy === 'price-high') sorted.sort((a, b) => (b.market_price || 0) - (a.market_price || 0));
     else if (_currentSortBy === 'price-low') sorted.sort((a, b) => (a.market_price || 0) - (b.market_price || 0));
     return sorted;
@@ -751,7 +752,7 @@ function _renderSortToolbar() {
         </select>
         <label style="margin-left:8px;">Sort:</label>
         <select onchange="_setSort(this.value); _rerenderStage();">
-            <option value="default" ${_currentSortBy==='default'?'selected':''}>Default</option>
+            <option value="intake" ${_currentSortBy==='intake'?'selected':''}>Intake order</option>
             <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>Alphabetical</option>
             <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price (High→Low)</option>
             <option value="price-low" ${_currentSortBy==='price-low'?'selected':''}>Price (Low→High)</option>
@@ -1872,7 +1873,7 @@ function _renderRouteCards(sessionId, data) {
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <label style="font-size:0.82rem;">Sort:</label>
             <select onchange="_setSort(this.value); _renderRouteCards('${sessionId}', _routeData);" style="font-size:0.82rem; padding:4px 8px;">
-                <option value="default" ${_currentSortBy==='default'?'selected':''}>Default (Entered Order)</option>
+                <option value="intake" ${_currentSortBy==='intake'?'selected':''}>Intake order</option>
                 <option value="alpha" ${_currentSortBy==='alpha'?'selected':''}>Alphabetical</option>
                 <option value="price-high" ${_currentSortBy==='price-high'?'selected':''}>Price (High→Low)</option>
                 <option value="price-low" ${_currentSortBy==='price-low'?'selected':''}>Price (Low→High)</option>
