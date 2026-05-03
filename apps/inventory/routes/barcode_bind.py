@@ -547,6 +547,23 @@ function esc(s) {
     c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c]));
 }
 
+// Build a single-quoted JS string literal safe to embed inside an HTML
+// double-quoted attribute (e.g. onclick="..."). Plain esc() turns ' into
+// &#39;, which the HTML parser decodes back to ' before the JS parser
+// runs — closing the string early and breaking the handler. Using \x27
+// (and friends) keeps the apostrophe out of the HTML-decode pass.
+function jsq(s) {
+  return "'" + String(s == null ? '' : s)
+    .replace(/\\\\/g, '\\\\\\\\')
+    .replace(/'/g,    '\\\\x27')
+    .replace(/"/g,    '\\\\x22')
+    .replace(/&/g,    '\\\\x26')
+    .replace(/</g,    '\\\\x3c')
+    .replace(/>/g,    '\\\\x3e')
+    .replace(/\\n/g,  '\\\\n')
+    .replace(/\\r/g,  '\\\\r') + "'";
+}
+
 function toast(msg, kind) {
   kind = kind || 'green';
   const m = document.getElementById('toast-mount');
@@ -894,7 +911,7 @@ async function runSearch() {
   out.innerHTML =
     '<table><thead><tr><th>Title</th><th>Status</th><th>Qty</th><th>Variants</th></tr></thead><tbody>'
     + data.products.map(p =>
-        '<tr class="product-row" onclick="loadVariants(\\'' + esc(p.product_id) + '\\')">'
+        '<tr class="product-row" onclick="loadVariants(' + jsq(p.product_id) + ')">'
         + '<td>' + esc(p.title || '') + '</td>'
         + '<td class="muted">' + esc(p.status || '') + '</td>'
         + '<td class="muted">' + p.qty + '</td>'
@@ -955,8 +972,8 @@ function renderVariantsDefault(productId, data) {
       + optCells
       + '<td>' + esc(v.variant_sku || '') + '</td>'
       + '<td>' + cur + '</td>'
-      + '<td><button class="btn btn-primary" onclick="assignBarcodeSingle(\\'' + esc(v.variant_id)
-        + '\\', \\'' + esc(labelTitle) + '\\')">' + btnLabel + '</button></td>'
+      + '<td><button class="btn btn-primary" onclick="assignBarcodeSingle('
+        + jsq(v.variant_id) + ', ' + jsq(labelTitle) + ')">' + btnLabel + '</button></td>'
       + '</tr>';
   }).join('');
 
@@ -969,8 +986,8 @@ function renderVariantsDefault(productId, data) {
     +   '<div style="font-weight:600;">' + esc(data.product.title || '') + '</div>'
     +   '<div style="flex:1;"></div>'
     +   '<button class="btn" style="color:var(--accent2); border-color:var(--accent2);" '
-    +     'onclick="enterPinMode(\\'' + esc(String(productId)) + '\\', \\''
-    +     esc(data.product.title || '') + '\\')">📌 Rapid bind mode</button>'
+    +     'onclick="enterPinMode(' + jsq(String(productId)) + ', '
+    +     jsq(data.product.title || '') + ')">📌 Rapid bind mode</button>'
     + '</div>'
     + '<div class="muted" style="margin-bottom:8px;">Pick a single variant, or check multiple to bind the same barcode to all (mini tins, multi-art collection boxes, etc.). For accessories with many distinct UPCs (sleeves, dice, deckboxes), use Rapid bind instead.</div>'
     + '<div id="multi-assign-bar" style="margin-bottom:10px; display:none;">'
@@ -1003,8 +1020,8 @@ function renderVariantsPinned(productId, data) {
       : '<span class="muted">—</span>';
     const btnLabel = pendingBarcode ? 'Bind ' + esc(pendingBarcode) : 'Bind';
     const btnClass = isBound ? 'btn' : 'btn btn-primary bind-btn';
-    const btn = '<button class="' + btnClass + '" onclick="assignBarcodeSingle(\\''
-      + esc(v.variant_id) + '\\', \\'' + esc(labelTitle) + '\\')">'
+    const btn = '<button class="' + btnClass + '" onclick="assignBarcodeSingle('
+      + jsq(v.variant_id) + ', ' + jsq(labelTitle) + ')">'
       + (isBound ? 'Rebind' : btnLabel) + '</button>';
     return '<tr id="pin-row-' + esc(v.variant_id) + '">'
       + optCells
