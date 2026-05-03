@@ -339,6 +339,31 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .rl-price { font-family: var(--mono); font-size: 0.78rem; color: var(--accent); }
 .rl-tag { font-size: 0.6rem; padding: 1px 5px; border-radius: 4px;
   background: rgba(192,132,252,0.18); color: #c084fc; margin-left: 4px; }
+
+/* Missing-cards picker overlay (used from hold pull "Can't Find") */
+.missing-picker-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.missing-picker {
+  background: var(--surface); border: 1.5px solid var(--border);
+  border-radius: 12px; padding: 20px; max-width: 480px; width: 100%;
+  max-height: 80vh; display: flex; flex-direction: column;
+}
+.missing-picker-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 4px; }
+.missing-picker-sub { font-size: 0.78rem; color: var(--dim); margin-bottom: 14px; }
+.missing-picker-list { overflow-y: auto; margin-bottom: 14px; }
+.missing-picker-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: 8px; margin-bottom: 6px; cursor: pointer;
+  background: var(--s1);
+}
+.missing-picker-row:hover { border-color: var(--accent); }
+.missing-picker-row input { width: 18px; height: 18px; cursor: pointer; }
+.missing-picker-actions { display: flex; gap: 10px; justify-content: flex-end; }
 </style>
 </head>
 <body>
@@ -1157,12 +1182,94 @@ function renderMissing(cards) {
 }
 
 async function markMissing(holdItemId) {
-  if (!await themedConfirm("Can't Find Card", "Mark this card as missing? It will be flagged for follow-up.")) return;
+  // Fetch sibling copies first — if there's more than one physical copy of
+  // this card+condition, the staffer should pick which barcode(s) they
+  // actually couldn't find. Marking the kiosk-allocated row blindly leads
+  // to the wrong physical copy being flagged.
+  let candidates = [];
   try {
-    await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/missing`, {});
-    toast('Card marked missing', 'amber');
+    const d = await get(`/api/holds/${_currentHoldId}/items/${holdItemId}/missing-candidates`);
+    candidates = d.candidates || [];
+  } catch(e) {
+    toast(e.message, 'red');
+    return;
+  }
+
+  // Single candidate (or somehow none) — fall back to the original confirm.
+  if (candidates.length <= 1) {
+    if (!await themedConfirm("Can't Find Card", "Mark this card as missing? It will be flagged for follow-up.")) return;
+    try {
+      const r = await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/missing`, {});
+      _toastMissingResult(r);
+      await refreshHoldDetail();
+    } catch(e) { toast(e.message, 'red'); }
+    return;
+  }
+
+  // Multiple candidates — picker modal.
+  const picked = await showMissingPicker(candidates);
+  if (!picked || !picked.length) return;
+  try {
+    const r = await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/missing`, { barcodes: picked });
+    _toastMissingResult(r);
     await refreshHoldDetail();
   } catch(e) { toast(e.message, 'red'); }
+}
+
+function _toastMissingResult(r) {
+  if (r.swapped) {
+    toast(`Flagged missing — hold reassigned to a different copy. Check the pull list for the new bin.`, 'amber');
+  } else if (r.hold_item_status === 'MISSING') {
+    toast(`Marked missing — no other copies available, hold item now MISSING.`, 'amber');
+  } else {
+    toast(`${r.missing_count} cop${r.missing_count===1?'y':'ies'} marked missing.`, 'amber');
+  }
+}
+
+function showMissingPicker(candidates) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'missing-picker-overlay';
+    overlay.innerHTML = `
+      <div class="missing-picker">
+        <div class="missing-picker-title">Which cop${candidates.length===1?'y':'ies'} can't you find?</div>
+        <div class="missing-picker-sub">Check every barcode that isn't in its bin. The hold will auto-substitute another copy if available.</div>
+        <div class="missing-picker-list">
+          ${candidates.map(c => `
+            <label class="missing-picker-row" data-bc="${esc(c.barcode)}">
+              <input type="checkbox" value="${esc(c.barcode)}">
+              <div style="flex:1;">
+                <div style="font-family:var(--mono);font-size:0.92rem;">${esc(c.barcode)}</div>
+                <div style="font-size:0.72rem;color:var(--dim);">
+                  ${esc(c.bin_label || 'no bin')} · ${esc(c.state)}${c.is_assigned ? ' · <span style="color:var(--accent);font-weight:600;">← assigned to this hold</span>' : ''}
+                </div>
+              </div>
+            </label>
+          `).join('')}
+        </div>
+        <div class="missing-picker-actions">
+          <button class="btn btn-ghost" id="mp-cancel">Cancel</button>
+          <button class="btn" style="background:var(--red);color:#fff;" id="mp-confirm">Mark Missing</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = (val) => {
+      overlay.remove();
+      resolve(val);
+    };
+    overlay.querySelector('#mp-cancel').onclick = () => close(null);
+    overlay.querySelector('#mp-confirm').onclick = () => {
+      const picked = [...overlay.querySelectorAll('input[type="checkbox"]:checked')].map(i => i.value);
+      if (!picked.length) {
+        toast('Pick at least one barcode', 'red');
+        return;
+      }
+      close(picked);
+    };
+    overlay.onclick = (e) => { if (e.target === overlay) close(null); };
+  });
 }
 
 async function markGone(cardId, cardName) {
@@ -1361,6 +1468,14 @@ function renderEditorDetail(card, copies, availableVariants) {
         <button class="btn btn-sm" onclick="refreshCopyPrice('${esc(String(c.id))}')">↻ Refresh price</button>
         <button class="btn btn-sm" onclick="openRelink('${esc(String(c.id))}')">🔗 Relink</button>
         <button class="btn btn-sm" onclick="reprintCopy('${esc(String(c.id))}')">🖨 Reprint</button>
+        ${(c.state === 'STORED' || c.state === 'DISPLAY') ? `
+          <button class="btn btn-sm" style="border-color:var(--red);color:var(--red);"
+                  onclick="markCopyMissing('${esc(String(c.id))}','${esc(c.barcode||'')}')">🚫 Mark Missing</button>
+        ` : ''}
+        ${c.state === 'MISSING' && _userCanUnmarkMissing() ? `
+          <button class="btn btn-sm btn-green"
+                  onclick="unmarkCopyMissing('${esc(String(c.id))}','${esc(c.barcode||'')}')">↩ Not Missing</button>
+        ` : ''}
       </div>
       <div class="ed-edit-panel">
         <div class="ed-field">
@@ -1453,6 +1568,38 @@ function reprintCopy(copyId) {
   // GET endpoint returns the PNG directly — open in a new tab so the
   // browser can render + print it without us round-tripping base64 over JSON.
   window.open(`/api/editor/copies/${copyId}/barcode-image`, '_blank');
+}
+
+function _userCanUnmarkMissing() {
+  // Owner + manager only. Hide the button entirely for associates so it's
+  // not even discoverable; backend also enforces.
+  const role = (window._pfUser && window._pfUser.role || '').toLowerCase();
+  return role === 'owner' || role === 'manager';
+}
+
+async function markCopyMissing(copyId, barcode) {
+  if (!await themedConfirm('Mark Missing',
+      `Flag barcode ${barcode} as missing? This will remove it from anything that references it for sale.`)) return;
+  try {
+    const d = await post(`/api/editor/copies/${copyId}/mark-missing`, {});
+    toast(`${d.card_name} flagged missing`, 'amber');
+    await refreshEditorDetail();
+    runEditorSearch();
+    refreshBadges();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function unmarkCopyMissing(copyId, barcode) {
+  if (!await themedConfirm('Not Missing',
+      `Restore barcode ${barcode} — confirm this card is actually present and not stolen.`)) return;
+  try {
+    const d = await post(`/api/editor/copies/${copyId}/unmark-missing`, {});
+    const where = d.state === 'STORED' ? 'restored to its bin' : 'sent to Return Queue for re-binning';
+    toast(`${d.card_name} ${where}`, 'green');
+    await refreshEditorDetail();
+    runEditorSearch();
+    refreshBadges();
+  } catch(e) { toast(e.message, 'red'); }
 }
 
 // ── Relink sub-modal ──────────────────────────────────────────────────────────

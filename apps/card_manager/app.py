@@ -14,7 +14,7 @@ import os
 import logging
 import requests as _requests
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, g
 
 import db
 from storage import assign_bins, assign_display_case, get_display_case_capacity, get_binder_capacity
@@ -839,27 +839,182 @@ def item_decision(hold_id, hold_item_id):
     return jsonify({"success": True, "decision": decision})
 
 
+# Active hold statuses — a raw_card lock against any of these means another
+# customer is already in line for that physical copy and we must NOT touch it.
+_ACTIVE_HOLD_STATUSES = ('PENDING', 'PULLING', 'READY')
+
+
+@app.route("/api/holds/<hold_id>/items/<hold_item_id>/missing-candidates")
+def missing_candidates(hold_id, hold_item_id):
+    """Sibling raw_cards a staffer might actually have in front of them when
+    they hit "Can't Find". Same identity (tcgplayer_id + condition) as the
+    hold_item's allocated copy, in STORED/DISPLAY, and either unlocked or
+    locked by a non-active hold or this hold itself. The originally
+    allocated copy is always included so the picker can show "← assigned".
+    """
+    orig = db.query_one("""
+        SELECT hi.id, hi.raw_card_id, rc.tcgplayer_id, rc.condition
+        FROM hold_items hi
+        JOIN raw_cards rc ON rc.id = hi.raw_card_id
+        WHERE hi.id = %s AND hi.hold_id = %s
+    """, (hold_item_id, hold_id))
+    if not orig:
+        return jsonify({"error": "Hold item not found"}), 404
+
+    rows = db.query(f"""
+        SELECT rc.id, rc.barcode, rc.state, rc.current_hold_id,
+               sl.bin_label,
+               (rc.id = %s) AS is_assigned
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+        LEFT JOIN holds h ON h.id = rc.current_hold_id
+        WHERE rc.tcgplayer_id = %s AND rc.condition = %s
+          AND (
+            rc.id = %s
+            OR (
+              rc.state IN ('STORED', 'DISPLAY')
+              AND (
+                rc.current_hold_id IS NULL
+                OR rc.current_hold_id = %s
+                OR h.status NOT IN {_ACTIVE_HOLD_STATUSES}
+              )
+            )
+          )
+        ORDER BY (rc.id = %s) DESC, sl.bin_label NULLS LAST, rc.barcode
+    """, (
+        str(orig["raw_card_id"]),
+        orig["tcgplayer_id"], orig["condition"],
+        str(orig["raw_card_id"]),
+        hold_id,
+        str(orig["raw_card_id"]),
+    ))
+
+    return jsonify({
+        "candidates": [_ser(dict(r)) for r in rows],
+        "assigned_card_id": str(orig["raw_card_id"]),
+    })
+
+
 @app.route("/api/holds/<hold_id>/items/<hold_item_id>/missing", methods=["POST"])
 def mark_item_missing(hold_id, hold_item_id):
-    """Mark a hold item as MISSING — card can't be found during pulling."""
+    """Mark a hold item as MISSING — card can't be found during pulling.
+
+    Body (optional): {"barcodes": ["BC1", "BC2", ...]} — the specific physical
+    copies the staffer couldn't find. If omitted, marks the originally-
+    allocated copy missing (legacy behavior).
+
+    Substitution: if the hold's currently-allocated copy is among the
+    barcodes the staffer flagged, we try to swap the hold_item to another
+    available sibling so the customer still gets their card. If no
+    substitute exists, the hold_item itself flips to MISSING.
+    """
     item = db.query_one("""
-        SELECT hi.*, rc.id AS card_id FROM hold_items hi
-        JOIN raw_cards rc ON hi.raw_card_id = rc.id
+        SELECT hi.id, hi.raw_card_id, hi.status,
+               rc.tcgplayer_id, rc.condition, rc.card_name
+        FROM hold_items hi
+        JOIN raw_cards rc ON rc.id = hi.raw_card_id
         WHERE hi.id = %s AND hi.hold_id = %s
     """, (hold_item_id, hold_id))
     if not item:
         return jsonify({"error": "Hold item not found"}), 404
 
-    db.execute("""
-        UPDATE hold_items SET status = 'MISSING', resolved_at = CURRENT_TIMESTAMP
-        WHERE id = %s
-    """, (hold_item_id,))
-    db.execute("""
-        UPDATE raw_cards SET state = 'MISSING', current_hold_id = NULL
-        WHERE id = %s
-    """, (str(item["card_id"]),))
+    body = request.get_json(silent=True) or {}
+    barcodes = [b.strip() for b in (body.get("barcodes") or []) if b and b.strip()]
 
-    return jsonify({"success": True, "status": "MISSING"})
+    # Resolve barcodes → raw_card rows. Each must be a sibling
+    # (same tcgplayer_id + condition) — refuse anything else.
+    picked = []
+    if barcodes:
+        picked = db.query(f"""
+            SELECT rc.id, rc.barcode, rc.state, rc.current_hold_id
+            FROM raw_cards rc
+            LEFT JOIN holds h ON h.id = rc.current_hold_id
+            WHERE rc.barcode = ANY(%s)
+              AND rc.tcgplayer_id = %s
+              AND rc.condition = %s
+        """, (barcodes, item["tcgplayer_id"], item["condition"]))
+        if len(picked) != len(barcodes):
+            found = {p["barcode"] for p in picked}
+            bad = [b for b in barcodes if b not in found]
+            return jsonify({"error": f"Not a sibling of this card: {', '.join(bad)}"}), 400
+        # Refuse states where flipping to MISSING would corrupt other state
+        # (PENDING_SALE has a Shopify draft attached, PENDING_RETURN/SOLD/GONE
+        # are managed elsewhere). STORED/DISPLAY/PULLED/MISSING are fair game.
+        for p in picked:
+            if p["state"] not in ("STORED", "DISPLAY", "PULLED", "MISSING"):
+                return jsonify({"error": f"Barcode {p['barcode']} is in {p['state']} — can't mark missing from here"}), 409
+        # Refuse to overwrite a copy currently locked by a different active
+        # hold — that physical card is already promised to another customer.
+        for p in picked:
+            if (p.get("current_hold_id") and str(p["current_hold_id"]) != hold_id):
+                other = db.query_one("SELECT status FROM holds WHERE id = %s", (str(p["current_hold_id"]),))
+                if other and other["status"] in _ACTIVE_HOLD_STATUSES:
+                    return jsonify({"error": f"Barcode {p['barcode']} is locked to another active hold"}), 409
+
+    # Default to the originally-allocated copy if no barcodes given.
+    if not picked:
+        picked = [{"id": item["raw_card_id"], "barcode": None}]
+
+    picked_ids = {str(p["id"]) for p in picked}
+
+    # Flip every picked copy to MISSING and clear locks.
+    db.execute("""
+        UPDATE raw_cards
+        SET state = 'MISSING',
+            current_hold_id = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = ANY(%s)
+    """, (list(picked_ids),))
+
+    # If the assigned copy is among the missing, attempt substitution so the
+    # customer still gets their card. Otherwise the hold_item is unaffected
+    # (staff just flagged extra missing inventory — keep pulling normally).
+    assigned_was_picked = str(item["raw_card_id"]) in picked_ids
+    swapped = False
+    new_card_id = None
+
+    if assigned_was_picked:
+        substitute = db.query_one(f"""
+            SELECT rc.id, rc.barcode
+            FROM raw_cards rc
+            LEFT JOIN holds h ON h.id = rc.current_hold_id
+            WHERE rc.tcgplayer_id = %s AND rc.condition = %s
+              AND rc.state IN ('STORED', 'DISPLAY')
+              AND NOT (rc.id::text = ANY(%s))
+              AND (
+                rc.current_hold_id IS NULL
+                OR h.status NOT IN {_ACTIVE_HOLD_STATUSES}
+              )
+            ORDER BY rc.state DESC, rc.id
+            LIMIT 1
+        """, (item["tcgplayer_id"], item["condition"], list(picked_ids)))
+
+        if substitute:
+            db.execute("""
+                UPDATE hold_items
+                SET raw_card_id = %s
+                WHERE id = %s
+            """, (str(substitute["id"]), hold_item_id))
+            db.execute("""
+                UPDATE raw_cards SET current_hold_id = %s
+                WHERE id = %s
+            """, (hold_id, str(substitute["id"])))
+            swapped = True
+            new_card_id = str(substitute["id"])
+        else:
+            db.execute("""
+                UPDATE hold_items
+                SET status = 'MISSING', resolved_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (hold_item_id,))
+
+    return jsonify({
+        "success":           True,
+        "missing_count":     len(picked_ids),
+        "hold_item_status":  "MISSING" if (assigned_was_picked and not swapped) else item["status"],
+        "swapped":           swapped,
+        "new_card_id":       new_card_id,
+    })
 
 
 @app.route("/api/holds/<hold_id>/items/<hold_item_id>/reverse", methods=["POST"])
@@ -2796,6 +2951,73 @@ def editor_refresh_price(copy_id):
     """, (new_price, copy_id))
 
     return jsonify({"success": True, "current_price": float(new_price)})
+
+
+@app.route("/api/editor/copies/<copy_id>/mark-missing", methods=["POST"])
+def editor_mark_missing(copy_id):
+    """Flag a copy as MISSING from the editor — for cases where you know
+    a card isn't where it should be without an active hold to drive it.
+    Refuses to clobber a copy locked by an active hold (use the hold's
+    Can't Find flow instead, so the hold_item gets the right attribution).
+    """
+    card = db.query_one("""
+        SELECT rc.id, rc.state, rc.current_hold_id, rc.card_name,
+               h.status AS hold_status, h.id AS hold_short_id
+        FROM raw_cards rc
+        LEFT JOIN holds h ON h.id = rc.current_hold_id
+        WHERE rc.id::text = %s
+    """, (copy_id,))
+    if not card:
+        return jsonify({"error": "Copy not found"}), 404
+    if card["state"] not in ("STORED", "DISPLAY"):
+        return jsonify({"error": f"Can only mark STORED/DISPLAY copies missing — this one is {card['state']}"}), 409
+    if card.get("hold_status") in _ACTIVE_HOLD_STATUSES:
+        return jsonify({
+            "error": "This copy is assigned to an active hold. "
+                     "Use the hold's Can't Find flow so the hold gets attributed correctly."
+        }), 409
+
+    db.execute("""
+        UPDATE raw_cards
+        SET state = 'MISSING',
+            current_hold_id = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (copy_id,))
+    return jsonify({"success": True, "state": "MISSING", "card_name": card["card_name"]})
+
+
+@app.route("/api/editor/copies/<copy_id>/unmark-missing", methods=["POST"])
+def editor_unmark_missing(copy_id):
+    """Restore a wrongly-flagged MISSING copy. Owner/manager only — letting
+    associates clear MISSING is a great way for a stolen card to get
+    persistently un-flagged by the thief.
+
+    If the row still has its last bin, restore to STORED there. Otherwise
+    route to PENDING_RETURN so the next store_returns pass re-bins it.
+    """
+    user = getattr(g, "user", None) or {}
+    role = (user.get("role") or "").lower()
+    if role not in ("owner", "manager"):
+        return jsonify({"error": "Owner or manager only."}), 403
+
+    card = db.query_one("""
+        SELECT id, state, bin_id, card_name FROM raw_cards WHERE id::text = %s
+    """, (copy_id,))
+    if not card:
+        return jsonify({"error": "Copy not found"}), 404
+    if card["state"] != "MISSING":
+        return jsonify({"error": f"Copy is {card['state']}, not MISSING"}), 409
+
+    new_state = "STORED" if card.get("bin_id") else "PENDING_RETURN"
+    db.execute("""
+        UPDATE raw_cards
+        SET state = %s,
+            current_hold_id = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (new_state, copy_id))
+    return jsonify({"success": True, "state": new_state, "card_name": card["card_name"]})
 
 
 @app.route("/api/editor/copies/<copy_id>/barcode-image")
