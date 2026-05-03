@@ -75,6 +75,22 @@ th, td { font-size: 0.88rem; }
 th { font-size: 0.8rem; }
 .row-unmapped { background: var(--amber-bg); }
 
+/* ─── SESSION VIEW ─── */
+/* Full-width page section that takes over when a session is open. The
+ * tab nav above is hidden via body.session-active so the session has the
+ * full container width to work with. */
+#session-view {
+    display: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin-top: 16px;
+}
+#session-view.active { display: block; }
+body.session-active .tabs,
+body.session-active .tab-content { display: none !important; }
+
 /* ─── MODAL (overrides) ─── */
 .modal-overlay {
     align-items: flex-start;
@@ -82,7 +98,6 @@ th { font-size: 0.8rem; }
     padding: 40px 20px;
     overflow-y: auto;
 }
-/* Mapping modal must stack ABOVE session modal */
 #mapping-modal { z-index: 1100; }
 /* Themed prompt/confirm modal stacks above everything */
 #themed-prompt-overlay { z-index: 1200; align-items: center; }

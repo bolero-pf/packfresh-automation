@@ -74,17 +74,38 @@ document.addEventListener('keydown', (e) => {
         if (relink && relink.classList.contains('active')) { closeModal('relink-modal'); return; }
         const mapping = document.getElementById('mapping-modal');
         if (mapping.classList.contains('active')) { closeModal('mapping-modal'); return; }
-        const session = document.getElementById('session-modal');
-        if (session.classList.contains('active')) { closeModal('session-modal'); return; }
+        const session = document.getElementById('session-view');
+        if (session && session.classList.contains('active')) { hideSessionView(); return; }
     }
 });
+// Show/hide the full-page session view. Replaces the legacy modal pattern —
+// when a session is open, the tab nav and tab-content blocks above are
+// hidden via body.session-active and the view fills the container.
+function showSessionView() {
+    const view = document.getElementById('session-view');
+    if (!view) return;
+    view.classList.add('active');
+    document.body.classList.add('session-active');
+    window.scrollTo(0, 0);
+}
+function hideSessionView() {
+    const view = document.getElementById('session-view');
+    if (!view) return;
+    view.classList.remove('active');
+    document.body.classList.remove('session-active');
+    currentSessionId = null;
+    // Refresh the visible session list so any in-place changes show up.
+    try {
+        if (typeof loadFilteredActive === 'function') loadFilteredActive();
+    } catch(e) {}
+}
+function closeSessionView() { hideSessionView(); }
 // Click outside modal to close — track mousedown origin so text-select drags don't dismiss
 {
     let _mousedownTarget = null;
     document.addEventListener('mousedown', (e) => { _mousedownTarget = e.target; });
     document.querySelectorAll('.modal-overlay').forEach(overlay => {
         if (overlay.id === 'themed-prompt-overlay') return; // only via Cancel/Confirm/Escape
-        if (overlay.id === 'session-modal') return;          // only via × button or Escape
         overlay.addEventListener('mouseup', (e) => {
             // Only dismiss if BOTH mousedown and mouseup landed on the bare overlay (not a drag)
             if (e.target === overlay && _mousedownTarget === overlay) {
@@ -1072,15 +1093,12 @@ async function viewSession(sessionId, _preserveScroll) {
         loadIntakeItems();
     }
     const body = document.getElementById('session-modal-body');
-    const overlay = document.getElementById('session-modal');
-    // Capture scroll BEFORE any DOM mutation — spinner reflow will zero it out
-    const scrollTop = _preserveScroll ? (overlay ? overlay.scrollTop : 0) : 0;
-    // Only show spinner for fresh opens — skip it when preserving scroll
-    // so the existing content keeps the modal at full height
+    // Capture window scroll BEFORE any DOM mutation — spinner reflow will zero it out
+    const scrollTop = _preserveScroll ? window.scrollY : 0;
     if (!_preserveScroll) {
         body.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
     }
-    openModal('session-modal');
+    showSessionView();
 
     try {
         const r = await fetch(`/api/intake/session/${sessionId}`);
@@ -1149,11 +1167,6 @@ async function viewSession(sessionId, _preserveScroll) {
 
             <!-- ═══ OFFER TAB ═══ -->
             <div id="stab-offer" class="session-tab-content">
-                ${editable ? `
-                    <div style="margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap;">
-                        <button class="btn btn-sm" style="background:var(--red); color:#fff;" onclick="cancelSession('${sessionId}')">✕ Cancel Session</button>
-                    </div>
-                ` : ''}
                 ${rejuvenatable ? `
                     <div style="margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                         <button class="btn btn-sm" style="background:#059669;color:#fff;border:none;"
@@ -1461,8 +1474,7 @@ async function viewSession(sessionId, _preserveScroll) {
         `;
         // Restore scroll after render — use rAF + retries to survive repaint/reflow
         if (scrollTop) {
-            const _ov = document.getElementById('session-modal');
-            const _restoreScroll = () => { if (_ov) _ov.scrollTop = scrollTop; };
+            const _restoreScroll = () => { window.scrollTo(0, scrollTop); };
             _restoreScroll();
             requestAnimationFrame(() => {
                 _restoreScroll();
@@ -2217,8 +2229,7 @@ let _storeFilter = 'all';
 async function storeCheck(sessionId) {
     const panel = document.getElementById('store-check-results');
     if (!panel) return;
-    const _modal = document.getElementById('session-modal');
-    const _savedScroll = _modal ? _modal.scrollTop : 0;
+    const _savedScroll = window.scrollY;
     panel.innerHTML = '<div class="loading"><span class="spinner"></span> Checking store inventory...</div>';
 
     try {
@@ -2238,9 +2249,9 @@ async function storeCheck(sessionId) {
         _storeFilter = 'all';
         renderStoreCheck();
         // Restore scroll after store check re-render
-        if (_savedScroll && _modal) {
-            _modal.scrollTop = _savedScroll;
-            setTimeout(() => { _modal.scrollTop = _savedScroll; }, 50);
+        if (_savedScroll) {
+            window.scrollTo(0, _savedScroll);
+            setTimeout(() => { window.scrollTo(0, _savedScroll); }, 50);
         }
 
         // If cache is currently refreshing in the background, poll and auto-reload when done
@@ -2283,8 +2294,7 @@ function renderStoreCheck() {
     const panel = document.getElementById('store-check-results');
     if (!panel || !_storeCheckData) return;
     // Preserve scroll position of the session modal
-    const _modal = document.getElementById('session-modal');
-    const _savedScroll = _modal ? _modal.scrollTop : 0;
+    const _savedScroll = window.scrollY;
     const items = _storeCheckData.items;
     const sessionId = _storeCheckData.sessionId;
 
@@ -2491,9 +2501,9 @@ function renderStoreCheck() {
     `;
     loadCacheStatus();
     // Restore scroll position after DOM reflow
-    if (_savedScroll && _modal) {
-        _modal.scrollTop = _savedScroll;
-        setTimeout(() => { _modal.scrollTop = _savedScroll; }, 50);
+    if (_savedScroll) {
+        window.scrollTo(0, _savedScroll);
+        setTimeout(() => { window.scrollTo(0, _savedScroll); }, 50);
     }
 }
 
@@ -4538,19 +4548,24 @@ function _renderStickyActions(sessionId, s, items) {
     if (editable && status !== 'in_progress') {
         inner += `<button class="btn btn-secondary btn-sm" onclick="transitionSession('${sessionId}','reopen')">↩ Reopen</button>`;
     }
-    if (!inner) return '';
-    // Sticky bar sits flush with the modal's top scroll edge so the
-    // primary actions stay visible no matter how far staff scrolls
-    // past hundreds of items. Right padding leaves clearance for the
-    // existing modal-close-sticky button.
+    // Top toolbar — Back button on the left, status-driven actions on the
+    // right, Cancel folded in for editable sessions. Sticky to the page
+    // top so actions stay visible while scrolling through hundreds of
+    // items. The negative margins pull the bar flush with the session
+    // view's outer padding.
+    const cancelBtn = (editable && status === 'in_progress')
+        ? `<button class="btn btn-sm" style="background:transparent;color:var(--red);border:1px solid var(--red);" onclick="cancelSession('${sessionId}')">✕ Cancel Session</button>`
+        : '';
     return `
         <div class="session-actions" style="position: sticky; top: 0; z-index: 5;
              background: var(--surface);
-             margin: -28px -28px 16px;
-             padding: 10px 56px 10px 28px;
+             margin: -24px -28px 16px;
+             padding: 12px 28px;
              border-bottom: 1px solid var(--border);
              display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+            <button class="btn btn-secondary btn-sm" onclick="closeSessionView()" style="margin-right:auto;">← Back to Sessions</button>
             ${inner}
+            ${cancelBtn}
         </div>`;
 }
 
