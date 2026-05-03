@@ -4,16 +4,20 @@ raw_card_updater — nightly raw-card price refresh.
 For every raw card in stock (state IN ('STORED','DISPLAY'), not on hold):
 DISPLAY cards (binders) need nightly repricing too — they're customer-
 facing via kiosk and POS rings them up at current_price just like STORED.
-  1. Look up market price in scrydex_price_cache by
+  1. Skip cards in the price_auto_block list ('raw' domain) — escape
+     hatch for runaway suggestions (e.g. a corrupted catalog mapping
+     pricing a $10 card at $13k).
+  2. Look up market price in scrydex_price_cache by
      (scrydex_id, variant, condition, price_type='raw'), falling back to
      tcgplayer_id when no scrydex_id is bound. Scrydex IDs are more
      specific (TCG IDs can collide across variants or be orphaned).
-  2. Floor at cost_basis (never sell below cost).
-  3. Charm-ceil round to a customer-friendly .99 price.
-  4. Compare to raw_cards.current_price:
+  3. Floor at cost_basis (never sell below cost).
+  4. Charm-ceil round to a customer-friendly .99 price.
+  5. Compare to raw_cards.current_price (delta = (old - suggested)/suggested):
        |delta| <= AUTO_DELTA_PCT  -> auto-apply (small drift, rebalance silently)
-       |delta| >  AUTO_DELTA_PCT  -> flag for review in /dashboard/raw-runs
-  5. Persist every row to raw_card_price_runs for audit + per-row apply.
+       delta < -AUTO_DELTA_PCT    -> auto-apply (raise — never miss a fast mover)
+       delta >  AUTO_DELTA_PCT    -> flag_overpriced (review needed to drop)
+  6. Persist every row to raw_card_price_runs for audit + per-row apply.
 
 No Shopify mutations — raw card listings are created on-demand at Champion
 checkout from the live raw_cards.current_price. Updating the DB is the
@@ -218,9 +222,16 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
         import db as db_module
         db_module.init_pool()
 
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
+    from price_auto_block import load_blocks, raw_key
+
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc)
     logger.info(f"raw_card_updater run_id={run_id} apply_auto={apply_auto}")
+
+    blocked = load_blocks(db_module, "raw")
+    if blocked:
+        logger.info(f"  {len(blocked)} cards on raw price-auto-block list")
 
     cards = db_module.query("""
         SELECT id, barcode, tcgplayer_id, scrydex_id, card_name, set_name,
@@ -253,6 +264,13 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             "cost_basis":  float(card["cost_basis"]) if card["cost_basis"] is not None else None,
             "old_price":   float(card["current_price"]) if card["current_price"] is not None else None,
         }
+
+        block_key = raw_key(card["scrydex_id"], card["tcgplayer_id"])
+        if block_key and block_key in blocked:
+            entry.update({"action": "skip", "reason": f"auto-block ({block_key})"})
+            stats["skip"] += 1
+            _record(db_module, run_id, started_at, entry)
+            continue
 
         if not card["tcgplayer_id"] and not card["scrydex_id"]:
             entry.update({"action": "skip", "reason": "no scrydex_id or tcgplayer_id"})
@@ -289,6 +307,13 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             "scrydex_id":      entry["scrydex_id"] or cache.get("scrydex_id"),
         })
 
+        # Decision tree:
+        #   |delta| <= SKIP                : ok (no-op)
+        #   |delta| <= AUTO   OR delta < 0 : auto-apply (small drift OR raise)
+        #   delta > AUTO                   : flag_overpriced (need to drop, review)
+        # We always auto-RAISE — Sean does not want to miss a card moving from
+        # $100 -> $120 because the gap is "more than 10%". Drops still need a
+        # human eye since cutting prices on live inventory is a one-way move.
         if abs(delta_pct) <= SKIP_DELTA_PCT:
             entry.update({
                 "action": "ok",
@@ -296,8 +321,16 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             })
             stats["ok"] += 1
 
-        elif abs(delta_pct) <= AUTO_DELTA_PCT:
-            # Small drift — auto-apply unless we'd dip below cost basis
+        elif delta_pct > AUTO_DELTA_PCT:
+            entry.update({
+                "action": "flag_overpriced",
+                "reason": f"overpriced {delta_pct:+.1f}% — review (won't auto-drop)",
+            })
+            stats["flag_overpriced"] += 1
+
+        else:
+            # Either small drift (within ±AUTO_DELTA_PCT) or an underpricing
+            # (delta_pct < -AUTO_DELTA_PCT, market rose). Both auto-apply.
             if floor and suggested < floor:
                 entry.update({
                     "action": "skip",
@@ -307,40 +340,31 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             elif apply_auto:
                 try:
                     _apply_db_price(db_module, entry["raw_card_id"], suggested)
+                    if delta_pct < -AUTO_DELTA_PCT:
+                        why = (f"auto-raised {abs(delta_pct):.1f}% to follow market; "
+                               f"${old:.2f} -> ${suggested:.2f}")
+                    else:
+                        why = (f"auto-applied {delta_pct:+.1f}% drift; "
+                               f"${old:.2f} -> ${suggested:.2f}")
                     entry.update({
                         "action": "auto_applied",
                         "new_price": suggested,
                         "applied_at": datetime.now(timezone.utc),
                         "applied_price": suggested,
                         "apply_status": "applied",
-                        "reason": (f"auto-applied {delta_pct:+.1f}% drift; "
-                                   f"${old:.2f} -> ${suggested:.2f}"),
+                        "reason": why,
                     })
                     stats["auto_applied"] += 1
                 except Exception as e:
                     entry.update({"action": "error", "reason": f"DB update failed: {e}"})
                     stats["error"] += 1
             else:
-                # Dry-run mode: would auto-apply but don't actually write
                 entry.update({
                     "action": "auto_applied",
                     "reason": f"[DRY-RUN] would auto-apply {delta_pct:+.1f}%",
                     "apply_status": "pending",
                 })
                 stats["auto_applied"] += 1
-
-        elif delta_pct > AUTO_DELTA_PCT:
-            entry.update({
-                "action": "flag_overpriced",
-                "reason": f"overpriced {delta_pct:+.1f}% — review",
-            })
-            stats["flag_overpriced"] += 1
-        else:  # delta_pct < -AUTO_DELTA_PCT
-            entry.update({
-                "action": "flag_underpriced",
-                "reason": f"underpriced {delta_pct:+.1f}% vs suggested — review",
-            })
-            stats["flag_underpriced"] += 1
 
         _record(db_module, run_id, started_at, entry)
 

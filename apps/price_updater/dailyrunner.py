@@ -1,13 +1,13 @@
 import requests
 import time
 import re
-import csv
+import sys
+import uuid
 import concurrent
-import argparse
 import os
 import random
 import threading
-import pandas as pd
+from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from selenium import webdriver
@@ -22,38 +22,82 @@ import traceback
 
 load_dotenv()
 
-
-
 CHROME_BINARY_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "chrome", "chrome.exe"))
 CHROME_BINARY_PATH = ".venv/Scripts/chrome/chrome.exe"
 MAX_WORKERS = 3
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
-# Write outputs next to your app, not the ephemeral CWD
-REVIEW_CSV     = BASE_DIR / "price_updates_needs_review.csv"
-PUSHED_CSV     = BASE_DIR / "price_updates_pushed.csv"
-UNTOUCHED_CSV  = BASE_DIR / "price_updates_untouched.csv"
-MISSING_CSV    = BASE_DIR / "price_updates_missing_listing.csv"  # keep your current name
+sys.path.insert(0, str(BASE_DIR.parent / "shared"))
+import db as shared_db
+from price_auto_block import load_blocks
 
-# One place to define the columns your dashboard can tolerate
-CSV_COLS = [
-    "title","sku","shopify_price","suggested_price","price_to_upload",
-    "shopify_qty","variant_id","shopify_inventory_item_id","pending_shopify_update",
-    "price_last_updated","notes","product_gid","tcg_price","percent_diff","reason",
-    "tcgplayer_id","handle","tags","uploaded_price","new_price","note"
-]
 
-def _write_csv_safe(rows, path, cols=CSV_COLS):
-    import pandas as pd
-    # Always emit headers so read_csv never fails
-    df = pd.DataFrame(rows)
-    if df.empty:
-        df = pd.DataFrame(columns=cols)
-    # Re-order columns where possible (missing columns will be created)
-    df = df.reindex(columns=cols, fill_value="")
-    df.to_csv(path, index=False)
-    print(f"[WRITE] {path} rows={len(df)}")
+_INSERT_RUN_SQL = """
+    INSERT INTO sealed_price_runs (
+        run_id, started_at,
+        product_gid, variant_id, sku, title, handle, tcgplayer_id, qty,
+        old_price, tcg_price, suggested_price, new_price, delta_pct,
+        action, reason, apply_status, applied_at, applied_price
+    ) VALUES (
+        %s, %s,
+        %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s
+    )
+"""
+
+
+def _coerce_money(val):
+    if val is None or val == "":
+        return None
+    try:
+        return round(float(val), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _persist_rows(run_id: str, started_at: datetime, rows: list[dict]) -> int:
+    """Insert a batch of result rows into sealed_price_runs. Best-effort —
+    DB failures are logged and the run continues (the next batch flush
+    will retry the whole batch since we hold rows in memory)."""
+    if not rows:
+        return 0
+    payload = []
+    for r in rows:
+        payload.append((
+            run_id, started_at,
+            r.get("product_gid"), str(r.get("variant_id") or "") or None,
+            r.get("sku"), r.get("title"), r.get("handle"),
+            str(r.get("tcgplayer_id") or "") or None,
+            r.get("shopify_qty") if r.get("shopify_qty") is not None
+                else r.get("inventory_quantity"),
+            _coerce_money(r.get("shopify_price")),
+            _coerce_money(r.get("tcg_price")),
+            _coerce_money(r.get("suggested_price")),
+            _coerce_money(r.get("new_price") or r.get("uploaded_price")),
+            r.get("percent_diff") if isinstance(r.get("percent_diff"), (int, float)) else None,
+            r.get("action"),
+            r.get("reason") or r.get("note"),
+            r.get("apply_status", "pending"),
+            r.get("applied_at"),
+            _coerce_money(r.get("applied_price")),
+        ))
+    try:
+        return shared_db.execute_many_batch(_INSERT_RUN_SQL, payload, page_size=200)
+    except Exception as e:
+        print(f"[ERROR] sealed_price_runs batch insert failed ({len(rows)} rows): {e}")
+        return 0
+
+
+def _flush_to_db(run_id: str, started_at: datetime, buffered: list[dict]) -> None:
+    """Drain the buffer into sealed_price_runs and clear it on success."""
+    if not buffered:
+        return
+    inserted = _persist_rows(run_id, started_at, buffered)
+    if inserted:
+        buffered.clear()
+        print(f"[WRITE] sealed_price_runs +{inserted} rows (run={run_id[:8]})")
 # === CONFIG ===
 SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN")
 SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE")
@@ -498,14 +542,37 @@ def safe_percent_diff(old_price: float, new_price: float):
         return ""   # or "n/a"
     return round(100 * (new_price - old_price) / old_price, 2)
 
-def process_product(product):
+def process_product(product, blocked: set | None = None):
+    """Decide what to do with one Shopify variant. Returns the original
+    product dict mutated with `action`, `reason`, and pricing fields the
+    DB writer expects.
+
+    Decision tree:
+      block-listed       -> skip
+      ignore-skus file   -> untouched (legacy local mute)
+      tagged ignore_*    -> untouched
+      no tcg_id          -> missing
+      tcg fetch failed   -> missing
+      new > current      -> updated (always raise)
+      new < current OOS  -> updated (auto-lower OOS only)
+      new < current in-stock -> review (bulk-approve in dashboard)
+      new == current     -> untouched
+    """
+    blocked = blocked or set()
     tcg_id = product["tcgplayer_id"]
     current_price = float(product.get("shopify_price") or product.get("price") or 0)
+
+    variant_key = str(product.get("variant_id") or "")
+    if variant_key and variant_key in blocked:
+        product.update({"action": "skip", "reason": "auto-block"})
+        return "skip", product
+
     if not tcg_id:
+        product.update({"action": "missing", "reason": "no tcgplayer_id metafield"})
         return "missing", product
 
     if product["sku"] in ignored_skus:
-        print(f"🚫 Ignoring {product['title']} (SKU: {product['sku']})")
+        product.update({"action": "untouched", "reason": "ignored sku (local file)"})
         return "untouched", product
 
     raw_tags = product.get("tags") or []
@@ -513,77 +580,67 @@ def process_product(product):
                                                                                      raw_tags.split(",")]
 
     if any(tag in tags for tag in ["weekly deals", "ignore_update", "slab"]):
-        #print(f"🛑 Skipping {product['title']} (tagged as Weekly Deals or Ignore Update or a graded card)")
+        product.update({"action": "untouched", "reason": "tagged for skip"})
         return "untouched", product
 
     print(f"[{tcg_id}] Checking {product['title']}...")
     tcg_price = get_featured_price_tcgplayer(tcg_id)
     if tcg_price is None:
+        product.update({"action": "missing", "reason": "tcgplayer scrape failed",
+                        "tcg_price": None})
         return "missing", product
 
-    #new_price = round_nice_price(tcg_price * TCGPLAYER_PRICE_ADJUSTMENT)
     new_price = round_competitive_price(tcg_price)
+    percent_diff = safe_percent_diff(current_price, new_price)
 
     if new_price < current_price:
         shopify_qty = int(product.get("shopify_qty") or product.get("inventory_quantity") or 0)
         if shopify_qty <= 0:
-            # Out of stock → auto-update to keep prices accurate for when we restock
             print(f"  ⬇ OOS auto-update {product['title']}: ${current_price:.2f} → ${new_price:.2f} (qty=0)")
             update_variant_price(product["product_gid"], product["variant_id"], new_price)
-            percent_diff = safe_percent_diff(current_price, new_price)
-            return ("updated",
-                    {**product,
-                     "shopify_price": current_price,
-                     "current_price": current_price,
-                     "product_gid": product["product_gid"],
-                     "tcg_price": tcg_price,
-                     "uploaded_price": new_price,
-                     "new_price": new_price,
-                     "percent_diff": percent_diff,
-                     "reason": "OOS auto-lower to market"})
+            product.update({
+                "action": "updated",
+                "tcg_price": tcg_price,
+                "suggested_price": new_price,
+                "uploaded_price": new_price, "new_price": new_price,
+                "percent_diff": percent_diff,
+                "reason": "OOS auto-lower to market",
+                "apply_status": "applied",
+                "applied_at": datetime.now(timezone.utc),
+                "applied_price": new_price,
+            })
+            return "updated", product
         else:
-            # In stock → send to review (don't auto-cut prices on live inventory)
-            percent_diff = safe_percent_diff(current_price, new_price)
-            return ("review",
-                    {**product,
-                     "shopify_price": current_price,
-                     "price_to_upload": "",  # empty until you approve it
-                     "current_price": current_price,
-                     "product_gid": product["product_gid"],
-                     "tcg_price": tcg_price,
-                     "suggested_price": new_price,
-                     "percent_diff": percent_diff,
-                     "reason": "Lower to stay near market (in stock — needs review)"})
+            product.update({
+                "action": "review",
+                "tcg_price": tcg_price,
+                "suggested_price": new_price,
+                "percent_diff": percent_diff,
+                "reason": "Lower to stay near market (in stock — needs review)",
+            })
+            return "review", product
 
     elif new_price > current_price:
-        # price increase → auto-update
         print(f" Updating {product['title']} : {tcg_price} : {new_price}")
         update_variant_price(product["product_gid"], product["variant_id"], new_price)
-        percent_diff = safe_percent_diff(current_price, new_price)
-        return ("updated",
-                {**product,
-                 "shopify_price": current_price,
-                 "current_price": current_price,
-                 "tcg_price": tcg_price,
-                 "uploaded_price": new_price,
-                 "new_price": new_price,
-                 "percent_diff": percent_diff,
-                 "reason": "Raise to stay near market"})
+        product.update({
+            "action": "updated",
+            "tcg_price": tcg_price,
+            "suggested_price": new_price,
+            "uploaded_price": new_price, "new_price": new_price,
+            "percent_diff": percent_diff,
+            "reason": "Raise to stay near market",
+            "apply_status": "applied",
+            "applied_at": datetime.now(timezone.utc),
+            "applied_price": new_price,
+        })
+        return "updated", product
 
-    # equal → no-op
-    return ("untouched",
-            {**product, "tcg_price": tcg_price, "note": "At target"})
-
-def _variant_product_gid_from_graphql(variant_id: str) -> str:
-    # Fallback resolver if CSV lacks product_gid (should be rare once we write it)
-    q = """
-    query($id: ID!) { productVariant(id: $id) { product { id } } }
-    """
-    vid = f"gid://shopify/ProductVariant/{variant_id}"
-    r = requests.post(GRAPHQL_ENDPOINT, headers=HEADERS, json={"query": q, "variables": {"id": vid}})
-    r.raise_for_status()
-    data = r.json()
-    return data["data"]["productVariant"]["product"]["id"]
+    product.update({
+        "action": "untouched", "tcg_price": tcg_price,
+        "percent_diff": percent_diff, "reason": "At target",
+    })
+    return "untouched", product
 
 def _invalidate_inventory_cache():
     """Notify inventory + intake services that Shopify prices changed."""
@@ -599,125 +656,34 @@ def _invalidate_inventory_cache():
             print(f"⚠️ Failed to notify {name} cache: {e}")
 
 
-def upload_reviewed_csv():
-    import math
-    try:
-        # Keep empty strings as "" instead of NaN
-        df = pd.read_csv(REVIEW_CSV, keep_default_na=False)
-    except Exception as e:
-        print(f"❌ Failed to read review CSV: {e}")
-        return
-
-    print(f"🚀 Uploading reviewed prices from {REVIEW_CSV}...")
-
-    for _, row in df.iterrows():
-        variant_id = str(row.get("variant_id") or "").strip()
-        raw = row.get("price_to_upload", "")
-
-        # Normalize to a clean string
-        s = ("" if raw is None else str(raw)).strip()
-        if s == "" or s.lower() == "nan":
-            print(f"⚠️ Skipping row with missing/NaN price: {row.get('title')}")
-            continue
-
-        # Validate numeric + finite
-        try:
-            new_price = float(s)
-            if not math.isfinite(new_price) or new_price <= 0:
-                print(f"⚠️ Skipping non-finite/invalid price '{s}' for {row.get('title')}")
-                continue
-        except Exception:
-            print(f"⚠️ Skipping non-numeric price '{s}' for {row.get('title')}")
-            continue
-
-        if not variant_id:
-            print(f"⚠️ Skipping row without variant_id: {row.get('title')}")
-            continue
-
-        product_gid = row.get("product_gid")
-        if not isinstance(product_gid, str) or not product_gid.startswith("gid://shopify/Product/"):
-            product_gid = _variant_product_gid_from_graphql(variant_id)
-
-        try:
-            update_variant_price(product_gid, variant_id, new_price)
-            print(f"✅ Updated {row.get('title')} to ${new_price:.2f}")
-        except Exception as e:
-            print(f"❌ Failed to update variant {variant_id}: {e}")
-
-    _invalidate_inventory_cache()
-
-def upload_missing_csv():
-    import math
-    try:
-        df = pd.read_csv(MISSING_CSV, keep_default_na=False)
-    except Exception as e:
-        print(f"❌ Failed to read missing CSV: {e}")
-        return
-
-    print(f"🚀 Uploading reviewed prices from {MISSING_CSV}...")
-
-    for _, row in df.iterrows():
-        variant_id = str(row.get("variant_id") or "").strip()
-        raw = row.get("price_to_upload", "")
-
-        s = ("" if raw is None else str(raw)).strip()
-        if s == "" or s.lower() == "nan":
-            print(f"⚠️ Skipping row with missing/NaN price: {row.get('title')}")
-            continue
-
-        try:
-            new_price = float(s)
-            if not math.isfinite(new_price) or new_price <= 0:
-                print(f"⚠️ Skipping non-finite/invalid price '{s}' for {row.get('title')}")
-                continue
-        except Exception:
-            print(f"⚠️ Skipping non-numeric price '{s}' for {row.get('title')}")
-            continue
-
-        if not variant_id:
-            print(f"⚠️ Skipping row without variant_id: {row.get('title')}")
-            continue
-
-        # ensure we have product_gid for this variant
-        product_gid = row.get("product_gid")
-        if not isinstance(product_gid, str) or not product_gid.startswith("gid://shopify/Product/"):
-            product_gid = _variant_product_gid_from_graphql(variant_id)
-
-        try:
-            update_variant_price(product_gid, variant_id, new_price)
-            print(f"✅ Updated {row.get('title')} to ${new_price:.2f}")
-        except Exception as e:
-            print(f"❌ Failed to update variant {variant_id}: {e}")
-
-
-def process_product_with_delay(product_and_index):
+def process_product_with_delay(product_and_index, blocked):
     product, index = product_and_index
 
-    # Scale delay as batch progresses
+    # Scale delay as batch progresses to dodge TCGplayer's bot detection
     delay = random.uniform(2.5, 5.0) + (index / 700.0) * 2.5  # starts ~3s, ends ~5.5s
     time.sleep(delay)
 
-    return process_product(product)
+    return process_product(product, blocked=blocked)
+
 
 def run_price_sync():
+    """Scan every Shopify variant, call TCGplayer for the featured price,
+    apply auto-raises immediately and queue drops for review. Every row
+    persists to sealed_price_runs (the dashboard reads from there)."""
+    shared_db.init_pool()
+    blocked = load_blocks(shared_db, "sealed")
+    if blocked:
+        print(f"  {len(blocked)} variants on sealed price-auto-block list")
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--upload-reviewed", action="store_true", help="Upload reviewed prices")
-    parser.add_argument("--upload-missing", action="store_true", help="Upload missing listings")
-    args = parser.parse_args()
-
-    if args.upload_reviewed:
-        upload_reviewed_csv()
-        return
-    elif args.upload_missing:
-        upload_missing_csv()
-        return
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
+    print(f"=== sealed run_id={run_id} started_at={started_at.isoformat()} ===")
 
     products = get_shopify_products()
-    updated_rows, flagged_rows, missing_rows, untouched_rows  = [], [], [], []
+    counts = {"updated": 0, "review": 0, "missing": 0, "untouched": 0, "skip": 0}
+    pending_db: list[dict] = []
 
     try:
-
         print(f"🔄 Total products to process: {len(products)}")
 
         for batch_start in range(0, len(products), 200):
@@ -726,59 +692,47 @@ def run_price_sync():
 
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 indexed_batch = [(product, batch_start + i) for i, product in enumerate(batch)]
-                futures = {executor.submit(process_product_with_delay, p): p[0] for p in indexed_batch}
+                futures = {executor.submit(process_product_with_delay, p, blocked): p[0] for p in indexed_batch}
                 completed = 0
                 for future in concurrent.futures.as_completed(futures):
                     try:
                         result_type, data = future.result(timeout=60)
                     except concurrent.futures.TimeoutError:
-                        print(f"⏰ Timeout in thread for product: {futures[future].get('title', 'Unknown')}")
-                        result_type, data = "missing", {**futures[future], "reason": "Thread timeout"}
+                        product = futures[future]
+                        print(f"⏰ Timeout in thread for product: {product.get('title', 'Unknown')}")
+                        result_type = "missing"
+                        data = {**product, "action": "missing", "reason": "Thread timeout"}
 
                     completed += 1
                     if completed % 10 == 0 or completed == len(batch):
                         print(f"🔁 Processed {completed}/{len(batch)} items in this batch...")
 
-                    if result_type == "updated":
-                        updated_rows.append(data)
-                    elif result_type == "review":
-                        flagged_rows.append(data)
-                    elif result_type == "missing":
-                        missing_rows.append(data)
-                    elif result_type == "untouched":
-                        untouched_rows.append(data)
-            # Incrementally write each time.
-            _write_csv_safe(updated_rows, PUSHED_CSV)
-            _write_csv_safe(flagged_rows, REVIEW_CSV)
-            _write_csv_safe(untouched_rows, UNTOUCHED_CSV)
-            _write_csv_safe([{**r, "price_to_upload": ""} for r in missing_rows], MISSING_CSV)
-            # ✅ Sleep after each batch, except the last one
+                    counts[result_type] = counts.get(result_type, 0) + 1
+                    pending_db.append(data)
+
+            # Persist this batch (and any unflushed prior rows) before sleeping.
+            _flush_to_db(run_id, started_at, pending_db)
+
             if batch_start + len(batch) < len(products):
                 print(f"🟡 Cooling down to avoid IP rate limit", flush=True)
                 for i in range(10, 0, -1):
                     print(f"💤 Still alive… sleeping {i} more minute(s)", flush=True)
                     time.sleep(60)
 
-        _write_csv_safe(updated_rows, PUSHED_CSV)
-        _write_csv_safe(flagged_rows, REVIEW_CSV)
-        _write_csv_safe(untouched_rows, UNTOUCHED_CSV)
-        _write_csv_safe([{**r, "price_to_upload": ""} for r in missing_rows], MISSING_CSV)
+        _flush_to_db(run_id, started_at, pending_db)
 
-        print(f"\n✅ Updates pushed: {len(updated_rows)}")
-        print(f"⚠️  Flagged for review: {len(flagged_rows)}")
-        print(f"❓ Missing listings: {len(missing_rows)}")
-        print(f"👌 Untouched (no change needed): {len(untouched_rows)}")
+        print(f"\n✅ Updates pushed:        {counts.get('updated', 0)}")
+        print(f"⚠️  Flagged for review:    {counts.get('review', 0)}")
+        print(f"❓ Missing listings:       {counts.get('missing', 0)}")
+        print(f"🚫 Auto-blocked / skipped: {counts.get('skip', 0)}")
+        print(f"👌 Untouched (no change):  {counts.get('untouched', 0)}")
     except Exception as e:
         print("FATAL error in run_price_sync: ", e)
         traceback.print_exc()
         raise
     finally:
         print("🧹 Final flush (crash-safe)!")
-        _write_csv_safe(updated_rows, PUSHED_CSV)
-        _write_csv_safe(flagged_rows, REVIEW_CSV)
-        _write_csv_safe(untouched_rows, UNTOUCHED_CSV)
-        _write_csv_safe([{**r, "price_to_upload": ""} for r in missing_rows],
-                        MISSING_CSV)
+        _flush_to_db(run_id, started_at, pending_db)
         _invalidate_inventory_cache()
 
 

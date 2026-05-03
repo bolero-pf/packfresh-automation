@@ -35,9 +35,12 @@
         .row-btn-apply:hover { filter: brightness(1.1); }
         .row-btn-dismiss { background: transparent; color: var(--text-dim); border-color: var(--border); }
         .row-btn-dismiss:hover { border-color: var(--text-dim); color: var(--text); }
+        .row-btn-block { background: transparent; color: #f87171; border-color: rgba(239,68,68,0.4); }
+        .row-btn-block:hover { background: rgba(239,68,68,0.12); }
         .row-btn:disabled { opacity: 0.35; cursor: not-allowed; }
         .applied-tag   { color: #4ade80; font-size: 0.78rem; font-weight: 600; }
         .dismissed-tag { color: var(--text-dim); font-size: 0.78rem; font-style: italic; }
+        .blocked-tag   { color: #f87171; font-size: 0.78rem; font-weight: 600; }
 
         /* Count badge — loud, like Hold Queue's qty>1 callout. */
         .count-badge {
@@ -137,8 +140,11 @@
             {% set inconsistent = (g.distinct_old_prices or 0) > 1 %}
             {% set has_raw = g.raw_card_ids and (g.raw_card_ids|select|list|length > 0) %}
             {% set group_id = 'g-' ~ loop.index %}
+            {% set raw_block_key = g.scrydex_id if g.scrydex_id else ('tcg:' ~ g.tcgplayer_id if g.tcgplayer_id else '') %}
             <tr data-group-id="{{ group_id }}"
                 data-row-ids='{{ g.row_ids|tojson }}'
+                data-block-key="{{ raw_block_key }}"
+                data-block-label="{{ g.card_name }} {% if g.set_name %}· {{ g.set_name }}{% endif %} {% if g.card_number %}#{{ g.card_number }}{% endif %} {% if g.variant %}· {{ g.variant }}{% endif %}"
                 data-suggested="{{ '%.2f' % g.suggested_price if g.suggested_price is not none else '' }}">
                 <td><span class="pill {{ pill_cls }}">{{ act }}</span></td>
                 <td>
@@ -200,8 +206,10 @@
                     {% set all_dismissed = g.apply_statuses and (g.apply_statuses|reject('equalto', 'dismissed')|list|length == 0) %}
                     {% if all_applied %}
                         <span class="applied-tag">✓ Applied{% if g.applied_prices and g.applied_prices[0] %} · ${{ '%.2f' % g.applied_prices[0] }}{% endif %}{% if g.copies > 1 %} ×{{ g.copies }}{% endif %}</span>
+                        {% if raw_block_key %}<button class="row-btn row-btn-block" data-act="block" style="margin-left:8px;">Block</button>{% endif %}
                     {% elif all_dismissed %}
                         <span class="dismissed-tag">dismissed{% if g.copies > 1 %} ×{{ g.copies }}{% endif %}</span>
+                        {% if raw_block_key %}<button class="row-btn row-btn-block" data-act="block" style="margin-left:8px;">Block</button>{% endif %}
                     {% elif act in ('flag_overpriced', 'flag_underpriced') and g.suggested_price and has_raw %}
                         <div class="row-actions">
                             <span style="color:var(--text-dim);font-size:0.8rem;">$</span>
@@ -212,7 +220,10 @@
                                 Apply{% if g.copies > 1 %} ×{{ g.copies }}{% endif %}
                             </button>
                             <button class="row-btn row-btn-dismiss" data-act="dismiss">Dismiss</button>
+                            {% if raw_block_key %}<button class="row-btn row-btn-block" data-act="block">Block</button>{% endif %}
                         </div>
+                    {% elif raw_block_key %}
+                        <button class="row-btn row-btn-block" data-act="block">Block</button>
                     {% else %}—{% endif %}
                 </td>
             </tr>
@@ -282,12 +293,44 @@
         t.textContent = open ? '▾' : '▴';
     });
 
-    // Group apply / dismiss.
+    // Group block (raw domain). Permanent until removed from /dashboard/price-blocks.
+    async function blockRawGroup(tr) {
+        const blockKey = tr.dataset.blockKey;
+        const label = tr.dataset.blockLabel;
+        if (!blockKey) return;
+        if (!confirm(`Permanently block raw updater from auto-pricing this print?\n\n${label}\nblock_key: ${blockKey}\n\nFuture runs will skip every copy. Remove from /dashboard/price-blocks.`)) return;
+        const cell = tr.querySelector('td:last-child');
+        tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
+        try {
+            const r = await fetch('/api/price-block/add', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({domain: 'raw', block_key: blockKey, label, reason: 'manual block from raw run detail'}),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                cell.innerHTML = `<span style="color:#f87171;font-size:0.78rem;">${d.error || 'block failed'}</span>`;
+                tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+                return;
+            }
+            cell.innerHTML = `<span class="blocked-tag">🚫 blocked${d.inserted ? '' : ' (already blocked)'}</span>`;
+        } catch(err) {
+            cell.innerHTML = `<span style="color:#f87171;font-size:0.78rem;">${err.message}</span>`;
+            tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+        }
+    }
+
+    // Group apply / dismiss / block.
     document.addEventListener('click', async function(e) {
         const btn = e.target.closest('.row-btn');
         if (!btn) return;
         const tr = btn.closest('tr[data-group-id]');
         if (!tr) return;
+
+        if (btn.dataset.act === 'block') {
+            blockRawGroup(tr);
+            return;
+        }
+
         let rowIds;
         try { rowIds = JSON.parse(tr.dataset.rowIds || '[]'); }
         catch (_) { rowIds = []; }

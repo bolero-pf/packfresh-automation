@@ -41,9 +41,12 @@
         .row-btn-apply:hover { filter: brightness(1.1); }
         .row-btn-dismiss { background: transparent; color: var(--text-dim); border-color: var(--border); }
         .row-btn-dismiss:hover { border-color: var(--text-dim); color: var(--text); }
+        .row-btn-block { background: transparent; color: #f87171; border-color: rgba(239,68,68,0.4); }
+        .row-btn-block:hover { background: rgba(239,68,68,0.12); }
         .row-btn:disabled { opacity: 0.35; cursor: not-allowed; }
         .applied-tag { color: #4ade80; font-size: 0.78rem; font-weight: 600; }
         .dismissed-tag { color: var(--text-dim); font-size: 0.78rem; font-style: italic; }
+        .blocked-tag { color: #f87171; font-size: 0.78rem; font-weight: 600; }
         .tcg-controls { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; min-width: 260px; }
         .tcg-input {
             width: 88px; padding: 5px 8px; border: 1px solid var(--border);
@@ -120,7 +123,9 @@
         {% for r in rows %}
             {% set act = r.action %}
             {% set pill_cls = {'adjusted':'p-adj','flag_overpriced':'p-over','flag_underpriced':'p-under','skip':'p-skip','error':'p-err','ok':'p-ok'}.get(act, 'p-skip') %}
-            <tr data-row-id="{{ r.id }}">
+            <tr data-row-id="{{ r.id }}"
+                data-variant-gid="{{ r.variant_gid or '' }}"
+                data-title="{{ r.title }}">
                 <td><span class="pill {{ pill_cls }}">{{ act }}</span></td>
                 <td>
                     {% if r.product_gid and store_domain %}
@@ -155,12 +160,19 @@
                 <td class="action-cell">
                     {% if r.apply_status == 'applied' %}
                         <span class="applied-tag">✓ Applied{% if r.applied_price %} · ${{ '%.2f' % r.applied_price }}{% endif %}</span>
+                        {% if r.variant_gid %}<button class="row-btn row-btn-block" data-act="block" style="margin-left:8px;">Block</button>{% endif %}
                     {% elif r.apply_status == 'dismissed' %}
                         <span class="dismissed-tag">dismissed</span>
+                        {% if r.variant_gid %}<button class="row-btn row-btn-block" data-act="block" style="margin-left:8px;">Block</button>{% endif %}
                     {% elif act in ('flag_overpriced', 'flag_underpriced') and r.suggested_price and r.product_gid %}
                         <div class="row-actions">
                             <button class="row-btn row-btn-apply" data-act="apply">Apply ${{ '%.2f' % r.suggested_price }}</button>
                             <button class="row-btn row-btn-dismiss" data-act="dismiss">Dismiss</button>
+                            {% if r.variant_gid %}<button class="row-btn row-btn-block" data-act="block">Block</button>{% endif %}
+                        </div>
+                    {% elif act == 'adjusted' and r.variant_gid %}
+                        <div class="row-actions">
+                            <button class="row-btn row-btn-block" data-act="block">Block</button>
                         </div>
                     {% elif act == 'skip' and r.reason == 'no tcg_id' and r.product_gid %}
                         <div class="tcg-controls">
@@ -332,6 +344,31 @@
         }
     }
 
+    async function doBlock(tr) {
+        const variantGid = tr.dataset.variantGid;
+        const title = tr.dataset.title;
+        if (!variantGid) return;
+        if (!confirm(`Permanently block slab updater from auto-pricing "${title}"?\n\nFuture runs will skip this listing. Remove from /dashboard/price-blocks.`)) return;
+        const cell = tr.querySelector('td.action-cell, td:last-child');
+        tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
+        try {
+            const r = await fetch('/api/price-block/add', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({domain: 'slab', block_key: variantGid, label: title, reason: 'manual block from slab run detail'}),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                cell.innerHTML = `<span class="tcg-err">${d.error || 'block failed'}</span>`;
+                tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+                return;
+            }
+            cell.innerHTML = `<span class="blocked-tag">🚫 blocked${d.inserted ? '' : ' (already blocked)'}</span>`;
+        } catch(err) {
+            cell.innerHTML = `<span class="tcg-err">${err.message}</span>`;
+            tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+        }
+    }
+
     document.addEventListener('click', async function(e) {
         // Pick-a-candidate (in the suggest panel — the TR is two above)
         const pick = e.target.closest('[data-pick-tcg]');
@@ -349,6 +386,8 @@
         const act = btn.dataset.act;
         if (act === 'apply' || act === 'dismiss') {
             doApplyOrDismiss(tr, act);
+        } else if (act === 'block') {
+            doBlock(tr);
         } else if (act === 'suggest-tcg') {
             doSuggestTcg(tr);
         } else if (act === 'save-tcg') {

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sealed Run Detail</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
+    <style>
+        body { padding: 24px; max-width: 1700px; margin: 0 auto; }
+        h1 { font-size: 1.3rem; margin-bottom: 4px; }
+        .sub { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 16px; font-family: var(--font-mono); }
+        .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+        .filters a { padding: 4px 10px; border-radius: 14px; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text); text-decoration: none; }
+        .filters a.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .bulk {
+            margin-left: auto; display: flex; gap: 8px; align-items: center;
+            padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px;
+            background: var(--surface);
+        }
+        .bulk label { font-size: 0.78rem; color: var(--text-dim); }
+        .bulk input[type=number] {
+            width: 64px; padding: 4px 8px; background: var(--surface-2);
+            border: 1px solid var(--border); border-radius: 5px;
+            color: var(--text); font-family: var(--font-mono);
+        }
+        .bulk input[type=number]:focus { outline: none; border-color: var(--accent); }
+        .bulk-status { font-size: 0.8rem; color: var(--text-dim); margin-left: 6px; min-width: 200px; }
+        .bulk-status.ok  { color: #4ade80; }
+        .bulk-status.err { color: #f87171; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; vertical-align: top; }
+        th { background: var(--surface); color: var(--text-dim); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; position: sticky; top: 0; }
+        tr:hover td { background: var(--surface-2); }
+        .pill { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 0.7rem; font-weight: 600; white-space: nowrap; }
+        .p-up   { background: rgba(34,197,94,0.18);  color: #4ade80; }
+        .p-rev  { background: rgba(245,158,11,0.18); color: #fbbf24; }
+        .p-miss { background: rgba(239,68,68,0.18);  color: #f87171; }
+        .p-skip { background: var(--surface-2); color: var(--text-dim); }
+        .p-ok   { background: rgba(148,163,184,0.18); color: var(--text-dim); }
+        .num { font-family: var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .delta-pos  { color: #fbbf24; }
+        .delta-neg  { color: #7aadff; }
+        .delta-zero { color: var(--text-dim); }
+        .reason { color: var(--text-dim); font-size: 0.78rem; }
+        a.title-link { color: var(--text); }
+        a.title-link:hover { color: var(--accent); }
+        .row-actions { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+        .row-btn {
+            min-height: 30px; padding: 0 10px; border-radius: 6px;
+            font-size: 0.75rem; font-weight: 600; cursor: pointer;
+            border: 1.5px solid transparent;
+        }
+        .row-btn-apply   { background: var(--accent); color: #0a0a0f; border-color: var(--accent); }
+        .row-btn-apply:hover { filter: brightness(1.1); }
+        .row-btn-dismiss { background: transparent; color: var(--text-dim); border-color: var(--border); }
+        .row-btn-dismiss:hover { border-color: var(--text-dim); color: var(--text); }
+        .row-btn-block   { background: transparent; color: #f87171; border-color: rgba(239,68,68,0.4); }
+        .row-btn-block:hover { background: rgba(239,68,68,0.12); }
+        .row-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+        .applied-tag   { color: #4ade80; font-size: 0.78rem; font-weight: 600; }
+        .dismissed-tag { color: var(--text-dim); font-size: 0.78rem; font-style: italic; }
+        .blocked-tag   { color: #f87171; font-size: 0.78rem; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <a href="/dashboard/sealed-runs" style="color:var(--text-dim);font-size:0.85rem;">← all runs</a>
+    <h1 style="margin-top:8px;">Sealed Run · {{ summary.total }} variants</h1>
+    <div class="sub">{{ summary.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }} · run_id={{ run_id }}</div>
+
+    <div class="filters">
+        {% set actions = [('', 'All'), ('review', 'Review'), ('updated', 'Updated'), ('missing', 'Missing'), ('skip', 'Skipped'), ('untouched', 'Untouched')] %}
+        {% for code, label in actions %}
+            <a href="?{% if code %}action={{ code }}{% endif %}" class="{% if action_filter == code %}active{% endif %}">{{ label }}</a>
+        {% endfor %}
+
+        <form id="bulk-form" class="bulk" onsubmit="return false;"
+              data-pending="{{ summary.pending_review or 0 }}">
+            <label for="bulk-thr">Bulk-approve drops with |Δ| ≤</label>
+            <input type="number" id="bulk-thr" min="0" max="100" step="0.5" value="2">
+            <label>%</label>
+            <button class="row-btn row-btn-apply" id="bulk-go">Approve all ({{ summary.pending_review or 0 }} pending)</button>
+            <span id="bulk-status" class="bulk-status"></span>
+        </form>
+    </div>
+
+    {% if not rows %}
+        <p style="color:var(--text-dim);">No rows match this filter.</p>
+    {% else %}
+    <table>
+        <thead>
+            <tr>
+                <th>Action</th>
+                <th>Title</th>
+                <th class="num">Qty</th>
+                <th class="num">Old&nbsp;$</th>
+                <th class="num">New / Suggested $</th>
+                <th class="num">TCG&nbsp;$</th>
+                <th class="num">Δ %</th>
+                <th>Reason</th>
+                <th>Apply</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in rows %}
+            {% set act = r.action %}
+            {% set pill_cls = {'updated':'p-up','review':'p-rev','missing':'p-miss','skip':'p-skip','error':'p-miss','untouched':'p-ok'}.get(act, 'p-skip') %}
+            <tr data-row-id="{{ r.id }}"
+                data-variant-id="{{ r.variant_id or '' }}"
+                data-title="{{ r.title }}">
+                <td><span class="pill {{ pill_cls }}">{{ act }}</span></td>
+                <td>
+                    {% if r.product_gid and store_domain %}
+                        {% set pid = r.product_gid.split('/')[-1] %}
+                        <a class="title-link" href="https://{{ store_domain }}/admin/products/{{ pid }}" target="_blank">{{ r.title }}</a>
+                    {% else %}
+                        {{ r.title }}
+                    {% endif %}
+                    {% if r.sku or r.tcgplayer_id %}<div class="reason">{% if r.sku %}SKU {{ r.sku }}{% endif %}{% if r.tcgplayer_id %}{% if r.sku %} · {% endif %}TCG#{{ r.tcgplayer_id }}{% endif %}</div>{% endif %}
+                </td>
+                <td class="num">{{ r.qty if r.qty is not none else '—' }}</td>
+                <td class="num">{% if r.old_price is not none %}${{ '%.2f' % r.old_price }}{% else %}—{% endif %}</td>
+                <td class="num">
+                    {% if r.new_price is not none %}<strong>${{ '%.2f' % r.new_price }}</strong>
+                    {% elif r.suggested_price is not none %}<em>${{ '%.2f' % r.suggested_price }}</em>
+                    {% else %}—{% endif %}
+                </td>
+                <td class="num">{% if r.tcg_price is not none %}${{ '%.2f' % r.tcg_price }}{% else %}—{% endif %}</td>
+                <td class="num">
+                    {% if r.delta_pct is not none %}
+                        {% set d = r.delta_pct %}
+                        <span class="{% if d > 0 %}delta-pos{% elif d < 0 %}delta-neg{% else %}delta-zero{% endif %}">{{ '%+.1f' % d }}%</span>
+                    {% else %}—{% endif %}
+                </td>
+                <td class="reason">{{ r.reason or '' }}</td>
+                <td class="action-cell">
+                    {% if r.apply_status == 'applied' %}
+                        <span class="applied-tag">✓ Applied{% if r.applied_price %} · ${{ '%.2f' % r.applied_price }}{% endif %}</span>
+                    {% elif r.apply_status == 'dismissed' %}
+                        <span class="dismissed-tag">dismissed</span>
+                    {% elif act == 'review' and r.suggested_price and r.product_gid and r.variant_id %}
+                        <div class="row-actions">
+                            <button class="row-btn row-btn-apply"   data-act="apply">Apply ${{ '%.2f' % r.suggested_price }}</button>
+                            <button class="row-btn row-btn-dismiss" data-act="dismiss">Dismiss</button>
+                            <button class="row-btn row-btn-block"   data-act="block" title="Stop auto-pricing this variant forever">Block</button>
+                        </div>
+                    {% elif act == 'updated' and r.variant_id %}
+                        <div class="row-actions">
+                            <button class="row-btn row-btn-block" data-act="block" title="Stop auto-pricing this variant on future runs">Block</button>
+                        </div>
+                    {% else %}—{% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <script>
+    const RUN_ID = {{ run_id|tojson }};
+
+    async function doApplyOrDismiss(tr, verb) {
+        const rowId = tr.dataset.rowId;
+        tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
+        const cell = tr.querySelector('td.action-cell');
+        try {
+            const r = await fetch(`/dashboard/sealed-runs/row/${rowId}/${verb}`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                cell.innerHTML = `<span class="dismissed-tag" style="color:#f87171;">${d.error || 'failed'}</span>`;
+                tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+                return;
+            }
+            cell.innerHTML = verb === 'apply'
+                ? `<span class="applied-tag">✓ Applied · $${(d.applied_price||0).toFixed(2)}</span>`
+                : `<span class="dismissed-tag">dismissed</span>`;
+        } catch(err) {
+            cell.innerHTML = `<span style="color:#f87171;font-size:0.78rem;">${err.message}</span>`;
+            tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+        }
+    }
+
+    async function doBlock(tr) {
+        const variantId = tr.dataset.variantId;
+        const title = tr.dataset.title;
+        if (!variantId) return;
+        if (!confirm(`Permanently block sealed updater from auto-pricing "${title}" (variant ${variantId})?\n\nFuture runs will skip this variant. Remove from /dashboard/price-blocks.`)) return;
+        tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
+        const cell = tr.querySelector('td.action-cell');
+        try {
+            const r = await fetch('/api/price-block/add', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({domain: 'sealed', block_key: variantId, label: title, reason: 'manual block from sealed run detail'}),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                cell.innerHTML = `<span style="color:#f87171;font-size:0.78rem;">${d.error || 'block failed'}</span>`;
+                tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+                return;
+            }
+            cell.innerHTML = `<span class="blocked-tag">🚫 blocked${d.inserted ? '' : ' (was already blocked)'}</span>`;
+        } catch(err) {
+            cell.innerHTML = `<span style="color:#f87171;font-size:0.78rem;">${err.message}</span>`;
+            tr.querySelectorAll('.row-btn').forEach(b => b.disabled = false);
+        }
+    }
+
+    document.addEventListener('click', function(e) {
+        const btn = e.target.closest('.row-btn');
+        if (!btn) return;
+        const tr = btn.closest('tr[data-row-id]');
+        if (!tr) return;
+        const act = btn.dataset.act;
+        if (act === 'apply' || act === 'dismiss') doApplyOrDismiss(tr, act);
+        else if (act === 'block') doBlock(tr);
+    });
+
+    // Bulk approve all review rows below threshold.
+    document.getElementById('bulk-go').addEventListener('click', async function() {
+        const thrEl = document.getElementById('bulk-thr');
+        const thr = Number(thrEl.value);
+        if (!isFinite(thr) || thr < 0 || thr > 100) {
+            alert('Threshold must be a number 0-100');
+            return;
+        }
+        if (!confirm(`Approve every pending review row whose |delta_pct| ≤ ${thr}%?`)) return;
+        const btn = this;
+        const status = document.getElementById('bulk-status');
+        btn.disabled = true;
+        status.className = 'bulk-status'; status.textContent = 'Applying…';
+        try {
+            const r = await fetch(`/dashboard/sealed-runs/${encodeURIComponent(RUN_ID)}/bulk-apply`, {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({threshold_pct: thr}),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                status.className = 'bulk-status err';
+                status.textContent = 'Error: ' + (d.error || r.statusText);
+                btn.disabled = false; return;
+            }
+            status.className = 'bulk-status ok';
+            status.textContent = `✓ ${d.applied} applied / ${d.failed} failed (of ${d.candidates} candidates) — reload to refresh table`;
+            // Auto-reload after 2s so the table reflects new statuses.
+            setTimeout(() => window.location.reload(), 1800);
+        } catch(err) {
+            status.className = 'bulk-status err';
+            status.textContent = 'Error: ' + err.message;
+            btn.disabled = false;
+        }
+    });
+    </script>
+</body>
+</html>

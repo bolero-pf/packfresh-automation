@@ -1,4 +1,3 @@
-import pandas as pd
 import sys
 from functools import wraps
 import subprocess
@@ -46,12 +45,16 @@ def _authorized_trigger():
 REDDIT_FEED_USER = os.environ["REDDIT_USER_NAME"]
 REDDIT_FEED_PASS = os.environ["REDDIT_USER_PASS"]
 ROOT = Path(__file__).resolve().parent  # == .../price_updater
-REVIEW_CSV    = ROOT / "price_updates_needs_review.csv"
-PUSHED_CSV    = ROOT / "price_updates_pushed.csv"
-MISSING_CSV   = ROOT / "price_updates_missing_listing.csv"
-UNTOUCHED_CSV = ROOT / "price_updates_untouched.csv"
 RUN_LOG = ROOT / "run_output.log"
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "price-updater-fallback-key")
+
+
+def _shared_db():
+    """Lazy-import the shared db module + ensure pool initialized."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    import db as shared_db
+    shared_db.init_pool()
+    return shared_db
 
 
 @app.post("/price_update")
@@ -136,22 +139,26 @@ FEED_COLUMNS = [
 ]
 
 
-if not os.path.exists(REVIEW_CSV):
-    pd.DataFrame(columns=[
-        "name", "tcgplayer_id", "shopify_price", "suggested_price", "price_to_upload",
-        "shopify_qty", "variant_id", "shopify_inventory_id", "pending_shopify_update",
-        "price_last_updated", "notes"
-    ]).to_csv(REVIEW_CSV, index=False)
-
-
 def call_dailyrunner():
+    """In-process cron: spawn dailyrunner.py as a subprocess and tee output
+    to RUN_LOG (same as the manual /run-sealed-updater route uses)."""
     try:
-        import requests
-        auth = (os.environ.get("DASHBOARD_USER"), os.environ.get("DASHBOARD_PASS"))
-        response = requests.get("http://localhost:5000/run-dailyrunner", auth=auth)
-        print(f"🔁 Cron called /run-dailyrunner, status: {response.status_code}")
+        SCRIPT = ROOT / "dailyrunner.py"
+        RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(RUN_LOG, "a", buffering=1, encoding="utf-8") as f:
+            f.write(f"\n=== CRON RUN {__import__('datetime').datetime.now().isoformat()} ===\n")
+            p = subprocess.Popen(
+                [sys.executable, "-u", str(SCRIPT)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cwd=str(ROOT), text=True, bufsize=1,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
+            for line in p.stdout:
+                print(line, end=""); f.write(line)
+            p.wait()
+            f.write(f"=== EXIT code={p.returncode} at {__import__('datetime').datetime.now().isoformat()} ===\n")
     except Exception as e:
-        print(f"❌ Cron call failed: {e}")
+        print(f"❌ Cron call_dailyrunner failed: {e}")
 
 
 def run_scrydex_sync():
@@ -231,14 +238,13 @@ def run_scrydex_sync():
 
 
 def run_slab_updater():
-    """Nightly slab price sync — runs after Scrydex sync so cache is fresh."""
+    """Nightly slab price sync — runs after Scrydex sync so cache is fresh.
+
+    apply=True so undervalued slabs auto-raise. Overpriced slabs still flag
+    for human review at /dashboard/slab-runs (we never auto-drop)."""
     try:
         from slab_updater import run as slab_run
-        # apply=False — slabs never auto-adjust. Every over/underpriced
-        # finding lands in the dashboard at /dashboard/slab-runs as a flag
-        # for human review. Charm pricing is applied at click-to-apply time
-        # (handled in the dashboard, not here).
-        results = slab_run(apply=False, csv_path="slab_updates.csv")
+        results = slab_run(apply=True, csv_path="slab_updates.csv")
         adjusted = sum(1 for r in results if r.get("action") == "adjusted")
         flagged  = sum(1 for r in results if "flag" in (r.get("action") or ""))
         print(f"✅ Slab updater done: {len(results)} slabs, {adjusted} adjusted, {flagged} flagged")
@@ -256,14 +262,6 @@ if os.environ.get("ENABLE_CRON", "").lower() == "true":
     scheduler.start()
     print("✅ Scheduler started — dailyrunner 3AM, Scrydex 4AM, slab updater 5AM UTC")
 
-def load_csv(path):
-    if not os.path.exists(path):
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(path)
-    except pd.errors.EmptyDataError:
-        # File exists but has no rows/headers → treat as empty table
-        return pd.DataFrame()
 def check_reddit_auth(username, password):
     return username == REDDIT_FEED_USER and password == REDDIT_FEED_PASS
 
@@ -281,7 +279,7 @@ def requires_reddit_auth(f):
     return wrapper
 @app.route("/")
 def home():
-    return redirect("/dashboard/review")
+    return redirect("/dashboard/sealed-runs")
 
 @app.route("/dashboard/runlog")
 def runlog():
@@ -739,6 +737,10 @@ def raw_run_detail(run_id):
             MAX(cache_low)       AS cache_low,
             MAX(delta_pct)       AS delta_pct,
             MAX(new_price)       AS new_price,
+            -- Identity for the Block button. Groups share identity by
+            -- construction so MAX is just "pick the non-null one".
+            MAX(scrydex_id)      AS scrydex_id,
+            MAX(tcgplayer_id)    AS tcgplayer_id,
             -- per-copy spread
             COUNT(*)             AS copies,
             MIN(cost_basis)      AS cost_basis_min,
@@ -1205,26 +1207,6 @@ def slab_run_dismiss_row(row_id):
     return jsonify({"ok": True})
 
 
-@app.route('/run-dailyrunner', methods=["GET", "POST"])
-def run_dailyrunner():
-    def launch_script():
-        with open(RUN_LOG, "w") as f:
-            subprocess.Popen(
-                [sys.executable, "dailyrunner.py"],
-                stdout=f,
-                stderr=f,
-                cwd=str(ROOT)
-            )
-
-    threading.Thread(target=launch_script).start()
-
-    # If it's a browser visit, go to logs page
-    if request.method == "GET":
-        return redirect(url_for("runlog_page"))
-
-    # If it's a cron POST, just return OK
-    return "✅ dailyrunner.py triggered\n", 200
-
 @app.route('/stream-log')
 def stream_log():
     def generate():
@@ -1236,108 +1218,6 @@ def stream_log():
                     time.sleep(0.25)
                     continue
                 yield f"data: {line.strip()}\n\n"
-    return Response(generate(), mimetype="text/event-stream")
-
-@app.route("/dashboard/<view>")
-def dashboard(view):
-    files = {
-        "review": REVIEW_CSV,
-        "pushed": PUSHED_CSV,
-        "missing": MISSING_CSV,
-        "untouched": UNTOUCHED_CSV
-    }
-    titles = {
-        "review": "Needs Review",
-        "pushed": "Auto-Updated Items",
-        "missing": "Missing Listings",
-        "untouched": "Untouched Listings"
-    }
-
-    df = load_csv(files.get(view, REVIEW_CSV))
-    if "shopify_qty" in df.columns:
-        df["shopify_qty"] = pd.to_numeric(df["shopify_qty"], errors="coerce").fillna(0)
-        df = df[df["shopify_qty"] > 0]
-    else:
-        df["shopify_qty"] = 0
-    df["shopify_qty"] = pd.to_numeric(df["shopify_qty"], errors="coerce").fillna(0)
-    df = df[df["shopify_qty"] > 0]
-
-    if "tcgplayer_id" in df.columns:
-        df["tcgplayer_id"] = df["tcgplayer_id"].astype(str).str.replace(".0", "", regex=False)
-    else:
-        df["tcgplayer_id"] = ""
-    if "price_to_upload" in df.columns:
-        df["price_to_upload"] = df["price_to_upload"].fillna("")
-    if "suggested_price" in df.columns:
-        df["suggested_price"] = df["suggested_price"].fillna("")
-
-    df = df.drop(columns=[col for col in ["handle", "variant_id"] if col in df.columns and col != "shopify_qty"])
-    return render_template("review.html", df=df, title=titles.get(view, "Needs Review"), view=view)
-
-
-@app.route("/save/<view>", methods=["POST"], endpoint='save_csv')
-def save_csv(view):
-    file_map = {
-        "review": REVIEW_CSV,
-        "missing": MISSING_CSV
-    }
-    filepath = file_map.get(view)
-    if not filepath or not os.path.exists(filepath):
-        return f"Invalid or missing file for view: {view}", 400
-
-    df = pd.read_csv(filepath)
-    for idx in df.index:
-        val = request.form.get(f"price_to_upload_{idx}")
-        if val is not None:
-            df.at[idx, "price_to_upload"] = val
-    df.to_csv(filepath, index=False)
-    return redirect(f"/dashboard/{view}")
-
-@app.route("/run", methods=["POST"])
-def run():
-    action = request.form.get("action")
-    source = request.form.get("source", "review")  # default to review
-
-    python_exec = sys.executable
-    cmd = [python_exec, "dailyrunner.py"]
-
-    if action == "upload":
-        if source == "review":
-            cmd.append("--upload-reviewed")
-        elif source == "missing":
-            cmd.append("--upload-missing")
-
-    subprocess.Popen(cmd, cwd=str(ROOT))
-    return redirect(f"/dashboard/{source}")
-
-@app.route("/ignore", methods=["POST"])
-def ignore_sku():
-    sku = request.form.get("sku")
-    if not sku:
-        return "Missing SKU", 400
-
-    with open(".venv/Scripts/ignore_skus.txt", "a") as f:
-        f.write(sku.strip() + "\n")
-
-    return "OK", 200
-@app.route("/run-live/upload")
-def run_live_upload():
-    def generate():
-        process = subprocess.Popen(
-            [sys.executable, "dailyrunner.py", "--upload-reviewed"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,  # <-- enables string mode instead of bytes
-            encoding='utf-8',  # <-- force UTF-8 decoding
-            bufsize=1,
-            cwd=str(ROOT)
-        )
-
-        for line in iter(process.stdout.readline, ''):
-            yield f"data: {line.strip()}\n\n"
-
-        yield "data: ✅ Upload complete.\n\n"
-
     return Response(generate(), mimetype="text/event-stream")
 
 def map_variant_to_row(product, variant):
@@ -1428,6 +1308,357 @@ def reddit_feed():
     csv_data = output.getvalue()
     output.close()
     return Response(csv_data, mimetype="text/csv")
+
+# ── Sealed price runs (replaces the four CSV-backed dashboards) ──────────
+#
+# dailyrunner.py writes one row per Shopify variant per nightly run into
+# sealed_price_runs. This block surfaces those rows: list of runs, detail
+# page with per-action filtering, per-row apply/dismiss, and the headline
+# bulk-approve form for "approve every <X% review row in one click".
+
+@app.route('/run-sealed-updater', methods=["GET", "POST"])
+def trigger_sealed_updater():
+    """Manually kick off dailyrunner.py from the dashboard. Same launch
+    machinery as /price_update; this route is JWT-gated for human owners."""
+    from flask import jsonify
+    if not _authorized_trigger():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    SCRIPT = ROOT / "dailyrunner.py"
+
+    def launch():
+        RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(RUN_LOG, "a", buffering=1, encoding="utf-8") as f:
+            f.write(f"\n=== RUN {__import__('datetime').datetime.now().isoformat()} ===\n")
+            p = subprocess.Popen(
+                [sys.executable, "-u", str(SCRIPT)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cwd=str(ROOT), text=True, bufsize=1,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
+            for line in p.stdout:
+                print(line, end=""); f.write(line)
+            p.wait()
+            f.write(f"=== EXIT code={p.returncode} at {__import__('datetime').datetime.now().isoformat()} ===\n")
+
+    threading.Thread(target=launch, daemon=True).start()
+    if request.method == "GET":
+        return redirect("/dashboard/sealed-runs")
+    return jsonify({"ok": True, "started": True}), 200
+
+
+@app.route('/dashboard/sealed-runs')
+def sealed_runs_list():
+    """One row per nightly run with per-action counts."""
+    db = _shared_db()
+    rows = db.query("""
+        SELECT run_id,
+               MIN(started_at)                                AS started_at,
+               COUNT(*)                                       AS total,
+               COUNT(*) FILTER (WHERE action = 'updated')     AS updated,
+               COUNT(*) FILTER (WHERE action = 'review')      AS review,
+               COUNT(*) FILTER (WHERE action = 'missing')     AS missing,
+               COUNT(*) FILTER (WHERE action = 'untouched')   AS untouched,
+               COUNT(*) FILTER (WHERE action = 'skip')        AS skipped,
+               COUNT(*) FILTER (WHERE action = 'error')       AS errors
+        FROM sealed_price_runs
+        GROUP BY run_id
+        ORDER BY started_at DESC
+        LIMIT 60
+    """)
+    return render_template("sealed_runs.html", runs=rows)
+
+
+@app.route('/dashboard/sealed-runs/<run_id>')
+def sealed_run_detail(run_id):
+    """Detail page for one sealed run with per-action filter + bulk-approve."""
+    db = _shared_db()
+    action_filter = (request.args.get("action") or "").strip()
+
+    where = ["run_id = %s"]
+    params: list = [run_id]
+    if action_filter:
+        where.append("action = %s"); params.append(action_filter)
+    where_sql = " AND ".join(where)
+
+    sql = f"""
+        SELECT id, product_gid, variant_id, sku, title, handle, tcgplayer_id,
+               qty, old_price, tcg_price, suggested_price, new_price, delta_pct,
+               action, reason, apply_status, applied_at, applied_price,
+               started_at
+        FROM sealed_price_runs
+        WHERE {where_sql}
+        ORDER BY
+            CASE action
+                WHEN 'error'     THEN 0
+                WHEN 'review'    THEN 1
+                WHEN 'updated'   THEN 2
+                WHEN 'missing'   THEN 3
+                WHEN 'skip'      THEN 4
+                WHEN 'untouched' THEN 5
+                ELSE 6
+            END,
+            ABS(COALESCE(delta_pct, 0)) DESC NULLS LAST,
+            title
+    """
+    rows = db.query(sql, tuple(params))
+
+    summary = db.query_one("""
+        SELECT MIN(started_at) AS started_at, COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE action = 'review' AND apply_status = 'pending') AS pending_review
+        FROM sealed_price_runs WHERE run_id = %s
+    """, (run_id,))
+
+    return render_template(
+        "sealed_run_detail.html",
+        run_id=run_id, rows=rows, summary=summary,
+        action_filter=action_filter,
+        store_domain=os.environ.get("SHOPIFY_STORE", ""),
+    )
+
+
+@app.route('/dashboard/sealed-runs/row/<int:row_id>/apply', methods=["POST"])
+def sealed_run_apply_row(row_id):
+    """Apply one flagged row's suggested price (or override) to Shopify."""
+    from flask import jsonify
+    db = _shared_db()
+    from dailyrunner import update_variant_price
+
+    row = db.query_one("""
+        SELECT id, product_gid, variant_id, suggested_price, old_price,
+               apply_status, title
+        FROM sealed_price_runs WHERE id = %s
+    """, (row_id,))
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+    if row["apply_status"] in ("applied", "dismissed"):
+        return jsonify({"ok": False, "error": f"row already {row['apply_status']}"}), 409
+    if not row["product_gid"] or not row["variant_id"]:
+        return jsonify({"ok": False, "error": "row has no Shopify identifiers"}), 400
+
+    body = request.get_json(silent=True) or {}
+    override = body.get("price")
+    target = float(override) if override is not None else float(row["suggested_price"] or 0)
+    if target <= 0:
+        return jsonify({"ok": False, "error": "no valid price to apply"}), 400
+
+    try:
+        update_variant_price(row["product_gid"], row["variant_id"], target)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Shopify update failed: {e}"}), 502
+
+    db.execute("""
+        UPDATE sealed_price_runs
+           SET apply_status = 'applied', applied_at = NOW(), applied_price = %s,
+               new_price = %s
+         WHERE id = %s
+    """, (target, target, row_id))
+    return jsonify({"ok": True, "applied_price": target, "title": row["title"]})
+
+
+@app.route('/dashboard/sealed-runs/row/<int:row_id>/dismiss', methods=["POST"])
+def sealed_run_dismiss_row(row_id):
+    """Mark a flagged row as dismissed without changing Shopify."""
+    from flask import jsonify
+    db = _shared_db()
+    row = db.query_one(
+        "SELECT id, apply_status FROM sealed_price_runs WHERE id = %s", (row_id,))
+    if not row:
+        return jsonify({"ok": False, "error": "row not found"}), 404
+    if row["apply_status"] in ("applied", "dismissed"):
+        return jsonify({"ok": False, "error": f"row already {row['apply_status']}"}), 409
+    db.execute(
+        "UPDATE sealed_price_runs SET apply_status='dismissed', applied_at=NOW() WHERE id = %s",
+        (row_id,))
+    return jsonify({"ok": True})
+
+
+@app.route('/dashboard/sealed-runs/<run_id>/bulk-apply', methods=["POST"])
+def sealed_run_bulk_apply(run_id):
+    """Approve every pending review row whose |delta_pct| <= threshold_pct.
+    Body: {threshold_pct: 2}. Default 2%. The headline use case: a run
+    surfaces 200 review rows that are all 1-2% drops from charm-rounding
+    noise — Sean clicks Approve once and they all go.
+
+    Each Shopify mutation runs sequentially (no fan-out) so one failure
+    doesn't poison the rest; per-row results are reported back."""
+    from flask import jsonify
+    db = _shared_db()
+    from dailyrunner import update_variant_price
+
+    body = request.get_json(silent=True) or {}
+    try:
+        threshold = float(body.get("threshold_pct") if body.get("threshold_pct") is not None else 2.0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "threshold_pct must be numeric"}), 400
+    if threshold < 0 or threshold > 100:
+        return jsonify({"ok": False, "error": "threshold_pct must be 0-100"}), 400
+
+    rows = db.query("""
+        SELECT id, product_gid, variant_id, suggested_price, title, delta_pct
+        FROM sealed_price_runs
+        WHERE run_id = %s
+          AND action = 'review'
+          AND apply_status = 'pending'
+          AND suggested_price IS NOT NULL
+          AND product_gid IS NOT NULL
+          AND variant_id IS NOT NULL
+          AND ABS(COALESCE(delta_pct, 0)) <= %s
+    """, (run_id, threshold))
+
+    applied, failed = [], []
+    for r in rows:
+        target = float(r["suggested_price"])
+        try:
+            update_variant_price(r["product_gid"], r["variant_id"], target)
+            db.execute("""
+                UPDATE sealed_price_runs
+                   SET apply_status = 'applied', applied_at = NOW(),
+                       applied_price = %s, new_price = %s
+                 WHERE id = %s
+            """, (target, target, r["id"]))
+            applied.append({"id": r["id"], "title": r["title"], "price": target})
+        except Exception as e:
+            failed.append({"id": r["id"], "title": r["title"], "error": str(e)})
+
+    return jsonify({
+        "ok": True, "threshold_pct": threshold,
+        "candidates": len(rows), "applied": len(applied), "failed": len(failed),
+        "failed_rows": failed[:20],  # cap noise in the response
+    })
+
+
+# ── Block list (price_auto_block) management ─────────────────────────────
+#
+# A row in any of the three run-detail pages can be muted with one click.
+# The updater consults the block list at the start of each run and treats
+# blocked rows as action='skip', reason='auto-block'. Permanent until
+# removed via /dashboard/price-blocks.
+
+@app.route('/api/price-block/add', methods=["POST"])
+def api_price_block_add():
+    """Body: {domain: 'raw'|'slab'|'sealed', block_key: str, label?, reason?}."""
+    from flask import jsonify
+    db = _shared_db()
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    from price_auto_block import add_block
+
+    body = request.get_json(silent=True) or {}
+    domain = (body.get("domain") or "").strip()
+    block_key = (body.get("block_key") or "").strip()
+    if domain not in ("raw", "slab", "sealed") or not block_key:
+        return jsonify({"ok": False, "error": "domain (raw|slab|sealed) and block_key required"}), 400
+
+    user = get_current_user() or {}
+    inserted = add_block(
+        db, domain=domain, block_key=block_key,
+        label=body.get("label"), reason=body.get("reason"),
+        blocked_by=user.get("email") or user.get("username"),
+    )
+    return jsonify({"ok": True, "inserted": inserted})
+
+
+@app.route('/api/price-block/remove', methods=["POST"])
+def api_price_block_remove():
+    """Body: {domain, block_key}."""
+    from flask import jsonify
+    db = _shared_db()
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    from price_auto_block import remove_block
+
+    body = request.get_json(silent=True) or {}
+    domain = (body.get("domain") or "").strip()
+    block_key = (body.get("block_key") or "").strip()
+    if not domain or not block_key:
+        return jsonify({"ok": False, "error": "domain and block_key required"}), 400
+    removed = remove_block(db, domain=domain, block_key=block_key)
+    return jsonify({"ok": True, "removed": removed})
+
+
+@app.route('/dashboard/price-blocks')
+def price_blocks_list():
+    """All current blocks across raw/slab/sealed with a Remove button."""
+    db = _shared_db()
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    from price_auto_block import list_blocks
+    blocks = list_blocks(db)
+    return render_template("price_blocks.html", blocks=blocks)
+
+
+# ── Big Movers ───────────────────────────────────────────────────────────
+#
+# Single page showing the latest run from each updater filtered to
+# auto-applied rows whose |delta_pct| >= threshold. Quick eyeball check
+# for what moved overnight; one-click Block per row.
+
+@app.route('/dashboard/big-movers')
+def big_movers():
+    db = _shared_db()
+    try:
+        threshold = float(request.args.get("threshold", 20))
+    except ValueError:
+        threshold = 20.0
+    threshold = max(0.0, min(threshold, 500.0))
+
+    # Latest run id per source
+    sealed_run = db.query_one(
+        "SELECT run_id, MIN(started_at) AS started_at FROM sealed_price_runs "
+        "WHERE run_id = (SELECT run_id FROM sealed_price_runs "
+        "                ORDER BY started_at DESC LIMIT 1) "
+        "GROUP BY run_id")
+    slab_run = db.query_one(
+        "SELECT run_id, MIN(started_at) AS started_at FROM slab_price_runs "
+        "WHERE run_id = (SELECT run_id FROM slab_price_runs "
+        "                ORDER BY started_at DESC LIMIT 1) "
+        "GROUP BY run_id")
+    raw_run = db.query_one(
+        "SELECT run_id, MIN(started_at) AS started_at FROM raw_card_price_runs "
+        "WHERE run_id = (SELECT run_id FROM raw_card_price_runs "
+        "                ORDER BY started_at DESC LIMIT 1) "
+        "GROUP BY run_id")
+
+    sealed_rows = []
+    if sealed_run:
+        sealed_rows = db.query("""
+            SELECT id, title, sku, variant_id, old_price, new_price,
+                   suggested_price, delta_pct, reason
+            FROM sealed_price_runs
+            WHERE run_id = %s AND action = 'updated'
+              AND ABS(COALESCE(delta_pct, 0)) >= %s
+            ORDER BY ABS(delta_pct) DESC LIMIT 200
+        """, (sealed_run["run_id"], threshold))
+
+    slab_rows = []
+    if slab_run:
+        slab_rows = db.query("""
+            SELECT id, title, sku, variant_gid, old_price, new_price,
+                   suggested_price, delta_pct, reason
+            FROM slab_price_runs
+            WHERE run_id = %s AND action = 'adjusted'
+              AND ABS(COALESCE(delta_pct, 0)) >= %s
+            ORDER BY ABS(delta_pct) DESC LIMIT 200
+        """, (slab_run["run_id"], threshold))
+
+    raw_rows = []
+    if raw_run:
+        raw_rows = db.query("""
+            SELECT id, raw_card_id, scrydex_id, tcgplayer_id, card_name,
+                   set_name, card_number, variant, condition,
+                   old_price, new_price, suggested_price, delta_pct, reason
+            FROM raw_card_price_runs
+            WHERE run_id = %s AND action = 'auto_applied'
+              AND ABS(COALESCE(delta_pct, 0)) >= %s
+            ORDER BY ABS(delta_pct) DESC LIMIT 200
+        """, (raw_run["run_id"], threshold))
+
+    return render_template(
+        "big_movers.html",
+        threshold=threshold,
+        sealed_run=sealed_run, sealed_rows=sealed_rows,
+        slab_run=slab_run,     slab_rows=slab_rows,
+        raw_run=raw_run,       raw_rows=raw_rows,
+    )
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

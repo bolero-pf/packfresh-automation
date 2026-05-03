@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Big Movers</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
+    <style>
+        body { padding: 24px; max-width: 1700px; margin: 0 auto; }
+        h1 { font-size: 1.4rem; margin-bottom: 4px; }
+        .sub { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 16px; }
+        .threshold-form {
+            display: flex; gap: 8px; align-items: center; margin-bottom: 20px;
+            padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px;
+            background: var(--surface); width: fit-content;
+        }
+        .threshold-form input { width: 70px; padding: 4px 8px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; color: var(--text); font-family: var(--font-mono); }
+        .threshold-form input:focus { outline: none; border-color: var(--accent); }
+
+        h2 { font-size: 1.05rem; margin: 28px 0 4px; display: flex; align-items: baseline; gap: 12px; }
+        h2 .meta { font-size: 0.78rem; color: var(--text-dim); font-family: var(--font-mono); font-weight: 400; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th, td { border-bottom: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+        th { background: var(--surface); color: var(--text-dim); font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; }
+        tr:hover td { background: var(--surface-2); }
+        .num { font-family: var(--font-mono); text-align: right; font-variant-numeric: tabular-nums; }
+        .delta-pos { color: #fbbf24; font-weight: 600; }
+        .delta-neg { color: #7aadff; font-weight: 600; }
+        .reason    { color: var(--text-dim); font-size: 0.78rem; }
+        .empty     { color: var(--text-dim); font-style: italic; padding: 8px 0; }
+        .row-btn-block {
+            background: transparent; color: #f87171;
+            border: 1.5px solid rgba(239,68,68,0.4);
+            border-radius: 6px; padding: 4px 10px; font-size: 0.74rem; font-weight: 600;
+            cursor: pointer;
+        }
+        .row-btn-block:hover { background: rgba(239,68,68,0.12); }
+        .row-btn-block:disabled { opacity: 0.35; cursor: not-allowed; }
+        .blocked-tag { color: #f87171; font-size: 0.78rem; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <div style="display:flex; gap:16px; align-items:center; margin-bottom:16px; padding-bottom:10px; border-bottom:1px solid var(--border); font-size:0.88rem; font-weight:600;">
+        <a href="/dashboard/sealed-runs" style="color:var(--accent);">Sealed Runs</a>
+        <a href="/dashboard/slab-runs"   style="color:var(--accent);">Slab Runs</a>
+        <a href="/dashboard/raw-runs"    style="color:var(--accent);">Raw Runs</a>
+        <a href="/dashboard/raw-rebind"  style="color:var(--accent);">Raw Rebind</a>
+        <a href="/dashboard/big-movers"  style="color:var(--text-dim);">Big Movers</a>
+        <a href="/dashboard/price-blocks" style="color:var(--accent);">Price Blocks</a>
+        <a href="/dashboard/runlog"      style="color:var(--accent);">Live Log</a>
+    </div>
+
+    <h1>Big Movers</h1>
+    <div class="sub">
+        Auto-applied price changes from the latest run of each updater whose
+        |Δ%| is at or above the threshold. Use Block on anything that looks
+        like data corruption to mute it on future runs.
+    </div>
+
+    <form class="threshold-form" method="GET" action="/dashboard/big-movers">
+        <label for="thr">Threshold |Δ%| ≥</label>
+        <input type="number" id="thr" name="threshold" min="0" max="500" step="1" value="{{ '%.0f' % threshold }}">
+        <button type="submit" class="btn btn-primary" style="padding:4px 12px;">Apply</button>
+    </form>
+
+    <h2>Sealed
+        <span class="meta">{% if sealed_run %}{{ sealed_run.started_at.strftime('%Y-%m-%d %H:%M UTC') }} · {{ sealed_rows|length }} rows{% else %}no run{% endif %}</span>
+    </h2>
+    {% if sealed_rows %}
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th><th class="num">Old&nbsp;$</th><th class="num">New&nbsp;$</th>
+                <th class="num">Δ %</th><th>Reason</th><th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in sealed_rows %}
+            <tr data-domain="sealed" data-block-key="{{ r.variant_id or '' }}" data-label="{{ r.title }}">
+                <td>{{ r.title }}{% if r.sku %} <span class="reason">· {{ r.sku }}</span>{% endif %}</td>
+                <td class="num">{% if r.old_price is not none %}${{ '%.2f' % r.old_price }}{% else %}—{% endif %}</td>
+                <td class="num"><strong>{% if r.new_price is not none %}${{ '%.2f' % r.new_price }}{% else %}—{% endif %}</strong></td>
+                <td class="num"><span class="{% if r.delta_pct < 0 %}delta-neg{% else %}delta-pos{% endif %}">{{ '%+.1f' % r.delta_pct }}%</span></td>
+                <td class="reason">{{ r.reason or '' }}</td>
+                <td><button class="row-btn-block">Block</button></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<div class="empty">Nothing above threshold.</div>{% endif %}
+
+    <h2>Slabs
+        <span class="meta">{% if slab_run %}{{ slab_run.started_at.strftime('%Y-%m-%d %H:%M UTC') }} · {{ slab_rows|length }} rows{% else %}no run{% endif %}</span>
+    </h2>
+    {% if slab_rows %}
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th><th class="num">Old&nbsp;$</th><th class="num">New&nbsp;$</th>
+                <th class="num">Δ %</th><th>Reason</th><th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in slab_rows %}
+            <tr data-domain="slab" data-block-key="{{ r.variant_gid or '' }}" data-label="{{ r.title }}">
+                <td>{{ r.title }}{% if r.sku %} <span class="reason">· {{ r.sku }}</span>{% endif %}</td>
+                <td class="num">{% if r.old_price is not none %}${{ '%.2f' % r.old_price }}{% else %}—{% endif %}</td>
+                <td class="num"><strong>{% if r.new_price is not none %}${{ '%.2f' % r.new_price }}{% else %}—{% endif %}</strong></td>
+                <td class="num"><span class="{% if r.delta_pct < 0 %}delta-neg{% else %}delta-pos{% endif %}">{{ '%+.1f' % r.delta_pct }}%</span></td>
+                <td class="reason">{{ r.reason or '' }}</td>
+                <td><button class="row-btn-block">Block</button></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<div class="empty">Nothing above threshold.</div>{% endif %}
+
+    <h2>Raw cards
+        <span class="meta">{% if raw_run %}{{ raw_run.started_at.strftime('%Y-%m-%d %H:%M UTC') }} · {{ raw_rows|length }} rows{% else %}no run{% endif %}</span>
+    </h2>
+    {% if raw_rows %}
+    <table>
+        <thead>
+            <tr>
+                <th>Card</th><th>Cond</th><th class="num">Old&nbsp;$</th><th class="num">New&nbsp;$</th>
+                <th class="num">Δ %</th><th>Reason</th><th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in raw_rows %}
+            {# block_key for raw is scrydex_id when present, else 'tcg:<id>' #}
+            {% set bk = r.scrydex_id if r.scrydex_id else ('tcg:' ~ r.tcgplayer_id if r.tcgplayer_id else '') %}
+            <tr data-domain="raw" data-block-key="{{ bk }}" data-label="{{ r.card_name }} {% if r.set_name %}· {{ r.set_name }}{% endif %} {% if r.card_number %}#{{ r.card_number }}{% endif %}">
+                <td>{{ r.card_name }}<div class="reason">{{ r.set_name or '' }}{% if r.card_number %} · #{{ r.card_number }}{% endif %}{% if r.variant %} · {{ r.variant }}{% endif %}</div></td>
+                <td>{{ r.condition or '—' }}</td>
+                <td class="num">{% if r.old_price is not none %}${{ '%.2f' % r.old_price }}{% else %}—{% endif %}</td>
+                <td class="num"><strong>{% if r.new_price is not none %}${{ '%.2f' % r.new_price }}{% else %}—{% endif %}</strong></td>
+                <td class="num"><span class="{% if r.delta_pct < 0 %}delta-neg{% else %}delta-pos{% endif %}">{{ '%+.1f' % r.delta_pct }}%</span></td>
+                <td class="reason">{{ r.reason or '' }}</td>
+                <td>{% if bk %}<button class="row-btn-block">Block</button>{% else %}—{% endif %}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}<div class="empty">Nothing above threshold.</div>{% endif %}
+
+    <script>
+    document.addEventListener('click', async function(e) {
+        const btn = e.target.closest('.row-btn-block');
+        if (!btn) return;
+        const tr = btn.closest('tr');
+        const domain = tr.dataset.domain;
+        const block_key = tr.dataset.blockKey;
+        const label = tr.dataset.label;
+        if (!block_key) return;
+        if (!confirm(`Block "${label}" on future ${domain} runs?\n\nThis is permanent until removed from /dashboard/price-blocks.`)) return;
+        btn.disabled = true; btn.textContent = 'Blocking…';
+        try {
+            const r = await fetch('/api/price-block/add', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({domain, block_key, label, reason: 'big-mover one-click block'}),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                btn.disabled = false; btn.textContent = 'Block';
+                alert('Error: ' + (d.error || 'unknown'));
+                return;
+            }
+            btn.outerHTML = `<span class="blocked-tag">🚫 blocked${d.inserted ? '' : ' (was already blocked)'}</span>`;
+        } catch(err) {
+            btn.disabled = false; btn.textContent = 'Block';
+            alert('Error: ' + err.message);
+        }
+    });
+    </script>
+</body>
+</html>

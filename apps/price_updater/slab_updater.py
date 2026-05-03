@@ -2,12 +2,23 @@
 slab_updater.py — Nightly graded slab price sync.
 
 Pulls live eBay comps from Scrydex for every slab in our Shopify store,
-compares to current listing price, and flags or auto-adjusts.
+compares to current listing price, and decides per-slab:
+
+  delta = (current - charm_ceil(market)) / charm_ceil(market)
+
+  |delta| <= 10%        -> ok (no-op)
+  delta   <  -10%        -> auto-RAISE in Shopify (always — never miss
+                            a fast mover going up)
+  delta   >   10%        -> flag_overpriced for human review (we never
+                            auto-drop slab prices on live inventory)
+
+Slabs in the price_auto_block list ('slab' domain, key=variant_gid) are
+skipped — escape hatch for runaway suggestions on a single listing.
 
 Usage:
-    python slab_updater.py                  # dry run (print only)
-    python slab_updater.py --apply          # apply safe auto-updates
-    python slab_updater.py --csv output.csv # write results to CSV
+    python slab_updater.py                # nightly mode (auto-raise + flag drops)
+    python slab_updater.py --dry-run      # no Shopify writes, log only
+    python slab_updater.py --csv out.csv  # also write results to CSV
 
 Can also be triggered via HTTP POST from review_dashboard.py or APScheduler.
 """
@@ -245,27 +256,37 @@ def update_variant_price(product_gid: str, variant_gid: str, new_price: float):
     return result
 
 
-def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
+def run(*, apply: bool = True, csv_path: str = None) -> list[dict]:
     """
     Main slab update loop.
 
     1. Fetch all slab products from Shopify
-    2. For each, extract grade from title + resolve TCG ID
-    3. Fetch live eBay comps via shared/graded_pricing.py
-    4. Compare current price to live median
-    5. Flag or auto-adjust
-    6. Persist every row to slab_price_runs for the dashboard audit trail
+    2. Skip any in the price_auto_block list (domain='slab')
+    3. For each, extract grade from title + resolve TCG ID
+    4. Fetch live eBay comps via shared/graded_pricing.py
+    5. Compare current price to charm-ceiled market target
+    6. Auto-RAISE undervalued listings, flag overpriced ones
+    7. Persist every row to slab_price_runs for the dashboard audit trail
+
+    apply=True (default): auto-raise undervalued slabs in Shopify.
+    apply=False         : log + persist only, no Shopify writes (dry-run).
 
     Returns list of result dicts.
     """
     import db as db_module
     db_module.init_pool()
 
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
+    from price_auto_block import load_blocks
     from graded_pricing import get_live_graded_comps
 
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc)
     logger.info(f"Slab updater run_id={run_id} started_at={started_at.isoformat()} apply={apply}")
+
+    blocked = load_blocks(db_module, "slab")
+    if blocked:
+        logger.info(f"  {len(blocked)} slabs on price-auto-block list")
 
     logger.info("Fetching slab products from Shopify...")
     slabs = fetch_slab_products()
@@ -277,6 +298,12 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
 
     for slab in slabs:
         title = slab["title"]
+        if slab.get("variant_gid") in blocked:
+            entry = {**slab, "action": "skip", "reason": "auto-block"}
+            results.append(entry)
+            _record_run_row(db_module, run_id, started_at, entry)
+            continue
+
         grade_info = extract_grade_from_title(title)
         if not grade_info:
             entry = {**slab, "action": "skip", "reason": "no grade in title"}
@@ -338,37 +365,36 @@ def run(*, apply: bool = False, csv_path: str = None) -> list[dict]:
             "delta_pct":   round(delta_pct, 1),
         }
 
-        # Sean's preference: never auto-adjust DOWN. Cost basis is the floor,
-        # charm-ceil is the target.
+        # Auto-raise UP, flag DROPS for review. Cost basis is still the floor
+        # below which we never go (max(market, cost) above).
         if abs(delta_pct) <= 10:
             entry["action"] = "ok"
             entry["reason"] = f"within 10% of target ${target:.2f} (delta {delta_pct:+.1f}%)"
         elif delta_pct > 10:
-            # Priced above target
+            # Currently priced above target — flag, don't auto-drop
+            entry["action"] = "flag_overpriced"
+            entry["reason"] = f"{delta_pct:+.1f}% over target ${target:.2f} — review"
+            entry["suggested_price"] = charm_price
+            flagged += 1
+        else:
+            # Currently priced below target — auto-raise to chase the market
+            entry["suggested_price"] = charm_price
             if apply and slab["qty"] > 0:
-                # Legacy CLI path (apply=True) — keep working for manual runs.
-                # Cron path now passes apply=False so this won't fire nightly.
-                new_price = charm_price
                 try:
-                    update_variant_price(slab["product_gid"], slab["variant_gid"], new_price)
+                    update_variant_price(slab["product_gid"], slab["variant_gid"], charm_price)
                     entry["action"] = "adjusted"
-                    entry["new_price"] = new_price
-                    entry["reason"] = f"{delta_pct:+.1f}% over target ${target:.2f}, adjusted to ${new_price}"
+                    entry["new_price"] = charm_price
+                    entry["reason"] = (f"auto-raised {abs(delta_pct):.1f}% to follow market; "
+                                       f"${current:.2f} -> ${charm_price:.2f}")
                     updated += 1
                 except Exception as e:
                     entry["action"] = "error"
                     entry["reason"] = f"price update failed: {e}"
             else:
-                entry["action"] = "flag_overpriced"
-                entry["reason"] = f"{delta_pct:+.1f}% over target ${target:.2f} — review"
-                entry["suggested_price"] = charm_price
+                entry["action"] = "flag_underpriced"
+                entry["reason"] = (f"[DRY-RUN] would auto-raise {abs(delta_pct):.1f}% "
+                                   f"to ${charm_price:.2f}")
                 flagged += 1
-        else:
-            # Priced below target — flag for review (never auto-raise)
-            entry["action"] = "flag_underpriced"
-            entry["reason"] = f"{delta_pct:+.1f}% below target ${target:.2f} — review"
-            entry["suggested_price"] = charm_price
-            flagged += 1
 
         results.append(entry)
         _record_run_row(db_module, run_id, started_at, entry)
@@ -400,8 +426,9 @@ if __name__ == "__main__":
     load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
     parser = argparse.ArgumentParser(description="Nightly slab price updater")
-    parser.add_argument("--apply", action="store_true", help="Apply safe auto-updates (default: dry run)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Don't push price changes to Shopify (default: apply auto-raises)")
     parser.add_argument("--csv", default=None, help="Write results to CSV file")
     args = parser.parse_args()
 
-    run(apply=args.apply, csv_path=args.csv)
+    run(apply=not args.dry_run, csv_path=args.csv)
