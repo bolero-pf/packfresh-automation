@@ -1339,8 +1339,39 @@ async function viewSession(sessionId, _preserveScroll) {
                             : '<span class="badge" style="background:#666;color:#fff;">Rejected</span>';
                         const overrideNote = i.price_override_note ? `<br><small style="color:var(--accent);" title="${(i.price_override_note||'').replace(/"/g,'&quot;')}">⚡ ${i.price_override_note}</small>` : '';
                         const parentNote = i.parent_item_id ? '<br><small style="color:var(--text-dim);">↳ split from above</small>' : '';
+                        // Variant mismatch — seller claimed one variant at intake but the
+                        // actual broken-down variant in ingest was different. Show signed
+                        // dollar delta (actual - claimed): negative = we overpaid, positive = bonus.
+                        let variantMismatch = '';
+                        if (i.claimed_variant_id && i.actual_variant_id
+                            && String(i.claimed_variant_id) !== String(i.actual_variant_id)
+                            && bd && Array.isArray(bd.variants)) {
+                            const _claimV = bd.variants.find(v => String(v.id) === String(i.claimed_variant_id));
+                            const _actualV = bd.variants.find(v => String(v.id) === String(i.actual_variant_id));
+                            const _claimVal = _claimV ? ((_claimV.store != null && _claimV.store > 0) ? _claimV.store : _claimV.market) : null;
+                            const _actualVal = _actualV ? ((_actualV.store != null && _actualV.store > 0) ? _actualV.store : _actualV.market) : null;
+                            if (_claimVal != null && _actualVal != null) {
+                                const _delta = _actualVal - _claimVal;
+                                const _sign = _delta >= 0 ? '+' : '-';
+                                const _color = _delta < 0 ? 'var(--red,#f05252)' : 'var(--green,#2dd4a0)';
+                                const _qty = i.quantity || 1;
+                                const _totalDelta = _delta * _qty;
+                                variantMismatch = `<br><span class="badge" style="background:${_color};color:#fff;font-size:0.65rem;" title="Claimed: ${_claimV.name} ($${_claimVal.toFixed(2)}) → Actual: ${_actualV.name} ($${_actualVal.toFixed(2)})${_qty > 1 ? ' × ' + _qty : ''}">Wrong variant: ${_sign}$${Math.abs(_totalDelta).toFixed(2)}</span>`;
+                            } else {
+                                variantMismatch = `<br><span class="badge" style="background:var(--red,#f05252);color:#fff;font-size:0.65rem;">Wrong variant</span>`;
+                            }
+                        }
                         const bd = s.session_type !== 'raw' ? i.breakdown_summary : null;
-                        const bdVal = bd ? parseFloat(bd.best_variant_market) || 0 : 0;
+                        // Honor claimed_variant_id / probabilistic avg / selectable max
+                        let bdVal = 0;
+                        if (bd) {
+                            if (typeof resolveBreakdownAggregate === 'function') {
+                                const _agg = resolveBreakdownAggregate(bd, i.claimed_variant_id || null);
+                                bdVal = (_agg.store != null && _agg.store > 0) ? _agg.store : (_agg.market || 0);
+                            } else {
+                                bdVal = parseFloat(bd.best_variant_market) || 0;
+                            }
+                        }
                         const bdNote = '';
                         const vel = i.velocity;
                         let velNote = '';
@@ -1366,7 +1397,7 @@ async function viewSession(sessionId, _preserveScroll) {
                             velNote = `<br><small>📊 <span style="color:${rateColor};">${sold} sold · ${rateLabel}</span> · <span style="color:${stockColor};">${stockInfo}</span>${confidence}</small>`;
                         }
                         return `<tr style="${rowStyle}" data-item-id="${i.id}">
-                            <td class="name-cell" data-label="">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${bdNote}${velNote}</td>
+                            <td class="name-cell" data-label="">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${variantMismatch}${bdNote}${velNote}</td>
                             ${(s.session_type === 'raw' || s.session_type === 'mixed') ? `<td data-label="Type">${
                                 i.product_type === 'sealed'
                                 ? '<span class="badge" style="background:rgba(79,125,249,0.18);color:#7aadff;">Sealed</span>'
@@ -2408,8 +2439,20 @@ function renderStoreCheck() {
             ? ((i.store_price - unitOffer) / i.store_price * 100)
             : null;
         const bd = i.breakdown;
-        const bdMktVal = bd ? parseFloat(bd.best_variant_market) || 0 : 0;
-        const bdStoreVal = bd && bd.best_variant_store ? parseFloat(bd.best_variant_store) || 0 : 0;
+        // Resolve breakdown values via shared helper — honors claimed_variant_id
+        // (locked: that variant's value), probabilistic recipes (avg), or
+        // selectable recipes (max). Falls back to best_* for old-style payloads.
+        let bdMktVal = 0, bdStoreVal = 0;
+        if (bd) {
+            if (typeof resolveBreakdownAggregate === 'function') {
+                const agg = resolveBreakdownAggregate(bd, i.claimed_variant_id || null);
+                bdMktVal = agg.market || 0;
+                bdStoreVal = agg.store != null ? agg.store : 0;
+            } else {
+                bdMktVal = parseFloat(bd.best_variant_market) || 0;
+                bdStoreVal = parseFloat(bd.best_variant_store) || 0;
+            }
+        }
         const bdVal = bdStoreVal || bdMktVal;
         // effectiveSellPrice: best available sell price for this item
         // If no store price (null/0), treat same as not-in-store — use bd or estimate
@@ -2526,6 +2569,8 @@ function renderStoreCheck() {
                         ${i.store_note ? '<br><small style="color:var(--amber);">&#x26A0; ' + i.store_note + '</small>' : ''}
                         ${i.item_status === 'damaged' ? '<br><span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>' + (!i.damaged_variant_exists ? ' <span class="badge" style="background:var(--red);color:#fff;font-size:0.65rem;">Needs Listing</span>' : '') : ''}
                         ${bd ? (() => {
+                            // bdStoreVal/bdMktVal already honor claimed_variant_id and avg-for-multi-variant
+                            // via resolveBreakdownAggregate in the per-item enrichment block.
                             const parentStore  = found && i.store_price != null ? i.store_price : null;
                             const childStore   = i.bdStoreVal > 0 ? i.bdStoreVal : null;
                             const childMkt     = i.bdMktVal || 0;
@@ -2545,8 +2590,25 @@ function renderStoreCheck() {
                             const arrow = pct > 5 ? '▲' : pct >= -10 ? '≈' : '▼';
                             const displayVal = childStore || childMkt;
                             const valLabel = childStore ? 'store' : 'mkt';
-                            const valStr = displayVal > 0 ? `${valLabel} $${displayVal.toFixed(2)}` : '';
-                            const name = bd.variant_count > 1 ? `${bd.variant_count} configs` : bd.variant_name || 'breakdown';
+
+                            // Suffix: claimed variant name OR avg + per-variant list (multi)
+                            let suffix = '';
+                            const _claimedV = i.claimed_variant_id && Array.isArray(bd.variants)
+                                ? bd.variants.find(v => String(v.id) === String(i.claimed_variant_id)) : null;
+                            if (_claimedV) {
+                                suffix = ` (claimed: ${_claimedV.name || 'variant'})`;
+                            } else if (bd.variant_count > 1 && Array.isArray(bd.variants)) {
+                                const _vals = bd.variants
+                                    .map(v => (v.store != null && v.store > 0) ? v.store : v.market)
+                                    .filter(n => n > 0);
+                                if (_vals.length > 1) {
+                                    suffix = ` avg (${_vals.map(n => '$' + parseFloat(n).toFixed(2)).join(', ')})`;
+                                }
+                            }
+                            const valStr = displayVal > 0 ? `${valLabel} $${displayVal.toFixed(2)}${suffix}` : '';
+                            const name = (_claimedV || bd.variant_count <= 1)
+                                ? (bd.variant_name || 'breakdown')
+                                : `${bd.variant_count} configs`;
                             const deepVal = bd.deep_bd_store ? parseFloat(bd.deep_bd_store) : (bd.deep_bd_market ? parseFloat(bd.deep_bd_market) : 0);
                             const deepStr = deepVal > 0 ? ` &middot; <span style="color:var(--accent);" title="Store value if children are also broken down">Deep: $${deepVal.toFixed(2)}</span>` : '';
                             return `<br><small style="color:${bdNoteColor};">&#x1F4E6; ${arrow} ${name}${valStr ? ': ' + valStr : ''}${deepStr}${bd.variant_notes ? ' &middot; <em>' + bd.variant_notes + '</em>' : ''}</small>`;
@@ -5342,11 +5404,30 @@ async function _enrichIntakeBreakdowns(items, sessionId) {
             const cell = document.querySelector(`tr[data-item-id="${item.id}"] td.name-cell`);
             if (!cell) return;
 
-            // Remove any old badges
-            cell.querySelectorAll('.bd-badge, .bd-baked, .bd-summary-badge, .bd-live-badge').forEach(e => e.remove());
+            // Remove any old badges + pickers
+            cell.querySelectorAll('.bd-badge, .bd-baked, .bd-summary-badge, .bd-live-badge, .bd-variant-picker').forEach(e => e.remove());
             if (!bd || !bd.best_variant_market) return;
 
-            renderBreakdownBadge(cell, bd, { market_price: item.market_price }, { priceMode: 'best' });
+            const parentInfo = { market_price: item.market_price, claimed_variant_id: item.claimed_variant_id };
+            renderBreakdownBadge(cell, bd, parentInfo, { priceMode: 'best' });
+            // Variant claim picker — only renders for probabilistic recipes w/ >1 variant
+            if (typeof renderVariantClaimPicker === 'function') {
+                renderVariantClaimPicker(cell, bd, item.claimed_variant_id || null, async (newVid) => {
+                    try {
+                        await fetch(`/api/intake/item/${item.id}/claim-variant`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ variant_id: newVid }),
+                        });
+                        // Refresh the session view so margins recalc against the new claim.
+                        if (typeof viewSession === 'function' && currentSessionId) {
+                            viewSession(currentSessionId);
+                        } else {
+                            _enrichIntakeBreakdowns();
+                        }
+                    } catch (e) { /* swallow — UI revert on failure handled by next refresh */ }
+                });
+            }
         });
     } catch(e) { /* silent */ }
 }

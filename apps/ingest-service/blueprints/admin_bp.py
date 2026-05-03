@@ -11,6 +11,7 @@ from flask import Blueprint, request, jsonify, render_template, send_file, Respo
 
 import db
 import intake
+import breakdown_logic as bd_logic
 from helpers import (
     _serialize,
     _decode_override,
@@ -462,6 +463,14 @@ def shopify_session_store_check(session_id):
     # Enrich with breakdown cache data (multi-variant schema)
     all_tcg_ids = [i["tcgplayer_id"] for i in result_items if i.get("tcgplayer_id")]
     breakdown_data = {}
+    # Pull the shared summary alongside — gives us variant_resolution, variants[],
+    # expected/worst aggregates, plus a single source of truth for deep_bd_*.
+    bd_summary_map = {}
+    if all_tcg_ids:
+        try:
+            bd_summary_map = bd_logic.get_breakdown_summary_for_items(all_tcg_ids, db, ppt=pricing)
+        except Exception as e:
+            logger.warning(f"deal-candidates: shared breakdown summary failed: {e}")
     if all_tcg_ids:
         try:
             ph = ",".join(["%s"] * len(all_tcg_ids))
@@ -677,6 +686,7 @@ def shopify_session_store_check(session_id):
                 if has_deep_store and dv_store > best_deep_store:
                     best_deep_store = dv_store
 
+            shared_summary = bd_summary_map.get(int(tcg_id)) if tcg_id else None
             item["breakdown"] = {
                 "best_variant_market": bd["best_variant_market"],
                 "best_variant_store": store_total,
@@ -689,6 +699,13 @@ def shopify_session_store_check(session_id):
                 "total_components": len(bd["components"]),
                 "deep_bd_market": round(best_deep_market, 2) if best_deep_market > 0 else None,
                 "deep_bd_store": round(best_deep_store, 2) if best_deep_store > 0 else None,
+                # Multi-variant recipes: frontend uses these for the override
+                # picker and avg/claimed badge formatting.
+                "variants": (shared_summary or {}).get("variants") or [],
+                "expected_variant_market": (shared_summary or {}).get("expected_variant_market"),
+                "expected_variant_store":  (shared_summary or {}).get("expected_variant_store"),
+                "worst_variant_market":    (shared_summary or {}).get("worst_variant_market"),
+                "worst_variant_store":     (shared_summary or {}).get("worst_variant_store"),
             }
         else:
             item["breakdown"] = None

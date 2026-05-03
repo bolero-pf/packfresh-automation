@@ -185,7 +185,9 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
         return {}
     ph = ",".join(["%s"] * len(tcg_ids))
 
-    # Step 1: get best variant per parent (highest total_component_market)
+    # Step 1: get best variant per parent (highest total_component_market).
+    # Any recipe with >1 variant is implicitly probabilistic at intake — the
+    # operator only knows the actual variant when cracking it open in ingest.
     variant_rows = db.query(f"""
         SELECT sbc.tcgplayer_id AS parent_id,
                sbc.variant_count, sbc.best_variant_market,
@@ -308,6 +310,70 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
             except Exception:
                 pass
 
+    # Step 3.5: per-variant totals across ALL variants of these parents (for
+    # avg/min and the variants[] list used by the override picker).
+    parent_id_to_variants = {}  # parent_tcg_id -> [{id, name, market, store, ...}]
+    if tcg_ids:
+        all_var_rows = db.query(f"""
+            SELECT sbv.id AS variant_id, sbv.variant_name, sbv.display_order,
+                   sbv.total_component_market AS variant_market,
+                   sbc.tcgplayer_id AS parent_id
+            FROM sealed_breakdown_variants sbv
+            JOIN sealed_breakdown_cache sbc ON sbc.id = sbv.breakdown_id
+            WHERE sbc.tcgplayer_id IN ({ph})
+            ORDER BY sbv.display_order, sbv.created_at
+        """, tuple(tcg_ids))
+
+        # Pull components for ALL variants (with component_type for promo handling).
+        all_var_ids = [str(r["variant_id"]) for r in all_var_rows]
+        all_var_comp_rows = []
+        if all_var_ids:
+            avp = ",".join(["%s"] * len(all_var_ids))
+            all_var_comp_rows = db.query(f"""
+                SELECT variant_id, tcgplayer_id AS comp_tcg_id, quantity_per_parent,
+                       market_price AS comp_market,
+                       COALESCE(component_type, 'sealed') AS component_type
+                FROM sealed_breakdown_components
+                WHERE variant_id IN ({avp})
+            """, tuple(all_var_ids))
+
+        comps_by_var = {}
+        for c in all_var_comp_rows:
+            comps_by_var.setdefault(str(c["variant_id"]), []).append(c)
+
+        for vr in all_var_rows:
+            vkey = str(vr["variant_id"])
+            vc = comps_by_var.get(vkey, [])
+            v_total_market = 0.0
+            v_total_store = 0.0
+            v_in_store = 0
+            for c in vc:
+                qty = c["quantity_per_parent"] or 1
+                mkt = float(c["comp_market"] or 0)
+                v_total_market += mkt * qty
+                if c.get("component_type") == "promo":
+                    # Promos: treat market as store (no separate listing).
+                    v_total_store += mkt * qty
+                    v_in_store += 1
+                else:
+                    cs = store_map.get(c["comp_tcg_id"])
+                    if cs and cs.get("shopify_price"):
+                        v_total_store += float(cs["shopify_price"]) * qty
+                        v_in_store += 1
+            v_total_components = len(vc)
+            v_all_in_store = (v_in_store == v_total_components and v_total_components > 0)
+            v_any_in_store = v_in_store > 0
+            parent_id_to_variants.setdefault(vr["parent_id"], []).append({
+                "id": str(vr["variant_id"]),
+                "name": vr["variant_name"],
+                "display_order": vr["display_order"],
+                "market": round(v_total_market, 2),
+                "store": round(v_total_store, 2) if v_any_in_store else None,
+                "store_partial": v_any_in_store and not v_all_in_store,
+                "components_in_store": v_in_store,
+                "total_components": v_total_components,
+            })
+
     # Step 4: assemble results
     comps_by_variant = {}
     for c in comp_rows:
@@ -388,20 +454,79 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
             if has_child_bd and all_store and dv_store > best_deep_store:
                 best_deep_store = dv_store
 
+        # Aggregate market/store across ALL variants for this parent.
+        pvariants = parent_id_to_variants.get(pid, [])
+        v_markets = [v["market"] for v in pvariants if v["market"] is not None]
+        v_stores  = [v["store"]  for v in pvariants if v["store"]  is not None]
+
+        expected_market = round(sum(v_markets) / len(v_markets), 2) if v_markets else None
+        worst_market    = round(min(v_markets), 2) if v_markets else None
+        # Store aggregates only meaningful when EVERY variant has full store data.
+        all_variants_have_store = (len(v_stores) == len(pvariants) and len(pvariants) > 0
+                                    and all(not v.get("store_partial") for v in pvariants))
+        if all_variants_have_store:
+            best_store_agg     = round(max(v_stores), 2)
+            expected_store_agg = round(sum(v_stores) / len(v_stores), 2)
+            worst_store_agg    = round(min(v_stores), 2)
+        else:
+            best_store_agg = expected_store_agg = worst_store_agg = None
+
         result[pid] = {
             "variant_count":        vrow["variant_count"],
             "best_variant_market":  float(vrow["best_variant_market"] or 0),
+            "expected_variant_market": expected_market,
+            "worst_variant_market":    worst_market,
             "variant_names":        vrow["variant_names"],
             "parent_store_price":   parent_store_price,
             "best_variant_store":   round(total_comp_store, 2) if any_comps_in_store else None,
             "best_variant_store_partial": any_comps_in_store and not all_comps_in_store,
+            "expected_variant_store":  expected_store_agg,
+            "worst_variant_store":     worst_store_agg,
             "components_in_store":  comps_with_store,
             "total_components":     total_components,
             "deep_bd_market":       round(best_deep_market, 2) if best_deep_market > 0 else None,
             "deep_bd_store":        round(best_deep_store, 2) if best_deep_store > 0 else None,
+            "variants":             pvariants,
         }
 
     return result
+
+
+def pick_offer_value(summary: dict, claimed_variant_id: Optional[str] = None,
+                     prefer: str = "store") -> Optional[float]:
+    """
+    Single source of truth: which number drives intake offer math?
+
+    - claimed_variant_id set     → that variant's value (operator locked it)
+    - >1 variant (no claim)      → expected (avg) across variants
+    - 1 variant                  → best (= only) variant value
+
+    `prefer="store"` returns store-priced value if available, falls back to market.
+    `prefer="market"` always returns the market-priced value.
+
+    Returns None if `summary` is empty or carries no usable values.
+    """
+    if not summary:
+        return None
+
+    def _pick(store_val, market_val):
+        if prefer == "store" and store_val is not None and store_val > 0:
+            return float(store_val)
+        return float(market_val) if market_val is not None else None
+
+    if claimed_variant_id:
+        for v in summary.get("variants") or []:
+            if str(v.get("id")) == str(claimed_variant_id):
+                return _pick(v.get("store"), v.get("market"))
+        # Claim no longer points to a real variant — fall through to default.
+
+    variant_count = summary.get("variant_count") or 0
+    if variant_count > 1:
+        return _pick(summary.get("expected_variant_store"),
+                     summary.get("expected_variant_market"))
+
+    return _pick(summary.get("best_variant_store"),
+                 summary.get("best_variant_market"))
 
 
 def get_store_prices(tcg_ids: list, db) -> dict:

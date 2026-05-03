@@ -11,6 +11,7 @@ from flask import Blueprint, request, jsonify, render_template, send_file, Respo
 
 import db
 import intake
+import breakdown_logic as bd_logic
 from helpers import (
     _serialize,
     _decode_override,
@@ -551,87 +552,22 @@ def get_session(session_id):
 
     items = intake.get_session_items(session_id)
 
-    # Attach breakdown summaries to sealed items that have a tcgplayer_id
+    # Attach breakdown summaries to sealed items that have a tcgplayer_id.
+    # The shared summary call also triggers JIT-refresh of stale component
+    # market prices internally (when ppt is passed), so no separate refresh
+    # thread is needed here.
     tcg_ids = list({int(i["tcgplayer_id"]) for i in items if i.get("tcgplayer_id")})
-
-    # JIT refresh stale component market prices in background (don't block response)
-    if tcg_ids and pricing:
-        try:
-            from breakdown_helpers import refresh_stale_component_prices
-            import threading
-            _ph = ",".join(["%s"] * len(tcg_ids))
-            _vids = db.query(f"""
-                SELECT sbv.id AS variant_id
-                FROM sealed_breakdown_cache sbc
-                JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
-                WHERE sbc.tcgplayer_id IN ({_ph})
-            """, tuple(tcg_ids))
-            if _vids:
-                threading.Thread(target=refresh_stale_component_prices,
-                    args=([v["variant_id"] for v in _vids], db, pricing), daemon=True).start()
-        except Exception:
-            pass
 
     bd_map = {}
     if tcg_ids:
         try:
-            ph = ",".join(["%s"] * len(tcg_ids))
-            rows = db.query(f"""
-                SELECT sbc.tcgplayer_id, sbc.variant_count, sbc.best_variant_market,
-                       COALESCE(
-                           (SELECT STRING_AGG(variant_name, ' / ' ORDER BY display_order)
-                            FROM sealed_breakdown_variants WHERE breakdown_id=sbc.id), ''
-                       ) AS variant_names
-                FROM sealed_breakdown_cache sbc
-                WHERE sbc.tcgplayer_id IN ({ph})
-            """, tuple(tcg_ids))
-            bd_map = {r["tcgplayer_id"]: dict(r) for r in rows}
-
-            # Compute deep value for each parent across all variants
-            if bd_map:
-                try:
-                    all_comps = db.query(f"""
-                        SELECT sbc.tcgplayer_id AS parent_id, sbv.id AS variant_id,
-                               sbco.tcgplayer_id AS comp_tcg_id, sbco.quantity_per_parent,
-                               sbco.market_price AS comp_market
-                        FROM sealed_breakdown_cache sbc
-                        JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
-                        LEFT JOIN sealed_breakdown_components sbco ON sbco.variant_id = sbv.id
-                        WHERE sbc.tcgplayer_id IN ({ph}) AND sbco.tcgplayer_id IS NOT NULL
-                    """, tuple(tcg_ids))
-                    # Get which components have their own recipes
-                    _comp_ids = list(set(c["comp_tcg_id"] for c in all_comps if c["comp_tcg_id"]))
-                    _cbd_map = {}
-                    if _comp_ids:
-                        _cbph = ",".join(["%s"] * len(_comp_ids))
-                        _cbd_rows = db.query(
-                            f"SELECT tcgplayer_id, best_variant_market FROM sealed_breakdown_cache WHERE tcgplayer_id IN ({_cbph})",
-                            tuple(_comp_ids))
-                        _cbd_map = {int(r["tcgplayer_id"]): float(r["best_variant_market"] or 0) for r in _cbd_rows}
-                    # Compute best deep value per parent across all variants
-                    _by_parent_variant = {}
-                    for c in all_comps:
-                        key = (c["parent_id"], c["variant_id"])
-                        _by_parent_variant.setdefault(key, []).append(c)
-                    for (pid, _vid), vcomps in _by_parent_variant.items():
-                        dv = 0.0
-                        dv_has = False
-                        for vc in vcomps:
-                            cbd = _cbd_map.get(vc["comp_tcg_id"], 0)
-                            qty = vc["quantity_per_parent"] or 1
-                            if cbd > 0:
-                                dv += cbd * qty
-                                dv_has = True
-                            else:
-                                dv += float(vc["comp_market"] or 0) * qty
-                        if dv_has and dv > 0 and pid in bd_map:
-                            existing = bd_map[pid].get("deep_bd_market") or 0
-                            if dv > existing:
-                                bd_map[pid]["deep_bd_market"] = round(dv, 2)
-                except Exception:
-                    pass
-        except Exception:
-            pass  # breakdown table may not exist yet
+            # Shared logic returns variant_resolution, expected/worst aggregates,
+            # full variants[] list, plus deep_bd_* — exactly what the frontend needs
+            # for the override picker and the avg/claimed badge formats.
+            bd_map = bd_logic.get_breakdown_summary_for_items(tcg_ids, db, ppt=pricing)
+        except Exception as e:
+            logger.warning(f"breakdown summary lookup failed: {e}")
+            bd_map = {}
 
     # Attach velocity data from sku_analytics (prefer non-damaged variant with most sales)
     velocity_map = {}
@@ -729,7 +665,10 @@ def session_meta_stats(session_id):
     shopify_ids = list({str(i["shopify_product_id"]) for i in items if i.get("shopify_product_id")})
     cache_by_tcg: dict[int, dict] = {}
     cache_by_shopify: dict[str, dict] = {}
-    bd_by_tcg: dict[int, float] = {}  # tcgplayer_id -> best per-unit sell value (broken down)
+    # bd_summary_by_tcg holds the full breakdown summary (variant_resolution,
+    # variants[], best/expected/worst aggregates) so per-item offer math can
+    # honor each row's claimed_variant_id via pick_offer_value().
+    bd_summary_by_tcg: dict[int, dict] = {}
     try:
         if tcg_ids:
             ph = ",".join(["%s"] * len(tcg_ids))
@@ -745,25 +684,11 @@ def session_meta_stats(session_id):
                 if tcg in cache_by_tcg and r.get("is_damaged"):
                     continue
                 cache_by_tcg[tcg] = r
-            # Sealed breakdown predictions — per-unit market value if
-            # you broke the sealed item into its component cards. The
-            # store-priced equivalent (best_variant_store) is computed
-            # JIT by the breakdown engine, not stored, so meta-stats
-            # uses the denormalized market value as the breakdown sell
-            # estimate. Plenty close for a 'is this collection a good
-            # buy?' read; the Store tab still surfaces store-priced BD
-            # numbers when staff drill in.
-            for r in db.query(
-                f"""SELECT tcgplayer_id, best_variant_market
-                    FROM sealed_breakdown_cache
-                    WHERE tcgplayer_id IN ({ph})
-                      AND best_variant_market IS NOT NULL
-                      AND best_variant_market > 0""",
-                tuple(tcg_ids),
-            ):
-                tcg = r.get("tcgplayer_id")
-                if tcg and r.get("best_variant_market"):
-                    bd_by_tcg[int(tcg)] = float(r["best_variant_market"])
+            try:
+                bd_summary_by_tcg = bd_logic.get_breakdown_summary_for_items(tcg_ids, db, ppt=pricing)
+            except Exception as e:
+                logger.warning(f"meta-stats breakdown summary lookup failed: {e}")
+                bd_summary_by_tcg = {}
         if shopify_ids:
             ph = ",".join(["%s"] * len(shopify_ids))
             for r in db.query(
@@ -810,7 +735,20 @@ def session_meta_stats(session_id):
             store_price = float(cache_row["shopify_price"])
             in_store = (cache_row.get("shopify_qty") or 0) > 0 or store_price > 0
 
-        unit_bd = bd_by_tcg.get(item["tcgplayer_id"]) if item.get("tcgplayer_id") else None
+        # Per-item breakdown value — honors variant_resolution and the row's
+        # claimed_variant_id so probabilistic recipes use the avg (not max)
+        # unless the seller's claim has been locked in. Prefer market here
+        # because meta-stats has historically reported market-based BD; the
+        # Store tab continues to surface store-priced BD when staff drill in.
+        unit_bd = None
+        if item.get("tcgplayer_id"):
+            _bd_summary = bd_summary_by_tcg.get(int(item["tcgplayer_id"]))
+            if _bd_summary:
+                unit_bd = bd_logic.pick_offer_value(
+                    _bd_summary,
+                    claimed_variant_id=item.get("claimed_variant_id"),
+                    prefer="market",
+                )
         item_bd = (unit_bd * qty) if unit_bd else 0.0
 
         # 'Achievable sell-as-sealed' price: when listed, that's our

@@ -1825,9 +1825,14 @@ def break_down_item_with_cache(item_id: str, components: list[dict],
     """
     Break down a sealed item and optionally save/update the variant recipe in cache.
     qty_to_break defaults to the item's full quantity.
+
+    Persists `actual_variant_id` on the parent intake_items row so a later
+    comparison against `claimed_variant_id` (set during intake) flags
+    misrepresentation when the seller said the wrong variant.
     """
     result = break_down_item(item_id, components)
 
+    actual_vid = None
     if save_to_cache:
         parent = result["parent_item"]
         tcgplayer_id = parent.get("tcgplayer_id")
@@ -1840,12 +1845,31 @@ def break_down_item_with_cache(item_id: str, components: list[dict],
                 "quantity_per_parent": int(c.get("quantity", 1)),
                 "market_price": c.get("market_price", 0),
             } for c in components]
-            save_variant(tcgplayer_id, product_name, variant_name, cache_comps,
-                         notes=variant_notes, variant_id=variant_id)
+            saved_cache = save_variant(tcgplayer_id, product_name, variant_name, cache_comps,
+                                        notes=variant_notes, variant_id=variant_id)
             result["cache_saved"] = True
             result["variant_name"] = variant_name
+
+            # Determine the variant ID that was actually used (passed-in or just-created).
+            if variant_id:
+                actual_vid = variant_id
+            elif saved_cache and saved_cache.get("variants"):
+                for v in saved_cache["variants"]:
+                    if v.get("variant_name") == variant_name:
+                        actual_vid = str(v["id"])
+                        break
         else:
             result["cache_saved"] = False
+    elif variant_id:
+        # Operator picked a known variant but we're not saving the recipe.
+        actual_vid = variant_id
+
+    if actual_vid:
+        try:
+            execute("UPDATE intake_items SET actual_variant_id = %s WHERE id = %s",
+                    (actual_vid, item_id))
+        except Exception:
+            pass  # column may not exist if migration not yet run
 
     return result
 

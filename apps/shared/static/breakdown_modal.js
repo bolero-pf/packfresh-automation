@@ -318,7 +318,11 @@
     function _renderConfigCards() {
         var variants = _cacheData.variants;
         var html = '<div class="bd-configs-section">';
-        html += '<div class="bd-configs-header">Saved configs (' + variants.length + ')</div>';
+        html += '<div class="bd-configs-header">Saved configs (' + variants.length + ')';
+        if (variants.length > 1) {
+            html += ' <small style="font-weight:normal;color:var(--text-dim,#888);font-size:11px;">— intake uses the average across all variants (locked when seller asserts a specific one)</small>';
+        }
+        html += '</div>';
         html += '<div class="bd-config-cards">';
         for (var i = 0; i < variants.length; i++) {
             var v = variants[i];
@@ -613,6 +617,7 @@
             var nr = document.getElementById('bd-notes-row');
             if (nr) nr.style.display = _showNotes ? 'block' : 'none';
         });
+
 
         // Save
         _on('bd-save-btn', 'click', _saveRecipe);

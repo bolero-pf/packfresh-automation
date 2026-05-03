@@ -426,6 +426,37 @@ def update_quantity(item_id):
 
 
 
+@bp.route("/api/intake/item/<item_id>/claim-variant", methods=["POST"])
+def claim_variant(item_id):
+    """
+    Lock an intake row to a specific breakdown variant ("seller said it's the
+    Kanto one"), or clear the claim. Used by probabilistic recipes where the
+    operator wants to use that variant's exact value for offer math instead
+    of the recipe's average.
+
+    Body: { "variant_id": "<uuid>" } to lock, or {} / { "variant_id": null } to clear.
+    """
+    data = request.get_json(silent=True) or {}
+    variant_id = data.get("variant_id")
+    try:
+        if variant_id:
+            db.execute(
+                "UPDATE intake_items SET claimed_variant_id = %s WHERE id = %s",
+                (variant_id, item_id),
+            )
+        else:
+            db.execute(
+                "UPDATE intake_items SET claimed_variant_id = NULL WHERE id = %s",
+                (item_id,),
+            )
+        item = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+        if not item:
+            return jsonify({"error": "Item not found"}), 404
+        return jsonify({"success": True, "item": _serialize(item)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route("/api/intake/item/<item_id>/update-condition", methods=["POST"])
 def update_condition(item_id):
     """Update an item's condition and re-price from PPT if possible."""
