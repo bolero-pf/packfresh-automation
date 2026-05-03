@@ -190,24 +190,14 @@ def clear_auth_cookie(response):
     return response
 
 
-ADMIN_BAR_HTML = """
+ADMIN_BAR_TEMPLATE = """
 <div id="pf-admin-bar" style="position:sticky;top:0;z-index:9999;background:#141720;border-bottom:1px solid #2a2f42;padding:6px 16px;display:flex;align-items:center;gap:12px;font-family:'DM Sans',sans-serif;font-size:0.78rem;">
   <a href="https://admin.pack-fresh.com" style="color:#4f7df9;text-decoration:none;font-weight:600;">← Console</a>
   <span style="color:#6b7280;">|</span>
-  <span style="color:#6b7280;" id="pf-admin-user"></span>
+  <span style="color:#6b7280;" id="pf-admin-user">{display_name}</span>
   <a href="https://admin.pack-fresh.com/logout" style="color:#6b7280;text-decoration:none;margin-left:auto;font-size:0.72rem;" onclick="document.cookie='pf_auth=;domain=.pack-fresh.com;path=/;max-age=0';">Sign Out</a>
 </div>
-<script>
-try {
-  const t = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('pf_auth='));
-  if (t) {
-    const p = JSON.parse(atob(t.split('.')[1]));
-    window._pfUser = { name: p.name, role: p.role, email: p.email, user_id: p.user_id };
-    const el = document.getElementById('pf-admin-user');
-    if (el) el.textContent = p.name + ' (' + p.role + ')';
-  }
-} catch(e) {}
-</script>
+<script>window._pfUser = {user_json};</script>
 """
 
 
@@ -263,12 +253,34 @@ def register_auth_hooks(app, roles=None, public_paths=('/health', '/ping', '/fav
 
 
 def inject_admin_bar(response):
-    """Inject the admin navigation bar into HTML responses."""
-    if response.content_type and "text/html" in response.content_type:
-        data = response.get_data(as_text=True)
-        # Insert after <body> tag
-        if "<body" in data:
-            import re
-            data = re.sub(r"(<body[^>]*>)", r"\1" + ADMIN_BAR_HTML, data, count=1)
-            response.set_data(data)
+    """Inject the admin navigation bar into HTML responses.
+
+    The pf_auth cookie is HttpOnly so JavaScript can't read it; the bar's
+    earlier inline-cookie-decode pattern silently failed everywhere except
+    the admin service itself. Render the user payload server-side and emit
+    it as a literal JS object so every staff subdomain gets a populated
+    window._pfUser without needing /api/me round-trips.
+    """
+    if not (response.content_type and "text/html" in response.content_type):
+        return response
+    data = response.get_data(as_text=True)
+    if "<body" not in data:
+        return response
+
+    import json, re, html as _html
+    user = get_current_user() or {}
+    user_safe = {
+        "name": user.get("name"),
+        "role": (user.get("role") or "").lower() or None,
+        "email": user.get("email"),
+        "user_id": user.get("id"),
+    }
+    user_json = json.dumps(user_safe).replace("</", "<\\/")
+    display = f"{user.get('name', '')} ({user.get('role', '')})" if user.get("name") else ""
+    bar = ADMIN_BAR_TEMPLATE.format(
+        user_json=user_json,
+        display_name=_html.escape(display),
+    )
+    data = re.sub(r"(<body[^>]*>)", r"\1" + bar, data, count=1)
+    response.set_data(data)
     return response
