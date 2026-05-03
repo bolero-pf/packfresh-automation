@@ -666,10 +666,40 @@ def process_product_with_delay(product_and_index, blocked):
     return process_product(product, blocked=blocked)
 
 
+def _classify_pre_scrape(product, blocked, ignored_skus):
+    """Decide what we know about a variant without ever hitting TCGplayer.
+    Returns (action, reason) for variants we can short-circuit, or None
+    when a real scrape is required.
+
+    Mirrors the head of process_product — any change there must be
+    reflected here or vice-versa, otherwise the pre-filter and the loop
+    will disagree.
+    """
+    variant_key = str(product.get("variant_id") or "")
+    if variant_key and variant_key in blocked:
+        return ("skip", "auto-block")
+    if not product.get("tcgplayer_id"):
+        return ("missing", "no tcgplayer_id metafield")
+    if product.get("sku") in ignored_skus:
+        return ("untouched", "ignored sku (local file)")
+    raw_tags = product.get("tags") or []
+    tags = ([t.strip().lower() for t in raw_tags] if isinstance(raw_tags, list)
+            else [t.strip().lower() for t in raw_tags.split(",")])
+    if any(tag in tags for tag in ("weekly deals", "ignore_update", "slab")):
+        return ("untouched", "tagged for skip")
+    return None
+
+
 def run_price_sync():
     """Scan every Shopify variant, call TCGplayer for the featured price,
     apply auto-raises immediately and queue drops for review. Every row
-    persists to sealed_price_runs (the dashboard reads from there)."""
+    persists to sealed_price_runs (the dashboard reads from there).
+
+    Performance: variants without a tcgplayer_id (or that are blocked,
+    sku-ignored, or tag-skipped) get classified up front and persisted in
+    one batch — the threaded scrape loop only runs over real candidates.
+    On a ~2200-SKU store with ~800 priceable variants this trims hours of
+    per-product sleeps + several inter-batch cooldowns."""
     shared_db.init_pool()
     blocked = load_blocks(shared_db, "sealed")
     if blocked:
@@ -679,12 +709,37 @@ def run_price_sync():
     started_at = datetime.now(timezone.utc)
     print(f"=== sealed run_id={run_id} started_at={started_at.isoformat()} ===")
 
-    products = get_shopify_products()
+    all_products = get_shopify_products()
     counts = {"updated": 0, "review": 0, "missing": 0, "untouched": 0, "skip": 0}
     pending_db: list[dict] = []
 
+    # Partition: anything decidable without a network call gets persisted
+    # straight to sealed_price_runs; the loop below only does real work.
+    to_scrape: list[dict] = []
+    pre_classified: list[dict] = []
+    for p in all_products:
+        pre = _classify_pre_scrape(p, blocked, ignored_skus)
+        if pre is None:
+            to_scrape.append(p)
+        else:
+            action, reason = pre
+            p["action"] = action
+            p["reason"] = reason
+            pre_classified.append(p)
+            counts[action] = counts.get(action, 0) + 1
+
+    print(f"🛒 {len(all_products)} variants total — {len(to_scrape)} need a "
+          f"TCGplayer scrape, {len(pre_classified)} pre-classified (skipped, "
+          f"missing, ignored, or blocked)")
+    if pre_classified:
+        _persist_rows(run_id, started_at, pre_classified)
+        print(f"[WRITE] sealed_price_runs +{len(pre_classified)} pre-classified "
+              f"rows (run={run_id[:8]})")
+
+    products = to_scrape
+
     try:
-        print(f"🔄 Total products to process: {len(products)}")
+        print(f"🔄 Scrape candidates: {len(products)}")
 
         for batch_start in range(0, len(products), 200):
             batch = products[batch_start:batch_start + 200]
