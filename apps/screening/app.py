@@ -103,9 +103,10 @@ register_auth_hooks(app, roles=["owner", "manager", "associate"], public_prefixe
 # Associates only get the Combine tab. Owner + manager see everything.
 # Routes not in this allow-list 403 for associates.
 _ASSOCIATE_ALLOWED_PATHS = {
-    "/",                       # console index — JS hides non-combine tabs
-    "/api/held-orders",        # combine cards + verification empty for associate
-    "/api/uncombine-order",    # combine action
+    "/",                          # console index — JS hides non-combine tabs
+    "/api/held-orders",           # combine cards + verification empty for associate
+    "/api/uncombine-order",       # combine action
+    "/api/release-and-fulfill",   # combine "Release & Ship" with tracking
     "/health", "/ping", "/favicon.ico",
 }
 _ASSOCIATE_ALLOWED_PREFIXES = ("/screening/", "/static", "/pf-static")

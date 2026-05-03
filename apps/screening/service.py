@@ -339,9 +339,21 @@ def release_and_fulfill(order_gid: str, tracking_number: str, tracking_company: 
     Resilient to orders where the hold was already manually released in Shopify
     and/or the order was already fulfilled (label purchased manually).
     """
-    data = shopify_gql(ORDER_FULFILLMENT_ORDERS_Q, {"id": order_gid})
-    fo_edges = (data.get("data", {}).get("order", {})
-                .get("fulfillmentOrders", {}).get("edges", []))
+    # Fetch order identity + fulfillment orders in one shot for logging
+    data = shopify_gql("""
+        query($id: ID!) {
+          order(id: $id) {
+            id
+            name
+            customer { email }
+            fulfillmentOrders(first: 10) { edges { node { id status } } }
+          }
+        }
+    """, {"id": order_gid})
+    order_node = data.get("data", {}).get("order", {}) or {}
+    order_name = order_node.get("name") or ""
+    email = (order_node.get("customer") or {}).get("email") or ""
+    fo_edges = order_node.get("fulfillmentOrders", {}).get("edges", [])
 
     # Release any remaining holds (ignore errors — hold may already be released)
     for edge in fo_edges:
@@ -371,6 +383,10 @@ def release_and_fulfill(order_gid: str, tracking_number: str, tracking_company: 
     # If everything is already fulfilled, that's a success — not an error
     if not fulfillment_order_ids:
         if already_done > 0:
+            _log_screening(order_gid, order_name, email, "release", "combine", {
+                "tracking": tracking_number, "carrier": tracking_company,
+                "note": "already_fulfilled",
+            })
             return {"fulfilled": True, "note": "Already fulfilled"}
         return {"fulfilled": False, "error": "No fulfillment orders found"}
 
@@ -391,6 +407,9 @@ def release_and_fulfill(order_gid: str, tracking_number: str, tracking_company: 
         errors = result.get("data", {}).get("fulfillmentCreateV2", {}).get("userErrors", [])
         if errors:
             return {"fulfilled": False, "error": "; ".join(e["message"] for e in errors)}
+        _log_screening(order_gid, order_name, email, "release", "combine", {
+            "tracking": tracking_number, "carrier": tracking_company,
+        })
         return {"fulfilled": True}
     except Exception as e:
         return {"fulfilled": False, "error": str(e)}
