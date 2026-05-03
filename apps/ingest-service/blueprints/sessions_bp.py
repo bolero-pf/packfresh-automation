@@ -737,9 +737,10 @@ def session_meta_stats(session_id):
 
         # Per-item breakdown value — honors variant_resolution and the row's
         # claimed_variant_id so probabilistic recipes use the avg (not max)
-        # unless the seller's claim has been locked in. Prefer market here
-        # because meta-stats has historically reported market-based BD; the
-        # Store tab continues to surface store-priced BD when staff drill in.
+        # unless the seller's claim has been locked in. Collection Summary
+        # is the store-side view (upside if we sell through), so prefer
+        # store-priced BD with market as fallback. The Offer tab is where
+        # market-priced BD belongs (negotiating against the seller).
         unit_bd = None
         if item.get("tcgplayer_id"):
             _bd_summary = bd_summary_by_tcg.get(int(item["tcgplayer_id"]))
@@ -747,7 +748,7 @@ def session_meta_stats(session_id):
                 unit_bd = bd_logic.pick_offer_value(
                     _bd_summary,
                     claimed_variant_id=item.get("claimed_variant_id"),
-                    prefer="market",
+                    prefer="store",
                 )
         item_bd = (unit_bd * qty) if unit_bd else 0.0
 
