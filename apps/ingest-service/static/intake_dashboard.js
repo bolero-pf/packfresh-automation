@@ -1525,7 +1525,10 @@ async function linkAndCompare() {
     // Step 1: Look up PPT price
     let pptPrice = null;
     let pptProductName = '';
-    let pptSourceLabel = 'PPT';
+    // Primary live source is Scrydex (per project policy — PPT is fallback only).
+    // Cache hits also reflect Scrydex's nightly snapshot. Default the label to
+    // Scrydex so a missing _price_source field doesn't lie to staff with 'PPT'.
+    let pptSourceLabel = 'Scrydex';
     try {
         const endpoint = currentMapProductType === 'raw' ? '/api/lookup/card' : '/api/lookup/sealed';
         const r = await fetch(endpoint, {
@@ -1544,7 +1547,7 @@ async function linkAndCompare() {
                     || item.market_price               // flat field
                     || null;
             pptProductName = item.name || item.productName || '';
-            pptSourceLabel = {cache:'Cache',ppt:'PPT',scrydex:'Scrydex'}[item._price_source] || 'PPT';
+            pptSourceLabel = {cache:'Cache',ppt:'PPT',scrydex:'Scrydex'}[item._price_source] || pptSourceLabel;
         } else {
             // PPT lookup failed — still allow linking, just no price comparison
             panel.innerHTML = `
@@ -1601,7 +1604,7 @@ async function linkAndCompare() {
                  onclick="selectPrice('ppt')" id="price-option-ppt">
                 <div style="font-size:0.75rem; color:var(--text-dim); font-weight:600; text-transform:uppercase;">${pptSourceLabel}</div>
                 <div style="font-size:1.4rem; font-weight:700; margin:4px 0;">${ppt > 0 ? '$' + ppt.toFixed(2) : 'N/A'}</div>
-                <div style="font-size:0.75rem; color:var(--text-dim);">${pptSourceLabel === 'Cache' ? 'Scrydex nightly cache' : 'TCGPlayer market'}</div>
+                <div style="font-size:0.75rem; color:var(--text-dim);">${({Cache:'Scrydex nightly cache', Scrydex:'Scrydex live', PPT:'PPT (fallback)'})[pptSourceLabel] || 'Scrydex'}</div>
             </div>
         </div>
 
@@ -1615,7 +1618,7 @@ async function linkAndCompare() {
         </div>
 
         <!-- Confirm button -->
-        <button class="btn btn-primary" style="width:100%;" id="confirm-link-btn" data-ppt-price="${ppt}" onclick="confirmSelectedLink(${ppt})">
+        <button class="btn btn-primary" style="width:100%;" id="confirm-link-btn" data-ppt-price="${ppt}" data-price-source-label="${pptSourceLabel}" onclick="confirmSelectedLink(${ppt})">
             Select a price above, then confirm
         </button>
     `;
@@ -1650,7 +1653,8 @@ function selectPrice(source) {
             btn.textContent = `Confirm Link — Use Collectr Price ($${currentMapCollectrPrice.toFixed(2)})`;
         } else if (source === 'ppt') {
             const pptVal = btn.dataset.pptPrice || '0';
-            btn.textContent = `Confirm Link — Use PPT Price ($${parseFloat(pptVal).toFixed(2)})`;
+            const lbl = btn.dataset.priceSourceLabel || 'Scrydex';
+            btn.textContent = `Confirm Link — Use ${lbl} Price ($${parseFloat(pptVal).toFixed(2)})`;
         } else {
             btn.textContent = 'Confirm Link — Use Custom Price';
         }

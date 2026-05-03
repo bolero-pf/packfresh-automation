@@ -448,7 +448,7 @@ class PriceProvider:
                     scrydex_id=scrydex_id, tcgplayer_id=tcgplayer_id,
                 )
                 if view:
-                    return view
+                    return self._stamp(view, "cache")
             except Exception as e:
                 logger.warning(f"Cache card-view lookup failed: {e}")
 
@@ -485,7 +485,7 @@ class PriceProvider:
         if primary is None and variants_map:
             primary = next(iter(variants_map))
 
-        return {
+        return self._stamp({
             **{k: meta.get(k) for k in (
                 "scrydex_id", "tcgplayer_id", "name",
                 "card_number", "printed_number", "rarity", "game",
@@ -496,7 +496,7 @@ class PriceProvider:
             "variants": variants_map,
             "primary_variant": primary,
             "graded": {},
-        }
+        }, self._primary_source)
 
 
 def create_price_provider(db=None, game: str = "pokemon") -> PriceProvider:
