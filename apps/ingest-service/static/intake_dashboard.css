@@ -90,7 +90,7 @@ th { font-size: 0.8rem; }
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 24px 28px;
-    margin: 24px auto;
+    margin-top: 16px;
 }
 #session-view.active { display: block; }
 body.session-active .tabs,
