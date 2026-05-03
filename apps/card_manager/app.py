@@ -43,7 +43,28 @@ def _ensure_columns():
         logger.debug(f"inventory_product_cache.barcode migration skipped ({e})")
 
 
+def _heal_stale_hold_locks():
+    """Clear current_hold_id on any raw_card whose referenced hold is in a
+    terminal status. These accumulate when staff scan a sibling copy during
+    pulling — the kiosk-allocated row keeps its lock forever, and the kiosk
+    browse filter (`current_hold_id IS NULL`) hides it from customers. Cheap
+    one-shot fix on boot; no-op once the table is clean."""
+    try:
+        n = db.execute("""
+            UPDATE raw_cards rc
+            SET current_hold_id = NULL
+            FROM holds h
+            WHERE rc.current_hold_id = h.id
+              AND h.status NOT IN ('PENDING','PULLING','READY')
+        """)
+        if n:
+            logger.info(f"_heal_stale_hold_locks: cleared {n} stale current_hold_id row(s)")
+    except Exception as e:
+        logger.warning(f"_heal_stale_hold_locks failed: {e}")
+
+
 _ensure_columns()
+_heal_stale_hold_locks()
 
 SHOPIFY_STORE   = os.environ.get("SHOPIFY_STORE", "")
 SHOPIFY_TOKEN   = os.environ.get("SHOPIFY_TOKEN", "")
@@ -60,6 +81,25 @@ def _shopify(method, path, **kwargs):
     r = _requests.request(method, url, headers=headers, timeout=30, **kwargs)
     r.raise_for_status()
     return r.json()
+
+
+def _resolve_hold_lock(card: dict) -> bool:
+    """Return True if the card is genuinely held by an active hold.
+    If `current_hold_id` references a hold in a terminal state (the lock is
+    stale — usually from sibling-substitution during pulling), clear it inline
+    and return False. Used by every "is this card available?" scan endpoint."""
+    hid = card.get("current_hold_id")
+    if not hid:
+        return False
+    hold = db.query_one("SELECT status FROM holds WHERE id = %s", (hid,))
+    if hold and hold["status"] in ("PENDING", "PULLING", "READY"):
+        return True
+    db.execute(
+        "UPDATE raw_cards SET current_hold_id = NULL WHERE id = %s",
+        (str(card["id"]),),
+    )
+    card["current_hold_id"] = None
+    return False
 
 
 def _ser(d: dict) -> dict:
@@ -81,7 +121,8 @@ from auth import register_auth_hooks
 register_auth_hooks(
     app,
     public_paths=('/health', '/ping', '/favicon.ico',
-                  '/price-check', '/price-check/', '/api/price-check'),
+                  '/price-check', '/price-check/',
+                  '/api/price-check', '/api/price-check/search'),
 )  # any authenticated user otherwise
 
 
@@ -221,6 +262,132 @@ def price_check_api():
             # fall through to 404 — don't expose the error to the public page
 
     return jsonify({"error": "Not found"}), 404
+
+
+@app.route("/api/price-check/search")
+def price_check_search():
+    """Free-text fallback for the price-check page when the input doesn't match
+    a barcode. Returns up to ~12 hits combining: (a) raw_cards grouped by
+    identity (so all conditions of the same card collapse into one row with a
+    price range), and (b) ACTIVE Shopify products by title. Same response
+    shape as /api/price-check so the frontend can reuse the result renderer."""
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify({"results": []})
+
+    like = f"%{q}%"
+    raw_rows = db.query("""
+        SELECT card_name,
+               set_name,
+               card_number,
+               MAX(image_url) AS image_url,
+               MAX(scrydex_id) AS scrydex_id,
+               MAX(tcgplayer_id) AS tcgplayer_id,
+               MIN(current_price) AS min_price,
+               MAX(current_price) AS max_price,
+               COUNT(*) AS qty,
+               array_agg(DISTINCT condition) AS conditions
+        FROM raw_cards
+        WHERE state IN ('STORED','DISPLAY')
+          AND current_hold_id IS NULL
+          AND current_price IS NOT NULL
+          AND (card_name ILIKE %s
+               OR set_name ILIKE %s
+               OR card_number ILIKE %s)
+        GROUP BY card_name, set_name, card_number
+        ORDER BY MIN(current_price) DESC NULLS LAST
+        LIMIT 8
+    """, (like, like, like))
+
+    results = []
+    for r in raw_rows:
+        # Image fallback to scrydex cache (matches the barcode lookup path).
+        image_url = r["image_url"]
+        sid = r["scrydex_id"]
+        tcg = r["tcgplayer_id"]
+        if not image_url and (sid or tcg):
+            if sid:
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+                    FROM scrydex_price_cache WHERE scrydex_id = %s
+                """, (sid,))
+            else:
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m, MAX(image_small) AS img_s
+                    FROM scrydex_price_cache WHERE tcgplayer_id = %s
+                """, (tcg,))
+            if sx:
+                image_url = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
+
+        title_parts = [r["card_name"]]
+        if r.get("card_number"):
+            title_parts.append(f"#{r['card_number']}")
+        min_p = charm_ceil_raw(r["min_price"] or 0)
+        max_p = charm_ceil_raw(r["max_price"] or 0)
+        results.append({
+            "kind":         "raw",
+            "title":        " ".join(title_parts),
+            "set_name":     r.get("set_name") or "",
+            "condition":    "",
+            "conditions":   list(r.get("conditions") or []),
+            "image_url":    image_url,
+            "price":        float(min_p) if min_p is not None else None,
+            "price_max":    float(max_p) if max_p is not None else None,
+            "qty":          int(r["qty"] or 0),
+            "source_label": "Pack Fresh single",
+        })
+
+    # Shopify active products by title — best-effort. Any failure here just
+    # means we return raw-only results; the page still works.
+    if SHOPIFY_STORE and SHOPIFY_TOKEN:
+        try:
+            from shopify_graphql import shopify_gql
+            query = """
+            query SearchProducts($q: String!) {
+              products(first: 8, query: $q) {
+                edges { node {
+                  title handle status
+                  featuredImage { url }
+                  images(first: 1) { edges { node { url } } }
+                  variants(first: 1) { edges { node { price } } }
+                } }
+              }
+            }
+            """
+            esc_q = q.replace('"', '\\"')
+            data = shopify_gql(query, {"q": f'title:*{esc_q}* AND status:active'})
+            edges = (data.get("data", {})
+                         .get("products", {})
+                         .get("edges", []) or [])
+            for edge in edges:
+                p = edge["node"]
+                if (p.get("status") or "").upper() != "ACTIVE":
+                    continue
+                img = (p.get("featuredImage") or {}).get("url")
+                if not img:
+                    ie = ((p.get("images") or {}).get("edges") or [])
+                    if ie:
+                        img = ie[0]["node"]["url"]
+                ve = ((p.get("variants") or {}).get("edges") or [])
+                price_val = None
+                if ve:
+                    try:
+                        price_val = float(ve[0]["node"].get("price"))
+                    except (TypeError, ValueError):
+                        price_val = None
+                results.append({
+                    "kind":         "sealed",
+                    "title":        p.get("title") or "Sealed product",
+                    "set_name":     "",
+                    "condition":    "",
+                    "image_url":    img,
+                    "price":        price_val,
+                    "source_label": "Sealed product",
+                })
+        except Exception as e:
+            logger.warning(f"price-check search Shopify lookup failed for {q!r}: {e}")
+
+    return jsonify({"results": results[:12]})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -554,7 +721,8 @@ def scan_card(hold_id):
 
     # Find a REQUESTED hold_item on this hold matching tcgplayer_id + condition
     match = db.query_one("""
-        SELECT hi.id, hi.barcode, rc.card_name, rc.condition
+        SELECT hi.id, hi.barcode, hi.raw_card_id AS original_raw_id,
+               rc.card_name, rc.condition
         FROM hold_items hi
         JOIN raw_cards rc ON hi.raw_card_id = rc.id
         WHERE hi.hold_id = %s
@@ -570,6 +738,19 @@ def scan_card(hold_id):
             "card_name": scanned["card_name"],
             "barcode": barcode,
         }), 409
+
+    # Sibling substitution: kiosk allocates a specific raw_card row when a hold
+    # is created (sets current_hold_id). Staff often scan a *different* physical
+    # copy with the same identity. Without releasing the original lock, that
+    # row keeps current_hold_id forever — every later "Pull to Display" /
+    # set-out scan on that sibling rejects with "already on hold" even though
+    # the hold is long gone.
+    if str(match["original_raw_id"]) != str(scanned["id"]):
+        db.execute("""
+            UPDATE raw_cards
+            SET current_hold_id = NULL
+            WHERE id = %s AND current_hold_id = %s
+        """, (str(match["original_raw_id"]), hold_id))
 
     # Mark this hold_item as PULLED, lock in the EXACT physical copy that was
     # scanned. We update both `barcode` (display) AND `raw_card_id` (FK) so
@@ -588,10 +769,12 @@ def scan_card(hold_id):
         WHERE id = %s
     """, (barcode, str(scanned["id"]), str(match["id"])))
 
-    # Update the raw_card state
+    # Move the lock to the actually-scanned copy so any concurrent set-out /
+    # display scan on this sibling correctly reports it as held until pulled.
     db.execute("""
-        UPDATE raw_cards SET state = 'PULLED' WHERE barcode = %s
-    """, (barcode,))
+        UPDATE raw_cards SET state = 'PULLED', current_hold_id = %s
+        WHERE id = %s
+    """, (hold_id, str(scanned["id"])))
 
     return jsonify({
         "success":   True,
@@ -1051,8 +1234,17 @@ def scan_return():
     if not card:
         return jsonify({"error": "Barcode not found"}), 404
 
-    # Handle MISSING cards being re-found — treat as a return
+    # Handle MISSING cards being re-found — flip to PENDING_RETURN so the card
+    # actually surfaces in the Return Queue and gets a bin assigned on the
+    # next store_returns pass. Without this, scanning a found-missing barcode
+    # only returned a soft-success and the card stayed stuck in MISSING.
     if card["state"] == "MISSING":
+        db.execute("""
+            UPDATE raw_cards
+            SET state = 'PENDING_RETURN', current_hold_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (str(card["id"]),))
         return jsonify({
             "success":   True,
             "card_name": card["card_name"],
@@ -1360,7 +1552,7 @@ def display_scan_set_out():
         return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
     if card["state"] != "STORED":
         return jsonify({"error": f"Card is {card['state']}, not in storage", "barcode": barcode, "card_name": card["card_name"]}), 409
-    if card.get("current_hold_id"):
+    if _resolve_hold_lock(card):
         return jsonify({"error": "Card is on hold for a customer", "barcode": barcode, "card_name": card["card_name"]}), 409
 
     return jsonify({"success": True, "card": _ser(dict(card))})
@@ -1504,7 +1696,7 @@ def sell_scan():
     """, (barcode,))
     if not card:
         return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
-    if card.get("current_hold_id"):
+    if _resolve_hold_lock(card):
         return jsonify({"error": "Card is on hold for a customer", "barcode": barcode, "card_name": card["card_name"]}), 409
     # Sellable from anywhere physically in the store. PENDING_SALE means
     # someone else already started ringing it up; PENDING_RETURN/MISSING/GONE
@@ -1899,7 +2091,7 @@ def binder_fill_scan(binder_id):
         return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
     if card["state"] != "STORED":
         return jsonify({"error": f"Card is {card['state']}, not in storage", "barcode": barcode, "card_name": card["card_name"]}), 409
-    if card.get("current_hold_id"):
+    if _resolve_hold_lock(card):
         return jsonify({"error": "Card is on hold for a customer", "barcode": barcode, "card_name": card["card_name"]}), 409
 
     return jsonify({"success": True, "card": _ser(dict(card))})

@@ -90,6 +90,42 @@ body {
 }
 .pc-empty .icon { font-size: 3rem; opacity: 0.3; margin-bottom: 10px; }
 
+.pc-list { display: grid; gap: 10px; }
+.pc-list-head {
+  font-size: 0.72rem; color: var(--dim, #8a8e98);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+.pc-row {
+  display: flex; gap: 14px; align-items: center;
+  background: var(--surface-2, #1d2026);
+  border: 1.5px solid var(--border, #2a2d33);
+  border-radius: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.pc-row:hover { border-color: var(--accent, #4f7df9); background: var(--surface, #16181c); }
+.pc-row-img {
+  width: 56px; min-width: 56px; height: 78px;
+  background: var(--surface, #16181c);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+.pc-row-img.sealed { aspect-ratio: 1; height: auto; width: 64px; min-width: 64px; }
+.pc-row-img img { width: 100%; height: 100%; object-fit: contain; }
+.pc-row-img .no-img { font-size: 1.6rem; opacity: 0.3; }
+.pc-row-info { flex: 1; min-width: 0; }
+.pc-row-title { font-weight: 600; font-size: 1rem; line-height: 1.25; }
+.pc-row-meta { font-size: 0.78rem; color: var(--dim, #8a8e98); margin-top: 2px; }
+.pc-row-price {
+  font-family: 'DM Mono', monospace;
+  font-size: 1.3rem; font-weight: 700;
+  color: var(--green, #4ade80);
+  white-space: nowrap;
+}
+
 @media (max-width: 600px) {
   .pc-result { flex-direction: column; align-items: center; text-align: center; }
   .pc-img { width: 60vw; max-width: 220px; min-width: 0; }
@@ -111,7 +147,7 @@ body {
   <div class="pc-input-wrap">
     <span class="pc-icon">🔍</span>
     <input id="pc-input"
-           placeholder="Scan a barcode…"
+           placeholder="Scan a barcode or type a card / product name…"
            autocomplete="off"
            autocorrect="off"
            autocapitalize="off"
@@ -120,24 +156,28 @@ body {
   </div>
 
   <div id="pc-result" class="pc-result"></div>
+  <div id="pc-list" class="pc-list" style="display:none;"></div>
   <div id="pc-empty" class="pc-empty">
     <div class="icon">🃏</div>
-    <p>Awaiting scan…</p>
+    <p>Scan a barcode, or type a card / product name to look up.</p>
   </div>
 </div>
 
 <script>
 const inp = document.getElementById('pc-input');
 const resultEl = document.getElementById('pc-result');
+const listEl   = document.getElementById('pc-list');
 const emptyEl  = document.getElementById('pc-empty');
 
 function focusInput() { try { inp.focus(); } catch(e) {} }
 focusInput();
 window.addEventListener('focus', focusInput);
-// Re-focus aggressively — kiosk-style. Any click/tap that isn't on a button
-// should send focus back to the scanner input.
+// Re-focus aggressively — kiosk-style. Tap anywhere outside a button or
+// a result row sends focus back to the scanner input. Don't steal focus
+// when the user is clicking a clickable result.
 document.addEventListener('click', (e) => {
   if (e.target.tagName === 'INPUT') return;
+  if (e.target.closest('.pc-row')) return;
   setTimeout(focusInput, 0);
 });
 
@@ -148,8 +188,30 @@ function fmtPrice(p) {
   return '$' + n.toFixed(2);
 }
 
-function showResult(data) {
+function fmtPriceRange(min, max) {
+  if (min === null || min === undefined) return '—';
+  const lo = parseFloat(min);
+  const hi = parseFloat(max);
+  if (isFinite(hi) && hi > lo + 0.001) {
+    return '$' + lo.toFixed(2) + ' – $' + hi.toFixed(2);
+  }
+  return fmtPrice(min);
+}
+
+function clearAll() {
+  resultEl.classList.remove('show');
+  listEl.style.display = 'none';
+  listEl.innerHTML = '';
   emptyEl.style.display = 'none';
+}
+
+function showEmpty() {
+  clearAll();
+  emptyEl.style.display = 'block';
+}
+
+function showResult(data) {
+  clearAll();
 
   const isRaw = data.kind === 'raw';
   const imgClass = isRaw ? '' : 'sealed';
@@ -160,34 +222,117 @@ function showResult(data) {
   const meta = [];
   if (data.set_name)  meta.push('<span>' + esc(data.set_name) + '</span>');
   if (data.condition) meta.push('<span>· ' + esc(data.condition) + '</span>');
+  // Search results ship a `conditions` array (e.g. ["NM","LP"]); show the list
+  // when no single condition was selected (i.e. typed-name lookup).
+  if (!data.condition && Array.isArray(data.conditions) && data.conditions.length) {
+    meta.push('<span>· ' + esc(data.conditions.join(' / ')) + '</span>');
+  }
+  if (data.qty && data.qty > 1) {
+    meta.push('<span>· ' + data.qty + ' in stock</span>');
+  }
+
+  const priceStr = (data.price_max !== undefined && data.price_max !== null)
+    ? fmtPriceRange(data.price, data.price_max)
+    : fmtPrice(data.price);
 
   resultEl.innerHTML =
     '<div class="pc-img ' + imgClass + '">' + img + '</div>' +
     '<div class="pc-info">' +
       '<div class="pc-name">' + esc(data.title) + '</div>' +
       (meta.length ? '<div class="pc-meta">' + meta.join(' ') + '</div>' : '') +
-      '<div class="pc-price">' + fmtPrice(data.price) + '</div>' +
+      '<div class="pc-price">' + priceStr + '</div>' +
       '<div class="pc-source">' + esc(data.source_label) + '</div>' +
     '</div>';
   resultEl.classList.add('show');
 }
 
-async function lookup(bc) {
+function showList(results, q) {
+  clearAll();
+  if (!results.length) {
+    emptyEl.style.display = 'block';
+    emptyEl.innerHTML = '<div class="icon">🔍</div><p>No matches for "' + esc(q) + '".</p>';
+    return;
+  }
+  listEl.style.display = 'grid';
+  const rows = results.map((r, i) => {
+    const isRaw = r.kind === 'raw';
+    const imgClass = isRaw ? '' : 'sealed';
+    const img = r.image_url
+      ? '<img src="' + esc(r.image_url) + '" alt="">'
+      : '<div class="no-img">' + (isRaw ? '🃏' : '📦') + '</div>';
+    const meta = [];
+    if (r.set_name) meta.push(esc(r.set_name));
+    if (Array.isArray(r.conditions) && r.conditions.length) meta.push(esc(r.conditions.join(' / ')));
+    if (r.qty && r.qty > 1) meta.push(r.qty + ' in stock');
+    if (!isRaw) meta.push('Sealed');
+    const priceStr = (r.price_max !== undefined && r.price_max !== null)
+      ? fmtPriceRange(r.price, r.price_max)
+      : fmtPrice(r.price);
+    return '<div class="pc-row" data-idx="' + i + '">' +
+             '<div class="pc-row-img ' + imgClass + '">' + img + '</div>' +
+             '<div class="pc-row-info">' +
+               '<div class="pc-row-title">' + esc(r.title) + '</div>' +
+               (meta.length ? '<div class="pc-row-meta">' + meta.join(' · ') + '</div>' : '') +
+             '</div>' +
+             '<div class="pc-row-price">' + priceStr + '</div>' +
+           '</div>';
+  }).join('');
+  listEl.innerHTML = '<div class="pc-list-head">' + results.length + ' match' +
+                     (results.length === 1 ? '' : 'es') + ' for "' + esc(q) + '"</div>' +
+                     rows;
+
+  // Wire clicks to expand the row into the same single-result view used by
+  // direct barcode scans.
+  listEl.querySelectorAll('.pc-row').forEach(el => {
+    el.addEventListener('click', () => {
+      const idx = parseInt(el.dataset.idx, 10);
+      if (results[idx]) showResult(results[idx]);
+    });
+  });
+}
+
+async function lookup(input) {
+  // Try barcode first. On 404, fall back to free-text search.
   try {
-    const r = await fetch('/api/price-check?barcode=' + encodeURIComponent(bc));
-    if (!r.ok) {
+    const r = await fetch('/api/price-check?barcode=' + encodeURIComponent(input));
+    if (r.ok) {
+      const d = await r.json();
+      showResult(d);
+      try { pfSound.success(); } catch(_) {}
+      return;
+    }
+    if (r.status !== 404) {
       const d = await r.json().catch(() => ({}));
       throw new Error(d.error || ('HTTP ' + r.status));
     }
-    const d = await r.json();
-    showResult(d);
-    try { pfSound.success(); } catch(_) {}
   } catch(err) {
-    resultEl.classList.remove('show');
-    emptyEl.style.display = 'block';
-    await pfBlock('Not found',
-                  'Barcode "' + bc + '" — nothing in our store matches that. If this is a Pack Fresh card, ask staff to check the label.',
-                  { error: true });
+    showEmpty();
+    await pfBlock('Lookup failed', err.message || 'Unknown error', { error: true });
+    focusInput();
+    return;
+  }
+
+  // 404 from barcode — try free-text search.
+  try {
+    const r = await fetch('/api/price-check/search?q=' + encodeURIComponent(input));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const results = d.results || [];
+    if (results.length === 1) {
+      showResult(results[0]);
+      try { pfSound.success(); } catch(_) {}
+    } else {
+      showList(results, input);
+      if (results.length === 0) {
+        await pfBlock('Not found',
+                      '"' + input + '" — nothing in our store matches that.',
+                      { error: true });
+        focusInput();
+      }
+    }
+  } catch(err) {
+    showEmpty();
+    await pfBlock('Lookup failed', err.message || 'Unknown error', { error: true });
     focusInput();
   }
 }
@@ -195,10 +340,10 @@ async function lookup(bc) {
 inp.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   e.preventDefault();
-  const bc = inp.value.trim();
+  const v = inp.value.trim();
   inp.value = '';
-  if (!bc) return;
-  lookup(bc);
+  if (!v) return;
+  lookup(v);
 });
 </script>
 </body>

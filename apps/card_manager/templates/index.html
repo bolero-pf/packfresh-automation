@@ -944,15 +944,17 @@ async function handleScan(barcode) {
       toast(`✕ ${e.message}`, 'red');
     }
   } else if (activeView === 'view-missing') {
-    // Missing card scan — treat as return scan
+    // Missing card scan — backend flips state MISSING → PENDING_RETURN so the
+    // card actually shows up in the Return Queue. Just reload the list here;
+    // staff can keep scanning recovered cards and visit Return Queue when
+    // they're ready to bin them.
     try {
       const d = await post('/api/returns/scan', { barcode });
       if (d.was_missing || d.success) {
-        _returnScanned.add(barcode);
         flash('green');
-        toast(`🔍 Found! ${d.card_name} — use Return Queue to store it.`, 'green');
-        // Switch to returns view to complete storage
-        showView('returns');
+        toast(`🔍 Found ${d.card_name} — moved to Return Queue.`, 'green');
+        loadMissing();
+        refreshBadges();
       }
     } catch(e) {
       flash('red');

@@ -44,6 +44,12 @@ PENDING → PULLING → READY → ACCEPTED or RETURNED
 - `/api/sell/relist` is the inverse: PENDING_RETURN → fresh listing → PENDING_SALE. Exposed as "Sell instead" on Return Queue cards.
 - `raw_cards.shopify_product_id` / `shopify_variant_id` are populated on every listing creation so undo works without consulting `hold_items` (added in shared/018).
 
+## Hold Lock Invariant (`raw_cards.current_hold_id`)
+- Set by kiosk on hold creation against the specific allocated row.
+- Sibling substitution: scan_card on a different barcode of the same identity transfers the lock to the scanned copy and releases the original. Without this, the kiosk-allocated row keeps a stale lock and is hidden from kiosk browse forever.
+- Every "is this card available?" scan endpoint (display set-out, sell, binder fill) calls `_resolve_hold_lock(card)` — auto-clears current_hold_id when the referenced hold is in a terminal state.
+- `_heal_stale_hold_locks()` runs on boot to clean up legacy rows.
+
 ## Sidebar Badges
 - `/api/badges` returns `{holds, returns, missing, active_listings}`.
 - Polled every 15s globally (not just when a view is active), so pending work is visible from any tab.
