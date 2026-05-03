@@ -1158,14 +1158,17 @@ async function viewSession(sessionId, _preserveScroll) {
                 </div>
             </div>${_renderRoleLockBanner(sessionId, s)}
 
-            <!-- Collection Summary — populated by loadMetaStats(sessionId) below -->
-            <div id="meta-stats-panel" style="margin-bottom:16px;"></div>
-
             <!-- Session Sub-tabs -->
             <div style="display:flex; gap:2px; margin-bottom:16px; border-bottom:1px solid var(--border);">
                 <button class="tab active" data-stab="offer" onclick="switchSessionTab(this,'offer')">📋 Offer</button>
-                <button class="tab" data-stab="ppt" onclick="switchSessionTab(this,'ppt'); if(!document.getElementById('stab-ppt').dataset.loaded){ refreshPrices('${sessionId}'); document.getElementById('stab-ppt').dataset.loaded='1'; }">💰 PPT Prices</button>
+                <button class="tab" data-stab="summary" onclick="switchSessionTab(this,'summary'); if(!document.getElementById('stab-summary').dataset.loaded){ loadMetaStats('${sessionId}'); document.getElementById('stab-summary').dataset.loaded='1'; }">📊 Collection Summary</button>
+                <button class="tab" data-stab="ppt" onclick="switchSessionTab(this,'ppt'); if(!document.getElementById('stab-ppt').dataset.loaded){ refreshPrices('${sessionId}'); document.getElementById('stab-ppt').dataset.loaded='1'; }">💰 Market Prices</button>
                 ${s.session_type !== 'raw' ? `<button class="tab" data-stab="store" onclick="switchSessionTab(this,'store'); if(!document.getElementById('stab-store').dataset.loaded){ storeCheck('${sessionId}'); document.getElementById('stab-store').dataset.loaded='1'; }">🏪 Store</button>` : ''}
+            </div>
+
+            <!-- Collection Summary tab content — loaded lazily on first click -->
+            <div id="stab-summary" class="session-tab-content" style="display:none;">
+                <div id="meta-stats-panel"></div>
             </div>
 
             <!-- ═══ OFFER TAB ═══ -->
@@ -1498,8 +1501,8 @@ async function viewSession(sessionId, _preserveScroll) {
         }
         // Enrich breakdown summaries inline without full reload
         _enrichIntakeBreakdowns(items, sessionId);
-        // Collection-level meta stats (per-category SKU/qty/value/margin)
-        loadMetaStats(sessionId);
+        // Collection Summary tab loads lazily on first click — see the
+        // 📊 tab button above for the trigger.
         // Restore the user's "Sealed Product" vs "Individual Card" choice
         // so adding card after card doesn't keep flipping back to sealed
         _restoreSessionAddType();
@@ -5037,43 +5040,71 @@ function renderMetaStats(panel, data) {
     const t = data.totals || {};
     const cats = data.categories || [];
     if (!cats.length) {
-        panel.innerHTML = '';
+        panel.innerHTML = '<div class="alert alert-warning" style="font-size:0.85rem;">No items in this session yet.</div>';
         return;
     }
 
-    // Header — REAL margin uses sell_value (store price where listed,
-    // market price as fallback) vs paid cash/credit. The tautological
-    // 'offer percentage' margin is intentionally not shown.
+    // Sell value = best-of(store, breakdown, market) per item. Margin is
+    // computed against that, so the headline answers 'is this collection
+    // a good buy if I play it optimally?'
     const headerStats = `
-        <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:baseline; padding:10px 14px; background:var(--surface-2); border:1px solid var(--border); border-radius:8px 8px 0 0; border-bottom:none;">
-            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">SKUs</span> <strong style="font-size:1rem;">${t.sku_count || 0}</strong>${t.in_store_count != null ? ` <span style="color:var(--text-dim); font-size:0.78rem;">(${t.in_store_count} in store · ${_fmtPct(t.in_store_pct)})</span>` : ''}</div>
-            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Units</span> <strong style="font-size:1rem;">${t.qty || 0}</strong></div>
-            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Market</span> <strong style="font-size:1rem;">${_fmt$short(t.market_value)}</strong></div>
-            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Sell Value</span> <strong style="font-size:1rem;">${_fmt$short(t.sell_value)}</strong>${t.store_listed_value > 0 ? ` <span style="color:var(--text-dim); font-size:0.78rem;">(${_fmt$short(t.store_listed_value)} listed · rest est.)</span>` : ''}</div>
-            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Cash Margin</span> <strong style="font-size:1rem; color:${_marginColor(t.margin_cash_pct)};">${_fmtPct(t.margin_cash_pct)}</strong> <span style="color:var(--text-dim); font-size:0.78rem;">paid ${_fmt$short(t.cash_offer)}</span></div>
-            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Credit Margin</span> <strong style="font-size:1rem; color:${_marginColor(t.margin_credit_pct)};">${_fmtPct(t.margin_credit_pct)}</strong> <span style="color:var(--text-dim); font-size:0.78rem;">paid ${_fmt$short(t.credit_offer)}</span></div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:12px; padding:14px; background:var(--surface-2); border:1px solid var(--border); border-radius:8px 8px 0 0; border-bottom:none;">
+            <div><div style="color:var(--text-dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em;">SKUs</div><div style="font-size:1.1rem; font-weight:700;">${t.sku_count || 0}</div>${t.in_store_count != null ? `<div style="font-size:0.72rem; color:var(--text-dim);">${t.in_store_count} in store · ${_fmtPct(t.in_store_pct)}</div>` : ''}</div>
+            <div><div style="color:var(--text-dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em;">Units</div><div style="font-size:1.1rem; font-weight:700;">${t.qty || 0}</div></div>
+            <div><div style="color:var(--text-dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em;">Market</div><div style="font-size:1.1rem; font-weight:700;">${_fmt$short(t.market_value)}</div></div>
+            <div><div style="color:var(--text-dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em;">Sell Value (best)</div><div style="font-size:1.1rem; font-weight:700;">${_fmt$short(t.sell_value)}</div>${t.store_listed_value > 0 ? `<div style="font-size:0.72rem; color:var(--text-dim);">${_fmt$short(t.store_listed_value)} listed · rest est.</div>` : ''}</div>
+            ${t.breakdown_value > 0 ? `<div><div style="color:var(--text-dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em;">Breakdown Sell</div><div style="font-size:1.1rem; font-weight:700;">${_fmt$short(t.breakdown_value)}</div><div style="font-size:0.72rem; color:var(--text-dim);">${t.items_with_breakdown} item${t.items_with_breakdown===1?'':'s'} have BD</div></div>` : ''}
+            <div><div style="color:var(--text-dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em;">Cash Margin</div><div style="font-size:1.1rem; font-weight:700; color:${_marginColor(t.margin_cash_pct)};">${_fmtPct(t.margin_cash_pct)}</div><div style="font-size:0.72rem; color:var(--text-dim);">paid ${_fmt$short(t.cash_offer)}</div></div>
+            <div><div style="color:var(--text-dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.04em;">Credit Margin</div><div style="font-size:1.1rem; font-weight:700; color:${_marginColor(t.margin_credit_pct)};">${_fmtPct(t.margin_credit_pct)}</div><div style="font-size:0.72rem; color:var(--text-dim);">paid ${_fmt$short(t.credit_offer)}</div></div>
         </div>`;
+
+    // Detail header bar — sub-table of items inside an expanded
+    // category. Its own headers so columns line up under labels rather
+    // than under the parent table's headers (which mean different
+    // things at the per-item level).
+    const detailHead = `
+        <thead>
+            <tr style="background:var(--surface); color:var(--text-dim); font-size:0.72rem; text-transform:uppercase; letter-spacing:0.04em;">
+                <th style="padding:5px 12px 5px 32px; text-align:left;">Product</th>
+                <th style="padding:5px 8px; text-align:right;">Qty</th>
+                <th style="padding:5px 8px; text-align:right;">Market ea</th>
+                <th style="padding:5px 8px; text-align:right;">Store ea</th>
+                <th style="padding:5px 8px; text-align:right;">BD ea</th>
+                <th style="padding:5px 8px; text-align:right;">Best Strategy</th>
+                <th style="padding:5px 12px; text-align:right;">Paid</th>
+            </tr>
+        </thead>`;
 
     const rows = cats.map((c, ci) => {
         const pct = Number(c.share_of_market_pct) || 0;
         const barWidth = Math.min(100, pct);
-        const inStoreCoverage = c.sku_count > 0
-            ? Math.round((c.in_store_count || 0) / c.sku_count * 100)
-            : 0;
         const storeBadge = c.in_store_count > 0
             ? `<span style="font-size:0.7rem; color:var(--text-dim);">${c.in_store_count}/${c.sku_count} in store</span>`
             : `<span style="font-size:0.7rem; color:var(--amber);">est. (none in store)</span>`;
-        const detailRows = (c.items || []).map(it => `
-            <tr style="background:var(--surface-2);">
-                <td colspan="2" style="padding:4px 12px 4px 24px; font-size:0.78rem;">${it.name || '?'}</td>
-                <td style="padding:4px 12px; text-align:right; font-size:0.78rem; color:var(--text-dim);">${it.qty}</td>
-                <td style="padding:4px 12px; text-align:right; font-size:0.78rem;">${_fmt$(it.market_price)}<small style="color:var(--text-dim);"> ea</small></td>
-                <td style="padding:4px 12px; font-size:0.78rem;">${it.in_store ? '<span style="color:var(--green);">listed</span>' : '<span style="color:var(--text-dim);">not listed</span>'}</td>
-                <td style="padding:4px 12px; text-align:right; font-size:0.78rem;">${it.store_price != null ? _fmt$(it.store_price) : '—'}</td>
-                <td colspan="3" style="padding:4px 12px; text-align:right; font-size:0.78rem; color:var(--text-dim);">paid ${_fmt$(it.offer_price)}</td>
-            </tr>`).join('');
+        const bdBadge = c.items_with_breakdown > 0
+            ? `<span style="font-size:0.7rem; color:var(--accent); margin-left:6px;">${c.items_with_breakdown} BD</span>`
+            : '';
+
+        const detailRows = (c.items || []).map(it => {
+            const stratColor = it.best_strategy === 'breakdown' ? 'var(--accent)'
+                            : it.best_strategy === 'store'     ? 'var(--green)'
+                            :                                    'var(--text-dim)';
+            const stratLabel = it.best_strategy === 'breakdown' ? '✦ break down'
+                            : it.best_strategy === 'store'     ? '🏪 sell sealed'
+                            :                                    'market est.';
+            return `<tr style="background:var(--surface-2); font-size:0.78rem;">
+                <td style="padding:4px 12px 4px 32px;">${it.name || '?'}</td>
+                <td style="padding:4px 8px; text-align:right; color:var(--text-dim);">${it.qty}</td>
+                <td style="padding:4px 8px; text-align:right;">${_fmt$(it.market_price)}</td>
+                <td style="padding:4px 8px; text-align:right;">${it.store_price != null ? _fmt$(it.store_price) : '<span style="color:var(--text-dim);">—</span>'}</td>
+                <td style="padding:4px 8px; text-align:right;">${it.breakdown_price != null ? _fmt$(it.breakdown_price) : '<span style="color:var(--text-dim);">—</span>'}</td>
+                <td style="padding:4px 8px; text-align:right; color:${stratColor};">${stratLabel}</td>
+                <td style="padding:4px 12px; text-align:right; color:var(--text-dim);">${_fmt$(it.offer_price)}</td>
+            </tr>`;
+        }).join('');
+
         return `<tr class="meta-cat-row" data-ci="${ci}" style="cursor:pointer;">
-                <td style="padding:6px 12px;"><span class="meta-twirl" style="display:inline-block; width:12px; color:var(--text-dim);">▸</span> <strong>${c.label}</strong><br>${storeBadge}</td>
+                <td style="padding:6px 12px;"><span class="meta-twirl" style="display:inline-block; width:12px; color:var(--text-dim);">▸</span> <strong>${c.label}</strong><br>${storeBadge}${bdBadge}</td>
                 <td style="padding:6px 12px; text-align:right; color:var(--text-dim);">${c.sku_count}</td>
                 <td style="padding:6px 12px; text-align:right; color:var(--text-dim);">${c.qty}</td>
                 <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.market_value)}</td>
@@ -5086,44 +5117,45 @@ function renderMetaStats(panel, data) {
                     </div>
                 </td>
                 <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.sell_value)}</td>
+                <td style="padding:6px 12px; text-align:right;">${c.breakdown_value > 0 ? _fmt$short(c.breakdown_value) : '<span style="color:var(--text-dim);">—</span>'}</td>
                 <td style="padding:6px 12px; text-align:right; color:${_marginColor(c.margin_cash_pct)};">${_fmtPct(c.margin_cash_pct)}</td>
                 <td style="padding:6px 12px; text-align:right; color:${_marginColor(c.margin_credit_pct)};">${_fmtPct(c.margin_credit_pct)}</td>
             </tr>
             <tr class="meta-cat-detail" data-ci="${ci}" style="display:none;">
-                <td colspan="8" style="padding:0;">
+                <td colspan="9" style="padding:0;">
                     <table style="width:100%; border-collapse:collapse;">
-                        ${detailRows || '<tr><td style="padding:6px 24px; font-size:0.78rem; color:var(--text-dim);">No items.</td></tr>'}
+                        ${detailHead}
+                        <tbody>
+                            ${detailRows || '<tr><td colspan="7" style="padding:6px 24px; font-size:0.78rem; color:var(--text-dim);">No items.</td></tr>'}
+                        </tbody>
                     </table>
                 </td>
             </tr>`;
     }).join('');
 
     panel.innerHTML = `
-        <details open style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px;">
-            <summary style="cursor:pointer; padding:10px 14px; font-weight:700; font-size:0.95rem; user-select:none;">📊 Collection Summary</summary>
+        <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px;">
             ${headerStats}
             <div style="overflow-x:auto;">
                 <table style="width:100%; font-size:0.85rem; border-collapse:collapse; background:var(--surface);">
                     <thead style="background:var(--surface-2);">
-                        <tr style="text-align:left;">
-                            <th style="padding:6px 12px;">Category</th>
-                            <th style="padding:6px 12px; text-align:right;">SKUs</th>
-                            <th style="padding:6px 12px; text-align:right;">Units</th>
-                            <th style="padding:6px 12px; text-align:right;">Market</th>
-                            <th style="padding:6px 12px;">Share</th>
-                            <th style="padding:6px 12px; text-align:right;">Sell</th>
-                            <th style="padding:6px 12px; text-align:right;">Cash Margin</th>
-                            <th style="padding:6px 12px; text-align:right;">Credit Margin</th>
+                        <tr style="text-align:left; color:var(--text-dim); font-size:0.72rem; text-transform:uppercase; letter-spacing:0.04em;">
+                            <th style="padding:8px 12px;">Category</th>
+                            <th style="padding:8px 12px; text-align:right;">SKUs</th>
+                            <th style="padding:8px 12px; text-align:right;">Units</th>
+                            <th style="padding:8px 12px; text-align:right;">Market</th>
+                            <th style="padding:8px 12px;">Share</th>
+                            <th style="padding:8px 12px; text-align:right;">Sell (best)</th>
+                            <th style="padding:8px 12px; text-align:right;">Breakdown</th>
+                            <th style="padding:8px 12px; text-align:right;">Cash Margin</th>
+                            <th style="padding:8px 12px; text-align:right;">Credit Margin</th>
                         </tr>
                     </thead>
                     <tbody>${rows}</tbody>
                 </table>
             </div>
-        </details>`;
+        </div>`;
 
-    // Click a category row to expand its item list. Particularly useful
-    // for 'Other' so staff can see exactly which products fell through
-    // the tag taxonomy.
     panel.querySelectorAll('.meta-cat-row').forEach(row => {
         row.addEventListener('click', () => {
             const ci = row.dataset.ci;

@@ -729,6 +729,7 @@ def session_meta_stats(session_id):
     shopify_ids = list({str(i["shopify_product_id"]) for i in items if i.get("shopify_product_id")})
     cache_by_tcg: dict[int, dict] = {}
     cache_by_shopify: dict[str, dict] = {}
+    bd_by_tcg: dict[int, float] = {}  # tcgplayer_id -> best per-unit sell value (broken down)
     try:
         if tcg_ids:
             ph = ",".join(["%s"] * len(tcg_ids))
@@ -744,6 +745,30 @@ def session_meta_stats(session_id):
                 if tcg in cache_by_tcg and r.get("is_damaged"):
                     continue
                 cache_by_tcg[tcg] = r
+            # Sealed breakdown predictions — per-unit value if you broke
+            # the sealed item into its component cards. best_variant_store
+            # is preferred (uses our own listed prices) and falls back to
+            # best_variant_market when components aren't all in store.
+            for r in db.query(
+                f"""SELECT sbc.tcgplayer_id,
+                          sbc.best_variant_market,
+                          (SELECT total_component_store FROM sealed_breakdown_variants sbv
+                            WHERE sbv.cache_id = sbc.id
+                              AND sbv.total_component_market = sbc.best_variant_market
+                            LIMIT 1) AS best_variant_store
+                   FROM sealed_breakdown_cache sbc
+                   WHERE sbc.tcgplayer_id IN ({ph})""",
+                tuple(tcg_ids),
+            ):
+                tcg = r.get("tcgplayer_id")
+                if not tcg:
+                    continue
+                store_val = r.get("best_variant_store")
+                market_val = r.get("best_variant_market")
+                # Pick whichever is real and bigger (non-null)
+                vals = [float(v) for v in (store_val, market_val) if v is not None]
+                if vals:
+                    bd_by_tcg[int(tcg)] = max(vals)
         if shopify_ids:
             ph = ",".join(["%s"] * len(shopify_ids))
             for r in db.query(
@@ -763,9 +788,11 @@ def session_meta_stats(session_id):
     grand_credit = 0.0
     grand_sell = 0.0
     grand_listed = 0.0
+    grand_breakdown = 0.0
     grand_qty = 0
     grand_skus = 0
     grand_in_store = 0
+    grand_with_bd = 0
 
     for item in items:
         cache_row = None
@@ -787,14 +814,32 @@ def session_meta_stats(session_id):
         if cache_row and cache_row.get("shopify_price") is not None:
             store_price = float(cache_row["shopify_price"])
             in_store = (cache_row.get("shopify_qty") or 0) > 0 or store_price > 0
-        unit_sell = store_price if (store_price and store_price > 0) else unit_market
-        item_sell = unit_sell * qty
+
+        unit_bd = bd_by_tcg.get(item["tcgplayer_id"]) if item.get("tcgplayer_id") else None
+        item_bd = (unit_bd * qty) if unit_bd else 0.0
+
+        # Best-case sell: max of store, breakdown, market — represents
+        # 'if you played this collection optimally, what would it be
+        # worth?' Margin is computed against this so the headline number
+        # answers 'is this collection a good buy?'
+        unit_store = store_price if (store_price and store_price > 0) else 0.0
+        unit_best = max(unit_store, unit_bd or 0.0, unit_market)
+        item_sell = unit_best * qty
+        # 'best strategy' = how the optimal sell broke down for this row
+        if unit_bd and unit_bd >= unit_store and unit_bd >= unit_market:
+            best_strategy = "breakdown"
+        elif unit_store and unit_store >= unit_market:
+            best_strategy = "store"
+        else:
+            best_strategy = "market"
         item_listed = (store_price * qty) if (store_price and store_price > 0) else 0.0
 
         bucket = cats.setdefault(label, {
             "label": label, "sku_count": 0, "qty": 0,
             "market_value": 0.0, "cash_offer": 0.0, "credit_offer": 0.0,
-            "store_listed_value": 0.0, "sell_value": 0.0, "in_store_count": 0,
+            "store_listed_value": 0.0, "sell_value": 0.0,
+            "breakdown_value": 0.0, "items_with_breakdown": 0,
+            "in_store_count": 0,
             "items": [],
         })
         bucket["sku_count"] += 1
@@ -804,6 +849,9 @@ def session_meta_stats(session_id):
         bucket["credit_offer"] += item_credit
         bucket["sell_value"] += item_sell
         bucket["store_listed_value"] += item_listed
+        if unit_bd:
+            bucket["breakdown_value"] += item_bd
+            bucket["items_with_breakdown"] += 1
         if in_store:
             bucket["in_store_count"] += 1
         bucket["items"].append({
@@ -812,6 +860,8 @@ def session_meta_stats(session_id):
             "market_price": round(unit_market, 2),
             "offer_price": round(item_cash, 2),
             "store_price": round(store_price, 2) if store_price else None,
+            "breakdown_price": round(unit_bd, 2) if unit_bd else None,
+            "best_strategy": best_strategy,
             "in_store": in_store,
         })
 
@@ -820,6 +870,9 @@ def session_meta_stats(session_id):
         grand_credit += item_credit
         grand_sell += item_sell
         grand_listed += item_listed
+        if unit_bd:
+            grand_breakdown += item_bd
+            grand_with_bd += 1
         grand_qty += qty
         grand_skus += 1
         if in_store:
@@ -840,6 +893,7 @@ def session_meta_stats(session_id):
         b["credit_offer"] = round(b["credit_offer"], 2)
         b["sell_value"] = round(b["sell_value"], 2)
         b["store_listed_value"] = round(b["store_listed_value"], 2)
+        b["breakdown_value"] = round(b["breakdown_value"], 2)
         # Items already in display order (intake order). Sort biggest first
         # by market value so drill-in shows the heavy hitters first.
         b["items"].sort(key=lambda x: -(float(x["market_price"] or 0) * (x["qty"] or 0)))
@@ -855,6 +909,8 @@ def session_meta_stats(session_id):
             "credit_offer": round(grand_credit, 2),
             "sell_value": round(grand_sell, 2),
             "store_listed_value": round(grand_listed, 2),
+            "breakdown_value": round(grand_breakdown, 2),
+            "items_with_breakdown": grand_with_bd,
             "in_store_count": grand_in_store,
             "in_store_pct": round((grand_in_store / grand_skus * 100.0), 1) if grand_skus > 0 else 0.0,
             "margin_cash_pct": _margin(grand_sell, grand_cash),
