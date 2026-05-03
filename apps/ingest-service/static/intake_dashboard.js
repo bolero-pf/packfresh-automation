@@ -1777,40 +1777,67 @@ async function fuzzySearch() {
                 </div>`;
             return;
         }
+
+        // Cards: hand off to the shared card-search renderer so the
+        // Relink-via-mapping flow gets the same images, set/printing
+        // badges, and variant chips that Add Card uses. onPick stuffs
+        // the picked variant's tcgPlayer ID into the link input.
+        if (currentMapProductType === 'raw') {
+            _renderCardSearchResults(results, container, {
+                condition: 'NM', qty: 1, offerPct: null,
+                onPick: (pick) => {
+                    document.getElementById('map-tcgplayer-id').value = pick.tcgId || '';
+                    const inp = document.getElementById('map-tcgplayer-id');
+                    if (inp) { inp.style.outline = '2px solid var(--accent)'; setTimeout(() => inp.style.outline = '', 600); }
+                },
+            });
+            return;
+        }
+
+        // Sealed: enrich the existing rows with product images so the
+        // mapping modal stops looking like a 2008 PPT search dump.
         container.innerHTML = results.map(p => {
             const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.tcgPlayerID || '';
             const sid = p.scrydexId || p.scrydex_id || '';
             const price = p.unopenedPrice || p.prices?.market || p.market_price || p.price || '';
             const name = p.name || p.productName || '?';
             const pSetName = p.setName || p.set || '';
-            // Scrydex-only rows (no TCG mapping in Scrydex's marketplace data —
-            // common for older JP sets). Show with a dimmed hint instead of a
-            // bogus "click to use" empty insert. The intake mapping flow only
-            // supports tcgplayer_id linking today, so these aren't directly
-            // selectable here yet.
+            const img = p.imageCdnUrl400 || p.imageCdnUrl || p.imageCdnUrl800 || p.image_url || '';
+            const _esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            const imgHtml = img
+                ? `<img src="${_esc(img)}" loading="lazy" style="width:72px; height:96px; object-fit:contain; border-radius:6px; flex-shrink:0; background:var(--surface-2);">`
+                : `<div style="width:72px; height:96px; background:var(--surface-2); border-radius:6px; flex-shrink:0;"></div>`;
+            const priceText = price ? `<span style="font-weight:700; font-size:0.95rem;">$${Number(price).toFixed(2)}</span>` : '';
+
             if (!tcgId) {
                 if (!sid) {
-                    return `<div class="search-result" style="opacity:0.55; cursor:not-allowed; border-style:dashed;">
-                        <h4>${name}</h4>
-                        <p>${pSetName} ${price ? '• $' + price : ''}</p>
-                        <small style="color:var(--text-dim);">No identifier available — not linkable</small>
+                    return `<div class="search-result" style="display:flex; gap:12px; align-items:center; opacity:0.55; cursor:not-allowed; border-style:dashed;">
+                        ${imgHtml}
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-weight:700;">${_esc(name)}</div>
+                            <div style="font-size:0.8rem; color:var(--text-dim);">${_esc(pSetName)} ${priceText ? '· ' + priceText : ''}</div>
+                            <div style="font-size:0.72rem; color:var(--text-dim);">No identifier available — not linkable</div>
+                        </div>
                     </div>`;
                 }
-                // Scrydex-only (sealed JP, JP cards, anything Scrydex hasn't
-                // mapped to TCG). scrydex_id is the canonical linker; the
-                // price_updater only needs tcgplayer_id later for the live
-                // crawl, so this still links cleanly.
-                return `<div class="search-result" style="border:1px solid var(--accent2,#c084fc); background:rgba(192,132,252,0.04); cursor:pointer;"
+                return `<div class="search-result" style="display:flex; gap:12px; align-items:center; border:1px solid var(--accent2,#c084fc); background:rgba(192,132,252,0.04); cursor:pointer;"
                          onclick="pickScrydexResult('${sid}', '${name.replace(/'/g, "\\'")}', '${pSetName.replace(/'/g, "\\'")}')">
-                    <h4>${name}</h4>
-                    <p>${pSetName} ${price ? '• $' + price : ''}</p>
-                    <small style="color:var(--accent2,#c084fc);">Scrydex ID: ${sid} — click to link (no TCG mapping needed)</small>
+                    ${imgHtml}
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-weight:700;">${_esc(name)}</div>
+                        <div style="font-size:0.8rem; color:var(--text-dim);">${_esc(pSetName)} ${priceText ? '· ' + priceText : ''}</div>
+                        <div style="font-size:0.72rem; color:var(--accent2,#c084fc);">Scrydex ID: ${sid} — click to link (no TCG mapping needed)</div>
+                    </div>
                 </div>`;
             }
-            return `<div class="search-result" onclick="document.getElementById('map-tcgplayer-id').value='${tcgId}'">
-                <h4>${name}</h4>
-                <p>${pSetName} ${price ? '• $' + price : ''}</p>
-                <small style="color:var(--accent);">TCGPlayer ID: ${tcgId} — click to use</small>
+            return `<div class="search-result" style="display:flex; gap:12px; align-items:center; cursor:pointer;"
+                     onclick="document.getElementById('map-tcgplayer-id').value='${tcgId}'; this.style.outline='2px solid var(--accent)';">
+                ${imgHtml}
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:700;">${_esc(name)}</div>
+                    <div style="font-size:0.8rem; color:var(--text-dim);">${_esc(pSetName)} ${priceText ? '· ' + priceText : ''}</div>
+                    <div style="font-size:0.72rem; color:var(--accent);">TCGPlayer ID: ${tcgId} — click to use</div>
+                </div>
             </div>`;
         }).join('');
     } catch(err) {
@@ -3248,25 +3275,30 @@ async function _relinkManualPrice() {
 }
 
 function _relinkRenderResults(results, resultsDiv, append) {
-    const html = results.slice(0, 8).map(function(c) {
-        const tid = c.tcgPlayerId || c.tcgplayer_id || '';
-        const sn = c.setName || c.set_name || '';
-        const cn = c.cardNumber || c.number || '';
-        const rarity = c.rarity || '';
-        return '<div class="search-result" data-rtcg="' + tid + '" style="cursor:pointer;">' +
-            '<h4>' + (c.name||'') + (cn ? ' #'+cn : '') + '</h4>' +
-            '<p>' + sn + (rarity ? ' · '+rarity : '') + ' · TCG#' + tid + '</p></div>';
-    }).join('');
-    if (append) {
-        resultsDiv.innerHTML += html;
-    } else {
-        resultsDiv.innerHTML = html;
-    }
-    resultsDiv.querySelectorAll('[data-rtcg]').forEach(function(el) {
-        el.addEventListener('click', function() {
-            _relinkFetchAndShowConditions(parseInt(el.getAttribute('data-rtcg')));
+    // Render via the shared card-search renderer so relink shows the
+    // same images, set/printing/game badges, and variant chips that the
+    // Add Card flow does. Click handler resolves to the picked variant's
+    // tcgPlayer ID and opens the conditions panel for that card.
+    const renderInto = (container) => {
+        _renderCardSearchResults((results || []).slice(0, 12), container, {
+            condition: 'NM',
+            qty: 1,
+            offerPct: null,  // no per-chip offer projection in relink
+            onPick: (pick) => {
+                if (pick && pick.tcgId) _relinkFetchAndShowConditions(parseInt(pick.tcgId));
+            },
         });
-    });
+    };
+    if (append) {
+        // Preserve any warning HTML already in resultsDiv (e.g. "set
+        // filter dropped — showing all results") and append a wrapper
+        // div that owns its own click listeners.
+        const wrap = document.createElement('div');
+        renderInto(wrap);
+        resultsDiv.appendChild(wrap);
+    } else {
+        renderInto(resultsDiv);
+    }
 }
 
     async function _relinkDoSearch() {
@@ -4123,6 +4155,156 @@ async function searchCardsForSession(sessionId, offerPct) {
 
 
 
+// Shared renderer for /api/search/cards results. Both the in-session
+// "Add Card" flow and the imported-item "Relink" flow consume the same
+// payload — the only difference is what to do when the user clicks a
+// card or one of its variant chips. Centralising rendering here keeps
+// images, set/printing/game badges, and price chips identical across
+// both flows so an imported item being relinked looks the same as a
+// fresh card lookup.
+//
+// opts:
+//   condition     — string used to look up per-variant prices ('NM' default)
+//   qty           — qty for the offer-projection chip text (1 default)
+//   offerPct      — number (0..100) shown as "offer $X.XX" alongside each
+//                   variant chip; pass null to suppress (relink has no
+//                   offer context)
+//   inGraded      — when true, surfaces a small "PSA 10 — click variant
+//                   for graded price" hint on each row
+//   gradeCompany / gradeValue — only used for the graded hint label
+//   onPick(pick)  — called when the row or a variant chip is clicked.
+//                   `pick` is { tcgId, cardName, setName, cardNum, rarity,
+//                   condition, qty, price, variant }
+function _renderCardSearchResults(rawCards, container, opts) {
+    opts = opts || {};
+    const condition = opts.condition || 'NM';
+    const qty = opts.qty || 1;
+    const offerPct = (opts.offerPct == null) ? null : Number(opts.offerPct);
+    const inGraded = !!opts.inGraded;
+    const gradeCompany = opts.gradeCompany || 'PSA';
+    const gradeValue = opts.gradeValue || '10';
+    const onPick = typeof opts.onPick === 'function' ? opts.onPick : null;
+
+    if (!rawCards || !rawCards.length) {
+        container.innerHTML = '<div class="alert alert-warning">No cards found. Try a different name or set.</div>';
+        container.onclick = null;
+        return;
+    }
+
+    // Same cardRows shape as the original _doCardSearch render — one row
+    // per printing, with variant chips inside each row.
+    const cardRows = rawCards.map(c => {
+        const cardTcg = c.tcgPlayerId || c.tcgplayer_id || c.id || '';
+        const setName = c.setName || c.set_name || (c.set ? c.set.name : '') || '';
+        const expCode = (c.expansionId || c.expansion_id || '').toUpperCase();
+        const game = (c.game || '').toLowerCase();
+        const cardNum = c.cardNumber || c.number || '';
+        const rarity = c.rarity || '';
+        const cardImg = c.imageCdnUrl400 || c.imageCdnUrl || c.imageCdnUrl800 || '';
+        const prices = c.prices || {};
+        const variantsObj = (prices && typeof prices === 'object' && prices.variants) || {};
+        const variantNames = Object.keys(variantsObj);
+
+        const variants = [];
+        if (variantNames.length === 0) {
+            let p = null;
+            if (typeof prices === 'object') p = prices[condition.toLowerCase()] || prices.market || prices.mid || null;
+            if (!p && c.price) p = c.price;
+            variants.push({ name: '', tcgId: cardTcg, img: cardImg, price: p });
+        } else {
+            variantNames.forEach(vname => {
+                const vData = variantsObj[vname] || {};
+                const condEntry = vData[condition] || vData['Near Mint'] || vData['NM'] || {};
+                const p = (typeof condEntry === 'object') ? (condEntry.price ?? null) : condEntry;
+                const vImg = vData._image_small || vData._image_medium || vData._image_large || cardImg;
+                const vTcg = vData._tcgplayer_id || cardTcg;
+                variants.push({ name: vname, tcgId: vTcg, img: vImg, price: p });
+            });
+        }
+        variants.sort((a, b) => (b.price || 0) - (a.price || 0));
+        const maxPrice = variants.reduce((m, v) => Math.max(m, v.price || 0), 0);
+        const displayImg = variants[0]?.img || cardImg;
+        return { c, setName, expCode, game, cardNum, rarity, img: displayImg, variants, maxPrice };
+    });
+    cardRows.sort((a, b) => b.maxPrice - a.maxPrice);
+
+    // Map of pickid -> pick data. Storing it here (not in HTML attrs)
+    // keeps quoting safe and avoids re-parsing on every click.
+    const picks = new Map();
+    const _esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    container.innerHTML = cardRows.map((row, idx) => {
+        const { c, setName, expCode, game, cardNum, rarity, img, variants } = row;
+        const rowId = `_csrow_${idx}`;
+        const cardName = c.name || '';
+
+        variants.forEach((v, vi) => {
+            picks.set(`${rowId}_v${vi}`, {
+                tcgId: v.tcgId, cardName, setName, cardNum, rarity,
+                condition, qty, price: v.price || 0, variant: v.name || '',
+            });
+        });
+        // Row-level click defaults to the highest-priced variant (variants[0] post-sort)
+        picks.set(rowId, picks.get(`${rowId}_v0`));
+
+        const setCodeId = expCode + (cardNum ? '-' + cardNum : '');
+        const setCodeBadge = expCode ? `<span style="background:var(--surface); border:1px solid var(--border); color:var(--accent); padding:2px 7px; border-radius:4px; font-size:0.72rem; font-weight:700; font-family:ui-monospace,monospace;">${_esc(setCodeId)}</span>` : '';
+        const gameBadge = (game && game !== 'pokemon') ? `<span style="background:var(--accent-alt,#7c3aed); color:#fff; padding:2px 7px; border-radius:4px; font-size:0.65rem; font-weight:700;">${_esc(game.toUpperCase())}</span>` : '';
+        const printingBadges = (typeof pfCardPrintingBadges === 'function') ? pfCardPrintingBadges(setName, expCode, variants) : '';
+
+        const imgHtml = img
+            ? `<img src="${_esc(img)}" loading="lazy" style="width:96px; height:134px; object-fit:contain; border-radius:6px; flex-shrink:0; background:var(--surface-2);">`
+            : `<div style="width:96px; height:134px; background:var(--surface-2); border-radius:6px; flex-shrink:0;"></div>`;
+
+        const chipsHtml = variants.map((v, vi) => {
+            const pickId = `${rowId}_v${vi}`;
+            const p = v.price;
+            const hasPrice = p != null && p > 0;
+            const isFoil = v.name && /foil|holo|etched/i.test(v.name);
+            const isChase = v.name && /alt|manga|premium|special|enchanted|fullArt|jollyRoger/i.test(v.name);
+            const baselineNonFoil = variants.find(x => !/foil|holo|etched/i.test(x.name||''));
+            const highlight = isChase || (isFoil && variants.length > 1 && (v.price||0) > (baselineNonFoil?.price||0));
+            const bg = highlight ? 'var(--amber)' : 'var(--surface-2)';
+            const color = highlight ? '#000' : 'var(--text)';
+            const label = v.name || 'Default';
+            const icon = isFoil ? '✦ ' : '';
+            const priceText = hasPrice ? '$' + Number(p).toFixed(2) : '—';
+            const offerText = (hasPrice && offerPct != null) ? ' · offer $' + (p * qty * offerPct / 100).toFixed(2) : '';
+            return `<span data-pickid="${pickId}" style="display:inline-flex; align-items:center; gap:6px; background:${bg}; color:${color}; padding:7px 11px; border-radius:6px; font-size:0.82rem; font-weight:600; cursor:pointer; border:1px solid var(--border); transition:filter 0.12s;" onmouseover="this.style.filter='brightness(1.15)'" onmouseout="this.style.filter=''">${icon}${_esc(label)} <span style="font-weight:700;">${priceText}</span><span style="opacity:0.7; font-size:0.72rem; font-weight:500;">${offerText}</span></span>`;
+        }).join(' ');
+
+        return `<div class="search-result" data-pickid="${rowId}" style="display:flex; gap:14px; align-items:stretch; padding:10px 12px; cursor:pointer;">
+            ${imgHtml}
+            <div style="flex:1; min-width:0; display:flex; flex-direction:column; justify-content:space-between; gap:8px;">
+                <div>
+                    <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-bottom:4px;">
+                        ${gameBadge}
+                        <span style="font-weight:700; font-size:0.95rem;">${_esc(cardName)}</span>
+                        ${setCodeBadge}
+                        ${printingBadges}
+                    </div>
+                    <div style="font-size:0.78rem; color:var(--text-dim);">${_esc(setName)}${rarity ? ' · '+_esc(rarity) : ''} · TCG#${_esc(picks.get(rowId).tcgId)}</div>
+                    ${inGraded ? `<div style="font-size:0.75rem; color:var(--accent); margin-top:3px;">${_esc(gradeCompany)} ${_esc(gradeValue)} — click variant for graded price</div>` : ''}
+                </div>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                    ${chipsHtml}
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+
+    // Event delegation — click on a chip resolves to its pickid via
+    // closest(); clicking the row outside any chip resolves to the row's
+    // default pickid (highest-priced variant). Reassigning onclick (vs
+    // addEventListener) means re-renders don't stack listeners.
+    container.onclick = (e) => {
+        const t = e.target.closest('[data-pickid]');
+        if (!t || !container.contains(t)) return;
+        const pick = picks.get(t.getAttribute('data-pickid'));
+        if (pick && onPick) onPick(pick);
+    };
+}
+
 async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offerPct, context) {
     try {
         const r = await fetch('/api/search/cards', {
@@ -4139,112 +4321,24 @@ async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offer
         if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
         const cards = d.results || [];
-        if (!cards.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No cards found. Try a different name or set.</div>'; return; }
 
         const ids = _getCardFormIds(context);
         const condition = document.getElementById(ids.cond)?.value || 'NM';
         const qty = parseInt(document.getElementById(ids.qty)?.value) || 1;
+        const inGraded = _isGradedContext(context);
+        const gf = inGraded ? _getGradeFields(context) : null;
 
-        // One row per printing (card entry). Variants (Normal/Foil/Etched)
-        // render as clickable price chips inside the row so foil/non-foil
-        // of the same printing stay visually tied together — critical for
-        // MTG where printings differ by tiny stamps (promo ★, prerelease
-        // date stamp) and the set-code prefix (MKM vs PMKM) is the main
-        // distinguisher. Each variant still carries its own image +
-        // tcgplayer_id from Scrydex's marketplaces[]/images[].
-        const cardRows = cards.map(c => {
-            const cardTcg = c.tcgPlayerId || c.tcgplayer_id || c.id || '';
-            const setName = c.setName || c.set_name || (c.set ? c.set.name : '') || '';
-            const expCode = (c.expansionId || c.expansion_id || '').toUpperCase();
-            const game = (c.game || '').toLowerCase();
-            const cardNum = c.cardNumber || c.number || '';
-            const rarity = c.rarity || '';
-            const cardImg = c.imageCdnUrl400 || c.imageCdnUrl || c.imageCdnUrl800 || '';
-            const prices = c.prices || {};
-            const variantsObj = (prices && typeof prices === 'object' && prices.variants) || {};
-            const variantNames = Object.keys(variantsObj);
-
-            const variants = [];
-            if (variantNames.length === 0) {
-                let p = null;
-                if (typeof prices === 'object') p = prices[condition.toLowerCase()] || prices.market || prices.mid || null;
-                if (!p && c.price) p = c.price;
-                variants.push({ name: '', tcgId: cardTcg, img: cardImg, price: p });
-            } else {
-                variantNames.forEach(vname => {
-                    const vData = variantsObj[vname] || {};
-                    const condEntry = vData[condition] || vData['Near Mint'] || vData['NM'] || {};
-                    const p = (typeof condEntry === 'object') ? (condEntry.price ?? null) : condEntry;
-                    const vImg = vData._image_small || vData._image_medium || vData._image_large || cardImg;
-                    const vTcg = vData._tcgplayer_id || cardTcg;
-                    variants.push({ name: vname, tcgId: vTcg, img: vImg, price: p });
-                });
-            }
-            // Chase/foil first within each card so the high-value variant leads the chip row
-            variants.sort((a, b) => (b.price || 0) - (a.price || 0));
-            const maxPrice = variants.reduce((m, v) => Math.max(m, v.price || 0), 0);
-            const displayImg = variants[0]?.img || cardImg;
-            return { c, setName, expCode, game, cardNum, rarity, img: displayImg, variants, maxPrice };
+        _renderCardSearchResults(cards, resultsDiv, {
+            condition, qty, offerPct,
+            inGraded,
+            gradeCompany: gf?.company || 'PSA',
+            gradeValue: gf?.value || '10',
+            onPick: (pick) => {
+                addCardFromSearch(sessionId, pick.tcgId, pick.cardName, pick.setName,
+                    pick.cardNum, pick.rarity, pick.condition, pick.qty, pick.price,
+                    context, pick.variant);
+            },
         });
-
-        // Cards with the highest-priced variant bubble up
-        cardRows.sort((a, b) => b.maxPrice - a.maxPrice);
-
-        resultsDiv.innerHTML = cardRows.map(row => {
-            const { c, setName, expCode, game, cardNum, rarity, img, variants } = row;
-            const safeName = (c.name||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-            const safeSet = setName.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-
-            const inGraded = _isGradedContext(context);
-            const _gfSearch = inGraded ? _getGradeFields(context) : null;
-
-            const setCodeId = expCode + (cardNum ? '-' + cardNum : '');
-            const setCodeBadge = expCode ? `<span style="background:var(--surface); border:1px solid var(--border); color:var(--accent); padding:2px 7px; border-radius:4px; font-size:0.72rem; font-weight:700; font-family:ui-monospace,monospace;">${setCodeId}</span>` : '';
-            const gameBadge = (game && game !== 'pokemon') ? `<span style="background:var(--accent-alt,#7c3aed); color:#fff; padding:2px 7px; border-radius:4px; font-size:0.65rem; font-weight:700;">${game.toUpperCase()}</span>` : '';
-            const printingBadges = pfCardPrintingBadges(setName, expCode, variants);
-
-            const imgHtml = img
-                ? `<img src="${img}" loading="lazy" style="width:96px; height:134px; object-fit:contain; border-radius:6px; flex-shrink:0; background:var(--surface-2);">`
-                : `<div style="width:96px; height:134px; background:var(--surface-2); border-radius:6px; flex-shrink:0;"></div>`;
-
-            const defaultV = variants[0] || { name:'', tcgId: c.tcgplayer_id || c.tcgPlayerId || c.id || '', price: 0 };
-            const safeDefaultVariant = (defaultV.name||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-
-            const chipsHtml = variants.map(v => {
-                const p = v.price;
-                const hasPrice = p != null && p > 0;
-                const safeVariant = (v.name||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                const isFoil = v.name && /foil|holo|etched/i.test(v.name);
-                const isChase = v.name && /alt|manga|premium|special|enchanted|fullArt|jollyRoger/i.test(v.name);
-                const highlight = isChase || (isFoil && variants.length > 1 && (v.price||0) > (variants.find(x=>!/foil|holo|etched/i.test(x.name||''))?.price||0));
-                const bg = highlight ? 'var(--amber)' : 'var(--surface-2)';
-                const color = highlight ? '#000' : 'var(--text)';
-                const label = v.name || 'Default';
-                const icon = isFoil ? '✦ ' : '';
-                const priceText = hasPrice ? '$' + Number(p).toFixed(2) : '—';
-                const offerText = hasPrice ? ' · offer $' + (p * qty * offerPct / 100).toFixed(2) : '';
-                return `<span onclick="event.stopPropagation(); addCardFromSearch('${sessionId}', ${v.tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${condition}', ${qty}, ${p || 0}, '${context}', '${safeVariant}')" style="display:inline-flex; align-items:center; gap:6px; background:${bg}; color:${color}; padding:7px 11px; border-radius:6px; font-size:0.82rem; font-weight:600; cursor:pointer; border:1px solid var(--border); transition:filter 0.12s;" onmouseover="this.style.filter='brightness(1.15)'" onmouseout="this.style.filter=''">${icon}${label} <span style="font-weight:700;">${priceText}</span><span style="opacity:0.7; font-size:0.72rem; font-weight:500;">${offerText}</span></span>`;
-            }).join(' ');
-
-            return `<div class="search-result" style="display:flex; gap:14px; align-items:stretch; padding:10px 12px; cursor:pointer;" onclick="addCardFromSearch('${sessionId}', ${defaultV.tcgId}, '${safeName}', '${safeSet}', '${cardNum}', '${rarity}', '${condition}', ${qty}, ${defaultV.price || 0}, '${context}', '${safeDefaultVariant}')">
-                ${imgHtml}
-                <div style="flex:1; min-width:0; display:flex; flex-direction:column; justify-content:space-between; gap:8px;">
-                    <div>
-                        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-bottom:4px;">
-                            ${gameBadge}
-                            <span style="font-weight:700; font-size:0.95rem;">${c.name||''}</span>
-                            ${setCodeBadge}
-                            ${printingBadges}
-                        </div>
-                        <div style="font-size:0.78rem; color:var(--text-dim);">${setName}${rarity ? ' · '+rarity : ''} · TCG#${defaultV.tcgId || ''}</div>
-                        ${inGraded ? `<div style="font-size:0.75rem; color:var(--accent); margin-top:3px;">${_gfSearch.company||'PSA'} ${_gfSearch.value||'10'} — click variant for graded price</div>` : ''}
-                    </div>
-                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
-                        ${chipsHtml}
-                    </div>
-                </div>
-            </div>`;
-        }).join('');
     } catch(err) {
         resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
