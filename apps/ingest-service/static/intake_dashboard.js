@@ -384,8 +384,30 @@ let _sessionOverrides = {};             // sessionId → { token, approver }
 const ASSOCIATE_DEFAULTS = { cash: 65, credit: 75 };
 
 function _pfRole() {
-    try { return (window._pfUser && window._pfUser.role) || 'associate'; }
-    catch (e) { return 'associate'; }
+    // Prefer the cached _pfUser set by shared/auth.py admin-bar script.
+    try {
+        if (window._pfUser && window._pfUser.role) return String(window._pfUser.role).toLowerCase();
+    } catch (e) {}
+    // Fallback: decode the pf_auth JWT directly. This runs even when the
+    // admin bar's inline <script> hasn't executed yet (or threw silently),
+    // which is the realistic case during early DOMContentLoaded firings.
+    try {
+        const cookie = document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('pf_auth='));
+        if (cookie) {
+            const token = cookie.slice('pf_auth='.length);
+            const b64url = token.split('.')[1] || '';
+            const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+            const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+            const payload = JSON.parse(atob(padded));
+            // Prime _pfUser so subsequent calls hit the fast path.
+            window._pfUser = window._pfUser || {
+                name: payload.name, role: payload.role,
+                email: payload.email, user_id: payload.sub,
+            };
+            if (payload.role) return String(payload.role).toLowerCase();
+        }
+    } catch (e) {}
+    return 'associate';
 }
 
 function _outsideAssociate(cashPct, creditPct) {
