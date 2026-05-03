@@ -1158,6 +1158,9 @@ async function viewSession(sessionId, _preserveScroll) {
                 </div>
             </div>${_renderRoleLockBanner(sessionId, s)}
 
+            <!-- Collection Summary — populated by loadMetaStats(sessionId) below -->
+            <div id="meta-stats-panel" style="margin-bottom:16px;"></div>
+
             <!-- Session Sub-tabs -->
             <div style="display:flex; gap:2px; margin-bottom:16px; border-bottom:1px solid var(--border);">
                 <button class="tab active" data-stab="offer" onclick="switchSessionTab(this,'offer')">📋 Offer</button>
@@ -1495,6 +1498,8 @@ async function viewSession(sessionId, _preserveScroll) {
         }
         // Enrich breakdown summaries inline without full reload
         _enrichIntakeBreakdowns(items, sessionId);
+        // Collection-level meta stats (per-category SKU/qty/value/margin)
+        loadMetaStats(sessionId);
         // Restore the user's "Sealed Product" vs "Individual Card" choice
         // so adding card after card doesn't keep flipping back to sealed
         _restoreSessionAddType();
@@ -4980,6 +4985,118 @@ function _patchBreakdownActionButtons(tcgId, cache) {
             dropdown.appendChild(bdBtn);
         }
     });
+}
+
+// ═══════════════════════════════ COLLECTION META STATS ═══════════════════════════════
+//
+// Populates #meta-stats-panel inside the session view with category-
+// level breakdowns + collection-wide totals. Categories are server-
+// classified from Shopify tags (with name fallback) — see
+// shared/product_categorize.py and the /meta-stats endpoint.
+
+function _fmt$(n) {
+    const v = Number(n) || 0;
+    return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function _fmt$short(n) {
+    const v = Number(n) || 0;
+    if (v >= 10000) return '$' + Math.round(v).toLocaleString('en-US');
+    return _fmt$(v);
+}
+function _fmtPct(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '—';
+    return v.toFixed(1) + '%';
+}
+function _marginColor(pct) {
+    const v = Number(pct);
+    if (!Number.isFinite(v)) return 'var(--text-dim)';
+    if (v >= 30) return 'var(--green)';
+    if (v >= 15) return 'var(--amber)';
+    return 'var(--red)';
+}
+
+async function loadMetaStats(sessionId) {
+    const panel = document.getElementById('meta-stats-panel');
+    if (!panel) return;
+    panel.innerHTML = '<div class="loading" style="padding:8px;"><span class="spinner"></span> Calculating breakdown…</div>';
+    try {
+        const r = await fetch('/api/intake/session/' + encodeURIComponent(sessionId) + '/meta-stats');
+        const d = await r.json();
+        if (!r.ok) {
+            panel.innerHTML = '<div class="alert alert-warning" style="font-size:0.8rem;">Could not compute breakdown: ' + (d.error || 'unknown') + '</div>';
+            return;
+        }
+        renderMetaStats(panel, d);
+    } catch (e) {
+        panel.innerHTML = '<div class="alert alert-warning" style="font-size:0.8rem;">Breakdown unavailable: ' + e.message + '</div>';
+    }
+}
+
+function renderMetaStats(panel, data) {
+    const t = data.totals || {};
+    const cats = data.categories || [];
+    if (!cats.length) {
+        panel.innerHTML = '';  // empty session → nothing to show
+        return;
+    }
+
+    const headerStats = `
+        <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:baseline; padding:10px 14px; background:var(--surface-2); border:1px solid var(--border); border-radius:8px 8px 0 0; border-bottom:none;">
+            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">SKUs</span> <strong style="font-size:1rem;">${t.sku_count || 0}</strong></div>
+            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Units</span> <strong style="font-size:1rem;">${t.qty || 0}</strong></div>
+            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Market</span> <strong style="font-size:1rem;">${_fmt$short(t.market_value)}</strong></div>
+            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Cash Offer</span> <strong style="font-size:1rem;">${_fmt$short(t.cash_offer)}</strong> <span style="color:${_marginColor(t.avg_margin_cash_pct)}; font-size:0.8rem;">(${_fmtPct(t.avg_margin_cash_pct)} margin)</span></div>
+            <div><span style="color:var(--text-dim); font-size:0.75rem; text-transform:uppercase;">Credit Offer</span> <strong style="font-size:1rem;">${_fmt$short(t.credit_offer)}</strong> <span style="color:${_marginColor(t.avg_margin_credit_pct)}; font-size:0.8rem;">(${_fmtPct(t.avg_margin_credit_pct)} margin)</span></div>
+        </div>`;
+
+    const rows = cats.map(c => {
+        // Visualise category share with an inline bar in the % cell
+        const pct = Number(c.share_of_market_pct) || 0;
+        const barWidth = Math.min(100, pct);
+        return `<tr>
+            <td style="padding:6px 12px;"><strong>${c.label}</strong></td>
+            <td style="padding:6px 12px; text-align:right; color:var(--text-dim);">${c.sku_count}</td>
+            <td style="padding:6px 12px; text-align:right; color:var(--text-dim);">${c.qty}</td>
+            <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.market_value)}</td>
+            <td style="padding:6px 12px; min-width:120px;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <div style="flex:1; height:6px; background:var(--surface); border-radius:3px; overflow:hidden;">
+                        <div style="height:100%; width:${barWidth}%; background:var(--accent);"></div>
+                    </div>
+                    <span style="font-size:0.78rem; color:var(--text-dim); width:42px; text-align:right;">${_fmtPct(pct)}</span>
+                </div>
+            </td>
+            <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.cash_offer)}</td>
+            <td style="padding:6px 12px; text-align:right;">${_fmt$short(c.credit_offer)}</td>
+            <td style="padding:6px 12px; text-align:right; color:${_marginColor(c.avg_margin_cash_pct)};">${_fmtPct(c.avg_margin_cash_pct)}</td>
+            <td style="padding:6px 12px; text-align:right; color:${_marginColor(c.avg_margin_credit_pct)};">${_fmtPct(c.avg_margin_credit_pct)}</td>
+        </tr>`;
+    }).join('');
+
+    panel.innerHTML = `
+        <details open style="background:var(--surface-2); border:1px solid var(--border); border-radius:8px;">
+            <summary style="cursor:pointer; padding:10px 14px; font-weight:700; font-size:0.95rem; user-select:none;">📊 Collection Summary</summary>
+            ${headerStats}
+            <div style="overflow-x:auto;">
+                <table style="width:100%; font-size:0.85rem; border-collapse:collapse; background:var(--surface);">
+                    <thead style="background:var(--surface-2);">
+                        <tr style="text-align:left;">
+                            <th style="padding:6px 12px;">Category</th>
+                            <th style="padding:6px 12px; text-align:right;">SKUs</th>
+                            <th style="padding:6px 12px; text-align:right;">Units</th>
+                            <th style="padding:6px 12px; text-align:right;">Market</th>
+                            <th style="padding:6px 12px;">Share</th>
+                            <th style="padding:6px 12px; text-align:right;">Cash</th>
+                            <th style="padding:6px 12px; text-align:right;">Credit</th>
+                            <th style="padding:6px 12px; text-align:right;">Cash Margin</th>
+                            <th style="padding:6px 12px; text-align:right;">Credit Margin</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+        </details>`;
 }
 
 // Enrich offer tab rows with live breakdown summary badges (uses shared renderBreakdownBadge)

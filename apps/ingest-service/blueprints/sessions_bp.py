@@ -682,6 +682,140 @@ def get_session(session_id):
 
 
 
+@bp.route("/api/intake/session/<session_id>/meta-stats", methods=["GET"])
+def session_meta_stats(session_id):
+    """Per-category breakdown of an intake session for the Collection
+    Summary card. Categories are computed from Shopify tags joined out of
+    inventory_product_cache when available, falling back to product-name
+    parsing — see shared/product_categorize.py for the rules.
+
+    Stats per category:
+        sku_count             — distinct intake_items rows
+        qty                   — sum of quantity (actual units of product)
+        market_value          — sum of market_price * quantity
+        cash_offer            — sum of offer_price (already qty-weighted)
+        credit_offer          — sum of market * qty * credit_pct/100
+        share_of_market_pct   — this category's market_value / total
+        avg_margin_cash_pct   — value-weighted (market - cash) / market
+        avg_margin_credit_pct — value-weighted (market - credit) / market
+    """
+    from product_categorize import classify_item, sort_categories
+
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    items = intake.get_session_items(session_id) or []
+    # Only good/damaged items count toward the collection (skip missing/rejected)
+    items = [i for i in items if (i.get("item_status") or "good") in ("good", "damaged")]
+
+    cash_pct = session.get("cash_percentage")
+    if cash_pct is None:
+        cash_pct = session.get("offer_percentage")
+    credit_pct = session.get("credit_percentage")
+    cash_pct = float(cash_pct) if cash_pct is not None else 0.0
+    credit_pct = float(credit_pct) if credit_pct is not None else 0.0
+
+    # Bulk-fetch tags for every item with a tcgplayer_id or shopify_product_id
+    # in one round-trip. inventory_product_cache.tags is a comma-separated
+    # text column (see shared/cache_manager.py).
+    tcg_ids = list({i["tcgplayer_id"] for i in items if i.get("tcgplayer_id")})
+    shopify_ids = list({str(i["shopify_product_id"]) for i in items if not i.get("tcgplayer_id") and i.get("shopify_product_id")})
+    tags_by_tcg = {}
+    tags_by_shopify = {}
+    try:
+        if tcg_ids:
+            ph = ",".join(["%s"] * len(tcg_ids))
+            for r in db.query(
+                f"SELECT tcgplayer_id, tags FROM inventory_product_cache WHERE tcgplayer_id IN ({ph})",
+                tuple(tcg_ids),
+            ):
+                if r.get("tcgplayer_id"):
+                    tags_by_tcg[r["tcgplayer_id"]] = r.get("tags") or ""
+        if shopify_ids:
+            ph = ",".join(["%s"] * len(shopify_ids))
+            for r in db.query(
+                f"SELECT shopify_product_id, tags FROM inventory_product_cache WHERE shopify_product_id IN ({ph})",
+                tuple(shopify_ids),
+            ):
+                pid = str(r.get("shopify_product_id") or "")
+                if pid:
+                    tags_by_shopify[pid] = r.get("tags") or ""
+    except Exception as e:
+        logger.warning(f"meta-stats: cache tag join failed: {e}")
+
+    # Aggregate per category
+    cats: dict[str, dict] = {}
+    grand_market = 0.0
+    grand_cash = 0.0
+    grand_credit = 0.0
+    grand_qty = 0
+    grand_skus = 0
+
+    for item in items:
+        tags_csv = ""
+        if item.get("tcgplayer_id"):
+            tags_csv = tags_by_tcg.get(item["tcgplayer_id"], "")
+        if not tags_csv and item.get("shopify_product_id"):
+            tags_csv = tags_by_shopify.get(str(item["shopify_product_id"]), "")
+
+        label = classify_item(item, tags_csv)
+        qty = int(item.get("quantity") or 0)
+        unit_market = float(item.get("market_price") or 0)
+        item_market = unit_market * qty
+        item_cash = float(item.get("offer_price") or 0)
+        item_credit = unit_market * qty * (credit_pct / 100.0) if credit_pct else 0.0
+
+        bucket = cats.setdefault(label, {
+            "label": label, "sku_count": 0, "qty": 0,
+            "market_value": 0.0, "cash_offer": 0.0, "credit_offer": 0.0,
+        })
+        bucket["sku_count"] += 1
+        bucket["qty"] += qty
+        bucket["market_value"] += item_market
+        bucket["cash_offer"] += item_cash
+        bucket["credit_offer"] += item_credit
+
+        grand_market += item_market
+        grand_cash += item_cash
+        grand_credit += item_credit
+        grand_qty += qty
+        grand_skus += 1
+
+    # Derived per-category fields
+    out_cats = []
+    for label in sort_categories(cats.keys()):
+        b = cats[label]
+        m = b["market_value"]
+        b["share_of_market_pct"] = round((m / grand_market * 100.0), 1) if grand_market > 0 else 0.0
+        b["avg_margin_cash_pct"] = round(((m - b["cash_offer"]) / m * 100.0), 1) if m > 0 else 0.0
+        b["avg_margin_credit_pct"] = round(((m - b["credit_offer"]) / m * 100.0), 1) if m > 0 else 0.0
+        # Round monetary fields once for the wire
+        b["market_value"] = round(b["market_value"], 2)
+        b["cash_offer"] = round(b["cash_offer"], 2)
+        b["credit_offer"] = round(b["credit_offer"], 2)
+        out_cats.append(b)
+
+    grand_margin_cash = round(((grand_market - grand_cash) / grand_market * 100.0), 1) if grand_market > 0 else 0.0
+    grand_margin_credit = round(((grand_market - grand_credit) / grand_market * 100.0), 1) if grand_market > 0 else 0.0
+
+    return jsonify({
+        "session_id": session_id,
+        "totals": {
+            "sku_count": grand_skus,
+            "qty": grand_qty,
+            "market_value": round(grand_market, 2),
+            "cash_offer": round(grand_cash, 2),
+            "credit_offer": round(grand_credit, 2),
+            "avg_margin_cash_pct": grand_margin_cash,
+            "avg_margin_credit_pct": grand_margin_credit,
+            "cash_percentage": cash_pct,
+            "credit_percentage": credit_pct,
+        },
+        "categories": out_cats,
+    })
+
+
+
 @bp.route("/api/intake/sessions", methods=["GET"])
 def list_sessions():
     """List sessions by status with optional filters."""
