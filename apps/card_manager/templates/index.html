@@ -1679,11 +1679,23 @@ function renderRelinkResults(results) {
     const tag = r.tcgplayer_id ? '' : '<span class="rl-tag">Scrydex-only</span>';
     const variant = r.variant && !['normal','holofoil'].includes((r.variant||'').toLowerCase())
       ? ` · ${esc(r.variant)}` : '';
+    // For non-EN cards r.name is the English name (used for the Shopify
+    // title) and r.name_native is the original (e.g. カツラのウインディ).
+    // Show both — operator needs the native string to confirm they're
+    // picking the right printing, but the listing must be English so
+    // store search works.
+    const lang = (r.language_code || '').toUpperCase();
+    const isEn = !lang || lang === 'EN';
+    const langBadge = isEn ? '' : `<span class="rl-tag" style="background:rgba(239,68,68,0.18);color:#fca5a5;">${esc(lang)}</span>`;
+    const nativeLine = (!isEn && r.name_native && r.name_native !== r.name)
+      ? `<div class="rl-meta" style="color:var(--text);">${esc(r.name_native)}${r.set_name_native?` · ${esc(r.set_name_native)}`:''}</div>`
+      : '';
     return `<div class="rl-row" onclick="confirmRelink(${i})">
       <div class="rl-img">${img}</div>
       <div class="rl-info">
-        <div class="rl-name">${esc(r.name||'')}${tag}</div>
+        <div class="rl-name">${langBadge}${esc(r.name||'')}${tag}</div>
         <div class="rl-meta">${esc(r.set_name||'')}${r.card_number?' · #'+esc(r.card_number):''}${variant}</div>
+        ${nativeLine}
       </div>
       <div class="rl-price">${r.market_price !== null ? '$'+r.market_price.toFixed(2) : '—'}</div>
     </div>`;
@@ -1693,8 +1705,14 @@ function renderRelinkResults(results) {
 async function confirmRelink(idx) {
   const r = window._rlCache?.[idx];
   if (!r || !_relinkTargetCopyId) return;
+  const lang = (r.language_code || '').toUpperCase();
+  const isEn = !lang || lang === 'EN';
+  const langSuffix = isEn ? '' : ` [${lang}]`;
+  const nativeNote = (!isEn && r.name_native && r.name_native !== r.name)
+    ? ` Listing title will be English ("${r.name}"); native name is "${r.name_native}".`
+    : '';
   if (!await themedConfirm('Relink this copy?',
-      `Set identity to "${r.name}" (${r.set_name||''})${r.tcgplayer_id?` · TCG #${r.tcgplayer_id}`:''}? Image and price will refresh from Scrydex.`)) return;
+      `Set identity to "${r.name}"${langSuffix} (${r.set_name||''})${r.tcgplayer_id?` · TCG #${r.tcgplayer_id}`:''}? Image and price will refresh from Scrydex.${nativeNote}`)) return;
   try {
     const d = await post(`/api/editor/copies/${_relinkTargetCopyId}/relink`, {
       tcgplayer_id: r.tcgplayer_id,

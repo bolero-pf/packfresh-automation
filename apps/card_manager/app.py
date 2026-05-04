@@ -2742,11 +2742,19 @@ def editor_scrydex_search():
     params.append(limit)
     rows = db.query(sql, tuple(params))
 
+    # `name` / `set_name` are English-first because they're written straight
+    # to raw_cards.card_name → Shopify listing title via _create_raw_listing.
+    # Customers can't search the store with JP characters, so JP printings
+    # need an English title. `name_native` / `set_name_native` carry the
+    # original (e.g. カツラのウインディ / 闇からの挑戦) so the relink picker
+    # can show both for operator confirmation.
     return jsonify({"results": [{
         "scrydex_id":   r.get("scrydex_id"),
         "tcgplayer_id": r.get("tcgplayer_id"),
-        "name":         r.get("product_name") or r.get("product_name_en"),
-        "set_name":     r.get("expansion_name") or r.get("expansion_name_en"),
+        "name":         r.get("product_name_en") or r.get("product_name"),
+        "set_name":     r.get("expansion_name_en") or r.get("expansion_name"),
+        "name_native":     r.get("product_name"),
+        "set_name_native": r.get("expansion_name"),
         "language_code": r.get("language_code"),
         "card_number":  r.get("card_number"),
         "rarity":       r.get("rarity"),
