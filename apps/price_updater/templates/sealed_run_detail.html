@@ -69,12 +69,33 @@
     <h1 style="margin-top:8px;">Sealed Run · {{ summary.total }} variants</h1>
     <div class="sub">{{ summary.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }} · run_id={{ run_id }}</div>
 
+    {# Build query string preserving all current filters except the one we're replacing.
+       Used by every <a> below — clicking a filter pill keeps the OOS toggle and sort. #}
+    {% macro qs(action=None, sort=None, oos=None) -%}
+        {%- set _action = action_filter if action is none else action -%}
+        {%- set _sort   = sort_key      if sort   is none else sort   -%}
+        {%- set _oos    = include_oos   if oos    is none else oos    -%}
+        {%- set parts = [] -%}
+        {%- if _action %}{% set _ = parts.append('action=' ~ _action) %}{% endif -%}
+        {%- if _sort %}{% set _ = parts.append('sort=' ~ _sort) %}{% endif -%}
+        {%- if _oos %}{% set _ = parts.append('include_oos=1') %}{% endif -%}
+        {%- if parts %}?{{ parts | join('&') }}{% endif -%}
+    {%- endmacro %}
+
     <div class="filters">
-        {% set actions = [('', 'All'), ('review', 'Review'), ('updated', 'Updated'), ('missing', 'Missing'), ('skip', 'Skipped'), ('untouched', 'Untouched')] %}
+        {% set actions = [('', 'All'), ('review', 'Review'), ('updated', 'Updated'), ('missing', 'Missing TCG ID'), ('error', 'Scrape errors'), ('skip', 'Skipped (tag/block)'), ('untouched', 'Untouched')] %}
         {% for code, label in actions %}
-            <a href="?{% if code %}action={{ code }}{% endif %}" class="{% if action_filter == code %}active{% endif %}">{{ label }}</a>
+            <a href="{{ qs(action=code) }}" class="{% if action_filter == code %}active{% endif %}">{{ label }}</a>
         {% endfor %}
 
+        {% if include_oos %}
+            <a href="{{ qs(oos=False) }}" class="active" style="margin-left:auto;">✓ Showing OOS · click to hide</a>
+        {% else %}
+            <a href="{{ qs(oos=True) }}" style="margin-left:auto;">+ Show {{ summary.oos_count or 0 }} OOS</a>
+        {% endif %}
+    </div>
+
+    <div class="filters" style="margin-bottom: 16px;">
         <form id="bulk-form" class="bulk" onsubmit="return false;"
               data-pending="{{ summary.pending_review or 0 }}">
             <label for="bulk-thr">Bulk-approve drops with |Δ| ≤</label>
@@ -89,17 +110,33 @@
     {% if not rows %}
         <p style="color:var(--text-dim);">No rows match this filter.</p>
     {% else %}
+    {% macro sort_link(sort_code, label, num=False) -%}
+        {%- set is_active = sort_key == sort_code -%}
+        {%- set arrow = '' -%}
+        {%- if sort_code == 'delta_desc' and is_active %}{% set arrow = ' ↓' %}{% endif -%}
+        {%- if sort_code == 'delta_asc'  and is_active %}{% set arrow = ' ↑' %}{% endif -%}
+        {%- if sort_code == 'qty_desc'   and is_active %}{% set arrow = ' ↓' %}{% endif -%}
+        {%- if sort_code == 'qty_asc'    and is_active %}{% set arrow = ' ↑' %}{% endif -%}
+        {%- if sort_code == 'title'      and is_active %}{% set arrow = ' ↑' %}{% endif -%}
+        <a href="{{ qs(sort=sort_code) }}" style="color:{% if is_active %}var(--accent){% else %}var(--text-dim){% endif %}; text-decoration: none;">{{ label }}{{ arrow }}</a>
+    {%- endmacro %}
+
     <table>
         <thead>
             <tr>
                 <th>Action</th>
-                <th>Title</th>
-                <th class="num">Qty</th>
+                <th>{{ sort_link('title', 'Title') }}</th>
+                <th class="num">{{ sort_link('qty_desc', 'Qty') }}</th>
                 <th class="num">Old&nbsp;$</th>
                 <th class="num">New / Suggested $</th>
                 <th class="num">TCG&nbsp;$</th>
-                <th class="num">Δ %</th>
+                <th class="num">
+                    {{ sort_link('delta_desc', 'Δ % ↓') }}
+                    &middot;
+                    {{ sort_link('delta_asc',  '↑') }}
+                </th>
                 <th>Reason</th>
+                <th>TCG link</th>
                 <th>Apply</th>
             </tr>
         </thead>
@@ -118,7 +155,7 @@
                     {% else %}
                         {{ r.title }}
                     {% endif %}
-                    {% if r.sku or r.tcgplayer_id %}<div class="reason">{% if r.sku %}SKU {{ r.sku }}{% endif %}{% if r.tcgplayer_id %}{% if r.sku %} · {% endif %}TCG#{{ r.tcgplayer_id }}{% endif %}</div>{% endif %}
+                    {% if r.sku %}<div class="reason">SKU {{ r.sku }}</div>{% endif %}
                 </td>
                 <td class="num">{{ r.qty if r.qty is not none else '—' }}</td>
                 <td class="num">{% if r.old_price is not none %}${{ '%.2f' % r.old_price }}{% else %}—{% endif %}</td>
@@ -135,6 +172,11 @@
                     {% else %}—{% endif %}
                 </td>
                 <td class="reason">{{ r.reason or '' }}</td>
+                <td>
+                    {% if r.tcgplayer_id %}
+                        <a href="https://www.tcgplayer.com/product/{{ r.tcgplayer_id }}?Language=English" target="_blank" rel="noopener" style="font-family: var(--font-mono); font-size: 0.78rem;">TCG#{{ r.tcgplayer_id }} ↗</a>
+                    {% else %}—{% endif %}
+                </td>
                 <td class="action-cell">
                     {% if r.apply_status == 'applied' %}
                         <span class="applied-tag">✓ Applied{% if r.applied_price %} · ${{ '%.2f' % r.applied_price }}{% endif %}</span>

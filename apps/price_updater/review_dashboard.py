@@ -1352,14 +1352,14 @@ def sealed_runs_list():
     try:
         rows = db.query("""
             SELECT run_id,
-                   MIN(started_at)                                AS started_at,
-                   COUNT(*)                                       AS total,
-                   COUNT(*) FILTER (WHERE action = 'updated')     AS updated,
-                   COUNT(*) FILTER (WHERE action = 'review')      AS review,
-                   COUNT(*) FILTER (WHERE action = 'missing')     AS missing,
-                   COUNT(*) FILTER (WHERE action = 'untouched')   AS untouched,
-                   COUNT(*) FILTER (WHERE action = 'skip')        AS skipped,
-                   COUNT(*) FILTER (WHERE action = 'error')       AS errors
+                   MIN(started_at)                                              AS started_at,
+                   COUNT(*)                                                     AS total,
+                   COUNT(*) FILTER (WHERE action = 'updated')                   AS updated,
+                   COUNT(*) FILTER (WHERE action = 'review')                    AS review,
+                   COUNT(*) FILTER (WHERE action = 'missing')                   AS missing,
+                   COUNT(*) FILTER (WHERE action = 'error')                     AS errors,
+                   COUNT(*) FILTER (WHERE action = 'untouched')                 AS untouched,
+                   COUNT(*) FILTER (WHERE action = 'skip')                      AS skipped
             FROM sealed_price_runs
             GROUP BY run_id
             ORDER BY started_at DESC
@@ -1374,16 +1374,41 @@ def sealed_runs_list():
     return render_template("sealed_runs.html", runs=rows, table_missing=table_missing)
 
 
+_SEALED_DETAIL_SORTS = {
+    # default: action priority then magnitude
+    "":            "CASE action WHEN 'error' THEN 0 WHEN 'review' THEN 1 "
+                   "  WHEN 'updated' THEN 2 WHEN 'missing' THEN 3 "
+                   "  WHEN 'skip' THEN 4 WHEN 'untouched' THEN 5 ELSE 6 END, "
+                   "ABS(COALESCE(delta_pct, 0)) DESC NULLS LAST, title",
+    "delta_desc":  "delta_pct DESC NULLS LAST, title",
+    "delta_asc":   "delta_pct ASC NULLS LAST, title",
+    "abs_delta":   "ABS(COALESCE(delta_pct, 0)) DESC NULLS LAST, title",
+    "title":       "title ASC",
+    "qty_desc":    "qty DESC NULLS LAST, title",
+    "qty_asc":     "qty ASC NULLS LAST, title",
+}
+
+
 @app.route('/dashboard/sealed-runs/<run_id>')
 def sealed_run_detail(run_id):
-    """Detail page for one sealed run with per-action filter + bulk-approve."""
+    """Detail page for one sealed run with per-action filter, OOS toggle,
+    sort control, and bulk-approve."""
     db = _shared_db()
     action_filter = (request.args.get("action") or "").strip()
+    include_oos   = (request.args.get("include_oos") or "").strip() == "1"
+    sort_key      = (request.args.get("sort") or "").strip()
+    if sort_key not in _SEALED_DETAIL_SORTS:
+        sort_key = ""
+    order_by_sql = _SEALED_DETAIL_SORTS[sort_key]
 
     where = ["run_id = %s"]
     params: list = [run_id]
     if action_filter:
         where.append("action = %s"); params.append(action_filter)
+    if not include_oos:
+        # Only hide rows we're confident are OOS — qty=0 explicitly. NULL
+        # qty (very rare; would be a Shopify metafield gap) stays visible.
+        where.append("(qty IS NULL OR qty > 0)")
     where_sql = " AND ".join(where)
 
     sql = f"""
@@ -1393,24 +1418,14 @@ def sealed_run_detail(run_id):
                started_at
         FROM sealed_price_runs
         WHERE {where_sql}
-        ORDER BY
-            CASE action
-                WHEN 'error'     THEN 0
-                WHEN 'review'    THEN 1
-                WHEN 'updated'   THEN 2
-                WHEN 'missing'   THEN 3
-                WHEN 'skip'      THEN 4
-                WHEN 'untouched' THEN 5
-                ELSE 6
-            END,
-            ABS(COALESCE(delta_pct, 0)) DESC NULLS LAST,
-            title
+        ORDER BY {order_by_sql}
     """
     rows = db.query(sql, tuple(params))
 
     summary = db.query_one("""
         SELECT MIN(started_at) AS started_at, COUNT(*) AS total,
-               COUNT(*) FILTER (WHERE action = 'review' AND apply_status = 'pending') AS pending_review
+               COUNT(*) FILTER (WHERE action = 'review' AND apply_status = 'pending') AS pending_review,
+               COUNT(*) FILTER (WHERE qty = 0) AS oos_count
         FROM sealed_price_runs WHERE run_id = %s
     """, (run_id,))
 
@@ -1418,6 +1433,8 @@ def sealed_run_detail(run_id):
         "sealed_run_detail.html",
         run_id=run_id, rows=rows, summary=summary,
         action_filter=action_filter,
+        include_oos=include_oos,
+        sort_key=sort_key,
         store_domain=os.environ.get("SHOPIFY_STORE", ""),
     )
 

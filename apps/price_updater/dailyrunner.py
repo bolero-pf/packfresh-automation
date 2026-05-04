@@ -547,16 +547,13 @@ def process_product(product, blocked: set | None = None):
     product dict mutated with `action`, `reason`, and pricing fields the
     DB writer expects.
 
-    Decision tree:
-      block-listed       -> skip
-      ignore-skus file   -> untouched (legacy local mute)
-      tagged ignore_*    -> untouched
-      no tcg_id          -> missing
-      tcg fetch failed   -> missing
-      new > current      -> updated (always raise)
-      new < current OOS  -> updated (auto-lower OOS only)
-      new < current in-stock -> review (bulk-approve in dashboard)
-      new == current     -> untouched
+    Action taxonomy (see _classify_pre_scrape for full table):
+      skip      -> tagged / block-listed / ignored-sku
+      missing   -> no tcgplayer_id metafield (Shopify catalog issue)
+      error     -> had id but TCGplayer scrape returned no price
+      updated   -> price was changed
+      review    -> in-stock drop awaiting human approval
+      untouched -> at target / no change needed
     """
     blocked = blocked or set()
     current_price = float(product.get("shopify_price") or product.get("price") or 0)
@@ -566,8 +563,8 @@ def process_product(product, blocked: set | None = None):
     tags = [t.strip().lower() for t in raw_tags] if isinstance(raw_tags, list) \
            else [t.strip().lower() for t in raw_tags.split(",")]
     if any(tag in tags for tag in ["weekly deals", "ignore_update", "slab"]):
-        product.update({"action": "untouched", "reason": "tagged for skip"})
-        return "untouched", product
+        product.update({"action": "skip", "reason": "tagged for skip"})
+        return "skip", product
 
     variant_key = str(product.get("variant_id") or "")
     if variant_key and variant_key in blocked:
@@ -580,15 +577,15 @@ def process_product(product, blocked: set | None = None):
         return "missing", product
 
     if product["sku"] in ignored_skus:
-        product.update({"action": "untouched", "reason": "ignored sku (local file)"})
-        return "untouched", product
+        product.update({"action": "skip", "reason": "ignored sku (local file)"})
+        return "skip", product
 
     print(f"[{tcg_id}] Checking {product['title']}...")
     tcg_price = get_featured_price_tcgplayer(tcg_id)
     if tcg_price is None:
-        product.update({"action": "missing", "reason": "tcgplayer scrape failed",
+        product.update({"action": "error", "reason": "tcgplayer scrape failed",
                         "tcg_price": None})
-        return "missing", product
+        return "error", product
 
     new_price = round_competitive_price(tcg_price)
     percent_diff = safe_percent_diff(current_price, new_price)
@@ -683,17 +680,23 @@ def _classify_pre_scrape(product, blocked, ignored_skus):
     reflected here or vice-versa, otherwise the pre-filter and the loop
     will disagree.
 
-    Tag-based skips (slab / weekly deals / ignore_update) are checked
-    FIRST, before tcg_id, so a slab missing its tcg_id metafield is
-    classified as "tagged for skip" instead of "missing tcg_id" — which
-    matters for the dashboard counts because slabs aren't supposed to
-    flow through this updater at all (slab_updater handles them).
+    Action taxonomy used here AND in process_product:
+        skip      -> deliberately excluded (tag, block-list, ignored sku)
+        missing   -> data quality issue: no tcgplayer_id metafield
+        error     -> data quality issue: scrape returned no price (process_product only)
+        updated   -> price was changed
+        review    -> in-stock drop awaiting human approval
+        untouched -> at target / no change needed
+
+    Tag-based skips are checked FIRST, before tcg_id, so a slab missing
+    its tcg_id metafield is classified as "tagged for skip" instead of
+    "missing" (slabs aren't supposed to flow through this updater at all).
     """
     raw_tags = product.get("tags") or []
     tags = ([t.strip().lower() for t in raw_tags] if isinstance(raw_tags, list)
             else [t.strip().lower() for t in raw_tags.split(",")])
     if any(tag in tags for tag in ("weekly deals", "ignore_update", "slab")):
-        return ("untouched", "tagged for skip")
+        return ("skip", "tagged for skip")
 
     variant_key = str(product.get("variant_id") or "")
     if variant_key and variant_key in blocked:
@@ -701,7 +704,7 @@ def _classify_pre_scrape(product, blocked, ignored_skus):
     if not product.get("tcgplayer_id"):
         return ("missing", "no tcgplayer_id metafield")
     if product.get("sku") in ignored_skus:
-        return ("untouched", "ignored sku (local file)")
+        return ("skip", "ignored sku (local file)")
     return None
 
 
@@ -725,7 +728,7 @@ def run_price_sync():
     print(f"=== sealed run_id={run_id} started_at={started_at.isoformat()} ===")
 
     all_products = get_shopify_products()
-    counts = {"updated": 0, "review": 0, "missing": 0, "untouched": 0, "skip": 0}
+    counts = {"updated": 0, "review": 0, "missing": 0, "error": 0, "untouched": 0, "skip": 0}
     pending_db: list[dict] = []
 
     # Partition: anything decidable without a network call gets persisted
@@ -793,8 +796,9 @@ def run_price_sync():
 
         print(f"\n✅ Updates pushed:        {counts.get('updated', 0)}")
         print(f"⚠️  Flagged for review:    {counts.get('review', 0)}")
-        print(f"❓ Missing listings:       {counts.get('missing', 0)}")
-        print(f"🚫 Auto-blocked / skipped: {counts.get('skip', 0)}")
+        print(f"❓ Missing tcgplayer_id:   {counts.get('missing', 0)}")
+        print(f"❌ Scrape errors:          {counts.get('error', 0)}")
+        print(f"🚫 Skipped (tag/block):    {counts.get('skip', 0)}")
         print(f"👌 Untouched (no change):  {counts.get('untouched', 0)}")
     except Exception as e:
         print("FATAL error in run_price_sync: ", e)
