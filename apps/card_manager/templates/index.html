@@ -1150,10 +1150,12 @@ async function _storeCards(barcodes) {
 }
 
 // ── Missing Cards ────────────────────────────────────────────────────────────
+let _missingCardsCache = [];
 async function loadMissing() {
   try {
     const d = await get('/api/missing');
     const cards = d.cards || [];
+    _missingCardsCache = cards;
     const badge = document.getElementById('badge-missing');
     badge.textContent = cards.length;
     badge.classList.toggle('visible', cards.length > 0);
@@ -1180,9 +1182,9 @@ function renderMissing(cards) {
         </div>
         <div style="font-family:var(--mono);font-size:0.72rem;color:var(--dim);">${esc(c.barcode)}</div>
         <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 8px;" title="Reprint with a new barcode if the current label won't scan"
-                onclick="regenerateAndPrint('${c.id}','${esc(c.card_name)}')">🆕 New BC</button>
+                onclick="regenerateAndPrint('${c.id}')">🆕 New BC</button>
         <button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:4px 10px;"
-                onclick="markGone('${c.id}','${esc(c.card_name)}')">Mark Gone</button>
+                onclick="markGone('${c.id}')">Mark Gone</button>
       </div>
     `).join('')}
   `;
@@ -1279,7 +1281,9 @@ function showMissingPicker(candidates) {
   });
 }
 
-async function markGone(cardId, cardName) {
+async function markGone(cardId) {
+  const card = _missingCardsCache.find(c => c.id === cardId);
+  const cardName = card ? card.card_name : 'this card';
   if (!await themedConfirm('Mark Card Gone', `Permanently mark "${cardName}" as gone? This flags it for audit/review.`)) return;
   try {
     await post(`/api/missing/${cardId}/gone`, {});
@@ -1581,8 +1585,13 @@ function reprintCopy(copyId) {
 // Centralized "this label won't scan" handler — generates a new barcode in
 // the DB, then opens the new label in a print tab. Same backend regardless
 // of which surface called it (editor, hold pull, returns, missing, set-out,
-// binder fill) so the UX is uniform.
+// binder fill) so the UX is uniform. `name` is optional — Missing tab looks
+// it up from its cache to dodge the apostrophe-in-onclick parsing bug.
 async function regenerateAndPrint(copyId, name) {
+  if (!name) {
+    const m = _missingCardsCache.find(c => c.id === copyId);
+    if (m) name = m.card_name;
+  }
   if (!await themedConfirm('New Barcode',
       `Generate a new barcode for ${name || 'this card'} and open the label to print? Apply the new label to the physical card.`)) return;
   try {
@@ -1597,7 +1606,7 @@ async function regenerateAndPrint(copyId, name) {
     else if (v === 'view-returns')   loadReturns();
     else if (v === 'view-editor')    refreshEditorDetail();
     else if (v === 'view-display' && _displayMode === 'set-out') {
-      const r = await get('/api/display/set-out/suggest?count=' + (_setOutSuggestions.length || 50));
+      const r = await get(`/api/display/set-out/suggest?count=${_setOutSuggestions.length || 50}&case_id=${encodeURIComponent(_setOutCaseId)}`);
       _setOutSuggestions = r.suggestions || _setOutSuggestions;
       renderSetOutScanStep();
     }
@@ -1780,7 +1789,7 @@ function renderDisplay(cases) {
             <div style="height:100%;background:${pct>=100?'var(--red)':pct>=80?'var(--accent)':'var(--green)'};width:${Math.min(100,pct)}%;"></div>
           </div>
           <button class="btn btn-sm" onclick="editCaseCapacity('${esc(c.id)}', ${c.capacity})">Edit capacity</button>
-          <button class="btn btn-sm btn-green" onclick="openSetOut('${esc(c.id)}', ${c.available})">+ Set Out</button>
+          <button class="btn btn-sm btn-green" onclick="openSetOut('${esc(c.id)}', ${c.available})" ${c.available===0?'disabled title="Case full"':''}>+ Set Out</button>
           <button class="btn btn-sm" onclick="openReturnAll('${esc(c.id)}')" ${c.current_count===0?'disabled':''}>↩ Return cards</button>
         </div>
         ${cardsHtml}
@@ -1833,7 +1842,7 @@ async function generateSuggestions() {
   if (!Number.isFinite(count) || count < 1) { toast('Enter a positive number', 'red'); return; }
   document.getElementById('display-overlay-content').innerHTML = '<div class="empty"><div class="spinner"></div></div>';
   try {
-    const d = await get(`/api/display/set-out/suggest?count=${count}`);
+    const d = await get(`/api/display/set-out/suggest?count=${count}&case_id=${encodeURIComponent(_setOutCaseId)}`);
     _setOutSuggestions = d.suggestions || [];
     renderSetOutScanStep();
   } catch(e) {

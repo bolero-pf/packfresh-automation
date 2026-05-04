@@ -1546,6 +1546,229 @@ def recent_assignments():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Display Case + Binder fill — shared scoring/quota helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Each filled location targets a balanced spread across these tiers so set-out
+# isn't just the top-N by price. Quotas are recomputed per request from the
+# location's *current* tier breakdown — refilling a case where all the
+# expensive cards sold pulls more premium cards back in.
+PRICE_TIERS    = ("premium", "high", "mid", "low")
+TIER_TARGETS   = {"premium": 0.25, "high": 0.25, "mid": 0.25, "low": 0.25}
+TIER_THRESHOLDS = (("premium", 100.0), ("high", 25.0), ("mid", 5.0), ("low", 0.0))
+
+
+def _classify_tier(price):
+    if price is None:
+        return "low"
+    p = float(price)
+    for label, lo in TIER_THRESHOLDS:
+        if p >= lo:
+            return label
+    return "low"
+
+
+def _compute_tier_quotas(capacity, count_to_fill, current_counts):
+    """Allocate `count_to_fill` slots across price tiers based on the *deficit*
+    from each tier's target at full capacity.
+
+    If every tier is already at or above target, distribute new picks evenly
+    so we keep refreshing variety. Returns {tier: quota}."""
+    if count_to_fill <= 0:
+        return {t: 0 for t in PRICE_TIERS}
+
+    target_at_full = {t: int(capacity * TIER_TARGETS[t]) for t in PRICE_TIERS}
+    deficits = {t: max(0, target_at_full[t] - current_counts.get(t, 0)) for t in PRICE_TIERS}
+    total_deficit = sum(deficits.values())
+
+    quotas = {t: 0 for t in PRICE_TIERS}
+    remaining = count_to_fill
+
+    if total_deficit > 0:
+        # Allocate proportionally to deficits, capped by per-tier deficit.
+        for t in PRICE_TIERS:
+            q = min(deficits[t], remaining, int(round(count_to_fill * deficits[t] / total_deficit)))
+            quotas[t] = q
+            remaining -= q
+
+        # Hand remainder (rounding losses) to tiers with the largest leftover deficit.
+        if remaining > 0:
+            for t in sorted(PRICE_TIERS, key=lambda x: deficits[x] - quotas[x], reverse=True):
+                if remaining <= 0:
+                    break
+                extra = min(remaining, deficits[t] - quotas[t])
+                if extra > 0:
+                    quotas[t] += extra
+                    remaining -= extra
+
+    # Anything still unallocated (all deficits met or capacity=0) — spread evenly.
+    if remaining > 0:
+        order = sorted(PRICE_TIERS, key=lambda x: quotas[x])
+        i = 0
+        while remaining > 0:
+            quotas[order[i % len(PRICE_TIERS)]] += 1
+            remaining -= 1
+            i += 1
+
+    return quotas
+
+
+def _game_filter_sql(card_type):
+    """Return a SQL fragment filtering rc.game for a typed location.
+
+    pokemon  -> only pokemon (NULL still excluded; Binder-1 backfill normalized them)
+    magic    -> only magic
+    other    -> every non-Pokémon TCG (mixed FG-2 case)
+    anything else (mixed/display/other unknown) -> no filter
+    """
+    if card_type == "pokemon":
+        return "rc.game = 'pokemon'"
+    if card_type == "magic":
+        return "rc.game = 'magic'"
+    if card_type == "other":
+        return "rc.game IS NOT NULL AND rc.game <> 'pokemon'"
+    return "TRUE"
+
+
+# Shared scoring SQL — one source of truth for set-out and binder fill so they
+# rank candidates identically. Caller appends the game filter and limit.
+_SCORE_SELECT_SQL = """
+    WITH base AS (
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.current_price, rc.image_url, rc.variant,
+               rc.tcgplayer_id, rc.scrydex_id, rc.game, sl.bin_label,
+               (SELECT MAX(rarity) FROM scrydex_price_cache spc
+                WHERE (rc.scrydex_id IS NOT NULL AND spc.scrydex_id = rc.scrydex_id)
+                   OR (rc.tcgplayer_id IS NOT NULL AND spc.tcgplayer_id = rc.tcgplayer_id)
+               ) AS rarity,
+               (SELECT MAX(weight) FROM featured_cards fc
+                WHERE rc.card_name ILIKE '%%' || fc.name_pattern || '%%'
+                  AND (fc.game = '*' OR fc.game = COALESCE(rc.game, 'pokemon'))
+               ) AS featured_boost
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.state = 'STORED'
+          AND rc.current_hold_id IS NULL
+          AND rc.current_price IS NOT NULL
+          AND rc.current_price >= 1.0
+          AND {game_filter}
+    )
+    SELECT *,
+           LN(GREATEST(1, current_price)) * 5 AS price_score,
+           CASE
+               WHEN rarity IS NULL THEN 0
+               WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
+               WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
+               WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
+               WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
+               WHEN rarity ILIKE '%%uncommon%%' THEN 2
+               ELSE 0
+           END AS rarity_score,
+           COALESCE(featured_boost, 0) AS featured_score
+    FROM base
+    ORDER BY (LN(GREATEST(1, current_price)) * 5
+              + COALESCE(featured_boost, 0)
+              + CASE
+                  WHEN rarity IS NULL THEN 0
+                  WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
+                  WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
+                  WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
+                  WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
+                  WHEN rarity ILIKE '%%uncommon%%' THEN 2
+                  ELSE 0
+              END
+             ) DESC
+    LIMIT %s
+"""
+
+
+def _greedy_pick_with_quotas(candidates, count, allowed_conditions,
+                             tier_quotas, name_cap, set_cap, by_card_seed=None,
+                             game_cap=None):
+    """Greedy pass over scored candidates with diversity caps.
+
+    `tier_quotas` enforces the price-tier mix. `by_card_seed` lets the caller
+    pre-load existing binder/case contents into the (name,variant) cap so we
+    never recommend a third copy of something already over-represented.
+    `game_cap` enforces a per-game ceiling for mixed locations (FG-2)."""
+    chosen = []
+    by_card = dict(by_card_seed or {})
+    by_set  = {}
+    by_game = {}
+    tier_used = {t: 0 for t in PRICE_TIERS}
+
+    for c in candidates:
+        if len(chosen) >= count:
+            break
+        if c.get("condition") not in allowed_conditions:
+            continue
+
+        tier = _classify_tier(c.get("current_price"))
+        if tier_used[tier] >= tier_quotas.get(tier, 0):
+            continue
+
+        cv = (c["card_name"], (c.get("variant") or "").lower())
+        if by_card.get(cv, 0) >= name_cap:
+            continue
+        if by_set.get(c.get("set_name") or "", 0) >= set_cap:
+            continue
+        if game_cap is not None:
+            g = c.get("game") or "_"
+            if by_game.get(g, 0) >= game_cap:
+                continue
+
+        chosen.append(c)
+        by_card[cv] = by_card.get(cv, 0) + 1
+        by_set[c.get("set_name") or ""] = by_set.get(c.get("set_name") or "", 0) + 1
+        tier_used[tier] += 1
+        if game_cap is not None:
+            g = c.get("game") or "_"
+            by_game[g] = by_game.get(g, 0) + 1
+
+    # Backfill pass: if quotas left a tier short (not enough storage stock at
+    # that price), use the freed slots to take the next-best cards from any
+    # tier so staff still gets a full shopping list.
+    if len(chosen) < count:
+        chosen_ids = {c["id"] for c in chosen}
+        for c in candidates:
+            if len(chosen) >= count:
+                break
+            if c["id"] in chosen_ids:
+                continue
+            if c.get("condition") not in allowed_conditions:
+                continue
+            cv = (c["card_name"], (c.get("variant") or "").lower())
+            if by_card.get(cv, 0) >= name_cap:
+                continue
+            if by_set.get(c.get("set_name") or "", 0) >= set_cap:
+                continue
+            if game_cap is not None:
+                g = c.get("game") or "_"
+                if by_game.get(g, 0) >= game_cap:
+                    continue
+            chosen.append(c)
+            by_card[cv] = by_card.get(cv, 0) + 1
+            by_set[c.get("set_name") or ""] = by_set.get(c.get("set_name") or "", 0) + 1
+            if game_cap is not None:
+                g = c.get("game") or "_"
+                by_game[g] = by_game.get(g, 0) + 1
+
+    return chosen
+
+
+def _current_tier_counts(bin_uuid):
+    """Per-tier breakdown of cards currently sitting in this case/binder."""
+    rows = db.query("""
+        SELECT current_price FROM raw_cards
+        WHERE state = 'DISPLAY' AND bin_id = %s
+    """, (bin_uuid,))
+    counts = {t: 0 for t in PRICE_TIERS}
+    for r in rows:
+        counts[_classify_tier(r["current_price"])] += 1
+    return counts
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Display Case — Front Glass + capacity management
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1607,84 +1830,69 @@ def display_case_capacity(case_id):
 
 @app.route("/api/display/set-out/suggest")
 def display_suggest():
-    """Score cards in storage and return the top-N as a shopping list with bin
-    labels. Staff uses this as guidance, not gospel — the actual transition is
-    driven by what they scan, not by this list."""
+    """Score cards in storage and return a shopping list scoped to the chosen
+    case's game type with a balanced price-tier mix. Caps at the case's free
+    slots — if the case is at 89/100, suggesting more than 11 is meaningless."""
     try:
         count = max(1, min(int(request.args.get("count", 50)), 200))
     except (TypeError, ValueError):
         return jsonify({"error": "count must be an integer"}), 400
 
-    # Pull 5x candidates so the diversity-cap pass below has room to work with.
-    candidates = db.query("""
-        WITH base AS (
-            SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
-                   rc.condition, rc.current_price, rc.image_url, rc.variant,
-                   rc.tcgplayer_id, rc.scrydex_id, rc.game, sl.bin_label,
-                   (SELECT MAX(rarity) FROM scrydex_price_cache spc
-                    WHERE (rc.scrydex_id IS NOT NULL AND spc.scrydex_id = rc.scrydex_id)
-                       OR (rc.tcgplayer_id IS NOT NULL AND spc.tcgplayer_id = rc.tcgplayer_id)
-                   ) AS rarity,
-                   (SELECT MAX(weight) FROM featured_cards fc
-                    WHERE rc.card_name ILIKE '%%' || fc.name_pattern || '%%'
-                      AND (fc.game = '*' OR fc.game = COALESCE(rc.game, 'pokemon'))
-                   ) AS featured_boost
-            FROM raw_cards rc
-            LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
-            WHERE rc.state = 'STORED'
-              AND rc.current_hold_id IS NULL
-              AND rc.current_price IS NOT NULL
-              AND rc.current_price >= 1.0
-        )
-        SELECT *,
-               LN(GREATEST(1, current_price)) * 5 AS price_score,
-               CASE
-                   WHEN rarity IS NULL THEN 0
-                   WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
-                   WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
-                   WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
-                   WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
-                   WHEN rarity ILIKE '%%uncommon%%' THEN 2
-                   ELSE 0
-               END AS rarity_score,
-               COALESCE(featured_boost, 0) AS featured_score
-        FROM base
-        ORDER BY (LN(GREATEST(1, current_price)) * 5
-                  + COALESCE(featured_boost, 0)
-                  + CASE
-                      WHEN rarity IS NULL THEN 0
-                      WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
-                      WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
-                      WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
-                      WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
-                      WHEN rarity ILIKE '%%uncommon%%' THEN 2
-                      ELSE 0
-                  END
-                 ) DESC
-        LIMIT %s
-    """, (count * 5,))
+    case_id = request.args.get("case_id", "").strip()
+    case = None
+    if case_id:
+        case = db.query_one("""
+            SELECT sl.id, sl.bin_label, sl.card_type, sl.capacity, sl.current_count,
+                   (sl.capacity - sl.current_count) AS available, sr.location_type
+            FROM storage_locations sl
+            JOIN storage_rows sr ON sl.row_id = sr.id
+            WHERE sl.id::text = %s
+        """, (case_id,))
+        if not case or case["location_type"] != "display_case":
+            return jsonify({"error": "Display case not found"}), 404
 
-    # Greedy diversity pass: ≤2 per (name, variant), ≤10 per set, condition NM/LP only.
-    # Strong condition filter keeps damaged stuff out of the front glass — staff
-    # can manually scan an off-list MP card if they really want one.
-    chosen = []
-    by_card = {}
-    by_set  = {}
-    for c in candidates:
-        if len(chosen) >= count:
-            break
-        if c.get("condition") not in ("NM", "LP"):
-            continue
-        cv = (c["card_name"], (c.get("variant") or "").lower())
-        if by_card.get(cv, 0) >= 2:
-            continue
-        if by_set.get(c.get("set_name") or "", 0) >= 10:
-            continue
-        chosen.append(c)
-        by_card[cv] = by_card.get(cv, 0) + 1
-        by_set[c.get("set_name") or ""] = by_set.get(c.get("set_name") or "", 0) + 1
+    # No case_id given (legacy callers) → score broadly without game scoping.
+    card_type = case["card_type"] if case else "mixed"
+    capacity  = case["capacity"]  if case else max(count, 1)
+    available = case["available"] if case else count
 
-    return jsonify({"suggestions": [_ser(dict(c)) for c in chosen], "total": len(chosen)})
+    if case and available <= 0:
+        return jsonify({"suggestions": [], "total": 0, "case": _ser(dict(case))})
+
+    count = min(count, available)
+
+    # Pull a generous candidate pool — the price score skews premium, so a
+    # tight LIMIT clips out the low/mid-tier cards the quota pass needs.
+    candidates = db.query(
+        _SCORE_SELECT_SQL.format(game_filter=_game_filter_sql(card_type)),
+        (max(count * 5, 500),),
+    )
+
+    # Refill weighs against what's already in the case — if all the premium
+    # cards sold, the deficit pass pulls premium back in instead of just
+    # piling on more of whichever tier is already over-represented.
+    current_counts = _current_tier_counts(case["id"]) if case else {t: 0 for t in PRICE_TIERS}
+    quotas = _compute_tier_quotas(capacity, count, current_counts)
+
+    # FG-2 ('other') is mixed-TCG; cap any one game at ~40% so one TCG can't
+    # dominate the case. Single-game cases (FG-1 pokemon, future magic case)
+    # don't need this guard.
+    game_cap = max(1, int(round(count * 0.4))) if card_type == "other" else None
+
+    chosen = _greedy_pick_with_quotas(
+        candidates, count,
+        allowed_conditions=("NM", "LP"),
+        tier_quotas=quotas,
+        name_cap=2,
+        set_cap=10,
+        game_cap=game_cap,
+    )
+
+    return jsonify({
+        "suggestions": [_ser(dict(c)) for c in chosen],
+        "total":       len(chosen),
+        "case":        _ser(dict(case)) if case else None,
+    })
 
 
 @app.route("/api/display/set-out/scan", methods=["POST"])
@@ -2118,19 +2326,17 @@ def list_binders():
 
 @app.route("/api/binders/<binder_id>/fill-suggest")
 def binder_fill_suggest(binder_id):
-    """Suggest STORED cards to add to a specific binder. Same scoring as
-    set-out but with two binder-specific rules:
-      - Cap ≤2 per (name, variant) counting what's *already in this binder*
-        plus the suggestions, so a binder with 2 Charizards never gets a
-        third recommendation.
-      - Honors the 'how many' input but never exceeds the binder's slot count."""
+    """Shopping list for a specific binder: same scoring + price-tier
+    distribution as set-out, plus a name-cap seeded by what's *already in this
+    binder* so a binder with 2 Charizards never gets a third recommendation.
+    Filtered by the binder's card_type (pokemon-only, magic-only, etc.)."""
     try:
         count = max(1, min(int(request.args.get("count", 50)), 480))
     except (TypeError, ValueError):
         return jsonify({"error": "count must be an integer"}), 400
 
     binder = db.query_one("""
-        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
+        SELECT sl.id, sl.bin_label, sl.card_type, sl.capacity, sl.current_count,
                (sl.capacity - sl.current_count) AS available, sr.location_type
         FROM storage_locations sl
         JOIN storage_rows sr ON sl.row_id = sr.id
@@ -2143,81 +2349,35 @@ def binder_fill_suggest(binder_id):
     if count <= 0:
         return jsonify({"suggestions": [], "total": 0, "binder": _ser(dict(binder))})
 
-    # Existing contents — used to seed the by_card cap and avoid re-suggesting
-    # cards that are already at quota in this binder.
+    # Existing contents — seed by_card cap so over-represented copies aren't
+    # suggested again.
     existing = db.query("""
         SELECT card_name, COALESCE(LOWER(variant), '') AS variant
         FROM raw_cards WHERE state = 'DISPLAY' AND bin_id = %s
     """, (binder_id,))
-
-    candidates = db.query("""
-        WITH base AS (
-            SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
-                   rc.condition, rc.current_price, rc.image_url, rc.variant,
-                   rc.tcgplayer_id, rc.scrydex_id, rc.game, sl.bin_label,
-                   (SELECT MAX(rarity) FROM scrydex_price_cache spc
-                    WHERE (rc.scrydex_id IS NOT NULL AND spc.scrydex_id = rc.scrydex_id)
-                       OR (rc.tcgplayer_id IS NOT NULL AND spc.tcgplayer_id = rc.tcgplayer_id)
-                   ) AS rarity,
-                   (SELECT MAX(weight) FROM featured_cards fc
-                    WHERE rc.card_name ILIKE '%%' || fc.name_pattern || '%%'
-                      AND (fc.game = '*' OR fc.game = COALESCE(rc.game, 'pokemon'))
-                   ) AS featured_boost
-            FROM raw_cards rc
-            LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
-            WHERE rc.state = 'STORED'
-              AND rc.current_hold_id IS NULL
-              AND rc.current_price IS NOT NULL
-              AND rc.current_price >= 1.0
-        )
-        SELECT *,
-               LN(GREATEST(1, current_price)) * 5 AS price_score,
-               CASE
-                   WHEN rarity IS NULL THEN 0
-                   WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
-                   WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
-                   WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
-                   WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
-                   WHEN rarity ILIKE '%%uncommon%%' THEN 2
-                   ELSE 0
-               END AS rarity_score,
-               COALESCE(featured_boost, 0) AS featured_score
-        FROM base
-        ORDER BY (LN(GREATEST(1, current_price)) * 5
-                  + COALESCE(featured_boost, 0)
-                  + CASE
-                      WHEN rarity IS NULL THEN 0
-                      WHEN rarity ILIKE '%%secret%%' OR rarity ILIKE '%%special%%' THEN 12
-                      WHEN rarity ILIKE '%%hyper%%'  OR rarity ILIKE '%%illustration%%' THEN 12
-                      WHEN rarity ILIKE '%%ultra%%'  OR rarity ILIKE '%%mythic%%' THEN 10
-                      WHEN rarity ILIKE '%%holo%%'   OR rarity ILIKE '%%rare%%'   THEN 6
-                      WHEN rarity ILIKE '%%uncommon%%' THEN 2
-                      ELSE 0
-                  END
-                 ) DESC
-        LIMIT %s
-    """, (count * 5,))
-
-    by_card = {}
+    by_card_seed = {}
     for e in existing:
         cv = (e["card_name"], e["variant"] or "")
-        by_card[cv] = by_card.get(cv, 0) + 1
+        by_card_seed[cv] = by_card_seed.get(cv, 0) + 1
 
-    chosen = []
-    by_set = {}
-    for c in candidates:
-        if len(chosen) >= count:
-            break
-        if c.get("condition") not in ("NM", "LP", "MP"):
-            continue  # binders are customer-touch; keep DMG/HP out
-        cv = (c["card_name"], (c.get("variant") or "").lower())
-        if by_card.get(cv, 0) >= 2:
-            continue
-        if by_set.get(c.get("set_name") or "", 0) >= 30:
-            continue  # softer set cap than display case (binders hold more)
-        chosen.append(c)
-        by_card[cv] = by_card.get(cv, 0) + 1
-        by_set[c.get("set_name") or ""] = by_set.get(c.get("set_name") or "", 0) + 1
+    candidates = db.query(
+        _SCORE_SELECT_SQL.format(game_filter=_game_filter_sql(binder["card_type"])),
+        (max(count * 5, 500),),
+    )
+
+    current_counts = _current_tier_counts(binder["id"])
+    quotas = _compute_tier_quotas(binder["capacity"], count, current_counts)
+
+    chosen = _greedy_pick_with_quotas(
+        candidates, count,
+        # Binders are customer-touch; MP allowed (softer than display case),
+        # DMG/HP still excluded.
+        allowed_conditions=("NM", "LP", "MP"),
+        tier_quotas=quotas,
+        name_cap=2,
+        set_cap=30,  # softer set cap than display case (binders hold more)
+        by_card_seed=by_card_seed,
+    )
 
     return jsonify({
         "suggestions": [_ser(dict(c)) for c in chosen],
