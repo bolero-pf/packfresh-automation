@@ -151,21 +151,42 @@ class PriceProvider:
             )
         return self._stamp(result, self._primary_source)
 
-    def search_cards(self, query, *, set_name=None, limit=5):
+    def search_cards(self, query, *, set_name=None, limit=8, all_games=True):
+        """Browse-style card search for any UI that lets an operator pick a
+        printing+variant. Cache first (multi-token across name / card_number /
+        printed_number / expansion_id / expansion_name — JP sets work because
+        ``all_games=True`` drops the game filter), live primary fallback when
+        cache is empty. Each result row carries a ``market_price`` field
+        (NM-condition price, or ``prices.market`` fallback, or 0) so chip
+        pickers can render a price without a second lookup.
+
+        Single source of truth — intake (/api/search/cards), ingestion, and
+        price_updater (raw-rebind) all go through this. Don't reimplement the
+        cache→live orchestration at the call site."""
+        results = []
         if self.cache:
             try:
-                results = self.cache.search_cards(query, set_name=set_name, limit=limit)
-                if results:
-                    return self._stamp(results, "cache")
+                results = self.cache.search_cards(
+                    query, set_name=set_name, limit=limit, all_games=all_games,
+                )
+                results = self._stamp(results, "cache")
             except Exception as e:
-                logger.warning(f"Cache search failed: {e}")
-        try:
-            return self._stamp(
-                self.primary.search_cards(query, set_name=set_name, limit=limit),
-                self._primary_source,
-            )
-        except (PPTError, ScrydexError) as e:
-            raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
+                logger.warning(f"Cache card search failed: {e}")
+                results = []
+        if not results:
+            try:
+                live = self.primary.search_cards(
+                    query, set_name=set_name, limit=limit,
+                ) or []
+                results = self._stamp(live, self._primary_source)
+            except (PPTError, ScrydexError) as e:
+                raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
+        for r in results or []:
+            if not r.get("market_price"):
+                conds = (r.get("prices") or {}).get("conditions") or {}
+                nm = conds.get("Near Mint") or conds.get("NM") or {}
+                r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
+        return results
 
     def get_sealed_product_by_tcgplayer_id(self, tcgplayer_id, *, include_history=False):
         # Cache-first

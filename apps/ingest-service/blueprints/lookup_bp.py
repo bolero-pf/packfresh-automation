@@ -11,6 +11,7 @@ from flask import Blueprint, request, jsonify, render_template, send_file, Respo
 
 import db
 import intake
+from price_provider import PriceError
 from helpers import (
     _serialize,
     _decode_override,
@@ -242,9 +243,9 @@ def search_sealed():
 
 @bp.route("/api/search/cards", methods=["POST"])
 def search_cards():
-    """Search for individual cards by name across all TCGs.
-    Cache first (multi-TCG), then live PPT/Scrydex fallback for the configured game.
-    """
+    """Search for individual cards by name across all TCGs. Thin wrapper —
+    `pricing.search_cards()` (shared/price_provider.py) owns the cache→live
+    orchestration; raw-rebind in price_updater calls the same method."""
     if not pricing:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
@@ -252,26 +253,14 @@ def search_cards():
     if not q:
         return jsonify({"error": "No query"}), 400
     try:
-        set_name = data.get("set_name") or None
-        limit = data.get("limit", 8)
-        results = []
-        cache = getattr(pricing, "cache", None)
-        if cache:
-            try:
-                results = cache.search_cards(q, set_name=set_name, limit=limit, all_games=True)
-                results = pricing._stamp(results, "cache")
-            except Exception as e:
-                logger.warning(f"Cross-game card cache search failed: {e}")
-                results = []
-        if not results:
-            live = pricing.primary.search_cards(q, set_name=set_name, limit=limit) or []
-            results = pricing._stamp(live, pricing._primary_source)
-        for r in (results or []):
-            if not r.get("market_price"):
-                conds = (r.get("prices") or {}).get("conditions") or {}
-                nm = conds.get("Near Mint") or conds.get("NM") or {}
-                r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
-        return jsonify({"results": results or []})
+        return jsonify({"results": pricing.search_cards(
+            q,
+            set_name=data.get("set_name") or None,
+            limit=int(data.get("limit") or 8),
+            all_games=True,
+        )})
+    except PriceError as e:
+        return jsonify({"error": str(e)}), 502
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

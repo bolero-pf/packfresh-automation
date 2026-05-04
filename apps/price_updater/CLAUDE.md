@@ -26,7 +26,12 @@ table for the dashboard. Auto-applied changes write the new price + set
 - `/dashboard/sealed-runs` (+ `/<run_id>`) — per-run apply / dismiss / **bulk-approve all <X% drops** / block
 - `/dashboard/slab-runs` (+ `/<run_id>`) — per-row apply / dismiss / block / TCG backfill helper
 - `/dashboard/raw-runs` (+ `/<run_id>`) — group-by-print apply / dismiss / block
-- `/dashboard/raw-rebind` — manual scrydex rebind for raw_cards the updater can't price
+- `/dashboard/raw-rebind` — manual scrydex rebind for raw_cards the updater can't price.
+  Search modal uses shared `pricing.search_cards()` (shared/price_provider.py) — same
+  cache→live orchestration as intake's `/api/search/cards` and ingestion's. Returns
+  whole-card rows; chip per variant (NM price); click chip → bind every copy of that
+  identity to (scrydex_id, variant). To add fields/tokens to the search, edit
+  `shared/price_cache.py:search_cards` — don't fork it here.
 - `/dashboard/big-movers` — auto-applied rows with |Δ%| ≥ threshold across all 3 latest runs (+ Block per row)
 - `/dashboard/price-blocks` — list every active block with Remove
 - `/dashboard/runlog` + `/stream-log` — live tail of dailyrunner output

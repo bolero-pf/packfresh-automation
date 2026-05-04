@@ -57,6 +57,21 @@ def _shared_db():
     return shared_db
 
 
+_PRICING = None
+
+
+def _pricing():
+    """Lazy-init the shared PriceProvider (cache + Scrydex). Used by the
+    raw-rebind search modal so it shares one source of truth with intake's
+    /api/search/cards — see shared/price_provider.py:search_cards."""
+    global _PRICING
+    if _PRICING is None:
+        db = _shared_db()
+        from price_provider import create_price_provider
+        _PRICING = create_price_provider(db=db)
+    return _PRICING
+
+
 # ── Runner launcher ──────────────────────────────────────────────────────
 #
 # Every "Run X now" button used to either spawn a subprocess (sealed) OR
@@ -1051,51 +1066,35 @@ def raw_rebind_list():
 
 @app.route('/api/raw-rebind/search', methods=["GET"])
 def api_raw_rebind_search():
-    """Search scrydex_price_cache for candidate (scrydex_id, variant) tuples
-    that could be bound to a raw_card. Returns one row per
-    (scrydex_id, variant) with NM market price, image, and the canonical
-    tcgplayer_id Scrydex publishes for that printing."""
+    """Search the Scrydex catalog for candidate printings the operator can
+    bind a raw_card to. Single source of truth — delegates to the shared
+    pricing.search_cards() that intake (/api/search/cards) and ingestion use,
+    so JP sets, printed_number-style queries (OP14-041, 026/SVC), and
+    multi-token name+set+number all work the same here as everywhere else.
+
+    Accepts a single freeform `q` (preferred) OR legacy name/set/number
+    fields (concatenated). Returns whole-card rows with a `variants` map so
+    the modal can render a card+variant chip picker."""
     from flask import jsonify
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
-    import db as shared_db
-    shared_db.init_pool()
 
-    name = (request.args.get("name") or "").strip()
-    set_name = (request.args.get("set") or "").strip()
-    number = (request.args.get("number") or "").strip()
-    if not name and not set_name and not number:
-        return jsonify({"ok": False, "error": "provide at least one of name/set/number"}), 400
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        # Back-compat: combine the legacy three-field form into one query —
+        # the shared cache search is multi-token so name/set/number all hit.
+        parts = [
+            (request.args.get("name") or "").strip(),
+            (request.args.get("set") or "").strip(),
+            (request.args.get("number") or "").strip(),
+        ]
+        q = " ".join(p for p in parts if p)
+    if not q:
+        return jsonify({"ok": False, "error": "query required"}), 400
 
-    where = ["product_type = 'card'", "price_type = 'raw'", "market_price IS NOT NULL"]
-    params: list = []
-    if name:
-        where.append("LOWER(product_name) LIKE %s")
-        params.append(f"%{name.lower()}%")
-    if set_name:
-        where.append("LOWER(expansion_name) LIKE %s")
-        params.append(f"%{set_name.lower()}%")
-    if number:
-        where.append("(card_number = %s OR card_number LIKE %s)")
-        params.append(number)
-        params.append(f"{number}/%")
-
-    sql = f"""
-        SELECT scrydex_id,
-               MAX(product_name)    AS product_name,
-               MAX(expansion_name)  AS expansion_name,
-               MAX(card_number)     AS card_number,
-               variant,
-               (ARRAY_AGG(tcgplayer_id) FILTER (WHERE tcgplayer_id IS NOT NULL))[1] AS tcgplayer_id,
-               MAX(market_price) FILTER (WHERE condition = 'NM') AS nm_price,
-               MAX(COALESCE(image_medium, image_small, image_large)) AS image_url
-        FROM scrydex_price_cache
-        WHERE {' AND '.join(where)}
-        GROUP BY scrydex_id, variant
-        ORDER BY MAX(expansion_name), MAX(card_number), variant
-        LIMIT 40
-    """
-    rows = shared_db.query(sql, tuple(params))
-    return jsonify({"ok": True, "results": [dict(r) for r in rows]})
+    try:
+        results = _pricing().search_cards(q, limit=20, all_games=True)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return jsonify({"ok": True, "results": results or []})
 
 
 @app.route('/api/raw-rebind/apply', methods=["POST"])

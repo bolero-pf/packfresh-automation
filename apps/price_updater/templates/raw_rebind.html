@@ -29,17 +29,23 @@
         .modal-body { padding: 14px 18px; overflow-y: auto; flex: 1; }
         .modal-foot { padding: 10px 18px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
 
-        .search-row { display: grid; grid-template-columns: 2fr 1.5fr 0.7fr auto; gap: 8px; margin-bottom: 14px; }
+        .search-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-bottom: 14px; }
         .search-row input { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; color: var(--text); font-family: var(--font-sans); }
+        .search-hint { color: var(--text-dim); font-size: 0.78rem; margin: -8px 0 12px 2px; }
 
         .results { display: grid; gap: 8px; }
-        .result { display: grid; grid-template-columns: 60px 1fr auto; gap: 12px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; transition: background 80ms; }
-        .result:hover { background: var(--surface-2); }
+        .result { display: grid; grid-template-columns: 60px 1fr; gap: 12px; align-items: stretch; padding: 10px; border: 1px solid var(--border); border-radius: 6px; }
         .result img { width: 56px; height: 78px; object-fit: cover; border-radius: 4px; background: var(--surface-2); }
-        .result .meta { font-size: 0.88rem; }
+        .result .meta { font-size: 0.88rem; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
         .result .meta .name { font-weight: 600; }
-        .result .meta .sub2 { color: var(--text-dim); font-size: 0.82rem; margin-top: 2px; }
-        .result .price { font-family: var(--font-mono); font-weight: 600; }
+        .result .meta .sub2 { color: var(--text-dim); font-size: 0.78rem; }
+        .result .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+        .chip { background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px; padding: 4px 10px; font-size: 0.78rem; cursor: pointer; display: inline-flex; gap: 6px; align-items: baseline; transition: background 80ms, border-color 80ms; }
+        .chip:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .chip .vname { font-weight: 600; }
+        .chip .vprice { font-family: var(--font-mono); color: var(--text-dim); }
+        .chip:hover .vprice { color: rgba(255,255,255,0.85); }
+        .game-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 0.65rem; font-weight: 700; background: var(--surface-2); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-right: 4px; vertical-align: middle; }
 
         .toast { position: fixed; bottom: 24px; right: 24px; padding: 10px 14px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border); color: var(--text); font-size: 0.9rem; opacity: 0; transition: opacity 200ms; }
         .toast.show { opacity: 1; }
@@ -133,11 +139,10 @@
             </div>
             <div class="modal-body">
                 <div class="search-row">
-                    <input type="text" id="q-name"   placeholder="Card name">
-                    <input type="text" id="q-set"    placeholder="Set name">
-                    <input type="text" id="q-number" placeholder="Card #">
+                    <input type="text" id="q-text" placeholder="charizard sv151 199, OP14-041, 026/SVC, etc.">
                     <button class="btn btn-primary" id="q-search">Search</button>
                 </div>
+                <div class="search-hint">Multi-token across name, set, set code, card number, printed number — all games (JP included). Picks a printing+variant; binds every physical copy of that identity together.</div>
                 <div id="results" class="results"></div>
                 <div id="results-empty" class="empty" style="display:none;">No matches. Try loosening the search.</div>
             </div>
@@ -152,9 +157,7 @@
     <script>
     const modal = document.getElementById('modal');
     const modalTitle = document.getElementById('modal-title');
-    const qName = document.getElementById('q-name');
-    const qSet  = document.getElementById('q-set');
-    const qNum  = document.getElementById('q-number');
+    const qText = document.getElementById('q-text');
     const results = document.getElementById('results');
     const resultsEmpty = document.getElementById('results-empty');
     const applyStatus = document.getElementById('apply-status');
@@ -168,6 +171,12 @@
         toastEl.textContent = msg;
         toastEl.className = 'toast show ' + (kind || '');
         setTimeout(() => toastEl.classList.remove('show'), 2400);
+    }
+
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[c]));
     }
 
     // Event delegation — robust against rows added later AND surfaces any
@@ -187,15 +196,20 @@
                 showToast('data-ids parse failed: ' + e.message, 'err');
                 return;
             }
-            qName.value = tr.dataset.name   || '';
-            qSet.value  = tr.dataset.set    || '';
-            qNum.value  = tr.dataset.number || '';
+            // Seed the freeform search with name + set code/name + number — the
+            // shared cache search is multi-token so it'll find the printing
+            // even if the original raw_card binding was wrong.
+            const seed = [tr.dataset.name, tr.dataset.set, tr.dataset.number]
+                .map(s => (s || '').trim()).filter(Boolean).join(' ');
+            qText.value = seed;
             modalTitle.textContent =
                 `Find match: ${tr.dataset.name} — ${tr.dataset.set} #${tr.dataset.number}`;
             results.innerHTML = '';
             resultsEmpty.style.display = 'none';
             applyStatus.textContent = '';
             modal.classList.add('show');
+            qText.focus();
+            qText.select();
             doSearch();
         } catch (err) {
             console.error('raw-rebind click handler failed', err);
@@ -207,56 +221,100 @@
     modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('show'); });
 
     document.getElementById('q-search').addEventListener('click', doSearch);
-    [qName, qSet, qNum].forEach(inp => {
-        inp.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
-    });
+    qText.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 
     async function doSearch() {
-        const params = new URLSearchParams();
-        if (qName.value.trim())  params.set('name',   qName.value.trim());
-        if (qSet.value.trim())   params.set('set',    qSet.value.trim());
-        if (qNum.value.trim())   params.set('number', qNum.value.trim());
+        const q = qText.value.trim();
+        if (!q) {
+            results.innerHTML = '<div class="mono">Type a card name, set, or number.</div>';
+            resultsEmpty.style.display = 'none';
+            return;
+        }
         results.innerHTML = '<div class="mono">Searching…</div>';
         resultsEmpty.style.display = 'none';
         try {
-            const r = await fetch('/api/raw-rebind/search?' + params.toString());
+            const r = await fetch('/api/raw-rebind/search?' + new URLSearchParams({q}).toString());
             const d = await r.json();
             if (!d.ok) {
-                results.innerHTML = `<div class="mono" style="color:#f87171;">${d.error || 'Search failed'}</div>`;
+                results.innerHTML = `<div class="mono" style="color:#f87171;">${esc(d.error || 'Search failed')}</div>`;
                 return;
             }
             renderResults(d.results || []);
         } catch (err) {
-            results.innerHTML = `<div class="mono" style="color:#f87171;">${err.message}</div>`;
+            results.innerHTML = `<div class="mono" style="color:#f87171;">${esc(err.message)}</div>`;
         }
     }
 
+    // Result shape comes from shared/price_provider.py:search_cards via
+    // shared/price_cache.py:_build_card_dict — same shape intake's chip
+    // picker eats. Variants live under prices.variants as
+    //   {VariantName: {'Near Mint': {price}, ..., '_image_*', '_tcgplayer_id'}}
+    // so iterating keys we skip anything starting with '_'.
     function renderResults(rows) {
         results.innerHTML = '';
         if (!rows.length) {
             resultsEmpty.style.display = 'block';
             return;
         }
-        for (const r of rows) {
+        for (const card of rows) {
+            const img = card.imageCdnUrl400 || card.imageCdnUrl || card.imageCdnUrl800 || '';
+            const variantsMap = (card.prices && card.prices.variants) || {};
+            const scrydexId = card.scrydexId || card.scrydex_id || '';
+
+            // One chip per variant. NM price is what the operator cares
+            // about for picking the right printing.
+            const chips = Object.keys(variantsMap)
+                .filter(v => !v.startsWith('_'))
+                .map(v => {
+                    const conds = variantsMap[v] || {};
+                    const nm = (conds['Near Mint'] || conds['NM'] || {});
+                    const price = nm.price != null ? `$${Number(nm.price).toFixed(2)}` : '—';
+                    return `<span class="chip" data-variant="${esc(v)}" data-scrydex="${esc(scrydexId)}">
+                        <span class="vname">${esc(v)}</span>
+                        <span class="vprice">${price}</span>
+                    </span>`;
+                }).join('');
+
             const div = document.createElement('div');
             div.className = 'result';
-            const img = r.image_url ? `<img src="${r.image_url}" alt="">` : `<img>`;
-            const price = r.nm_price != null ? `$${Number(r.nm_price).toFixed(2)}` : '—';
+            const number = card.printedNumber || card.cardNumber || '';
+            const game = (card.game || '').replace(/_/g, ' ');
             div.innerHTML = `
-                ${img}
+                ${img ? `<img src="${esc(img)}" alt="">` : `<img>`}
                 <div class="meta">
-                    <div class="name">${r.product_name || ''} <span class="mono" style="color:var(--text-dim);">#${r.card_number || ''}</span></div>
-                    <div class="sub2">${r.expansion_name || ''} · variant <strong>${r.variant}</strong> · scrydex_id <span class="mono">${r.scrydex_id}</span>${r.tcgplayer_id ? ` · tcg <span class="mono">${r.tcgplayer_id}</span>` : ''}</div>
+                    <div class="name">
+                        ${game ? `<span class="game-badge">${esc(game)}</span>` : ''}
+                        ${esc(card.name || '')}
+                        ${number ? `<span class="mono" style="color:var(--text-dim); font-weight:400;">#${esc(number)}</span>` : ''}
+                    </div>
+                    <div class="sub2">
+                        ${esc(card.setName || '')}
+                        · scrydex_id <span class="mono">${esc(scrydexId)}</span>
+                        ${card.tcgPlayerId ? `· tcg <span class="mono">${esc(card.tcgPlayerId)}</span>` : ''}
+                    </div>
+                    <div class="chips">${chips || '<span class="mono" style="color:var(--text-dim);">no variants in cache</span>'}</div>
                 </div>
-                <div class="price">${price}<br><span class="mono" style="font-size:0.7rem; color:var(--text-dim);">NM</span></div>
             `;
-            div.addEventListener('click', () => applyBind(r));
             results.appendChild(div);
         }
     }
 
-    async function applyBind(r) {
-        if (!confirm(`Bind ${activeIds.length} copy(ies) to ${r.scrydex_id} / ${r.variant}?`)) return;
+    // Chip click → bind. Delegated on the results container so dynamic
+    // re-renders don't need re-binding.
+    results.addEventListener('click', ev => {
+        const chip = ev.target.closest('.chip');
+        if (!chip) return;
+        const scrydexId = chip.dataset.scrydex;
+        const variant = chip.dataset.variant;
+        if (!scrydexId || !variant) {
+            showToast('Missing scrydex_id or variant on chip', 'err');
+            return;
+        }
+        applyBind(scrydexId, variant);
+    });
+
+    async function applyBind(scrydexId, variant) {
+        if (!confirm(`Bind ${activeIds.length} copy(ies) to ${scrydexId} / ${variant}?`)) return;
         applyStatus.textContent = 'Applying…';
         try {
             const resp = await fetch('/api/raw-rebind/apply', {
@@ -264,8 +322,8 @@
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     raw_card_ids: activeIds,
-                    scrydex_id:   r.scrydex_id,
-                    variant:      r.variant,
+                    scrydex_id:   scrydexId,
+                    variant:      variant,
                 }),
             });
             const d = await resp.json();

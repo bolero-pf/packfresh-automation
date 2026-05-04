@@ -764,8 +764,9 @@ def add_item(session_id):
 def search_cards():
     """Search for individual raw cards by name across all TCGs — mirrors
     the intake-service endpoint so the 'Unexpected Item' modal can use the
-    grouped-by-printing UI with variant chips.
-    """
+    grouped-by-printing UI with variant chips. Thin wrapper around the shared
+    `pricing.search_cards()` (shared/price_provider.py) — single source of
+    truth across intake, ingest, and price_updater raw-rebind."""
     if not pricing:
         return jsonify({"error": "PPT API not configured"}), 503
     data = request.get_json(silent=True) or {}
@@ -773,26 +774,14 @@ def search_cards():
     if not q:
         return jsonify({"error": "No query"}), 400
     try:
-        set_name = data.get("set_name") or None
-        limit = int(data.get("limit") or 8)
-        results = []
-        cache = getattr(pricing, "cache", None)
-        if cache:
-            try:
-                results = cache.search_cards(q, set_name=set_name, limit=limit, all_games=True)
-                results = pricing._stamp(results, "cache")
-            except Exception as e:
-                logger.warning(f"Cross-game card cache search failed: {e}")
-                results = []
-        if not results:
-            live = pricing.primary.search_cards(q, set_name=set_name, limit=limit) or []
-            results = pricing._stamp(live, pricing._primary_source)
-        for r in (results or []):
-            if not r.get("market_price"):
-                conds = (r.get("prices") or {}).get("conditions") or {}
-                nm = conds.get("Near Mint") or conds.get("NM") or {}
-                r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
-        return jsonify({"results": results or []})
+        return jsonify({"results": pricing.search_cards(
+            q,
+            set_name=data.get("set_name") or None,
+            limit=int(data.get("limit") or 8),
+            all_games=True,
+        )})
+    except PriceError as e:
+        return jsonify({"error": str(e)}), 502
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
