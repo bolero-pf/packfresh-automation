@@ -35,26 +35,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 
-def charm_drop_auto_threshold_slab(price) -> float:
-    """Maximum dollar drop the slab updater will auto-apply without flagging.
-    Pinned to one charm_ceil tier for the suggested price — within one
-    charm hop a "drop" is just rounding noise, not a real comp move.
-
-    Mirrors charm_ceil's tiers:
-      <  $100  -> $5
-      <  $500  -> $10
-      >= $500  -> $25
-    """
-    try:
-        p = float(price or 0)
-    except (TypeError, ValueError):
-        return 0.0
-    if p <= 0: return 0.0
-    if p < 100:  return 5.0
-    if p < 500:  return 10.0
-    return 25.0
-
-
 def charm_ceil(price) -> float:
     """Round price UP to a 'charm' price ending in .99.
 
@@ -385,42 +365,22 @@ def run(*, apply: bool = True, csv_path: str = None) -> list[dict]:
             "delta_pct":   round(delta_pct, 1),
         }
 
-        # Auto-raise UP. Auto-drop within one charm tier (rounding noise).
-        # Bigger drops still need a human eye. Cost basis is still the
-        # floor below which we never go (max(market, cost) above).
-        drop_dollars = (current - target) if delta_pct > 0 else 0.0
-        drop_threshold = charm_drop_auto_threshold_slab(target)
-        small_dollar_drop = (delta_pct > 10 and drop_dollars <= drop_threshold)
-        if abs(delta_pct) <= 10:
+        # Always auto-raise. Drops always flag — even tiny ones — because
+        # Shopify fires price-drop email/SMS notifications on every variant
+        # price decrease, and the nightly run lands overnight when no
+        # customer reads email. Sean batches drop approvals at midday so
+        # notifications hit when customers are awake.
+        if abs(delta_pct) <= 1:
+            # Effectively no change — current is already the charm-rounded target.
             entry["action"] = "ok"
-            entry["reason"] = f"within 10% of target ${target:.2f} (delta {delta_pct:+.1f}%)"
-        elif delta_pct > 10 and not small_dollar_drop:
-            # Currently priced above target — flag, don't auto-drop
+            entry["reason"] = f"already at target ${target:.2f} (delta {delta_pct:+.1f}%)"
+        elif delta_pct > 0:
+            # Priced above target — flag for human review at midday.
             entry["action"] = "flag_overpriced"
             entry["reason"] = (f"{delta_pct:+.1f}% over target ${target:.2f} "
-                               f"(${drop_dollars:.2f} drop > ${drop_threshold:.2f} tier) — review")
+                               "— review (drop notifications)")
             entry["suggested_price"] = charm_price
             flagged += 1
-        elif small_dollar_drop:
-            # Charm-rounding drop within tier — auto-apply.
-            entry["suggested_price"] = charm_price
-            if apply and slab["qty"] > 0:
-                try:
-                    update_variant_price(slab["product_gid"], slab["variant_gid"], charm_price)
-                    entry["action"] = "adjusted"
-                    entry["new_price"] = charm_price
-                    entry["reason"] = (f"auto-dropped ${drop_dollars:.2f} (within "
-                                       f"${drop_threshold:.2f} charm tier); "
-                                       f"${current:.2f} -> ${charm_price:.2f}")
-                    updated += 1
-                except Exception as e:
-                    entry["action"] = "error"
-                    entry["reason"] = f"price update failed: {e}"
-            else:
-                entry["action"] = "flag_overpriced"
-                entry["reason"] = (f"[DRY-RUN] would auto-drop ${drop_dollars:.2f} "
-                                   f"to ${charm_price:.2f}")
-                flagged += 1
         else:
             # Currently priced below target — auto-raise to chase the market
             entry["suggested_price"] = charm_price

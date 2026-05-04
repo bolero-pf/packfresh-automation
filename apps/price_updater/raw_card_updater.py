@@ -224,7 +224,6 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
     from price_auto_block import load_blocks, raw_key
-    from price_rounding import charm_drop_auto_threshold
 
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc)
@@ -309,19 +308,15 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
         })
 
         # Decision tree:
-        #   |delta| <= SKIP                            : ok (no-op)
-        #   delta > AUTO  AND |drop_$| > tier_threshold: flag_overpriced (real drop, review)
-        #   delta > AUTO  AND |drop_$| <= threshold    : auto-apply (charm-rounding drop)
-        #   otherwise (small drift OR raise)           : auto-apply
-        # We always auto-RAISE — Sean does not want to miss a $100 -> $120
-        # mover because the gap is "more than 10%". Drops only need a human
-        # if they're substantial — a $1.49 -> $0.99 drop is 33% but only 50¢,
-        # which is just charm-rounding noise.
-        drop_dollars = abs(old - suggested) if delta_pct > 0 else 0.0
-        drop_threshold = charm_drop_auto_threshold(suggested)
-        small_dollar_drop = (delta_pct > AUTO_DELTA_PCT
-                             and drop_dollars <= drop_threshold)
-
+        #   |delta| <= SKIP : ok (no-op)
+        #   delta > 0       : flag_overpriced (any drop, review queue)
+        #   delta < 0       : auto-apply (any raise, follow market up)
+        # Drops never auto-apply — even tiny ones — because Shopify fires
+        # price-drop email/SMS notifications on every variant.price decrease
+        # and the nightly run lands at 3 AM when no customer reads email.
+        # Sean batches drop approvals at midday so notifications match when
+        # customers are awake. Raises don't fire notifications, so there's
+        # no reason to delay them.
         if abs(delta_pct) <= SKIP_DELTA_PCT:
             entry.update({
                 "action": "ok",
@@ -329,17 +324,15 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             })
             stats["ok"] += 1
 
-        elif delta_pct > AUTO_DELTA_PCT and not small_dollar_drop:
+        elif delta_pct > 0:
             entry.update({
                 "action": "flag_overpriced",
-                "reason": (f"overpriced {delta_pct:+.1f}% (${drop_dollars:.2f} drop "
-                           f"> ${drop_threshold:.2f} tier) — review"),
+                "reason": f"overpriced {delta_pct:+.1f}% — review (drop notifications)",
             })
             stats["flag_overpriced"] += 1
 
         else:
-            # Either small drift (within ±AUTO_DELTA_PCT) or an underpricing
-            # (delta_pct < -AUTO_DELTA_PCT, market rose). Both auto-apply.
+            # delta_pct < -SKIP — market rose, raise to follow.
             if floor and suggested < floor:
                 entry.update({
                     "action": "skip",
@@ -349,23 +342,14 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             elif apply_auto:
                 try:
                     _apply_db_price(db_module, entry["raw_card_id"], suggested)
-                    if delta_pct < -AUTO_DELTA_PCT:
-                        why = (f"auto-raised {abs(delta_pct):.1f}% to follow market; "
-                               f"${old:.2f} -> ${suggested:.2f}")
-                    elif small_dollar_drop:
-                        why = (f"auto-dropped {drop_dollars:.2f} (within "
-                               f"${drop_threshold:.2f} charm tier); "
-                               f"${old:.2f} -> ${suggested:.2f}")
-                    else:
-                        why = (f"auto-applied {delta_pct:+.1f}% drift; "
-                               f"${old:.2f} -> ${suggested:.2f}")
                     entry.update({
                         "action": "auto_applied",
                         "new_price": suggested,
                         "applied_at": datetime.now(timezone.utc),
                         "applied_price": suggested,
                         "apply_status": "applied",
-                        "reason": why,
+                        "reason": (f"auto-raised {abs(delta_pct):.1f}% to follow market; "
+                                   f"${old:.2f} -> ${suggested:.2f}"),
                     })
                     stats["auto_applied"] += 1
                 except Exception as e:
@@ -374,7 +358,7 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             else:
                 entry.update({
                     "action": "auto_applied",
-                    "reason": f"[DRY-RUN] would auto-apply {delta_pct:+.1f}%",
+                    "reason": f"[DRY-RUN] would auto-raise {abs(delta_pct):.1f}%",
                     "apply_status": "pending",
                 })
                 stats["auto_applied"] += 1
