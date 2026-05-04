@@ -56,8 +56,16 @@
         <span id="run-status" class="run-status"></span>
     </div>
 
-    {% if not runs %}
-        <div class="empty">No sealed updater runs recorded yet. Hit "Run" to start one.</div>
+    {% if table_missing %}
+        <div class="empty" style="text-align:left; padding: 24px;">
+            <strong style="color:#fbbf24;">Database migration not applied yet.</strong><br><br>
+            The <code>sealed_price_runs</code> table doesn't exist in this database.
+            Apply <code>apps/shared/019_sealed_price_runs.sql</code> and
+            <code>apps/shared/020_price_auto_block.sql</code> to <code>$DATABASE_URL</code>,
+            then refresh this page.
+        </div>
+    {% elif not runs %}
+        <div class="empty">No sealed updater runs recorded yet. Hit "Run sealed updater now" to start one.</div>
     {% else %}
     <table>
         <thead>

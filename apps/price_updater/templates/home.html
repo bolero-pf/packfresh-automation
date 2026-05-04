@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Price Updater</title>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
+    <style>
+        body { padding: 24px; max-width: 1200px; margin: 0 auto; }
+        h1 { font-size: 1.6rem; margin-bottom: 4px; }
+        .sub { color: var(--text-dim); font-size: 0.95rem; margin-bottom: 28px; }
+        .grid {
+            display: grid; gap: 14px;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        }
+        .card {
+            display: block;
+            padding: 16px 18px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            text-decoration: none;
+            color: var(--text);
+            transition: border-color 0.15s, transform 0.1s;
+        }
+        .card:hover { border-color: var(--accent); transform: translateY(-1px); }
+        .card .ttl { font-size: 1.05rem; font-weight: 700; margin-bottom: 4px; color: var(--text); }
+        .card .ttl .badge {
+            display: inline-block; margin-left: 8px;
+            padding: 1px 8px; border-radius: 10px; font-size: 0.7rem; font-weight: 600;
+            background: rgba(79,125,249,0.18); color: #7aadff;
+            font-family: var(--font-mono); vertical-align: middle;
+        }
+        .card .desc { color: var(--text-dim); font-size: 0.85rem; line-height: 1.4; }
+        .section-h {
+            margin: 28px 0 12px;
+            font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em;
+            color: var(--text-dim); font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <h1>Price Updater</h1>
+    <div class="sub">
+        Nightly price sync for sealed (TCGplayer scrape), graded slabs (Scrydex live comps),
+        and raw cards (scrydex_price_cache). All three auto-raise to follow the market and
+        flag drops for review.
+    </div>
+
+    <div class="section-h">Run dashboards</div>
+    <div class="grid">
+        <a class="card" href="/dashboard/sealed-runs">
+            <div class="ttl">Sealed Runs</div>
+            <div class="desc">Per-run review of dailyrunner.py's TCGplayer scrape. Per-row Apply / Dismiss / Block, plus the bulk-approve form for small charm-rounding drops.</div>
+        </a>
+        <a class="card" href="/dashboard/slab-runs">
+            <div class="ttl">Slab Runs</div>
+            <div class="desc">Per-slab Scrydex live comp comparison. Auto-raises in Shopify, flags overpriced slabs for human review.</div>
+        </a>
+        <a class="card" href="/dashboard/raw-runs">
+            <div class="ttl">Raw Runs</div>
+            <div class="desc">Cache-driven raw-card pricing grouped by print. Apply per-group, dismiss, or block.</div>
+        </a>
+    </div>
+
+    <div class="section-h">Tools</div>
+    <div class="grid">
+        <a class="card" href="/dashboard/big-movers">
+            <div class="ttl">Big Movers</div>
+            <div class="desc">Auto-applied price changes from each updater's latest run, filtered by |Δ%|. One-click Block on anything that looks like data corruption.</div>
+        </a>
+        <a class="card" href="/dashboard/raw-rebind">
+            <div class="ttl">Raw Rebind</div>
+            <div class="desc">Manual scrydex rebind for in-stock raw_cards the nightly updater can't price (variant or set name mismatch).</div>
+        </a>
+        <a class="card" href="/dashboard/slab-backfill">
+            <div class="ttl">Slab TCG Backfill</div>
+            <div class="desc">Match Shopify slab listings to TCGplayer IDs so the nightly slab updater can price them.</div>
+        </a>
+        <a class="card" href="/dashboard/price-blocks">
+            <div class="ttl">Price Blocks</div>
+            <div class="desc">Cards / variants the nightly updaters skip on every run. Permanent until removed here.</div>
+        </a>
+    </div>
+
+    <div class="section-h">Live + manual</div>
+    <div class="grid">
+        <a class="card" href="/dashboard/runlog">
+            <div class="ttl">Live Log</div>
+            <div class="desc">Streaming output of the most recent dailyrunner invocation.</div>
+        </a>
+        <a class="card" href="/inventory">
+            <div class="ttl">Inventory</div>
+            <div class="desc">Inventory reconciliation views (legacy sub-routes).</div>
+        </a>
+    </div>
+</body>
+</html>

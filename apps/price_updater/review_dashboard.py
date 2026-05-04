@@ -279,7 +279,10 @@ def requires_reddit_auth(f):
     return wrapper
 @app.route("/")
 def home():
-    return redirect("/dashboard/sealed-runs")
+    """Landing page is a static nav hub — works whether or not the
+    sealed_price_runs migration has been applied yet, and whether or not
+    a run has populated data."""
+    return render_template("home.html")
 
 @app.route("/dashboard/runlog")
 def runlog():
@@ -1349,24 +1352,35 @@ def trigger_sealed_updater():
 
 @app.route('/dashboard/sealed-runs')
 def sealed_runs_list():
-    """One row per nightly run with per-action counts."""
+    """One row per nightly run with per-action counts. If the migration
+    hasn't been applied yet (or no run has happened), still render the
+    page with nav + an empty/instructional state instead of 500ing."""
     db = _shared_db()
-    rows = db.query("""
-        SELECT run_id,
-               MIN(started_at)                                AS started_at,
-               COUNT(*)                                       AS total,
-               COUNT(*) FILTER (WHERE action = 'updated')     AS updated,
-               COUNT(*) FILTER (WHERE action = 'review')      AS review,
-               COUNT(*) FILTER (WHERE action = 'missing')     AS missing,
-               COUNT(*) FILTER (WHERE action = 'untouched')   AS untouched,
-               COUNT(*) FILTER (WHERE action = 'skip')        AS skipped,
-               COUNT(*) FILTER (WHERE action = 'error')       AS errors
-        FROM sealed_price_runs
-        GROUP BY run_id
-        ORDER BY started_at DESC
-        LIMIT 60
-    """)
-    return render_template("sealed_runs.html", runs=rows)
+    rows = []
+    table_missing = False
+    try:
+        rows = db.query("""
+            SELECT run_id,
+                   MIN(started_at)                                AS started_at,
+                   COUNT(*)                                       AS total,
+                   COUNT(*) FILTER (WHERE action = 'updated')     AS updated,
+                   COUNT(*) FILTER (WHERE action = 'review')      AS review,
+                   COUNT(*) FILTER (WHERE action = 'missing')     AS missing,
+                   COUNT(*) FILTER (WHERE action = 'untouched')   AS untouched,
+                   COUNT(*) FILTER (WHERE action = 'skip')        AS skipped,
+                   COUNT(*) FILTER (WHERE action = 'error')       AS errors
+            FROM sealed_price_runs
+            GROUP BY run_id
+            ORDER BY started_at DESC
+            LIMIT 60
+        """)
+    except Exception as e:
+        msg = str(e).lower()
+        if "sealed_price_runs" in msg and ("does not exist" in msg or "undefined" in msg):
+            table_missing = True
+        else:
+            raise
+    return render_template("sealed_runs.html", runs=rows, table_missing=table_missing)
 
 
 @app.route('/dashboard/sealed-runs/<run_id>')
@@ -1581,8 +1595,17 @@ def price_blocks_list():
     db = _shared_db()
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
     from price_auto_block import list_blocks
-    blocks = list_blocks(db)
-    return render_template("price_blocks.html", blocks=blocks)
+    blocks = []
+    table_missing = False
+    try:
+        blocks = list_blocks(db)
+    except Exception as e:
+        msg = str(e).lower()
+        if "price_auto_block" in msg and ("does not exist" in msg or "undefined" in msg):
+            table_missing = True
+        else:
+            raise
+    return render_template("price_blocks.html", blocks=blocks, table_missing=table_missing)
 
 
 # ── Big Movers ───────────────────────────────────────────────────────────
@@ -1590,6 +1613,28 @@ def price_blocks_list():
 # Single page showing the latest run from each updater filtered to
 # auto-applied rows whose |delta_pct| >= threshold. Quick eyeball check
 # for what moved overnight; one-click Block per row.
+
+def _safe_query_one(db, sql, params=()):
+    """Return None if the underlying table hasn't been created yet
+    instead of bubbling a 500 to the user."""
+    try:
+        return db.query_one(sql, params)
+    except Exception as e:
+        msg = str(e).lower()
+        if "does not exist" in msg or "undefined" in msg:
+            return None
+        raise
+
+
+def _safe_query(db, sql, params=()):
+    try:
+        return db.query(sql, params)
+    except Exception as e:
+        msg = str(e).lower()
+        if "does not exist" in msg or "undefined" in msg:
+            return []
+        raise
+
 
 @app.route('/dashboard/big-movers')
 def big_movers():
@@ -1601,17 +1646,17 @@ def big_movers():
     threshold = max(0.0, min(threshold, 500.0))
 
     # Latest run id per source
-    sealed_run = db.query_one(
+    sealed_run = _safe_query_one(db,
         "SELECT run_id, MIN(started_at) AS started_at FROM sealed_price_runs "
         "WHERE run_id = (SELECT run_id FROM sealed_price_runs "
         "                ORDER BY started_at DESC LIMIT 1) "
         "GROUP BY run_id")
-    slab_run = db.query_one(
+    slab_run = _safe_query_one(db,
         "SELECT run_id, MIN(started_at) AS started_at FROM slab_price_runs "
         "WHERE run_id = (SELECT run_id FROM slab_price_runs "
         "                ORDER BY started_at DESC LIMIT 1) "
         "GROUP BY run_id")
-    raw_run = db.query_one(
+    raw_run = _safe_query_one(db,
         "SELECT run_id, MIN(started_at) AS started_at FROM raw_card_price_runs "
         "WHERE run_id = (SELECT run_id FROM raw_card_price_runs "
         "                ORDER BY started_at DESC LIMIT 1) "
@@ -1619,7 +1664,7 @@ def big_movers():
 
     sealed_rows = []
     if sealed_run:
-        sealed_rows = db.query("""
+        sealed_rows = _safe_query(db, """
             SELECT id, title, sku, variant_id, old_price, new_price,
                    suggested_price, delta_pct, reason
             FROM sealed_price_runs
@@ -1630,7 +1675,7 @@ def big_movers():
 
     slab_rows = []
     if slab_run:
-        slab_rows = db.query("""
+        slab_rows = _safe_query(db, """
             SELECT id, title, sku, variant_gid, old_price, new_price,
                    suggested_price, delta_pct, reason
             FROM slab_price_runs
@@ -1641,7 +1686,7 @@ def big_movers():
 
     raw_rows = []
     if raw_run:
-        raw_rows = db.query("""
+        raw_rows = _safe_query(db, """
             SELECT id, raw_card_id, scrydex_id, tcgplayer_id, card_name,
                    set_name, card_number, variant, condition,
                    old_price, new_price, suggested_price, delta_pct, reason

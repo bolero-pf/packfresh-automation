@@ -54,7 +54,14 @@
         slab → variant_gid; sealed → variant_id.
     </div>
 
-    {% if not blocks %}
+    {% if table_missing %}
+        <div class="empty" style="text-align:left; padding: 24px;">
+            <strong style="color:#fbbf24;">Database migration not applied yet.</strong><br><br>
+            The <code>price_auto_block</code> table doesn't exist in this database.
+            Apply <code>apps/shared/020_price_auto_block.sql</code> to <code>$DATABASE_URL</code>,
+            then refresh this page.
+        </div>
+    {% elif not blocks %}
         <div class="empty">No active blocks. Use the Block button on any run-detail page to add one.</div>
     {% else %}
     <table>
