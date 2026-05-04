@@ -31,6 +31,7 @@ BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR.parent / "shared"))
 import db as shared_db
 from price_auto_block import load_blocks
+from price_rounding import charm_drop_auto_threshold as _drop_threshold_for
 
 
 _INSERT_RUN_SQL = """
@@ -595,6 +596,12 @@ def process_product(product, blocked: set | None = None):
 
     if new_price < current_price:
         shopify_qty = int(product.get("shopify_qty") or product.get("inventory_quantity") or 0)
+        drop_dollars = current_price - new_price
+        # Sealed competitive endings (.99/.75/.50/.25) hop by ≤ ~$1; under
+        # $10 by ≤ ~$0.50. Use the same shared threshold as raw so a $1.49
+        # → $0.99 drop (50%) auto-applies because it's only 50¢.
+        drop_threshold = _drop_threshold_for(new_price)
+        small_dollar_drop = drop_dollars <= drop_threshold
         if shopify_qty <= 0:
             print(f"  ⬇ OOS auto-update {product['title']}: ${current_price:.2f} → ${new_price:.2f} (qty=0)")
             update_variant_price(product["product_gid"], product["variant_id"], new_price)
@@ -610,13 +617,31 @@ def process_product(product, blocked: set | None = None):
                 "applied_price": new_price,
             })
             return "updated", product
+        elif small_dollar_drop:
+            # Charm-rounding noise — apply silently. Anything bigger still
+            # waits for a human in the review queue.
+            print(f"  ⬇ small-drop auto-update {product['title']}: ${current_price:.2f} → ${new_price:.2f} (${drop_dollars:.2f} ≤ ${drop_threshold:.2f})")
+            update_variant_price(product["product_gid"], product["variant_id"], new_price)
+            product.update({
+                "action": "updated",
+                "tcg_price": tcg_price,
+                "suggested_price": new_price,
+                "uploaded_price": new_price, "new_price": new_price,
+                "percent_diff": percent_diff,
+                "reason": f"auto-dropped ${drop_dollars:.2f} (within ${drop_threshold:.2f} charm tier)",
+                "apply_status": "applied",
+                "applied_at": datetime.now(timezone.utc),
+                "applied_price": new_price,
+            })
+            return "updated", product
         else:
             product.update({
                 "action": "review",
                 "tcg_price": tcg_price,
                 "suggested_price": new_price,
                 "percent_diff": percent_diff,
-                "reason": "Lower to stay near market (in stock — needs review)",
+                "reason": (f"Lower ${drop_dollars:.2f} (> ${drop_threshold:.2f} charm tier) "
+                           "— in stock, needs review"),
             })
             return "review", product
 

@@ -80,8 +80,9 @@
             <label for="bulk-thr">Bulk-approve drops with |Δ| ≤</label>
             <input type="number" id="bulk-thr" min="0" max="100" step="0.5" value="2">
             <label>%</label>
-            <button class="row-btn row-btn-apply" id="bulk-go">Approve all ({{ summary.pending_review or 0 }} pending)</button>
-            <span id="bulk-status" class="bulk-status"></span>
+            <button class="row-btn row-btn-apply" id="bulk-pct">Approve&nbsp;by&nbsp;%</button>
+            <button class="row-btn row-btn-apply" id="bulk-charm" title="Approve every drop within one charm-rounding tier (e.g. $1.49 → $0.99 = 50¢, sub-$10 tier). Ignores percent.">Approve&nbsp;charm-tier&nbsp;drops</button>
+            <span id="bulk-status" class="bulk-status">{{ summary.pending_review or 0 }} pending</span>
         </form>
     </div>
 
@@ -218,39 +219,51 @@
         else if (act === 'block') doBlock(tr);
     });
 
-    // Bulk approve all review rows below threshold.
-    document.getElementById('bulk-go').addEventListener('click', async function() {
-        const thrEl = document.getElementById('bulk-thr');
-        const thr = Number(thrEl.value);
-        if (!isFinite(thr) || thr < 0 || thr > 100) {
-            alert('Threshold must be a number 0-100');
-            return;
-        }
-        if (!confirm(`Approve every pending review row whose |delta_pct| ≤ ${thr}%?`)) return;
-        const btn = this;
+    async function runBulkApply(body, confirmMsg) {
+        if (!confirm(confirmMsg)) return;
         const status = document.getElementById('bulk-status');
-        btn.disabled = true;
+        const buttons = document.querySelectorAll('#bulk-form button');
+        buttons.forEach(b => b.disabled = true);
         status.className = 'bulk-status'; status.textContent = 'Applying…';
         try {
             const r = await fetch(`/dashboard/sealed-runs/${encodeURIComponent(RUN_ID)}/bulk-apply`, {
                 method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({threshold_pct: thr}),
+                body: JSON.stringify(body),
             });
             const d = await r.json();
             if (!r.ok) {
                 status.className = 'bulk-status err';
                 status.textContent = 'Error: ' + (d.error || r.statusText);
-                btn.disabled = false; return;
+                buttons.forEach(b => b.disabled = false); return;
             }
             status.className = 'bulk-status ok';
             status.textContent = `✓ ${d.applied} applied / ${d.failed} failed (of ${d.candidates} candidates) — reload to refresh table`;
-            // Auto-reload after 2s so the table reflects new statuses.
             setTimeout(() => window.location.reload(), 1800);
         } catch(err) {
             status.className = 'bulk-status err';
             status.textContent = 'Error: ' + err.message;
-            btn.disabled = false;
+            buttons.forEach(b => b.disabled = false);
         }
+    }
+
+    document.getElementById('bulk-pct').addEventListener('click', function() {
+        const thr = Number(document.getElementById('bulk-thr').value);
+        if (!isFinite(thr) || thr < 0 || thr > 100) {
+            alert('Threshold must be a number 0-100'); return;
+        }
+        runBulkApply(
+            {mode: 'pct', threshold_pct: thr},
+            `Approve every pending review row whose |delta_pct| ≤ ${thr}%?`,
+        );
+    });
+
+    document.getElementById('bulk-charm').addEventListener('click', function() {
+        runBulkApply(
+            {mode: 'charm_tier'},
+            'Approve every pending review drop that falls within one charm-rounding tier?\n\n' +
+            '(e.g. $1.49 → $0.99 = 50¢ on sub-$10, $14.99 → $13.99 = $1 on sub-$100, etc. ' +
+            'Charm-tier drops are rounding noise, not real market moves.)',
+        );
     });
     </script>
 </body>

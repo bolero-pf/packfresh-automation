@@ -44,3 +44,31 @@ def charm_ceil_raw(price) -> float:
     if candidate < p:
         candidate = next_step + increment - 0.01
     return round(candidate, 2)
+
+
+def charm_drop_auto_threshold(price) -> float:
+    """Maximum dollar drop the nightly updaters will auto-apply without
+    flagging for review.
+
+    Pinned to the charm-tier increment for the suggested price — within
+    one charm hop a "drop" is just rounding noise, not a real market
+    move. Beyond that, a human should look.
+
+    Mirrors charm_ceil_raw's tier boundaries:
+      <  $10    -> $0.50  ($1.49 -> $0.99 = 50¢)
+      <  $100   -> $1.00
+      <  $500   -> $5.00
+      <  $2000  -> $25.00
+      >= $2000  -> $50.00
+    """
+    try:
+        p = float(price or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if p <= 0:
+        return 0.0
+    if p < 10:    return 0.50
+    if p < 100:   return 1.00
+    if p < 500:   return 5.00
+    if p < 2000:  return 25.00
+    return 50.00

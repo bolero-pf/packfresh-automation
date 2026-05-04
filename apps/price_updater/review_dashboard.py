@@ -1490,36 +1490,72 @@ def sealed_run_dismiss_row(row_id):
 
 @app.route('/dashboard/sealed-runs/<run_id>/bulk-apply', methods=["POST"])
 def sealed_run_bulk_apply(run_id):
-    """Approve every pending review row whose |delta_pct| <= threshold_pct.
-    Body: {threshold_pct: 2}. Default 2%. The headline use case: a run
-    surfaces 200 review rows that are all 1-2% drops from charm-rounding
-    noise — Sean clicks Approve once and they all go.
+    """Approve every pending review row matching the bulk filter.
+    Body modes:
+      {mode: 'pct', threshold_pct: 2}     -> |delta_pct| <= 2 (default)
+      {mode: 'charm_tier'}                -> drop_dollars <= charm tier
+                                              for that row's suggested price
+
+    The 'charm_tier' mode mirrors the per-product policy in
+    process_product: a $1.49 -> $0.99 drop is 33% but only 50¢, which
+    is just charm-rounding noise — auto-apply, don't flag.
 
     Each Shopify mutation runs sequentially (no fan-out) so one failure
     doesn't poison the rest; per-row results are reported back."""
     from flask import jsonify
     db = _shared_db()
     from dailyrunner import update_variant_price
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    from price_rounding import charm_drop_auto_threshold
 
     body = request.get_json(silent=True) or {}
-    try:
-        threshold = float(body.get("threshold_pct") if body.get("threshold_pct") is not None else 2.0)
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "threshold_pct must be numeric"}), 400
-    if threshold < 0 or threshold > 100:
-        return jsonify({"ok": False, "error": "threshold_pct must be 0-100"}), 400
+    mode = (body.get("mode") or "pct").strip()
 
-    rows = db.query("""
-        SELECT id, product_gid, variant_id, suggested_price, title, delta_pct
-        FROM sealed_price_runs
-        WHERE run_id = %s
-          AND action = 'review'
-          AND apply_status = 'pending'
-          AND suggested_price IS NOT NULL
-          AND product_gid IS NOT NULL
-          AND variant_id IS NOT NULL
-          AND ABS(COALESCE(delta_pct, 0)) <= %s
-    """, (run_id, threshold))
+    if mode not in ("pct", "charm_tier"):
+        return jsonify({"ok": False, "error": "mode must be 'pct' or 'charm_tier'"}), 400
+
+    if mode == "pct":
+        try:
+            threshold = float(body.get("threshold_pct") if body.get("threshold_pct") is not None else 2.0)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "threshold_pct must be numeric"}), 400
+        if threshold < 0 or threshold > 100:
+            return jsonify({"ok": False, "error": "threshold_pct must be 0-100"}), 400
+        rows = db.query("""
+            SELECT id, product_gid, variant_id, suggested_price, title, delta_pct, old_price
+            FROM sealed_price_runs
+            WHERE run_id = %s
+              AND action = 'review'
+              AND apply_status = 'pending'
+              AND suggested_price IS NOT NULL
+              AND product_gid IS NOT NULL
+              AND variant_id IS NOT NULL
+              AND ABS(COALESCE(delta_pct, 0)) <= %s
+        """, (run_id, threshold))
+        filter_label = f"|Δ%| ≤ {threshold}"
+    else:
+        # Pull every pending review row, then filter in Python by per-row tier.
+        candidates = db.query("""
+            SELECT id, product_gid, variant_id, suggested_price, title, delta_pct, old_price
+            FROM sealed_price_runs
+            WHERE run_id = %s
+              AND action = 'review'
+              AND apply_status = 'pending'
+              AND suggested_price IS NOT NULL
+              AND old_price IS NOT NULL
+              AND product_gid IS NOT NULL
+              AND variant_id IS NOT NULL
+        """, (run_id,))
+        rows = []
+        for r in candidates:
+            old = float(r["old_price"])
+            new = float(r["suggested_price"])
+            if new >= old:
+                continue  # not a drop — should have been auto-applied at run time
+            drop_dollars = old - new
+            if drop_dollars <= charm_drop_auto_threshold(new):
+                rows.append(r)
+        filter_label = "drop ≤ charm tier"
 
     applied, failed = [], []
     for r in rows:
@@ -1537,9 +1573,9 @@ def sealed_run_bulk_apply(run_id):
             failed.append({"id": r["id"], "title": r["title"], "error": str(e)})
 
     return jsonify({
-        "ok": True, "threshold_pct": threshold,
+        "ok": True, "mode": mode, "filter": filter_label,
         "candidates": len(rows), "applied": len(applied), "failed": len(failed),
-        "failed_rows": failed[:20],  # cap noise in the response
+        "failed_rows": failed[:20],
     })
 
 
