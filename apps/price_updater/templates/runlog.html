@@ -8,7 +8,23 @@
     <style>
         body { padding: 24px; }
         h1 { font-size: 1.3rem; margin-bottom: 12px; }
-        .actions { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+        .actions { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+        .running-bar {
+            display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+            padding: 8px 12px; margin-bottom: 12px;
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 8px; font-size: 0.85rem;
+        }
+        .pill { display: inline-flex; gap: 6px; align-items: center; padding: 3px 10px; border-radius: 12px; font-weight: 600; font-size: 0.78rem; }
+        .pill-live { background: rgba(34,197,94,0.18); color: #4ade80; }
+        .pill-idle { background: var(--surface-2); color: var(--text-dim); }
+        .pill-pid { font-family: var(--font-mono); color: var(--text-dim); font-weight: 400; font-size: 0.74rem; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 0 0 rgba(34,197,94,0.7); animation: pulse 1.4s infinite; }
+        @keyframes pulse {
+            0%   { box-shadow: 0 0 0 0 rgba(34,197,94,0.7); }
+            70%  { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+            100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+        }
         #log { white-space: pre-wrap; background: #0a0a0a; color: #4ade80; font-family: var(--font-mono); padding: 1em; height: 70vh; overflow-y: scroll; border-radius: 8px; border: 1px solid var(--border); }
     </style>
 </head>
@@ -25,15 +41,69 @@
 
     <h1>Live Script Log</h1>
 
+    <div class="running-bar">
+        <strong style="font-size:0.78rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em;">Currently running:</strong>
+        <span id="status-sealed"  class="pill pill-idle">sealed: idle</span>
+        <span id="status-slab"    class="pill pill-idle">slab: idle</span>
+        <span id="status-raw"     class="pill pill-idle">raw: idle</span>
+        <span id="status-scrydex" class="pill pill-idle">scrydex: idle</span>
+    </div>
+
     <div class="actions">
-        <button class="btn btn-primary"   data-trigger="/run-scrydex-sync">▶ Run Scrydex sync</button>
-        <button class="btn btn-secondary" data-trigger="/run-slab-updater">▶ Run slab updater</button>
-        <button class="btn btn-secondary" data-trigger="/run-raw-updater">▶ Run raw updater</button>
-        <button class="btn btn-secondary" data-trigger="/price_update">▶ Run price update</button>
+        <button class="btn btn-primary"   data-trigger="/run-scrydex-sync"  data-key="scrydex">▶ Run Scrydex sync</button>
+        <button class="btn btn-secondary" data-trigger="/run-slab-updater"  data-key="slab">▶ Run slab updater</button>
+        <button class="btn btn-secondary" data-trigger="/run-raw-updater"   data-key="raw">▶ Run raw updater</button>
+        <button class="btn btn-secondary" data-trigger="/run-sealed-updater" data-key="sealed">▶ Run sealed updater</button>
         <span id="trigger-status" style="font-family:var(--font-mono); font-size:0.85rem; color:var(--text-dim);"></span>
     </div>
 
     <script>
+    const STATUS_PILLS = {
+        sealed: document.getElementById('status-sealed'),
+        slab:   document.getElementById('status-slab'),
+        raw:    document.getElementById('status-raw'),
+        scrydex:document.getElementById('status-scrydex'),
+    };
+
+    function setPill(key, running, pid) {
+        const el = STATUS_PILLS[key];
+        if (!el) return;
+        if (running) {
+            el.className = 'pill pill-live';
+            el.innerHTML = `<span class="dot"></span> ${key}: running` +
+                (pid && pid > 0 ? ` <span class="pill-pid">pid ${pid}</span>` : '');
+        } else {
+            el.className = 'pill pill-idle';
+            el.textContent = `${key}: idle`;
+        }
+    }
+
+    async function pollStatus() {
+        try {
+            const r = await fetch('/api/runner-status', {cache: 'no-store'});
+            const d = await r.json();
+            const running = d.running || {};
+            for (const k of Object.keys(STATUS_PILLS)) {
+                setPill(k, k in running, running[k]);
+            }
+            // Reflect runner state on buttons too — disable "Run X" while X is live.
+            document.querySelectorAll('[data-trigger]').forEach(btn => {
+                const k = btn.dataset.key;
+                if (k in running) {
+                    btn.disabled = true;
+                    if (!btn.dataset._origText) btn.dataset._origText = btn.textContent;
+                    btn.textContent = `… ${k} running`;
+                } else if (btn.dataset._origText) {
+                    btn.disabled = false;
+                    btn.textContent = btn.dataset._origText;
+                    delete btn.dataset._origText;
+                }
+            });
+        } catch (_) { /* ignore — we'll try again next tick */ }
+    }
+    pollStatus();
+    setInterval(pollStatus, 3000);
+
     document.querySelectorAll('[data-trigger]').forEach(btn => {
         btn.addEventListener('click', async () => {
             const status = document.getElementById('trigger-status');
@@ -45,7 +115,10 @@
                     method:'POST', headers:{'Content-Type':'application/json'}, body:'{}',
                 });
                 const d = await r.json().catch(() => ({}));
-                if (!r.ok) {
+                if (r.status === 409) {
+                    status.textContent = '⚠ ' + (d.error || 'already running');
+                    status.style.color = '#fbbf24';
+                } else if (!r.ok) {
                     status.textContent = '✗ ' + (d.error || r.statusText);
                     status.style.color = '#f87171';
                 } else {
@@ -56,7 +129,7 @@
                 status.textContent = '✗ ' + err.message;
                 status.style.color = '#f87171';
             } finally {
-                setTimeout(() => { btn.disabled = false; }, 1500);
+                pollStatus();
             }
         });
     });
@@ -66,7 +139,7 @@
 
     <script>
         const logEl = document.getElementById("log");
-        const eventSource = new EventSource("/run-live/standard");
+        const eventSource = new EventSource("/stream-log");
 
         eventSource.onmessage = function(event) {
             logEl.textContent += event.data + "\n";
@@ -74,7 +147,7 @@
         };
 
         eventSource.onerror = function(err) {
-            logEl.textContent += "\n[Error connecting to log stream]";
+            logEl.textContent += "\n[Error connecting to log stream — reload to retry]";
             eventSource.close();
         };
     </script>

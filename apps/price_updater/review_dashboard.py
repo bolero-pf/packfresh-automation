@@ -57,38 +57,96 @@ def _shared_db():
     return shared_db
 
 
-@app.post("/price_update")
-def price_update():
-    """Trigger nightly price sync (dailyrunner.py) in background."""
-    if not _authorized_trigger():
-        from flask import jsonify
-        return jsonify({"error": "Unauthorized"}), 401
-    try:
-        SCRIPT = ROOT / "dailyrunner.py"
-        LOG = ROOT / "run_output.log"
+# ── Runner launcher ──────────────────────────────────────────────────────
+#
+# Every "Run X now" button used to either spawn a subprocess (sealed) OR
+# kick off threading.Thread(target=...) (slab/raw/scrydex). Two problems
+# with the threading path: (a) the runners' print() output went to the
+# Flask process's stdout — Railway logs but NOT RUN_LOG — so /dashboard/
+# runlog only ever showed sealed output, and (b) clicking "Run X" while
+# X was already running would happily start a second copy in parallel,
+# burning Scrydex credits and racing on Shopify writes.
+#
+# The launcher below subprocesses every runner (Popen + line-buffered
+# tee into RUN_LOG) and holds a per-runner-key entry in _RUNNER_PIDS for
+# the duration of the run. Re-clicks while a runner is live get a 409.
 
-        def launch():
-            LOG.parent.mkdir(parents=True, exist_ok=True)
-            with open(LOG, "a", buffering=1, encoding="utf-8") as f:
-                f.write(f"\n=== RUN {__import__('datetime').datetime.now().isoformat()} ===\n")
-                p = subprocess.Popen(
-                    [sys.executable, "-u", str(SCRIPT)],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    cwd=str(ROOT), text=True, bufsize=1,
-                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
-                )
+_RUNNER_PIDS: dict[str, int] = {}
+_RUNNER_LOCK = threading.Lock()
+
+
+def _runner_is_alive(key: str) -> bool:
+    """Return True iff a previous launch for this key is still running.
+    We don't poll Popen.poll() here because we don't keep the Popen
+    handle around — the launcher thread cleans up _RUNNER_PIDS itself."""
+    return key in _RUNNER_PIDS
+
+
+def _launch_runner(*, key: str, label: str, cmd: list[str]):
+    """Spawn `cmd` as a subprocess, tee stdout/stderr to RUN_LOG, and
+    track its PID under `key`. Idempotent: returns False if already
+    running. Always returns True if a new run was kicked off."""
+    with _RUNNER_LOCK:
+        if key in _RUNNER_PIDS:
+            return False
+        _RUNNER_PIDS[key] = -1  # placeholder so a racing caller sees us busy
+
+    def _go():
+        RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(RUN_LOG, "a", buffering=1, encoding="utf-8") as f:
+                ts = __import__('datetime').datetime.now().isoformat(timespec='seconds')
+                f.write(f"\n=== {label} START {ts} ===\n")
+                try:
+                    p = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        cwd=str(ROOT), text=True, bufsize=1,
+                        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                    )
+                except Exception as e:
+                    f.write(f"!!! {label} failed to spawn: {e}\n")
+                    return
+                with _RUNNER_LOCK:
+                    _RUNNER_PIDS[key] = p.pid
                 for line in p.stdout:
                     print(line, end="")
                     f.write(line)
                 p.wait()
-                f.write(f"=== EXIT code={p.returncode} at {__import__('datetime').datetime.now().isoformat()} ===\n")
+                ts2 = __import__('datetime').datetime.now().isoformat(timespec='seconds')
+                f.write(f"=== {label} EXIT code={p.returncode} {ts2} ===\n")
+        finally:
+            with _RUNNER_LOCK:
+                _RUNNER_PIDS.pop(key, None)
 
-        threading.Thread(target=launch, daemon=True).start()
+    threading.Thread(target=_go, daemon=True).start()
+    return True
+
+
+@app.get("/api/runner-status")
+def api_runner_status():
+    """Snapshot of which runners are currently live. Cheap to poll."""
+    from flask import jsonify
+    with _RUNNER_LOCK:
+        snapshot = dict(_RUNNER_PIDS)
+    return jsonify({"running": snapshot})
+
+
+@app.post("/price_update")
+def price_update():
+    """Trigger nightly sealed price sync (dailyrunner.py) in background.
+    Idempotent — re-firing while a sealed run is live returns 409."""
+    if not _authorized_trigger():
         from flask import jsonify
-        return jsonify({"ok": True, "started": True}), 200
-    except Exception as e:
-        from flask import jsonify
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"error": "Unauthorized"}), 401
+    started = _launch_runner(
+        key="sealed", label="SEALED",
+        cmd=[sys.executable, "-u", str(ROOT / "dailyrunner.py")],
+    )
+    from flask import jsonify
+    if not started:
+        return jsonify({"ok": False, "error": "sealed updater is already running"}), 409
+    return jsonify({"ok": True, "started": True}), 200
 
 FEED_COLUMNS = [
     "id",
@@ -140,127 +198,55 @@ FEED_COLUMNS = [
 
 
 def call_dailyrunner():
-    """In-process cron: spawn dailyrunner.py as a subprocess and tee output
-    to RUN_LOG (same as the manual /run-sealed-updater route uses)."""
-    try:
-        SCRIPT = ROOT / "dailyrunner.py"
-        RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(RUN_LOG, "a", buffering=1, encoding="utf-8") as f:
-            f.write(f"\n=== CRON RUN {__import__('datetime').datetime.now().isoformat()} ===\n")
-            p = subprocess.Popen(
-                [sys.executable, "-u", str(SCRIPT)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                cwd=str(ROOT), text=True, bufsize=1,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            )
-            for line in p.stdout:
-                print(line, end=""); f.write(line)
-            p.wait()
-            f.write(f"=== EXIT code={p.returncode} at {__import__('datetime').datetime.now().isoformat()} ===\n")
-    except Exception as e:
-        print(f"❌ Cron call_dailyrunner failed: {e}")
+    """APScheduler entrypoint for the nightly sealed run. Routes through
+    the same launcher as the manual button so it gets the same lock +
+    log tee, and a manually-triggered run still in progress at cron
+    time is left alone (logged as skipped) instead of doubled up."""
+    started = _launch_runner(
+        key="sealed", label="SEALED CRON",
+        cmd=[sys.executable, "-u", str(ROOT / "dailyrunner.py")],
+    )
+    if not started:
+        print("[cron] sealed updater already running — skipping cron fire")
 
 
-def run_scrydex_sync():
-    """Run the Scrydex nightly cache sync for all configured games."""
-    try:
-        scrydex_key = os.environ.get("SCRYDEX_API_KEY", "")
-        scrydex_team = os.environ.get("SCRYDEX_TEAM_ID", "")
-        if not scrydex_key or not scrydex_team:
-            print("⏭ Scrydex sync skipped — SCRYDEX_API_KEY/SCRYDEX_TEAM_ID not set")
-            return
-
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
-        from scrydex_client import ScrydexClient
-        from scrydex_nightly import sync_expansion
-        import db as shared_db
-
-        shared_db.init_pool()
-
-        # Sync all configured games
-        games = [g.strip() for g in os.environ.get("SCRYDEX_GAMES", "pokemon").split(",") if g.strip()]
-        import time as _time
-        grand_start = _time.time()
-        grand_totals = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0}
-
-        for game in games:
-            client = ScrydexClient(scrydex_key, scrydex_team, db=shared_db, game=game)
-
-            rows = shared_db.query(
-                "SELECT expansion_id FROM scrydex_sync_log WHERE game = %s AND active = TRUE", (game,))
-            expansion_ids = [r["expansion_id"] for r in rows]
-            if not expansion_ids:
-                print(f"⏭ {game}: no active expansions in sync_log")
-                continue
-
-            print(f"🔄 {game}: {len(expansion_ids)} active expansions")
-            totals = {"cards": 0, "sealed": 0, "prices": 0, "credits": 0}
-            failures = []
-            t_start = _time.time()
-
-            for i, eid in enumerate(expansion_ids):
-                try:
-                    stats = sync_expansion(client, eid, shared_db)
-                    for k in totals:
-                        totals[k] += stats.get(k, 0)
-                    if (i + 1) % 20 == 0:
-                        print(f"  ... {i+1}/{len(expansion_ids)} done ({totals['credits']} credits)")
-                except Exception as e:
-                    print(f"  ❌ {game}/{eid}: {e}")
-                    failures.append((eid, str(e)))
-                _time.sleep(0.05)
-
-            # Retry failures
-            if failures:
-                print(f"  🔁 Retrying {len(failures)} failed expansions...")
-                for eid, original_error in failures:
-                    try:
-                        stats = sync_expansion(client, eid, shared_db)
-                        for k in totals:
-                            totals[k] += stats.get(k, 0)
-                        print(f"    ✅ Retry OK: {game}/{eid}")
-                    except Exception as e:
-                        print(f"    ❌ Still failed: {game}/{eid}: {e}")
-                    _time.sleep(0.1)
-
-            elapsed = int(_time.time() - t_start)
-            print(f"✅ {game} done in {elapsed}s — {totals['cards']} cards, "
-                  f"{totals['sealed']} sealed, {totals['credits']} credits")
-            for k in grand_totals:
-                grand_totals[k] += totals[k]
-
-        grand_elapsed = int(_time.time() - grand_start)
-        print(f"✅ All games done in {grand_elapsed}s — {grand_totals['credits']} total credits")
-    except Exception as e:
-        print(f"❌ Scrydex sync failed: {e}")
-        import traceback
-        traceback.print_exc()
+def _cron_scrydex_sync():
+    started = _launch_runner(
+        key="scrydex", label="SCRYDEX CRON",
+        cmd=[sys.executable, "-u", str(ROOT / "run_scrydex_sync.py")],
+    )
+    if not started:
+        print("[cron] scrydex sync already running — skipping cron fire")
 
 
-def run_slab_updater():
-    """Nightly slab price sync — runs after Scrydex sync so cache is fresh.
+def _cron_slab_updater():
+    started = _launch_runner(
+        key="slab", label="SLAB CRON",
+        cmd=[sys.executable, "-u", str(ROOT / "slab_updater.py")],
+    )
+    if not started:
+        print("[cron] slab updater already running — skipping cron fire")
 
-    apply=True so undervalued slabs auto-raise. Overpriced slabs still flag
-    for human review at /dashboard/slab-runs (we never auto-drop)."""
-    try:
-        from slab_updater import run as slab_run
-        results = slab_run(apply=True, csv_path="slab_updates.csv")
-        adjusted = sum(1 for r in results if r.get("action") == "adjusted")
-        flagged  = sum(1 for r in results if "flag" in (r.get("action") or ""))
-        print(f"✅ Slab updater done: {len(results)} slabs, {adjusted} adjusted, {flagged} flagged")
-    except Exception as e:
-        print(f"❌ Slab updater failed: {e}")
-        import traceback
-        traceback.print_exc()
+
+def _cron_raw_updater():
+    started = _launch_runner(
+        key="raw", label="RAW CRON",
+        cmd=[sys.executable, "-u", str(ROOT / "raw_card_updater.py")],
+    )
+    if not started:
+        print("[cron] raw updater already running — skipping cron fire")
 
 
 if os.environ.get("ENABLE_CRON", "").lower() == "true":
     scheduler = BackgroundScheduler()
-    scheduler.add_job(call_dailyrunner, "cron", hour=3)  # UTC
-    scheduler.add_job(run_scrydex_sync, "cron", hour=4)  # UTC — after dailyrunner + analytics snapshot
-    scheduler.add_job(run_slab_updater, "cron", hour=5)  # UTC — after Scrydex sync
+    scheduler.add_job(call_dailyrunner,    "cron", hour=3)  # UTC
+    scheduler.add_job(_cron_scrydex_sync,  "cron", hour=4)  # after dailyrunner
+    scheduler.add_job(_cron_slab_updater,  "cron", hour=5)  # after Scrydex sync
+    # Raw card updater is fired by an external Shopify Flow today, but a
+    # local cron entry would slot in here at hour=6 if you ever wanted to
+    # decouple it from Flow.
     scheduler.start()
-    print("✅ Scheduler started — dailyrunner 3AM, Scrydex 4AM, slab updater 5AM UTC")
+    print("✅ Scheduler started — sealed 3AM, Scrydex 4AM, slabs 5AM UTC")
 
 def check_reddit_auth(username, password):
     return username == REDDIT_FEED_USER and password == REDDIT_FEED_PASS
@@ -291,11 +277,19 @@ def runlog():
 
 @app.route('/run-scrydex-sync', methods=["GET", "POST"])
 def trigger_scrydex_sync():
-    """Manually trigger Scrydex cache sync."""
+    """Manually trigger Scrydex cache sync. Subprocess so output streams
+    into RUN_LOG (visible at /dashboard/runlog). 409 if already running."""
     from flask import jsonify
     if not _authorized_trigger():
         return jsonify({"error": "Unauthorized"}), 401
-    threading.Thread(target=run_scrydex_sync, daemon=True).start()
+    started = _launch_runner(
+        key="scrydex", label="SCRYDEX",
+        cmd=[sys.executable, "-u", str(ROOT / "run_scrydex_sync.py")],
+    )
+    if not started:
+        if request.method == "GET":
+            return redirect("/dashboard/runlog?msg=already-running")
+        return jsonify({"ok": False, "error": "scrydex sync is already running"}), 409
     if request.method == "GET":
         return redirect("/dashboard/runlog")
     return jsonify({"ok": True, "started": True}), 200
@@ -303,13 +297,19 @@ def trigger_scrydex_sync():
 
 @app.route('/run-slab-updater', methods=["GET", "POST"])
 def trigger_slab_updater():
-    """Manually trigger the graded slab price updater. Always runs in apply
-    mode — it auto-adjusts overpriced in-stock slabs and persists every row
-    (adjusted, flagged, skipped) to slab_price_runs for review."""
+    """Manually trigger the graded slab price updater. Subprocess so output
+    streams into RUN_LOG. 409 if already running."""
     from flask import jsonify
     if not _authorized_trigger():
         return jsonify({"error": "Unauthorized"}), 401
-    threading.Thread(target=run_slab_updater, daemon=True).start()
+    started = _launch_runner(
+        key="slab", label="SLAB",
+        cmd=[sys.executable, "-u", str(ROOT / "slab_updater.py")],
+    )
+    if not started:
+        if request.method == "GET":
+            return redirect("/dashboard/slab-runs?msg=already-running")
+        return jsonify({"ok": False, "error": "slab updater is already running"}), 409
     if request.method == "GET":
         return redirect("/dashboard/slab-runs")
     return jsonify({"ok": True, "started": True}), 200
@@ -619,25 +619,20 @@ def slab_run_set_tcg(row_id):
 
 @app.route('/run-raw-updater', methods=["GET", "POST"])
 def trigger_raw_updater():
-    """Manually trigger the raw card price updater.
-    Always runs in apply_auto=True mode — small drifts auto-apply, larger
-    deltas land in /dashboard/raw-runs as flags for human review.
-    Designed to be hit nightly from a Shopify Flow."""
+    """Manually trigger the raw card price updater. Subprocess so output
+    streams into RUN_LOG (visible at /dashboard/runlog). 409 if already
+    running. Designed to be hit nightly from a Shopify Flow."""
     from flask import jsonify
     if not _authorized_trigger():
         return jsonify({"error": "Unauthorized"}), 401
-    def _go():
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        try:
-            from raw_card_updater import run as raw_run
-            import db as shared_db
-            shared_db.init_pool()
-            raw_run(apply_auto=True, db_module=shared_db)
-        except Exception as e:
-            print(f"❌ raw_card_updater failed: {e}")
-            import traceback; traceback.print_exc()
-    threading.Thread(target=_go, daemon=True).start()
+    started = _launch_runner(
+        key="raw", label="RAW",
+        cmd=[sys.executable, "-u", str(ROOT / "raw_card_updater.py")],
+    )
+    if not started:
+        if request.method == "GET":
+            return redirect("/dashboard/raw-runs?msg=already-running")
+        return jsonify({"ok": False, "error": "raw updater is already running"}), 409
     if request.method == "GET":
         return redirect("/dashboard/raw-runs")
     return jsonify({"ok": True, "started": True}), 200
@@ -1213,15 +1208,21 @@ def slab_run_dismiss_row(row_id):
 
 @app.route('/stream-log')
 def stream_log():
+    """SSE tail of RUN_LOG. Tolerates the file not existing yet (fresh
+    deploy) by creating it before tailing — without this the EventSource
+    on /dashboard/runlog would error out before any runner has fired."""
     def generate():
-        with open(RUN_LOG, "r") as f:
-            f.seek(0, 2)  # Go to end of file
+        RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if not RUN_LOG.exists():
+            RUN_LOG.touch()
+        with open(RUN_LOG, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)  # tail mode — start at current end of file
             while True:
                 line = f.readline()
                 if not line:
                     time.sleep(0.25)
                     continue
-                yield f"data: {line.strip()}\n\n"
+                yield f"data: {line.rstrip()}\n\n"
     return Response(generate(), mimetype="text/event-stream")
 
 def map_variant_to_row(product, variant):
@@ -1322,30 +1323,19 @@ def reddit_feed():
 
 @app.route('/run-sealed-updater', methods=["GET", "POST"])
 def trigger_sealed_updater():
-    """Manually kick off dailyrunner.py from the dashboard. Same launch
-    machinery as /price_update; this route is JWT-gated for human owners."""
+    """Manually kick off dailyrunner.py from the dashboard. Same launcher
+    as /price_update; this route is JWT-gated for human owners."""
     from flask import jsonify
     if not _authorized_trigger():
         return jsonify({"error": "Unauthorized"}), 401
-
-    SCRIPT = ROOT / "dailyrunner.py"
-
-    def launch():
-        RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(RUN_LOG, "a", buffering=1, encoding="utf-8") as f:
-            f.write(f"\n=== RUN {__import__('datetime').datetime.now().isoformat()} ===\n")
-            p = subprocess.Popen(
-                [sys.executable, "-u", str(SCRIPT)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                cwd=str(ROOT), text=True, bufsize=1,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            )
-            for line in p.stdout:
-                print(line, end=""); f.write(line)
-            p.wait()
-            f.write(f"=== EXIT code={p.returncode} at {__import__('datetime').datetime.now().isoformat()} ===\n")
-
-    threading.Thread(target=launch, daemon=True).start()
+    started = _launch_runner(
+        key="sealed", label="SEALED",
+        cmd=[sys.executable, "-u", str(ROOT / "dailyrunner.py")],
+    )
+    if not started:
+        if request.method == "GET":
+            return redirect("/dashboard/sealed-runs?msg=already-running")
+        return jsonify({"ok": False, "error": "sealed updater is already running"}), 409
     if request.method == "GET":
         return redirect("/dashboard/sealed-runs")
     return jsonify({"ok": True, "started": True}), 200

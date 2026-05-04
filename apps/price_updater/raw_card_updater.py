@@ -388,3 +388,24 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
         f"skip={stats['skip']} error={stats['error']}"
     )
     return stats
+
+
+if __name__ == "__main__":
+    # Subprocess entrypoint so review_dashboard.py can launch this as a
+    # separate process (output goes to stdout, parent tees into RUN_LOG).
+    import argparse as _argparse
+    from dotenv import load_dotenv as _load_dotenv
+
+    _load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+
+    p = _argparse.ArgumentParser(description="Nightly raw card price updater")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Don't write raw_cards.current_price (default: apply auto-raises)")
+    args = p.parse_args()
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
+    import db as _db
+    _db.init_pool()
+    run(apply_auto=not args.dry_run, db_module=_db)
