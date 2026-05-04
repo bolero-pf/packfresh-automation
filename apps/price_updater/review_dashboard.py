@@ -705,6 +705,7 @@ def raw_run_detail(run_id):
         WITH base AS (
             SELECT r.id, r.raw_card_id, r.barcode, r.card_name, r.set_name,
                    r.card_number, r.condition, r.variant, r.cost_basis,
+                   r.tcgplayer_id, r.scrydex_id,
                    r.old_price, r.new_price, r.suggested_price,
                    r.cache_market, r.cache_low, r.delta_pct,
                    r.action, r.reason, r.apply_status, r.applied_at,
