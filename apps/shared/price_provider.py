@@ -151,7 +151,8 @@ class PriceProvider:
             )
         return self._stamp(result, self._primary_source)
 
-    def search_cards(self, query, *, set_name=None, limit=8, all_games=True):
+    def search_cards(self, query, *, set_name=None, limit=8, all_games=True,
+                     cache_only=False):
         """Browse-style card search for any UI that lets an operator pick a
         printing+variant. Cache first (multi-token across name / card_number /
         printed_number / expansion_id / expansion_name — JP sets work because
@@ -159,6 +160,12 @@ class PriceProvider:
         cache is empty. Each result row carries a ``market_price`` field
         (NM-condition price, or ``prices.market`` fallback, or 0) so chip
         pickers can render a price without a second lookup.
+
+        ``cache_only=True`` skips the live fallback — used by price_updater
+        raw-rebind, which can only bind to printings that are already in the
+        Scrydex cache (the rebind writes scrydex_id; PPT can't supply one,
+        and PPT has no JP cards anyway). Also avoids surfacing PPT 401s on
+        services that don't have PPT_API_KEY set.
 
         Single source of truth — intake (/api/search/cards), ingestion, and
         price_updater (raw-rebind) all go through this. Don't reimplement the
@@ -173,7 +180,7 @@ class PriceProvider:
             except Exception as e:
                 logger.warning(f"Cache card search failed: {e}")
                 results = []
-        if not results:
+        if not results and not cache_only:
             try:
                 live = self.primary.search_cards(
                     query, set_name=set_name, limit=limit,

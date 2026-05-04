@@ -1091,7 +1091,12 @@ def api_raw_rebind_search():
         return jsonify({"ok": False, "error": "query required"}), 400
 
     try:
-        results = _pricing().search_cards(q, limit=20, all_games=True)
+        # cache_only — these are cards that already failed auto-link, and a
+        # rebind can only point at a scrydex_id that already exists in the
+        # cache. The live PPT fallback would never help (PPT has no JP cards
+        # and no scrydex_ids) and would surface 401s on services without
+        # PPT_API_KEY.
+        results = _pricing().search_cards(q, limit=20, all_games=True, cache_only=True)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 502
     return jsonify({"ok": True, "results": results or []})

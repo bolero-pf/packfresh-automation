@@ -196,21 +196,24 @@
                 showToast('data-ids parse failed: ' + e.message, 'err');
                 return;
             }
-            // Seed the freeform search with name + set code/name + number — the
-            // shared cache search is multi-token so it'll find the printing
-            // even if the original raw_card binding was wrong.
+            // Seed the freeform search with the broken card's data as a
+            // *starting point* for the operator to edit — but DON'T auto-run
+            // the search. These are cards that already failed auto-link, so
+            // the seeded query is the same string that didn't match anything
+            // overnight (e.g. JP romanizations like "Blaine's Arcanine
+            // Challenge from the Darkness 059"). The operator usually knows
+            // the English name or set code that will hit; let them type it.
             const seed = [tr.dataset.name, tr.dataset.set, tr.dataset.number]
                 .map(s => (s || '').trim()).filter(Boolean).join(' ');
             qText.value = seed;
             modalTitle.textContent =
                 `Find match: ${tr.dataset.name} — ${tr.dataset.set} #${tr.dataset.number}`;
-            results.innerHTML = '';
+            results.innerHTML = '<div class="mono" style="color:var(--text-dim);">Edit the query above and press Search (or Enter).</div>';
             resultsEmpty.style.display = 'none';
             applyStatus.textContent = '';
             modal.classList.add('show');
             qText.focus();
             qText.select();
-            doSearch();
         } catch (err) {
             console.error('raw-rebind click handler failed', err);
             showToast('click handler failed: ' + err.message, 'err');
