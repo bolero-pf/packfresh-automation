@@ -278,6 +278,17 @@
                     </span>`;
                 }).join('');
 
+            // For non-EN cards (JP especially) show the English name as the
+            // primary headline since that's what the operator searched on,
+            // with the native name as a secondary line so they can confirm
+            // it really is the JP printing they want to bind to.
+            const lang = (card.languageCode || '').toUpperCase();
+            const isEn = !lang || lang === 'EN';
+            const primaryName = isEn ? (card.name || '') : (card.nameEn || card.name || '');
+            const nativeName  = isEn ? '' : (card.name || '');
+            const primarySet  = isEn ? (card.setName || '') : (card.setNameEn || card.setName || '');
+            const nativeSet   = isEn ? '' : (card.setName || '');
+
             const div = document.createElement('div');
             div.className = 'result';
             const number = card.printedNumber || card.cardNumber || '';
@@ -287,11 +298,14 @@
                 <div class="meta">
                     <div class="name">
                         ${game ? `<span class="game-badge">${esc(game)}</span>` : ''}
-                        ${esc(card.name || '')}
+                        ${!isEn ? `<span class="game-badge" style="background:rgba(239,68,68,0.18); color:#fca5a5;">${esc(lang)}</span>` : ''}
+                        ${esc(primaryName)}
                         ${number ? `<span class="mono" style="color:var(--text-dim); font-weight:400;">#${esc(number)}</span>` : ''}
                     </div>
                     <div class="sub2">
-                        ${esc(card.setName || '')}
+                        ${esc(primarySet)}
+                        ${nativeName ? `· <span style="color:var(--text)">${esc(nativeName)}</span>` : ''}
+                        ${nativeSet  ? `(${esc(nativeSet)})` : ''}
                         · scrydex_id <span class="mono">${esc(scrydexId)}</span>
                         ${card.tcgPlayerId ? `· tcg <span class="mono">${esc(card.tcgPlayerId)}</span>` : ''}
                     </div>

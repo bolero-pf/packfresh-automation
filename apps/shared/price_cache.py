@@ -571,7 +571,14 @@ class PriceCache:
 
     def _search_card_ids(self, query: str, *, set_name=None, limit=5,
                           all_games=False) -> list:
-        """Internal: run the card search query, return [{scrydex_id, tcgplayer_id}]."""
+        """Internal: run the card search query, return [{scrydex_id, tcgplayer_id}].
+
+        Tokens match across product_name / product_name_en / card_number /
+        printed_number / expansion_id / expansion_name / expansion_name_en.
+        The *_en columns are critical for non-English cards — JP rows store
+        the JP name in product_name and the English name in product_name_en,
+        so without them an operator typing "blaine arcanine" never finds
+        gym2_ja-34. Mirrors the public `search_cards()` clause."""
         full_query = (query or "").strip()
         where_parts: list = ["product_type = 'card'"]
         params: list = []
@@ -582,16 +589,17 @@ class PriceCache:
         for forms in self._tokenize(query):
             ors = []
             for f in forms:
-                ors.append("(product_name ILIKE %s OR card_number ILIKE %s "
-                           "OR printed_number ILIKE %s "
-                           "OR expansion_id ILIKE %s OR expansion_name ILIKE %s)")
+                ors.append("(product_name ILIKE %s OR product_name_en ILIKE %s "
+                           "OR card_number ILIKE %s OR printed_number ILIKE %s "
+                           "OR expansion_id ILIKE %s "
+                           "OR expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
                 p = f"%{f}%"
-                params.extend([p, p, p, p, p])
+                params.extend([p, p, p, p, p, p, p])
             where_parts.append("(" + " OR ".join(ors) + ")")
 
         if set_name:
-            where_parts.append("expansion_name ILIKE %s")
-            params.append(f"%{set_name}%")
+            where_parts.append("(expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
+            params.extend([f"%{set_name}%", f"%{set_name}%"])
 
         where_clause = " AND ".join(where_parts)
 
@@ -742,9 +750,14 @@ class PriceCache:
         """Search cards by name in the local cache.
 
         Multi-token search: each whitespace/hyphen-separated token must match
-        product_name OR card_number OR expansion_id OR expansion_name. So
-        "boa hancock OP14" finds the One Piece Boa Hancock from the OP14 set,
-        and "OP14-041" finds card #041 in OP14.
+        product_name / product_name_en / card_number / printed_number /
+        expansion_id / expansion_name / expansion_name_en. The *_en columns
+        are critical for non-English cards — the JP "Blaine's Arcanine" is
+        stored as `カツラのウインディ` in product_name with `Blaine's Arcanine`
+        in product_name_en, so without the EN columns the operator-typed
+        English name never hits. So "blaine arcanine" finds the JP gym2_ja-34
+        printing, and "boa hancock OP14" still finds the One Piece card the
+        same way it always did.
 
         all_games=True drops the game filter so multi-TCG manual entry can find
         non-Pokemon cards (One Piece, Lorcana, MTG, etc.) in one search.
@@ -765,16 +778,17 @@ class PriceCache:
         for forms in self._tokenize(query):
             ors = []
             for f in forms:
-                ors.append("(product_name ILIKE %s OR card_number ILIKE %s "
-                           "OR printed_number ILIKE %s "
-                           "OR expansion_id ILIKE %s OR expansion_name ILIKE %s)")
+                ors.append("(product_name ILIKE %s OR product_name_en ILIKE %s "
+                           "OR card_number ILIKE %s OR printed_number ILIKE %s "
+                           "OR expansion_id ILIKE %s "
+                           "OR expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
                 p = f"%{f}%"
-                params.extend([p, p, p, p, p])
+                params.extend([p, p, p, p, p, p, p])
             where_parts.append("(" + " OR ".join(ors) + ")")
 
         if set_name:
-            where_parts.append("expansion_name ILIKE %s")
-            params.append(f"%{set_name}%")
+            where_parts.append("(expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
+            params.extend([f"%{set_name}%", f"%{set_name}%"])
 
         where_clause = " AND ".join(where_parts)
 
@@ -949,6 +963,13 @@ class PriceCache:
 
         return {
             "name": first.get("product_name"),
+            # English fallback + language code so non-EN cards (JP especially)
+            # are recognizable in chip-picker UIs — operator searched "Blaine's
+            # Arcanine" and gets a result row whose product_name is カツラのウインディ;
+            # surfacing nameEn + languageCode lets the UI show both.
+            "nameEn": first.get("product_name_en"),
+            "setNameEn": first.get("expansion_name_en"),
+            "languageCode": first.get("language_code"),
             "setName": first.get("expansion_name", ""),
             "expansionId": first.get("expansion_id", ""),
             "game": first.get("game", ""),
