@@ -168,21 +168,37 @@
         setTimeout(() => toast.classList.remove('show'), 2400);
     }
 
-    document.querySelectorAll('.find-match').forEach(btn => {
-        btn.addEventListener('click', () => {
+    // Event delegation — robust against rows added later AND surfaces any
+    // exception as a visible toast instead of swallowing it silently.
+    document.addEventListener('click', function (ev) {
+        const btn = ev.target.closest('.find-match');
+        if (!btn) return;
+        try {
             const tr = btn.closest('tr');
+            if (!tr) { showToast('No row found for this button', 'err'); return; }
             activeRow = tr;
-            activeIds = JSON.parse(tr.dataset.ids);
-            qName.value = tr.dataset.name || '';
-            qSet.value  = tr.dataset.set  || '';
+            const idsRaw = tr.dataset.ids || '[]';
+            try {
+                activeIds = JSON.parse(idsRaw);
+            } catch (e) {
+                console.error('raw-rebind: failed to parse data-ids', idsRaw, e);
+                showToast('data-ids parse failed: ' + e.message, 'err');
+                return;
+            }
+            qName.value = tr.dataset.name   || '';
+            qSet.value  = tr.dataset.set    || '';
             qNum.value  = tr.dataset.number || '';
-            modalTitle.textContent = `Find match: ${tr.dataset.name} — ${tr.dataset.set} #${tr.dataset.number}`;
+            modalTitle.textContent =
+                `Find match: ${tr.dataset.name} — ${tr.dataset.set} #${tr.dataset.number}`;
             results.innerHTML = '';
             resultsEmpty.style.display = 'none';
             applyStatus.textContent = '';
             modal.classList.add('show');
             doSearch();
-        });
+        } catch (err) {
+            console.error('raw-rebind click handler failed', err);
+            showToast('click handler failed: ' + err.message, 'err');
+        }
     });
 
     document.getElementById('modal-close').addEventListener('click', () => modal.classList.remove('show'));
