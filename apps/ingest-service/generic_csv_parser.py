@@ -285,17 +285,27 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
 
             # Pull grade fields. Either column may carry a combined "PSA 10"
             # string (some CSVs only have one column called "Grade") — split
-            # when we see a known grader prefix in either slot.
+            # when we see a known grader prefix in either slot. Then strip any
+            # trailing label noise ("10 Gem Mint", "9.5 Mint+") down to the
+            # numeric grade so it fits grade_value VARCHAR(10) and matches the
+            # cache shape (which stores '10' / '9.5' bare).
             gc_raw = (row.get(gc_col) or "").strip().upper() if gc_col else ""
             gv_raw = (row.get(gv_col) or "").strip() if gv_col else ""
             if gv_raw and not gc_raw:
-                parts = gv_raw.split(None, 1)
-                if len(parts) == 2 and parts[0].upper() in _GRADERS:
-                    gc_raw, gv_raw = parts[0].upper(), parts[1].strip()
+                m = re.match(r"^(PSA|BGS|CGC|SGC)\b\s*(.*)$", gv_raw, re.IGNORECASE)
+                if m:
+                    gc_raw, gv_raw = m.group(1).upper(), m.group(2).strip()
             if gc_raw and not gv_raw:
-                parts = gc_raw.split(None, 1)
-                if len(parts) == 2 and parts[0].upper() in _GRADERS:
-                    gc_raw, gv_raw = parts[0].upper(), parts[1].strip()
+                m = re.match(r"^(PSA|BGS|CGC|SGC)\b\s*(.*)$", gc_raw, re.IGNORECASE)
+                if m:
+                    gc_raw, gv_raw = m.group(1).upper(), m.group(2).strip()
+            # Strip the company prefix if it leaked into both columns.
+            m = re.match(r"^(PSA|BGS|CGC|SGC)\b\s*(.*)$", gv_raw, re.IGNORECASE)
+            if m:
+                gv_raw = m.group(2).strip()
+            # Pull the first numeric token — "10 Gem Mint" → "10", "9.5+" → "9.5".
+            m = re.search(r"\d+(?:\.\d+)?", gv_raw)
+            gv_raw = m.group(0) if m else ""
             is_graded = bool(gc_raw and gv_raw and gc_raw in _GRADERS)
             if is_graded:
                 product_type = "raw"  # graded slabs are raw items downstream
