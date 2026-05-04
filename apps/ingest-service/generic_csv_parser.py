@@ -34,6 +34,9 @@ class GenericParsedItem(NamedTuple):
     quantity: int
     market_price: Decimal  # per-unit
     tcgplayer_id: int | None
+    is_graded: bool
+    grade_company: str  # 'PSA' / 'BGS' / 'CGC' / 'SGC' or ''
+    grade_value: str    # '10', '9.5', etc., or ''
 
 
 class GenericParseResult(NamedTuple):
@@ -77,7 +80,15 @@ COLUMN_PATTERNS = {
         r"^rarity$", r"^rare$",
     ],
     "condition": [
-        r"^condition$", r"^card[_ ]?condition$", r"^cond$", r"^grade$",
+        r"^condition$", r"^card[_ ]?condition$", r"^cond$",
+    ],
+    "grade_company": [
+        r"^grade[_ ]?company$", r"^grading[_ ]?company$",
+        r"^grading[_ ]?service$", r"^grader$",
+    ],
+    "grade_value": [
+        r"^grade$", r"^grade[_ ]?value$", r"^grade[_ ]?#$",
+        r"^grade[_ ]?number$",
     ],
     "tcgplayer_id": [
         r"^tcgplayer[_ ]?id$", r"^tcg[_ ]?id$", r"^tcgplayer$",
@@ -257,6 +268,9 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
     cond_col = mapping.get("condition")
     tcg_col = mapping.get("tcgplayer_id")
     photo_col = mapping.get("photo_url")
+    gc_col = mapping.get("grade_company")
+    gv_col = mapping.get("grade_value")
+    _GRADERS = {"PSA", "BGS", "CGC", "SGC"}
 
     for i, row in enumerate(reader, start=2):
         try:
@@ -268,6 +282,23 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
             quantity = _parse_int(row.get(qty_col, "1"))
             market_price = _parse_decimal(row.get(price_col, "0"))
             product_type = _guess_type(row, mapping)
+
+            # Pull grade fields. Either column may carry a combined "PSA 10"
+            # string (some CSVs only have one column called "Grade") — split
+            # when we see a known grader prefix in either slot.
+            gc_raw = (row.get(gc_col) or "").strip().upper() if gc_col else ""
+            gv_raw = (row.get(gv_col) or "").strip() if gv_col else ""
+            if gv_raw and not gc_raw:
+                parts = gv_raw.split(None, 1)
+                if len(parts) == 2 and parts[0].upper() in _GRADERS:
+                    gc_raw, gv_raw = parts[0].upper(), parts[1].strip()
+            if gc_raw and not gv_raw:
+                parts = gc_raw.split(None, 1)
+                if len(parts) == 2 and parts[0].upper() in _GRADERS:
+                    gc_raw, gv_raw = parts[0].upper(), parts[1].strip()
+            is_graded = bool(gc_raw and gv_raw and gc_raw in _GRADERS)
+            if is_graded:
+                product_type = "raw"  # graded slabs are raw items downstream
 
             # Extract tcgplayer product ID — prefer photo URL extraction over the
             # "TCGplayer Id" column, which is often an internal SKU, not the product ID
@@ -297,6 +328,9 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
                 quantity=quantity,
                 market_price=market_price,
                 tcgplayer_id=tcgplayer_id,
+                is_graded=is_graded,
+                grade_company=gc_raw if is_graded else "",
+                grade_value=gv_raw if is_graded else "",
             )
             items.append(item)
 
@@ -340,5 +374,7 @@ def detect_csv_columns(file_content: str) -> dict:
         "unmapped": unmapped,
         "preview_rows": preview,
         "required_fields": ["name", "quantity", "price"],
-        "optional_fields": ["set_name", "card_number", "rarity", "condition", "tcgplayer_id", "product_type", "photo_url"],
+        "optional_fields": ["set_name", "card_number", "rarity", "condition",
+                            "grade_company", "grade_value",
+                            "tcgplayer_id", "product_type", "photo_url"],
     }

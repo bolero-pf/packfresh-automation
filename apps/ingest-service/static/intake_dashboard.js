@@ -300,12 +300,17 @@ document.getElementById('generic-csv-form').addEventListener('submit', async (e)
         _genericCsvMapping = d.mapping || {};
         const headers = d.headers || [];
         const required = ['name', 'quantity', 'price'];
-        const optional = ['set_name', 'card_number', 'rarity', 'condition', 'tcgplayer_id', 'product_type', 'photo_url'];
+        const optional = ['set_name', 'card_number', 'rarity', 'condition',
+                          'grade_company', 'grade_value',
+                          'tcgplayer_id', 'product_type', 'photo_url'];
         const allFields = [...required, ...optional];
         const fieldLabels = {
             name: 'Product Name *', quantity: 'Quantity *', price: 'Market Price *',
             set_name: 'Set Name', card_number: 'Card Number', rarity: 'Rarity',
-            condition: 'Condition', tcgplayer_id: 'TCGPlayer ID', product_type: 'Type',
+            condition: 'Condition',
+            grade_company: 'Grading Co (PSA/BGS/CGC/SGC)',
+            grade_value: 'Grade (10, 9.5, …)',
+            tcgplayer_id: 'TCGPlayer ID', product_type: 'Type',
             photo_url: 'Photo URL (extracts real TCG ID)',
         };
 
@@ -3681,12 +3686,18 @@ function _relinkRenderConditions(selectedCond) {
         html += `</div>`;
 
     } else {
-        // Graded mode
-        const graded = rs.gradedPrices || {};
+        // Graded mode. Two data sources: rs.gradedLive (rich live eBay comps
+        // for the currently-selected company/grade) and rs.gradedPrices (the
+        // scalar cache aggregate from price_cache, shape {COMPANY: {grade: Decimal}}).
+        // Live wins; cache scalar is the fallback.
         const selCompany = rs._relinkGradeCompany || 'PSA';
         const selGrade   = rs._relinkGradeValue || '9';
-        const gradeData  = (graded[selCompany] || {})[selGrade] || {};
-        const gradePrice = gradeData.price;
+        const live = ((rs.gradedLive || {})[selCompany] || {})[selGrade] || null;
+        const cacheScalar = ((rs.gradedPrices || {})[selCompany] || {})[selGrade];
+        const cachePrice = (cacheScalar != null) ? Number(cacheScalar) : null;
+        const gradePrice = (live && live.mid != null) ? Number(live.mid)
+                         : (live && live.market != null) ? Number(live.market)
+                         : cachePrice;
 
         html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
             <div class="form-group"><label>Grading Company</label>
@@ -3699,27 +3710,24 @@ function _relinkRenderConditions(selectedCond) {
             </select></div>
         </div>`;
 
-        // Price info box
-        if (gradePrice != null) {
-            const conf = gradeData.confidence;
-            const confColor = conf === 'high' ? '#22c55e' : conf === 'medium' ? '#f59e0b' : '#ef4444';
-            const method = (gradeData.method || '').replace(/_/g,' ');
-            const signals = [];
-            if (gradeData.count) signals.push(`${gradeData.count} sales`);
-            if (gradeData.volume_7day) signals.push(`${gradeData.volume_7day.toFixed(1)}/day`);
-            const breakdown = [];
-            if (gradeData.price_7day != null) breakdown.push(`7d $${gradeData.price_7day.toFixed(2)}`);
-            if (gradeData.median != null) breakdown.push(`median $${gradeData.median.toFixed(2)}`);
-            if (gradeData.min != null && gradeData.max != null) breakdown.push(`range $${gradeData.min.toFixed(0)}–$${gradeData.max.toFixed(0)}`);
+        if (rs._relinkGradedLoading) {
+            html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;color:var(--text-dim);"><span class="spinner"></span> Fetching ${selCompany} ${selGrade} comps…</div>`;
+        } else if (gradePrice != null) {
+            const sourceLabel = live
+                ? `<span style="color:#22c55e;font-size:0.72rem;font-weight:600;">live</span>`
+                : `<span style="color:#f59e0b;font-size:0.72rem;font-weight:600;">cache</span>`;
+            const stats = [];
+            if (live && live.comps_count) stats.push(`${live.comps_count} comps`);
+            if (live && live.low != null && live.high != null) {
+                stats.push(`range $${Number(live.low).toFixed(0)}–$${Number(live.high).toFixed(0)}`);
+            }
+            if (live && live.avg_7d != null) stats.push(`7d avg $${Number(live.avg_7d).toFixed(2)}`);
             html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;">
-                <strong style="font-size:1.15rem;">$${gradePrice.toFixed(2)}</strong>
-                <span style="color:${confColor};font-size:0.72rem;font-weight:600;text-transform:uppercase;margin-left:6px;">${conf||''}</span>
-                <span style="color:var(--text-dim);font-size:0.7rem;margin-left:4px;">${method}</span>
-                ${signals.length ? `<br><span style="color:var(--text-dim);font-size:0.72rem;">${signals.join(' · ')}</span>` : ''}
-                ${breakdown.length ? `<br><span style="color:var(--text-dim);font-size:0.68rem;opacity:0.8;">${breakdown.join(' · ')}</span>` : ''}
+                <strong style="font-size:1.15rem;">$${gradePrice.toFixed(2)}</strong> ${sourceLabel}
+                ${stats.length ? `<br><span style="color:var(--text-dim);font-size:0.72rem;">${stats.join(' · ')}</span>` : ''}
             </div>`;
         } else {
-            html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;color:var(--text-dim);">No eBay data for ${selCompany} ${selGrade}</div>`;
+            html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;color:var(--text-dim);">No eBay data for ${selCompany} ${selGrade} — backend will retry on save.</div>`;
         }
 
         html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
@@ -3801,24 +3809,12 @@ function _relinkSetMode(mode) {
     const rs = window._relinkState;
     if (!rs) return;
     rs._relinkMode = mode;
-    if (mode === 'graded' && !rs.gradedPrices && rs.tcgId) {
-        // Load graded prices if not already loaded
-        const body = document.getElementById('relink-body');
-        const spinner = document.createElement('div');
-        spinner.className = 'loading';
-        spinner.innerHTML = '<span class="spinner"></span> Loading graded prices...';
-        // Keep existing HTML, just append loading indicator
-        fetch('/api/lookup/card', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ tcgplayer_id: rs.tcgId }),
-        }).then(r => r.json()).then(d => {
-            rs.gradedPrices = d.graded_prices || null;
-            _relinkRenderConditions('NM');
-        }).catch(() => _relinkRenderConditions('NM'));
-        _relinkRenderConditions('NM');
-    } else {
-        _relinkRenderConditions('NM');
+    if (mode === 'graded') {
+        rs._relinkGradeCompany = rs._relinkGradeCompany || 'PSA';
+        rs._relinkGradeValue   = rs._relinkGradeValue   || '9';
+        _relinkFetchGraded();   // fires async; renderer shows spinner meanwhile
     }
+    _relinkRenderConditions('NM');
 }
 
 function _relinkGradeChanged() {
@@ -3826,7 +3822,38 @@ function _relinkGradeChanged() {
     if (!rs) return;
     rs._relinkGradeCompany = document.getElementById('relink-grade-company')?.value || 'PSA';
     rs._relinkGradeValue   = document.getElementById('relink-grade-value')?.value || '9';
+    _relinkFetchGraded();
     _relinkRenderConditions('NM');
+}
+
+// Fetch live eBay comps + cache aggregate for the currently-selected
+// (company, grade) and re-render. Mirrors onMarkGradedChange — live data only
+// lands in the response when grade_company/grade_value are passed.
+async function _relinkFetchGraded() {
+    const rs = window._relinkState;
+    if (!rs || !rs.tcgId) return;
+    const company = rs._relinkGradeCompany || 'PSA';
+    const grade   = rs._relinkGradeValue   || '9';
+    rs._relinkGradedLoading = true;
+    if (rs._relinkMode === 'graded') _relinkRenderConditions('NM');
+    try {
+        const r = await fetch('/api/lookup/card', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                tcgplayer_id: rs.tcgId,
+                grade_company: company,
+                grade_value: grade,
+            }),
+        });
+        const d = await r.json();
+        rs.gradedPrices = d.graded_prices || null;   // scalar cache
+        rs.gradedLive   = d.live_graded   || null;   // rich live comps
+    } catch(e) {
+        // Leave previous data in place — renderer will show "no eBay data"
+    } finally {
+        rs._relinkGradedLoading = false;
+        if (rs._relinkMode === 'graded') _relinkRenderConditions('NM');
+    }
 }
 
 // ═══════════════════════════════ MARK AS GRADED ═══════════════════════════════
