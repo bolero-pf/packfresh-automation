@@ -158,14 +158,16 @@
     const results = document.getElementById('results');
     const resultsEmpty = document.getElementById('results-empty');
     const applyStatus = document.getElementById('apply-status');
-    const toast = document.getElementById('toast');
+    // NB: do NOT name this `toast` — pf_ui.js exposes a global toast()
+    // function and the duplicate declaration aborts script parsing.
+    const toastEl = document.getElementById('toast');
     let activeRow = null;
     let activeIds = [];
 
     function showToast(msg, kind) {
-        toast.textContent = msg;
-        toast.className = 'toast show ' + (kind || '');
-        setTimeout(() => toast.classList.remove('show'), 2400);
+        toastEl.textContent = msg;
+        toastEl.className = 'toast show ' + (kind || '');
+        setTimeout(() => toastEl.classList.remove('show'), 2400);
     }
 
     // Event delegation — robust against rows added later AND surfaces any
