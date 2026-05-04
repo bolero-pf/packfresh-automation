@@ -169,13 +169,8 @@ _CACHE_LOOKUP_BY_TCG     = _CACHE_LOOKUP_SQL_TEMPLATE.format(key_clause="tcgplay
 _JPY_USD_RATE = float(os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
 
 
-def _lookup_cache_price(db_module, scrydex_id, tcgplayer_id, condition, variant) -> dict | None:
-    """Scrydex-first lookup with TCG fallback.
-
-    A row's tcgplayer_id may be a stale/secondary SKU that has no
-    scrydex_price_cache entry, while its scrydex_id resolves cleanly.
-    Try the more-specific key first.
-    """
+def _lookup_one(db_module, scrydex_id, tcgplayer_id, condition, variant) -> dict | None:
+    """Single-condition cache lookup. Scrydex-first, TCG fallback."""
     if not condition:
         return None
     if scrydex_id:
@@ -195,6 +190,58 @@ def _lookup_cache_price(db_module, scrydex_id, tcgplayer_id, condition, variant)
         if rows:
             return rows[0]
     return None
+
+
+def _lookup_cache_price(db_module, scrydex_id, tcgplayer_id, condition, variant) -> dict | None:
+    """Scrydex-first lookup with TCG fallback AND condition fallback.
+
+    Tries exact (cond, variant) first. If miss and condition != NM, falls
+    back to NM × FALLBACK_MULTIPLIERS[condition] so a damaged JP card in
+    an NM-only-cached printing still gets a derived price (instead of
+    being skipped on every nightly run forever). The returned dict carries
+    a `source` field — 'exact' or 'nm_fallback' — so the caller can record
+    an honest reason in raw_card_price_runs.
+    """
+    if not condition:
+        return None
+
+    # 1. Exact-condition match — preferred.
+    hit = _lookup_one(db_module, scrydex_id, tcgplayer_id, condition, variant)
+    if hit and hit.get("market_price") is not None:
+        hit = dict(hit)
+        hit["source"] = "exact"
+        return hit
+
+    # 2. NM fallback × multiplier — never overrides a real per-condition row,
+    # only fills the gap when the cache has no row for this condition. NM
+    # itself never falls back (it IS the base).
+    cond_upper = (condition or "").upper()
+    if cond_upper == "NM":
+        return None
+    nm_hit = _lookup_one(db_module, scrydex_id, tcgplayer_id, "NM", variant)
+    if not nm_hit or nm_hit.get("market_price") is None:
+        return None
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
+    from ppt_client import FALLBACK_MULTIPLIERS
+    mult = FALLBACK_MULTIPLIERS.get(cond_upper)
+    if mult is None:
+        return None
+
+    nm_market = Decimal(str(nm_hit["market_price"]))
+    derived = (nm_market * mult).quantize(Decimal("0.01"))
+    nm_low = nm_hit.get("low_price")
+    derived_low = (Decimal(str(nm_low)) * mult).quantize(Decimal("0.01")) if nm_low is not None else None
+    return {
+        "market_price": derived,
+        "low_price":    derived_low,
+        "scrydex_id":   nm_hit.get("scrydex_id"),
+        "tcgplayer_id": nm_hit.get("tcgplayer_id"),
+        "variant":      nm_hit.get("variant"),
+        "source":       "nm_fallback",
+        "nm_market":    nm_market,
+        "multiplier":   mult,
+    }
 
 
 def _apply_db_price(db_module, raw_card_id: str, new_price: float) -> None:
@@ -300,6 +347,17 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
         old = entry["old_price"] or 0.0
         delta_pct = ((old - suggested) / suggested * 100.0) if suggested > 0 else 0.0
 
+        # Annotate the audit trail when we're pricing off NM × multiplier
+        # rather than a real per-condition row — operator should be able to
+        # see at a glance why a DMG card got a price despite the cache only
+        # having NM. Reason string gets the derivation prepended below.
+        source_note = ""
+        if cache.get("source") == "nm_fallback":
+            mult = cache.get("multiplier")
+            nm_m = cache.get("nm_market")
+            source_note = (f"NM-fallback ${float(nm_m):.2f} × {float(mult):.2f} "
+                           f"({card['condition']}) → ${market:.2f}; ")
+
         entry.update({
             "cache_market":    market,
             "cache_low":       float(cache["low_price"]) if cache.get("low_price") is not None else None,
@@ -327,14 +385,14 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
         if abs(delta_pct) <= SKIP_DELTA_PCT:
             entry.update({
                 "action": "ok",
-                "reason": f"already at suggested ({delta_pct:+.2f}%)",
+                "reason": source_note + f"already at suggested ({delta_pct:+.2f}%)",
             })
             stats["ok"] += 1
 
         elif delta_pct > AUTO_DELTA_PCT and not small_dollar_drop:
             entry.update({
                 "action": "flag_overpriced",
-                "reason": (f"overpriced {delta_pct:+.1f}% (${drop_dollars:.2f} drop "
+                "reason": source_note + (f"overpriced {delta_pct:+.1f}% (${drop_dollars:.2f} drop "
                            f"> ${drop_threshold:.2f} tier) — review"),
             })
             stats["flag_overpriced"] += 1
@@ -343,7 +401,7 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             if floor and suggested < floor:
                 entry.update({
                     "action": "skip",
-                    "reason": f"suggested ${suggested:.2f} below cost ${floor:.2f}",
+                    "reason": source_note + f"suggested ${suggested:.2f} below cost ${floor:.2f}",
                 })
                 stats["skip"] += 1
             elif apply_auto:
@@ -365,7 +423,7 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
                         "applied_at": datetime.now(timezone.utc),
                         "applied_price": suggested,
                         "apply_status": "applied",
-                        "reason": why,
+                        "reason": source_note + why,
                     })
                     stats["auto_applied"] += 1
                 except Exception as e:
@@ -374,7 +432,7 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
             else:
                 entry.update({
                     "action": "auto_applied",
-                    "reason": f"[DRY-RUN] would auto-apply {delta_pct:+.1f}%",
+                    "reason": source_note + f"[DRY-RUN] would auto-apply {delta_pct:+.1f}%",
                     "apply_status": "pending",
                 })
                 stats["auto_applied"] += 1

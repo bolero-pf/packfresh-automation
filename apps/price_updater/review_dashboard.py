@@ -1011,6 +1011,15 @@ def raw_run_dismiss_row(row_id):
 # place for every physical copy of that identity.
 
 _REBIND_CANDIDATES_SQL = """
+-- A raw_card needs a rebind only when its (scrydex_id|tcgplayer_id, variant)
+-- has no raw market_price row in cache AT ALL. Per-condition rows aren't
+-- required: raw_card_updater._lookup_cache_price falls back to NM ×
+-- FALLBACK_MULTIPLIERS[condition] (DMG=0.25, HP=0.45, MP=0.65, LP=0.80)
+-- when the exact condition is missing. So a JP card whose cache only has
+-- NM=12000 JPY still gets a derived DMG price overnight; surfacing it
+-- here would be a misleading "checklist that doesn't update" — operator
+-- rebinds, list still shows the card, nightly run prices it correctly.
+-- Stay in lockstep with raw_card_updater._lookup_cache_price.
 SELECT
     i.card_name,
     i.set_name,
@@ -1032,7 +1041,6 @@ WHERE i.state IN ('STORED', 'DISPLAY')
     SELECT 1 FROM scrydex_price_cache c
     WHERE c.product_type = 'card' AND c.price_type = 'raw'
       AND c.market_price IS NOT NULL
-      AND UPPER(c.condition) = UPPER(i.condition)
       AND CASE WHEN c.variant IS NULL
                  OR regexp_replace(LOWER(c.variant), '[^a-z0-9]', '', 'g') IN ('normal','holofoil')
                THEN ''
