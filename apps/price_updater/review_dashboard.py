@@ -1429,12 +1429,34 @@ def sealed_run_detail(run_id):
         FROM sealed_price_runs WHERE run_id = %s
     """, (run_id,))
 
+    # Per-button preview count: how many pending review rows would the
+    # 'Approve charm-tier drops' button hit if clicked right now? Lets
+    # Sean see what each bulk button would do without clicking.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    from price_rounding import charm_drop_auto_threshold
+    charm_eligible_count = 0
+    pending_rows = db.query("""
+        SELECT old_price, suggested_price
+          FROM sealed_price_runs
+         WHERE run_id = %s AND action = 'review'
+           AND apply_status = 'pending'
+           AND suggested_price IS NOT NULL
+           AND old_price IS NOT NULL
+           AND product_gid IS NOT NULL
+           AND variant_id IS NOT NULL
+    """, (run_id,))
+    for r in pending_rows:
+        old, new = float(r["old_price"]), float(r["suggested_price"])
+        if new < old and (old - new) <= charm_drop_auto_threshold(new):
+            charm_eligible_count += 1
+
     return render_template(
         "sealed_run_detail.html",
         run_id=run_id, rows=rows, summary=summary,
         action_filter=action_filter,
         include_oos=include_oos,
         sort_key=sort_key,
+        charm_eligible_count=charm_eligible_count,
         store_domain=os.environ.get("SHOPIFY_STORE", ""),
     )
 
