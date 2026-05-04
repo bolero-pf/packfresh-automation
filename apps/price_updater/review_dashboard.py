@@ -1389,6 +1389,23 @@ _SEALED_DETAIL_SORTS = {
 }
 
 
+def _is_charm_drop(row) -> bool:
+    """A pending review row qualifies as a 'charm-tier drop' if its
+    suggested price is lower than current AND the dollar delta sits
+    inside the charm-rounding tier for the suggested price. Same
+    predicate the bulk-apply endpoint uses, mirrored here so the
+    dashboard can preview which rows the button would hit."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
+    from price_rounding import charm_drop_auto_threshold
+    if row.get("action") != "review" or row.get("apply_status") != "pending":
+        return False
+    old, new = row.get("old_price"), row.get("suggested_price")
+    if old is None or new is None:
+        return False
+    old, new = float(old), float(new)
+    return new < old and (old - new) <= charm_drop_auto_threshold(new)
+
+
 @app.route('/dashboard/sealed-runs/<run_id>')
 def sealed_run_detail(run_id):
     """Detail page for one sealed run with per-action filter, OOS toggle,
@@ -1396,6 +1413,7 @@ def sealed_run_detail(run_id):
     db = _shared_db()
     action_filter = (request.args.get("action") or "").strip()
     include_oos   = (request.args.get("include_oos") or "").strip() == "1"
+    charm_only    = (request.args.get("charm") or "").strip() == "1"
     sort_key      = (request.args.get("sort") or "").strip()
     if sort_key not in _SEALED_DETAIL_SORTS:
         sort_key = ""
@@ -1422,6 +1440,13 @@ def sealed_run_detail(run_id):
     """
     rows = db.query(sql, tuple(params))
 
+    # Tag each row with charm eligibility so the template can render a
+    # badge on the row + filter to just those rows when ?charm=1 is set.
+    for r in rows:
+        r["is_charm_drop"] = _is_charm_drop(r)
+    if charm_only:
+        rows = [r for r in rows if r["is_charm_drop"]]
+
     summary = db.query_one("""
         SELECT MIN(started_at) AS started_at, COUNT(*) AS total,
                COUNT(*) FILTER (WHERE action = 'review' AND apply_status = 'pending') AS pending_review,
@@ -1429,14 +1454,11 @@ def sealed_run_detail(run_id):
         FROM sealed_price_runs WHERE run_id = %s
     """, (run_id,))
 
-    # Per-button preview count: how many pending review rows would the
-    # 'Approve charm-tier drops' button hit if clicked right now? Lets
-    # Sean see what each bulk button would do without clicking.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
-    from price_rounding import charm_drop_auto_threshold
-    charm_eligible_count = 0
-    pending_rows = db.query("""
-        SELECT old_price, suggested_price
+    # Charm-eligible count is independent of the active filter — always
+    # shows the run-wide total so Sean can see what 'Approve charm-tier
+    # drops' would do regardless of what he's currently filtered to.
+    pending_for_charm = db.query("""
+        SELECT old_price, suggested_price, action, apply_status
           FROM sealed_price_runs
          WHERE run_id = %s AND action = 'review'
            AND apply_status = 'pending'
@@ -1445,10 +1467,7 @@ def sealed_run_detail(run_id):
            AND product_gid IS NOT NULL
            AND variant_id IS NOT NULL
     """, (run_id,))
-    for r in pending_rows:
-        old, new = float(r["old_price"]), float(r["suggested_price"])
-        if new < old and (old - new) <= charm_drop_auto_threshold(new):
-            charm_eligible_count += 1
+    charm_eligible_count = sum(1 for r in pending_for_charm if _is_charm_drop(r))
 
     return render_template(
         "sealed_run_detail.html",
@@ -1456,6 +1475,7 @@ def sealed_run_detail(run_id):
         action_filter=action_filter,
         include_oos=include_oos,
         sort_key=sort_key,
+        charm_only=charm_only,
         charm_eligible_count=charm_eligible_count,
         store_domain=os.environ.get("SHOPIFY_STORE", ""),
     )

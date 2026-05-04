@@ -62,6 +62,15 @@
         .applied-tag   { color: #4ade80; font-size: 0.78rem; font-weight: 600; }
         .dismissed-tag { color: var(--text-dim); font-size: 0.78rem; font-style: italic; }
         .blocked-tag   { color: #f87171; font-size: 0.78rem; font-weight: 600; }
+        .charm-badge { margin-left: 4px; font-size: 0.85rem; cursor: help; }
+        .row-price-input {
+            width: 72px; min-height: 28px; padding: 0 6px;
+            border-radius: 5px; font-size: 0.8rem;
+            background: var(--surface); border: 1.5px solid var(--border);
+            color: var(--text); font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums; text-align: right;
+        }
+        .row-price-input:focus { outline: none; border-color: var(--accent); }
     </style>
 </head>
 <body>
@@ -71,14 +80,16 @@
 
     {# Build query string preserving all current filters except the one we're replacing.
        Used by every <a> below — clicking a filter pill keeps the OOS toggle and sort. #}
-    {% macro qs(action=None, sort=None, oos=None) -%}
+    {% macro qs(action=None, sort=None, oos=None, charm=None) -%}
         {%- set _action = action_filter if action is none else action -%}
         {%- set _sort   = sort_key      if sort   is none else sort   -%}
         {%- set _oos    = include_oos   if oos    is none else oos    -%}
+        {%- set _charm  = charm_only    if charm  is none else charm  -%}
         {%- set parts = [] -%}
         {%- if _action %}{% set _ = parts.append('action=' ~ _action) %}{% endif -%}
         {%- if _sort %}{% set _ = parts.append('sort=' ~ _sort) %}{% endif -%}
         {%- if _oos %}{% set _ = parts.append('include_oos=1') %}{% endif -%}
+        {%- if _charm %}{% set _ = parts.append('charm=1') %}{% endif -%}
         {%- if parts %}?{{ parts | join('&') }}{% endif -%}
     {%- endmacro %}
 
@@ -87,6 +98,12 @@
         {% for code, label in actions %}
             <a href="{{ qs(action=code) }}" class="{% if action_filter == code %}active{% endif %}">{{ label }}</a>
         {% endfor %}
+
+        {% if charm_only %}
+            <a href="{{ qs(charm=False) }}" class="active" title="Click to clear">💡 Charm-tier only ({{ charm_eligible_count }})</a>
+        {% else %}
+            <a href="{{ qs(charm=True) }}" title="Show only the rows the 'Approve charm-tier drops' button would hit">💡 Charm-tier ({{ charm_eligible_count }})</a>
+        {% endif %}
 
         {% if include_oos %}
             <a href="{{ qs(oos=False) }}" class="active" style="margin-left:auto;">✓ Showing OOS · click to hide</a>
@@ -150,7 +167,10 @@
             <tr data-row-id="{{ r.id }}"
                 data-variant-id="{{ r.variant_id or '' }}"
                 data-title="{{ r.title }}">
-                <td><span class="pill {{ pill_cls }}">{{ act }}</span></td>
+                <td>
+                    <span class="pill {{ pill_cls }}">{{ act }}</span>
+                    {% if r.is_charm_drop %}<span class="charm-badge" title="This drop fits inside one charm-rounding tier — would be approved by 'Approve charm-tier drops'">💡</span>{% endif %}
+                </td>
                 <td>
                     {% if r.product_gid and store_domain %}
                         {% set pid = r.product_gid.split('/')[-1] %}
@@ -187,7 +207,11 @@
                         <span class="dismissed-tag">dismissed</span>
                     {% elif act == 'review' and r.suggested_price and r.product_gid and r.variant_id %}
                         <div class="row-actions">
-                            <button class="row-btn row-btn-apply"   data-act="apply">Apply ${{ '%.2f' % r.suggested_price }}</button>
+                            <span style="color:var(--text-dim);font-size:0.8rem;">$</span>
+                            <input type="number" class="row-price-input" step="0.01" min="0"
+                                   value="{{ '%.2f' % r.suggested_price }}"
+                                   title="Edit before clicking Apply to override the suggested price">
+                            <button class="row-btn row-btn-apply"   data-act="apply">Apply</button>
                             <button class="row-btn row-btn-dismiss" data-act="dismiss">Dismiss</button>
                             <button class="row-btn row-btn-block"   data-act="block" title="Stop auto-pricing this variant forever">Block</button>
                         </div>
@@ -208,11 +232,24 @@
 
     async function doApplyOrDismiss(tr, verb) {
         const rowId = tr.dataset.rowId;
-        tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
         const cell = tr.querySelector('td.action-cell');
+        let body = {};
+        if (verb === 'apply') {
+            const input = tr.querySelector('.row-price-input');
+            if (input) {
+                const v = parseFloat(input.value);
+                if (!isFinite(v) || v <= 0) {
+                    input.style.borderColor = '#f87171';
+                    return;
+                }
+                body.price = v;
+            }
+        }
+        tr.querySelectorAll('.row-btn').forEach(b => b.disabled = true);
         try {
             const r = await fetch(`/dashboard/sealed-runs/row/${rowId}/${verb}`, {
-                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body),
             });
             const d = await r.json();
             if (!r.ok) {
