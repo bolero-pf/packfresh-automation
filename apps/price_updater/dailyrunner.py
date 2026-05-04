@@ -560,28 +560,28 @@ def process_product(product, blocked: set | None = None):
       new == current     -> untouched
     """
     blocked = blocked or set()
-    tcg_id = product["tcgplayer_id"]
     current_price = float(product.get("shopify_price") or product.get("price") or 0)
+
+    # Tag-based skips first — see _classify_pre_scrape for why.
+    raw_tags = product.get("tags") or []
+    tags = [t.strip().lower() for t in raw_tags] if isinstance(raw_tags, list) \
+           else [t.strip().lower() for t in raw_tags.split(",")]
+    if any(tag in tags for tag in ["weekly deals", "ignore_update", "slab"]):
+        product.update({"action": "untouched", "reason": "tagged for skip"})
+        return "untouched", product
 
     variant_key = str(product.get("variant_id") or "")
     if variant_key and variant_key in blocked:
         product.update({"action": "skip", "reason": "auto-block"})
         return "skip", product
 
+    tcg_id = product["tcgplayer_id"]
     if not tcg_id:
         product.update({"action": "missing", "reason": "no tcgplayer_id metafield"})
         return "missing", product
 
     if product["sku"] in ignored_skus:
         product.update({"action": "untouched", "reason": "ignored sku (local file)"})
-        return "untouched", product
-
-    raw_tags = product.get("tags") or []
-    tags = [t.strip().lower() for t in raw_tags] if isinstance(raw_tags, list) else [t.strip().lower() for t in
-                                                                                     raw_tags.split(",")]
-
-    if any(tag in tags for tag in ["weekly deals", "ignore_update", "slab"]):
-        product.update({"action": "untouched", "reason": "tagged for skip"})
         return "untouched", product
 
     print(f"[{tcg_id}] Checking {product['title']}...")
@@ -699,7 +699,19 @@ def _classify_pre_scrape(product, blocked, ignored_skus):
     Mirrors the head of process_product — any change there must be
     reflected here or vice-versa, otherwise the pre-filter and the loop
     will disagree.
+
+    Tag-based skips (slab / weekly deals / ignore_update) are checked
+    FIRST, before tcg_id, so a slab missing its tcg_id metafield is
+    classified as "tagged for skip" instead of "missing tcg_id" — which
+    matters for the dashboard counts because slabs aren't supposed to
+    flow through this updater at all (slab_updater handles them).
     """
+    raw_tags = product.get("tags") or []
+    tags = ([t.strip().lower() for t in raw_tags] if isinstance(raw_tags, list)
+            else [t.strip().lower() for t in raw_tags.split(",")])
+    if any(tag in tags for tag in ("weekly deals", "ignore_update", "slab")):
+        return ("untouched", "tagged for skip")
+
     variant_key = str(product.get("variant_id") or "")
     if variant_key and variant_key in blocked:
         return ("skip", "auto-block")
@@ -707,11 +719,6 @@ def _classify_pre_scrape(product, blocked, ignored_skus):
         return ("missing", "no tcgplayer_id metafield")
     if product.get("sku") in ignored_skus:
         return ("untouched", "ignored sku (local file)")
-    raw_tags = product.get("tags") or []
-    tags = ([t.strip().lower() for t in raw_tags] if isinstance(raw_tags, list)
-            else [t.strip().lower() for t in raw_tags.split(",")])
-    if any(tag in tags for tag in ("weekly deals", "ignore_update", "slab")):
-        return ("untouched", "tagged for skip")
     return None
 
 
