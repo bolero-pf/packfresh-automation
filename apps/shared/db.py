@@ -18,13 +18,21 @@ _pool: ThreadedConnectionPool = None
 
 
 def init_pool(database_url: str = None, minconn: int = 2, maxconn: int = 10):
-    """Initialize the connection pool. Call once at app startup."""
+    """Initialize the connection pool. Idempotent — safe to call from every
+    Flask route or worker entrypoint; subsequent calls are no-ops once the
+    pool is up. Without this guard each route would create a fresh
+    ThreadedConnectionPool, orphaning the previous one's connections, and
+    every ~10 requests Postgres would hit its connection ceiling and the
+    next request would stall waiting for a slot to free."""
     global _pool
+    if _pool is not None:
+        return _pool
     url = database_url or os.getenv("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL not set")
     _pool = ThreadedConnectionPool(minconn, maxconn, url)
     logger.info(f"DB pool initialized (min={minconn}, max={maxconn})")
+    return _pool
 
 
 def get_pool() -> ThreadedConnectionPool:
