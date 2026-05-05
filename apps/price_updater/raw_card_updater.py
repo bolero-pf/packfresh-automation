@@ -132,14 +132,28 @@ def _record(db_module, run_id: str, started_at: datetime, entry: dict):
 # `currency` column: Scrydex sends JP-marketplace raw prices in JPY; the
 # CASE expression converts to USD inline so the returned market_price is
 # always USD regardless of the source row's currency.
+#
+# JP price-point selection: For JPY rows, prefer mid_price over market_price.
+# Scrydex's JP "market" oscillates between {low, mid, high} per sync — for
+# Blaine's Arcanine the cache moved from low (12000) to high (24000) overnight,
+# producing 2× swings in nightly output. mid is the median observed price and
+# is far more stable. Falls back to market when mid isn't populated (Scrydex
+# only fills mid for ~32% of JP raw rows). USD rows use market unchanged —
+# Scrydex's EN market is a properly-smoothed value, not a corner-pick.
 _CACHE_LOOKUP_SQL_TEMPLATE = """
     SELECT
-        CASE WHEN currency = 'JPY'
+        CASE WHEN currency = 'JPY' AND mid_price IS NOT NULL
+             THEN ROUND(mid_price::numeric * %s::numeric, 2)
+             WHEN currency = 'JPY'
              THEN ROUND(market_price::numeric * %s::numeric, 2)
              ELSE market_price END AS market_price,
+        CASE WHEN currency = 'JPY' AND mid_price IS NOT NULL THEN 'mid_jpy'
+             WHEN currency = 'JPY' THEN 'market_jpy'
+             ELSE 'market' END AS price_basis,
         CASE WHEN currency = 'JPY'
              THEN ROUND(low_price::numeric * %s::numeric, 2)
              ELSE low_price END AS low_price,
+        currency,
         scrydex_id, tcgplayer_id, variant
     FROM scrydex_price_cache
     WHERE {key_clause}
@@ -173,10 +187,12 @@ def _lookup_one(db_module, scrydex_id, tcgplayer_id, condition, variant) -> dict
     """Single-condition cache lookup. Scrydex-first, TCG fallback."""
     if not condition:
         return None
+    # Three JPY-rate placeholders now: mid, market, low (mid was added to
+    # stabilize JP pricing — see SQL comment above).
     if scrydex_id:
         rows = db_module.query(
             _CACHE_LOOKUP_BY_SCRYDEX,
-            (_JPY_USD_RATE, _JPY_USD_RATE, scrydex_id,
+            (_JPY_USD_RATE, _JPY_USD_RATE, _JPY_USD_RATE, scrydex_id,
              condition, variant, variant, variant),
         )
         if rows:
@@ -184,7 +200,7 @@ def _lookup_one(db_module, scrydex_id, tcgplayer_id, condition, variant) -> dict
     if tcgplayer_id:
         rows = db_module.query(
             _CACHE_LOOKUP_BY_TCG,
-            (_JPY_USD_RATE, _JPY_USD_RATE, int(tcgplayer_id),
+            (_JPY_USD_RATE, _JPY_USD_RATE, _JPY_USD_RATE, int(tcgplayer_id),
              condition, variant, variant, variant),
         )
         if rows:
@@ -201,6 +217,12 @@ def _lookup_cache_price(db_module, scrydex_id, tcgplayer_id, condition, variant)
     being skipped on every nightly run forever). The returned dict carries
     a `source` field — 'exact' or 'nm_fallback' — so the caller can record
     an honest reason in raw_card_price_runs.
+
+    JP cards (currency='JPY' on the NM source row) use JP_FALLBACK_MULTIPLIERS
+    (DMG=0.10, HP=0.20, MP=0.40, LP=0.65) — the JP collector market is much
+    more condition-strict than EN and the EN curve overprices off-NM JP cards
+    by 2-4×. Multiplier table choice is recorded in the source dict so the
+    audit string in raw_card_price_runs.reason names which one ran.
     """
     if not condition:
         return None
@@ -223,8 +245,14 @@ def _lookup_cache_price(db_module, scrydex_id, tcgplayer_id, condition, variant)
         return None
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
-    from ppt_client import FALLBACK_MULTIPLIERS
-    mult = FALLBACK_MULTIPLIERS.get(cond_upper)
+    is_jp = (nm_hit.get("currency") or "").upper() == "JPY"
+    if is_jp:
+        from ppt_client import JP_FALLBACK_MULTIPLIERS as _MULTS
+        mult_table = "jp"
+    else:
+        from ppt_client import FALLBACK_MULTIPLIERS as _MULTS
+        mult_table = "en"
+    mult = _MULTS.get(cond_upper)
     if mult is None:
         return None
 
@@ -241,6 +269,8 @@ def _lookup_cache_price(db_module, scrydex_id, tcgplayer_id, condition, variant)
         "source":       "nm_fallback",
         "nm_market":    nm_market,
         "multiplier":   mult,
+        "mult_table":   mult_table,
+        "nm_basis":     nm_hit.get("price_basis"),
     }
 
 
@@ -350,12 +380,18 @@ def run(*, apply_auto: bool = True, db_module=None) -> dict:
         # Annotate the audit trail when we're pricing off NM × multiplier
         # rather than a real per-condition row — operator should be able to
         # see at a glance why a DMG card got a price despite the cache only
-        # having NM. Reason string gets the derivation prepended below.
+        # having NM. Names the multiplier table (jp vs en — JP uses tighter
+        # multipliers because JP collectors only buy NM-MT) and the source
+        # price basis (mid_jpy means we used the median of Scrydex's
+        # low/mid/high range to dodge their day-over-day market swings).
         source_note = ""
         if cache.get("source") == "nm_fallback":
             mult = cache.get("multiplier")
             nm_m = cache.get("nm_market")
-            source_note = (f"NM-fallback ${float(nm_m):.2f} × {float(mult):.2f} "
+            tbl = cache.get("mult_table") or ""
+            basis = cache.get("nm_basis") or ""
+            tag = f"{tbl}/{basis}" if (tbl or basis) else ""
+            source_note = (f"NM-fallback[{tag}] ${float(nm_m):.2f} × {float(mult):.2f} "
                            f"({card['condition']}) → ${market:.2f}; ")
 
         entry.update({

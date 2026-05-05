@@ -76,6 +76,17 @@ FALLBACK_MULTIPLIERS = {
     "HP": Decimal("0.45"), "DMG": Decimal("0.25"),
 }
 
+# JP-specific multipliers — Japanese collector market is condition-strict
+# (NM-MT only really moves), so off-NM JP cards trade at a much steeper
+# discount than the EN curve. Used by raw_card_updater when synthesizing
+# off-NM prices from a JP NM cache row. Tuned conservatively — overpriced
+# JP HP/DMG sits forever; underpriced sells immediately and we revisit on
+# the next ingest.
+JP_FALLBACK_MULTIPLIERS = {
+    "NM": Decimal("1.00"), "LP": Decimal("0.65"), "MP": Decimal("0.40"),
+    "HP": Decimal("0.20"), "DMG": Decimal("0.10"),
+}
+
 
 class PPTError(Exception):
     def __init__(self, message: str, status_code: int = None, body=None):
