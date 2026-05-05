@@ -266,8 +266,8 @@
 
             // One chip per variant. NM price is what the operator cares
             // about for picking the right printing.
-            const chips = Object.keys(variantsMap)
-                .filter(v => !v.startsWith('_'))
+            const variantNames = Object.keys(variantsMap).filter(v => !v.startsWith('_'));
+            const chips = variantNames
                 .map(v => {
                     const conds = variantsMap[v] || {};
                     const nm = (conds['Near Mint'] || conds['NM'] || {});
@@ -277,6 +277,30 @@
                         <span class="vprice">${price}</span>
                     </span>`;
                 }).join('');
+
+            // Graded-only fallback. ~14% of cached scrydex_ids have only
+            // graded rows (special / shiny / promo printings that mostly
+            // sell PSA-slabbed). Binding a raw card to one of these is a
+            // dead end — the nightly run will never find a raw price.
+            // Surface the top graded comp so the operator can tell at a
+            // glance "this is graded-only, try a different printing"
+            // instead of "no variants in cache" which doesn't explain why.
+            let chipsHtml;
+            if (chips) {
+                chipsHtml = chips;
+            } else {
+                const graded = (card.ebay && card.ebay.salesByGrade) || {};
+                const gradeOrder = ['psa10','psa9','psa8','bgs10','bgs9.5','bgs9','cgc10','cgc9'];
+                const gradeKey = gradeOrder.find(k => graded[k] && graded[k].marketPrice7Day != null);
+                const topPrice = gradeKey != null
+                    ? `$${Number(graded[gradeKey].marketPrice7Day).toFixed(2)}`
+                    : '';
+                const gradeLabel = gradeKey ? gradeKey.toUpperCase().replace(/(\D+)(\d.*)/, '$1 $2') : '';
+                chipsHtml = `<span class="chip" style="cursor:not-allowed; opacity:0.7; background:rgba(239,68,68,0.12); border-color:rgba(239,68,68,0.4); color:#fca5a5;" title="No raw price in Scrydex cache for this printing — the nightly raw run can't price it. Pick a different printing.">
+                    <span class="vname">graded only</span>
+                    ${gradeKey ? `<span class="vprice">${esc(gradeLabel)} ${topPrice}</span>` : ''}
+                </span>`;
+            }
 
             // For non-EN cards (JP especially) show the English name as the
             // primary headline since that's what the operator searched on,
@@ -309,7 +333,7 @@
                         · scrydex_id <span class="mono">${esc(scrydexId)}</span>
                         ${card.tcgPlayerId ? `· tcg <span class="mono">${esc(card.tcgPlayerId)}</span>` : ''}
                     </div>
-                    <div class="chips">${chips || '<span class="mono" style="color:var(--text-dim);">no variants in cache</span>'}</div>
+                    <div class="chips">${chipsHtml}</div>
                 </div>
             `;
             results.appendChild(div);
@@ -317,14 +341,15 @@
     }
 
     // Chip click → bind. Delegated on the results container so dynamic
-    // re-renders don't need re-binding.
+    // re-renders don't need re-binding. Graded-only chips don't carry
+    // data-scrydex/data-variant — they're informational, not bindable.
     results.addEventListener('click', ev => {
         const chip = ev.target.closest('.chip');
         if (!chip) return;
         const scrydexId = chip.dataset.scrydex;
         const variant = chip.dataset.variant;
         if (!scrydexId || !variant) {
-            showToast('Missing scrydex_id or variant on chip', 'err');
+            showToast("Graded-only printing — no raw price in cache. Pick a different printing.", 'err');
             return;
         }
         applyBind(scrydexId, variant);
