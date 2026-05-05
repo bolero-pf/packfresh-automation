@@ -399,11 +399,16 @@ def list_holds():
     """All active holds ordered by created_at."""
     status_filter = request.args.get("status", "active")
     if status_filter == "active":
+        # Sealed/slab items aren't tracked through PULLED — they're notification-
+        # only. Treat them as effectively "done" so the queue progress bar
+        # reflects the raw work that actually requires action. A sealed-only
+        # hold shows 0/0 and renders as no progress bar (handled in the JS).
         rows = db.query("""
             SELECT h.*,
-                   COUNT(hi.id) AS total_items,
-                   COUNT(hi.id) FILTER (WHERE hi.status = 'PULLED') AS pulled_items,
-                   COUNT(hi.id) FILTER (WHERE hi.status = 'REQUESTED') AS pending_items
+                   COUNT(hi.id) FILTER (WHERE hi.item_kind = 'raw') AS total_items,
+                   COUNT(hi.id) FILTER (WHERE hi.item_kind = 'raw' AND hi.status = 'PULLED') AS pulled_items,
+                   COUNT(hi.id) FILTER (WHERE hi.item_kind = 'raw' AND hi.status = 'REQUESTED') AS pending_items,
+                   COUNT(hi.id) FILTER (WHERE hi.item_kind IN ('sealed','slab')) AS sealed_items
             FROM holds h
             LEFT JOIN hold_items hi ON hi.hold_id = h.id
             WHERE h.status IN ('PENDING','PULLING','READY')
@@ -1105,6 +1110,8 @@ def finish_hold(hold_id):
     """
     Finish a hold:
     - For guest holds: Create Shopify draft listings for ACCEPTED items, reject undecided
+    - For sealed-only holds: Mark sealed items DELIVERED and close (no listings, no
+      bin tracking — sealed lives on the shelf and Shopify decrements on POS sale)
     - For champion holds: Skip product creation (already exists), auto-accept all pulled items
     """
     # Check if this is a Champion (kiosk checkout) hold
@@ -1113,6 +1120,18 @@ def finish_hold(hold_id):
 
     if is_champion:
         return _finish_champion_hold(hold_id)
+
+    # If the hold has zero raw items, this is a sealed-only "brought it up to
+    # the customer" close — no Shopify listings to create, no bin locks to
+    # release. Just mark sealed items ACCEPTED so the detail view doesn't show
+    # stale REQUESTED/PULLED rows, and close the hold.
+    has_raw = db.query_one("""
+        SELECT 1 FROM hold_items
+        WHERE hold_id = %s AND item_kind = 'raw'
+        LIMIT 1
+    """, (hold_id,))
+    if not has_raw:
+        return _finish_sealed_only_hold(hold_id)
 
     if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
         return jsonify({"error": "Shopify not configured"}), 503
@@ -1202,24 +1221,45 @@ def finish_hold(hold_id):
             f"{[s['barcode'] for s in skipped_already_listed]}"
         )
 
-    # Any items still REQUESTED or PULLED (not yet decided) → auto-reject
-    # MISSING items are already resolved — leave them alone
+    # RAW items still REQUESTED or PULLED (not yet decided) → auto-reject.
+    # MISSING items are already resolved — leave them alone.
+    # SEALED/SLAB items are NEVER auto-rejected — they aren't tracked the way
+    # raw is (no bin lock, no Shopify listing to create), they just live on
+    # the shelf. Mark them ACCEPTED so the closed hold doesn't show stale
+    # REQUESTED/PULLED rows; if the customer doesn't buy them at POS, Shopify
+    # inventory stays unchanged and the items go back on the shelf.
     db.execute("""
         UPDATE raw_cards SET state = 'PENDING_RETURN', current_hold_id = NULL
         WHERE id IN (
             SELECT raw_card_id FROM hold_items
-            WHERE hold_id = %s AND status IN ('REQUESTED','PULLED')
+            WHERE hold_id = %s
+              AND item_kind = 'raw'
+              AND status IN ('REQUESTED','PULLED')
         )
     """, (hold_id,))
     db.execute("""
         UPDATE hold_items SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP
-        WHERE hold_id = %s AND status IN ('REQUESTED','PULLED')
+        WHERE hold_id = %s
+          AND item_kind = 'raw'
+          AND status IN ('REQUESTED','PULLED')
+    """, (hold_id,))
+    db.execute("""
+        UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
+        WHERE hold_id = %s
+          AND item_kind IN ('sealed','slab')
+          AND status IN ('REQUESTED','PULLED')
     """, (hold_id,))
 
-    # Close the hold. ACCEPTED if anything was listed (newly OR via toggle),
-    # otherwise RETURNED.
+    # Close the hold. ACCEPTED if anything was listed (newly OR via toggle)
+    # OR any sealed/slab item was delivered (customer is taking it). Only
+    # RETURNED if every raw was rejected and there were no sealed items.
     has_any_listing = bool(results) or bool(skipped_already_listed)
-    final_status = "ACCEPTED" if has_any_listing else "RETURNED"
+    has_sealed = db.query_one("""
+        SELECT 1 FROM hold_items
+        WHERE hold_id = %s AND item_kind IN ('sealed','slab')
+        LIMIT 1
+    """, (hold_id,))
+    final_status = "ACCEPTED" if (has_any_listing or has_sealed) else "RETURNED"
     db.execute("""
         UPDATE holds SET status = %s, resolved_at = CURRENT_TIMESTAMP WHERE id = %s
     """, (final_status, hold_id))
@@ -1277,6 +1317,29 @@ def _create_raw_listing(item: dict) -> dict:
         "variant_id": product["variants"][0]["id"],
         "title":      title,
     }
+
+
+def _finish_sealed_only_hold(hold_id):
+    """Close a sealed-only hold ("brought it up to the customer at the
+    register"). Sealed items aren't tracked the way raw is — they live on the
+    shelf, Shopify decrements inventory automatically when sold at POS, and
+    if the customer doesn't buy, nothing changes. So this just bulk-marks
+    every REQUESTED/PULLED sealed item ACCEPTED so the closed hold doesn't
+    show stale rows, and flips the hold itself to ACCEPTED."""
+    n = db.execute("""
+        UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
+        WHERE hold_id = %s
+          AND item_kind IN ('sealed','slab')
+          AND status IN ('REQUESTED','PULLED')
+    """, (hold_id,))
+
+    db.execute("""
+        UPDATE holds SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+    """, (hold_id,))
+
+    logger.info(f"Closed sealed-only hold {hold_id}: {n} item(s) marked ACCEPTED")
+    return jsonify({"success": True, "sealed_only": True, "closed": n})
 
 
 def _finish_champion_hold(hold_id):
@@ -1613,20 +1676,29 @@ def _compute_tier_quotas(capacity, count_to_fill, current_counts):
     return quotas
 
 
+# Canonical game IDs that can be assigned to a typed location. Two pseudo-types
+# layer on top: 'other' (every non-Pokemon TCG) and 'mixed' (every TCG including
+# Pokemon). Add new games here as we onboard them — the filter + UI dropdown
+# both consume this list.
+SINGLE_GAME_TYPES = ("pokemon", "magic", "onepiece", "lorcana", "riftbound", "yugioh")
+MULTI_GAME_TYPES  = ("other", "mixed")
+ALL_CARD_TYPES    = SINGLE_GAME_TYPES + MULTI_GAME_TYPES
+
+
 def _game_filter_sql(card_type):
     """Return a SQL fragment filtering rc.game for a typed location.
 
-    pokemon  -> only pokemon (NULL still excluded; Binder-1 backfill normalized them)
-    magic    -> only magic
-    other    -> every non-Pokémon TCG (mixed FG-2 case)
-    anything else (mixed/display/other unknown) -> no filter
+    Single-game types (pokemon, magic, …) -> only that game.
+    'other' -> every non-Pokémon TCG (legacy FG-2 case, still useful).
+    'mixed' -> every TCG including Pokémon.
+    Anything else -> no filter (legacy fallback).
     """
-    if card_type == "pokemon":
-        return "rc.game = 'pokemon'"
-    if card_type == "magic":
-        return "rc.game = 'magic'"
+    if card_type in SINGLE_GAME_TYPES:
+        return f"rc.game = '{card_type}'"
     if card_type == "other":
         return "rc.game IS NOT NULL AND rc.game <> 'pokemon'"
+    if card_type == "mixed":
+        return "rc.game IS NOT NULL"
     return "TRUE"
 
 
@@ -1789,12 +1861,13 @@ def display_cases():
         out.append({
             "id":            str(c["id"]),
             "bin_label":     c["bin_label"],
+            "card_type":     c["card_type"],
             "capacity":      c["capacity"],
             "current_count": c["current_count"],
             "available":     c["available"],
             "cards":         [_ser(dict(r)) for r in cards],
         })
-    return jsonify({"cases": out})
+    return jsonify({"cases": out, "card_type_options": list(ALL_CARD_TYPES)})
 
 
 @app.route("/api/display/cases/<case_id>/capacity", methods=["POST"])
@@ -1822,6 +1895,93 @@ def display_case_capacity(case_id):
 
     db.execute("UPDATE storage_locations SET capacity = %s WHERE id::text = %s", (new_cap, case_id))
     return jsonify({"success": True, "capacity": new_cap})
+
+
+@app.route("/api/display/cases/<case_id>/card-type", methods=["POST"])
+def display_case_card_type(case_id):
+    """Change which game(s) a display case holds. Set Out's shopping list
+    will start filtering by the new type immediately, but cards already in
+    the case stay where they are — staff can return them manually if they no
+    longer fit. The pseudo-types 'other' (every non-Pokemon TCG) and 'mixed'
+    (every TCG) are supported alongside single-game IDs."""
+    ct = ((request.get_json() or {}).get("card_type") or "").strip().lower()
+    if ct not in ALL_CARD_TYPES:
+        return jsonify({"error": f"card_type must be one of: {', '.join(ALL_CARD_TYPES)}"}), 400
+
+    row = db.query_one("""
+        SELECT sl.id, sr.location_type
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.id::text = %s
+    """, (case_id,))
+    if not row or row["location_type"] != "display_case":
+        return jsonify({"error": "Display case not found"}), 404
+
+    db.execute("UPDATE storage_locations SET card_type = %s WHERE id::text = %s", (ct, case_id))
+    return jsonify({"success": True, "card_type": ct})
+
+
+@app.route("/api/display/cases", methods=["POST"])
+def display_case_create():
+    """Add a new display case. Auto-picks the next FG-N partition number so
+    bin_labels stay sequential (FG-3, FG-4, …)."""
+    data = request.get_json() or {}
+    try:
+        capacity = int(data.get("capacity", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "capacity must be an integer"}), 400
+    if capacity < 1 or capacity > 1000:
+        return jsonify({"error": "capacity must be between 1 and 1000"}), 400
+    ct = (data.get("card_type") or "").strip().lower()
+    if ct not in ALL_CARD_TYPES:
+        return jsonify({"error": f"card_type must be one of: {', '.join(ALL_CARD_TYPES)}"}), 400
+
+    fg_row = db.query_one("""
+        SELECT sl.row_id
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sr.location_type = 'display_case'
+        LIMIT 1
+    """)
+    if not fg_row:
+        return jsonify({"error": "No display_case row exists yet — run migrate_display_phase1 first"}), 500
+    row_id = fg_row["row_id"]
+
+    next_part_row = db.query_one("""
+        SELECT COALESCE(MAX(partition_num), 0) + 1 AS next_part
+        FROM storage_locations WHERE row_id = %s
+    """, (row_id,))
+    next_part = next_part_row["next_part"]
+    bin_label = f"FG-{next_part}"
+
+    db.execute("""
+        INSERT INTO storage_locations (bin_label, row_id, partition_num, card_type, capacity)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (bin_label, row_id, next_part, ct, capacity))
+
+    return jsonify({"success": True, "bin_label": bin_label, "card_type": ct, "capacity": capacity})
+
+
+@app.route("/api/display/cases/<case_id>", methods=["DELETE"])
+def display_case_delete(case_id):
+    """Delete an empty display case. Refuses if any cards are still in it —
+    return them to storage first via the Return All flow."""
+    row = db.query_one("""
+        SELECT sl.id, sl.bin_label, sl.current_count, sr.location_type
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.id::text = %s
+    """, (case_id,))
+    if not row or row["location_type"] != "display_case":
+        return jsonify({"error": "Display case not found"}), 404
+    if row["current_count"] > 0:
+        return jsonify({
+            "error": f"{row['bin_label']} still holds {row['current_count']} card(s). "
+                     "Return them to storage before deleting."
+        }), 409
+
+    db.execute("DELETE FROM storage_locations WHERE id::text = %s", (case_id,))
+    return jsonify({"success": True})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1868,23 +2028,51 @@ def display_suggest():
         (max(count * 5, 500),),
     )
 
+    # Seed the (name, variant) cap with what's already in the case so we never
+    # suggest a copy of a card the case already has — display cases hold one of
+    # each, no duplicates.
+    by_card_seed = {}
+    if case:
+        existing = db.query("""
+            SELECT card_name, COALESCE(LOWER(variant), '') AS variant
+            FROM raw_cards WHERE state = 'DISPLAY' AND bin_id = %s
+        """, (case["id"],))
+        for e in existing:
+            cv = (e["card_name"], e["variant"] or "")
+            by_card_seed[cv] = by_card_seed.get(cv, 0) + 1
+
     # Refill weighs against what's already in the case — if all the premium
     # cards sold, the deficit pass pulls premium back in instead of just
     # piling on more of whichever tier is already over-represented.
     current_counts = _current_tier_counts(case["id"]) if case else {t: 0 for t in PRICE_TIERS}
     quotas = _compute_tier_quotas(capacity, count, current_counts)
 
-    # FG-2 ('other') is mixed-TCG; cap any one game at ~40% so one TCG can't
-    # dominate the case. Single-game cases (FG-1 pokemon, future magic case)
-    # don't need this guard.
-    game_cap = max(1, int(round(count * 0.4))) if card_type == "other" else None
+    # Multi-game cases ('other', 'mixed') split as evenly as possible across
+    # whichever games actually have storage stock so one TCG can't dominate
+    # when its stock dwarfs the others (e.g. lots of MTG, only a handful of
+    # OP). Backfill kicks in for games with low inventory — they just get
+    # fewer picks instead of blocking the case from filling.
+    game_cap = None
+    if card_type in MULTI_GAME_TYPES:
+        distinct_games = db.query(f"""
+            SELECT COUNT(DISTINCT rc.game) AS n
+            FROM raw_cards rc
+            WHERE rc.state = 'STORED'
+              AND rc.current_hold_id IS NULL
+              AND rc.current_price IS NOT NULL
+              AND rc.current_price >= 1.0
+              AND {_game_filter_sql(card_type)}
+        """)
+        n_games = max(1, (distinct_games[0]["n"] if distinct_games else 1))
+        game_cap = max(1, -(-count // n_games))  # ceil(count / n_games)
 
     chosen = _greedy_pick_with_quotas(
         candidates, count,
         allowed_conditions=("NM", "LP"),
         tier_quotas=quotas,
-        name_cap=2,
+        name_cap=1,   # one copy of each (name, variant) — no duplicates in the case
         set_cap=10,
+        by_card_seed=by_card_seed,
         game_cap=game_cap,
     )
 

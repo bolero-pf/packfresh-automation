@@ -552,6 +552,15 @@ let _scanBuffer = '';
 let _scanTimer = null;
 let _returnScanned = new Set();
 let _pollTimer = null;
+// Ephemeral "got it" ticks for sealed items in the current hold detail —
+// purely a visual aid for staff, not persisted.
+let _sealedTicks = new Set();
+
+function toggleSealedTick(holdItemId) {
+  if (_sealedTicks.has(holdItemId)) _sealedTicks.delete(holdItemId);
+  else _sealedTicks.add(holdItemId);
+  if (_holdData) renderHoldDetail(_holdData);
+}
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 function showView(name) {
@@ -585,28 +594,36 @@ async function loadHolds() {
       return;
     }
     el.innerHTML = holds.map(h => {
-      const age     = _age(h.created_at);
-      const pulled  = h.pulled_items || 0;
-      const total   = h.total_items  || 0;
-      const pct     = total ? Math.round(pulled / total * 100) : 0;
-      const badgeCls= h.status === 'PENDING' ? 'badge-pending' : h.status === 'PULLING' ? 'badge-pulling' : 'badge-ready';
+      const age      = _age(h.created_at);
+      const pulled   = h.pulled_items || 0;       // raw pulled
+      const totalRaw = h.total_items  || 0;       // raw only (post-reframe)
+      const sealed   = h.sealed_items || 0;
+      const total    = totalRaw + sealed;
+      const pct      = totalRaw ? Math.round(pulled / totalRaw * 100) : 0;
+      const sealedOnly = totalRaw === 0 && sealed > 0;
+      const badgeCls = h.status === 'PENDING' ? 'badge-pending' : h.status === 'PULLING' ? 'badge-pulling' : 'badge-ready';
       const isChampion = h.cohort === 'champion' && h.checkout_status === 'completed';
+      // Compose meta line: "5 cards · 2 sealed · 3m" for mixed; "3 sealed · 3m" for sealed-only.
+      const metaParts = [];
+      if (totalRaw) metaParts.push(`${totalRaw} card${totalRaw!==1?'s':''}`);
+      if (sealed)   metaParts.push(`${sealed} sealed`);
+      metaParts.push(age);
       return `<div class="card" onclick="openHold('${h.id}')">
         <div class="hold-row">
           <div>
-            <div class="hold-name">${esc(h.customer_name)}${isChampion ? ' <span style="color:#4ade80;font-size:0.75rem;font-weight:700;">★ PAID — Ship</span>' : ''}</div>
+            <div class="hold-name">${esc(h.customer_name)}${isChampion ? ' <span style="color:#4ade80;font-size:0.75rem;font-weight:700;">★ PAID — Ship</span>' : ''}${sealedOnly ? ' <span style="font-size:0.7rem;color:var(--accent);font-weight:600;">📦 sealed-only</span>' : ''}</div>
             <div class="hold-phone">${isChampion ? esc(h.shopify_order_number||'') + ' · ' + esc(h.shipping_name||h.customer_email||'') : esc(h.customer_phone||'—')}</div>
           </div>
           <div>
             <span class="badge ${badgeCls}">${h.status}</span>
           </div>
-          <div class="hold-meta">${total} card${total!==1?'s':''} · ${age}</div>
+          <div class="hold-meta">${metaParts.join(' · ')}</div>
         </div>
-        ${h.status === 'PULLING' ? `
+        ${(h.status === 'PULLING' && totalRaw) ? `
           <div class="progress-bar" style="margin-top:10px;">
             <div class="progress-fill" style="width:${pct}%"></div>
           </div>
-          <div style="font-size:0.72rem;color:var(--dim);margin-top:4px;">${pulled}/${total} pulled</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-top:4px;">${pulled}/${totalRaw} raw pulled${sealed?` · ${sealed} sealed (no scan needed)`:''}</div>
         ` : ''}
       </div>`;
     }).join('');
@@ -617,6 +634,7 @@ async function loadHolds() {
 
 async function openHold(holdId) {
   _currentHoldId = holdId;
+  _sealedTicks = new Set();   // reset ephemeral ticks for the new hold
   showView('hold-detail');
   document.getElementById('hold-detail-content').innerHTML = '<div class="empty"><div class="spinner"></div></div>';
   await refreshHoldDetail();
@@ -637,33 +655,62 @@ function renderHoldDetail(d) {
   const hold     = d.hold;
   const items    = d.items;
   const pull     = d.pull_list;
-  // Sealed/slab items live alongside raw items but skip the bin walk + decision
-  // step. They go REQUESTED → PULLED → (SOLD via order webhook) | RETURNED.
+  // Sealed/slab items are *notifications* — "also grab these off the shelf
+  // for the customer". No bin lock, no Shopify listing creation, no required
+  // scan. Shopify auto-decrements inventory at POS sale; if the customer
+  // doesn't buy, the items just go back on the shelf. The hold's lifecycle
+  // is governed entirely by the raw side.
   const products = (d.product_items || []).slice();
   const rawItems = items.filter(i => (i.item_kind || 'raw') === 'raw');
   const el       = document.getElementById('hold-detail-content');
 
-  // "All pulled" must include sealed/slab items even though they have no decision phase.
-  const allPulled   = items.every(i => ['PULLED','ACCEPTED','REJECTED','MISSING'].includes(i.item_status));
-  const anyDecided  = rawItems.some(i => ['ACCEPTED','REJECTED'].includes(i.item_status));
-  const pulledCount = items.filter(i => i.item_status === 'PULLED').length;
-  const totalCount  = items.length;
-  const badgeCls    = hold.status === 'PENDING' ? 'badge-pending' : hold.status === 'PULLING' ? 'badge-pulling' : 'badge-ready';
+  const hasRaw      = rawItems.length > 0;
+  const hasSealed   = products.length > 0;
+  const sealedOnly  = !hasRaw && hasSealed;
+
+  // RAW-side phase progression: only raw items gate Mark Ready / Finish Hold.
+  const rawAllPulled = hasRaw && rawItems.every(i => ['PULLED','ACCEPTED','REJECTED','MISSING'].includes(i.item_status));
+  const anyDecided   = rawItems.some(i => ['ACCEPTED','REJECTED'].includes(i.item_status));
+  const acceptedRaw  = rawItems.filter(i => i.item_status === 'ACCEPTED').length;
+  const badgeCls     = hold.status === 'PENDING' ? 'badge-pending' : hold.status === 'PULLING' ? 'badge-pulling' : 'badge-ready';
 
   const isChampionHold = hold.cohort === 'champion' && hold.checkout_status === 'completed';
+
+  // ── One dominant primary CTA per phase ─────────────────────────────────────
+  // Big, full-width-ish, in-your-face — staff should never wonder "what's next?".
+  let primaryCta = '';
+  if (sealedOnly) {
+    // Sealed-only = notification. One button, regardless of status: "Brought
+    // it up to the customer — close." finishHold() routes to the sealed-only
+    // backend path (no listings, no bin tracking).
+    if (!['ACCEPTED','RETURNED','CANCELLED'].includes(hold.status)) {
+      primaryCta = `<button class="btn primary-cta" style="background:var(--green);color:#000;font-size:1.05rem;font-weight:700;padding:14px 28px;border-radius:10px;" onclick="finishHold()">✓ Brought it up — Close hold</button>`;
+    }
+  } else if (hasRaw) {
+    if (hold.status === 'PENDING') {
+      primaryCta = `<button class="btn primary-cta" style="background:var(--amber);color:#000;font-size:1.05rem;font-weight:700;padding:14px 28px;border-radius:10px;" onclick="transitionHold('PULLING')">▶ Start Pulling</button>`;
+    } else if (hold.status === 'PULLING' && rawAllPulled) {
+      primaryCta = `<button class="btn primary-cta" style="background:var(--green);color:#000;font-size:1.05rem;font-weight:700;padding:14px 28px;border-radius:10px;" onclick="transitionHold('READY')">✓ All pulled — Ready for customer</button>`;
+    } else if (hold.status === 'READY' || anyDecided) {
+      const label = acceptedRaw > 0
+        ? `✓ Finish — Create ${acceptedRaw} listing${acceptedRaw===1?'':'s'}`
+        : `✓ Finish — Close hold (no listings)`;
+      primaryCta = `<button class="btn primary-cta" style="background:var(--green);color:#000;font-size:1.05rem;font-weight:700;padding:14px 28px;border-radius:10px;" onclick="finishHold()">${label}</button>`;
+    }
+  }
+
+  const cancelLabel = sealedOnly ? '✕ Customer didn\'t show' : '✕ Cancel Hold';
 
   let html = `
     <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
       <div>
         <div style="font-size:1.4rem;font-weight:700;">${esc(hold.customer_name)}${isChampionHold ? ' <span style="background:#4ade80;color:#000;padding:2px 10px;border-radius:12px;font-size:0.75rem;font-weight:700;">★ PAID — Ship</span>' : ''}</div>
-        <div style="font-size:0.82rem;color:var(--dim);">${isChampionHold ? esc(hold.shopify_order_number||'') + ' · ' + esc(hold.shipping_name||hold.customer_email||'') : esc(hold.customer_phone||'')} · ${_age(hold.created_at)} · <span class="badge ${badgeCls}">${hold.status}</span></div>
+        <div style="font-size:0.82rem;color:var(--dim);">${isChampionHold ? esc(hold.shopify_order_number||'') + ' · ' + esc(hold.shipping_name||hold.customer_email||'') : esc(hold.customer_phone||'')} · ${_age(hold.created_at)} · <span class="badge ${badgeCls}">${hold.status}</span>${sealedOnly ? ' <span style="font-size:0.7rem;color:var(--dim);margin-left:6px;">· sealed-only (Shopify handles inventory)</span>' : ''}</div>
         ${isChampionHold && hold.shipping_address ? `<div style="font-size:0.78rem;color:var(--dim);margin-top:2px;">📦 ${esc(hold.shipping_address)}</div>` : ''}
       </div>
-      <div class="btn-row" style="margin:0;flex-wrap:wrap;gap:8px;">
-        ${hold.status === 'PENDING' ? `<button class="btn btn-amber" onclick="transitionHold('PULLING')">▶ Start Pulling</button>` : ''}
-        ${hold.status === 'PULLING' && allPulled ? `<button class="btn btn-green" onclick="transitionHold('READY')">✓ Mark Ready</button>` : ''}
-        ${(hold.status === 'READY' || anyDecided) ? `<button class="btn btn-green" onclick="finishHold()">✓ Finish Hold</button>` : ''}
-        ${hold.status !== 'CANCELLED' ? `<button class="btn" style="background:none;border:1px solid var(--border);color:var(--red);" onclick="cancelHold()">✕ Cancel Hold</button>` : ''}
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
+        ${primaryCta}
+        ${hold.status !== 'CANCELLED' ? `<button class="btn btn-sm" style="background:none;border:1px solid var(--border);color:var(--red);font-size:0.78rem;" onclick="cancelHold()">${cancelLabel}</button>` : ''}
       </div>
     </div>
   `;
@@ -744,17 +791,33 @@ function renderHoldDetail(d) {
     }).join('');
   }
 
-  // Sealed / slab items — always shown regardless of phase, since they have
-  // no decision step and need a way to be marked "picked up". Scan the
-  // physical barcode (or the legacy SKU) to flip REQUESTED → PULLED.
+  // Sealed / slab items — notification only. No state tracking, no required
+  // scan. Staff sees the list, grabs the items off the shelf, brings them up.
+  // Optional ephemeral "got it" tick (in-memory, resets on refresh) so staff
+  // can mentally check items off without persisting anything to the DB.
   if (products.length) {
-    html += `<div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:16px 0 8px;">Sealed &amp; Slabs — scan barcode or tap Mark Pulled</div>`;
+    const sectionLabel = sealedOnly
+      ? 'Items to bring up to the customer'
+      : 'Also grab from the shelf';
+    const sectionSub = sealedOnly
+      ? 'Sealed items live on the shelf — Shopify decrements inventory automatically when sold at POS. No scanning required; just grab and go.'
+      : 'These don\'t need scanning — they aren\'t tracked. Just grab them off the shelf when you head up to the register.';
+    html += `<div style="margin:18px 0 8px;">
+      <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;">${sectionLabel}</div>
+      <div style="font-size:0.72rem;color:var(--dim);margin-top:2px;">${sectionSub}</div>
+    </div>`;
     html += products.map(item => {
       const kindLabel = (item.item_kind === 'slab') ? 'Slab' : 'Sealed';
       const price = parseFloat(item.current_price || 0);
+      // Ephemeral tick — _sealedTicks survives renders within this hold detail
+      // open but resets when navigating away. Pure visual aid.
+      const ticked = _sealedTicks.has(item.hold_item_id);
+      // Treat PULLED (legacy scan flow) the same as the ephemeral tick — if
+      // staff happened to scan a sealed barcode, show it as checked.
+      const isClosed = ['PULLED','ACCEPTED','REJECTED','CANCELLED'].includes(item.item_status);
       return `
-      <div class="scan-item ${item.item_status.toLowerCase()} no-hover" style="margin-bottom:6px;padding:10px 14px;border-radius:8px;">
-        <div class="scan-check">${item.item_status === 'PULLED' ? '✓' : ''}</div>
+      <div class="scan-item no-hover" style="margin-bottom:6px;padding:10px 14px;border-radius:8px;${ticked||isClosed?'background:rgba(74,222,128,0.06);border-color:var(--green);':''}">
+        <div class="scan-check" style="cursor:pointer;" onclick="toggleSealedTick('${item.hold_item_id}')" title="${ticked?'Untick':'Tick when you\\'ve grabbed it'}">${(ticked||isClosed) ? '✓' : '○'}</div>
         ${item.image_url ? `<img src="${esc(item.image_url)}" style="width:38px;height:38px;object-fit:contain;border-radius:4px;background:var(--surface2);">` : ''}
         <div style="flex:1;min-width:0;">
           <div style="font-weight:600;font-size:0.88rem;">
@@ -768,16 +831,6 @@ function renderHoldDetail(d) {
             ${price ? ` · $${price.toFixed(2)}` : ''}
           </div>
         </div>
-        ${item.item_status === 'REQUESTED' ? `
-          <button class="btn btn-sm btn-green" style="font-size:0.7rem;padding:4px 10px;" onclick="markProductPulled('${item.hold_item_id}','${esc(item.sku||'')}')">✓ Mark Pulled</button>
-        ` : item.item_status === 'EXPIRED_UNCLAIMED' ? `
-          <div style="display:flex;gap:6px;align-items:center;">
-            <span style="font-size:0.7rem;color:var(--amber);font-weight:600;">EXPIRED</span>
-            <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--amber);color:var(--amber);" onclick="markProductPulled('${item.hold_item_id}','${esc(item.sku||'')}')">↻ Recover &amp; Pull</button>
-          </div>
-        ` : item.item_status === 'PULLED' ? `
-          <span style="font-size:0.78rem;color:var(--green);font-weight:600;">PULLED</span>
-        ` : `<span style="font-size:0.78rem;color:var(--dim);">${item.item_status}</span>`}
       </div>`;
     }).join('');
   }
@@ -835,15 +888,21 @@ async function cancelHold() {
   // Releases raw_card locks (cards stay in their bins) and marks any
   // un-resolved items + the hold as CANCELLED. Refuses if any items are
   // already ACCEPTED — those have Shopify listings and must be reversed
-  // first.
-  if (!await themedConfirm(
-    'Cancel this hold?',
-    'Any cards locked by this hold will be released back to inventory immediately. ' +
-    'This is for "leave the cards there, just close it out" — not for completed sales.'
-  )) return;
+  // first. Sealed-only holds have nothing to release; the cancel just
+  // closes the notification.
+  const items    = _holdData?.items || [];
+  const rawItems = items.filter(i => (i.item_kind || 'raw') === 'raw');
+  const sealedOnly = rawItems.length === 0 && items.length > 0;
+
+  const title = sealedOnly ? 'Customer didn\'t show?' : 'Cancel this hold?';
+  const msg = sealedOnly
+    ? 'Nothing to release — sealed items live on the shelf and aren\'t locked. This just removes the notification from the queue.'
+    : 'Any cards locked by this hold will be released back to inventory immediately. ' +
+      'This is for "leave the cards there, just close it out" — not for completed sales.';
+  if (!await themedConfirm(title, msg)) return;
   try {
     await post(`/api/holds/${_currentHoldId}/cancel`, {});
-    toast('Hold cancelled — cards released.', 'green');
+    toast(sealedOnly ? 'Hold removed.' : 'Hold cancelled — cards released.', 'green');
     setTimeout(() => showView('holds'), 800);
   } catch(e) { toast(e.message, 'red'); }
 }
@@ -872,23 +931,39 @@ async function markProductPulled(holdItemId, sku) {
 }
 
 async function finishHold() {
-  const accepted = (_holdData?.items || []).filter(i => i.item_status === 'ACCEPTED').length;
-  const total    = (_holdData?.items || []).length;
-  const msg = accepted > 0
-    ? `Create ${accepted} Shopify listing${accepted>1?'s':''} and close hold? Unchosen cards will be returned.`
-    : 'No accepted cards — close hold and return all cards?';
-  if (!await themedConfirm('Finish Hold', msg)) return;
+  const items    = _holdData?.items || [];
+  const rawItems = items.filter(i => (i.item_kind || 'raw') === 'raw');
+  const sealedItems = items.filter(i => (i.item_kind || 'raw') !== 'raw');
+  const acceptedRaw = rawItems.filter(i => i.item_status === 'ACCEPTED').length;
+  const sealedOnly  = rawItems.length === 0 && sealedItems.length > 0;
 
-  const btn = document.querySelector('.btn-green[onclick="finishHold()"]');
+  let title, msg;
+  if (sealedOnly) {
+    title = 'Close hold?';
+    msg = `Closing this hold marks the ${sealedItems.length} sealed item${sealedItems.length===1?'':'s'} as delivered. Shopify decrements inventory automatically when the customer pays at POS — no extra action needed here.`;
+  } else if (acceptedRaw > 0) {
+    title = 'Finish Hold';
+    msg = `Create ${acceptedRaw} Shopify listing${acceptedRaw>1?'s':''} and close hold? Unchosen raw cards will be returned to storage.`;
+  } else {
+    title = 'Finish Hold';
+    msg = 'No accepted raw cards — close hold and return all raw cards to storage?';
+  }
+  if (!await themedConfirm(title, msg)) return;
+
+  const btn = document.querySelector('.primary-cta');
+  const originalLabel = btn ? btn.innerHTML : '';
   if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
 
   try {
     const d = await post(`/api/holds/${_currentHoldId}/finish`, {});
-    toast(`Done! ${d.created} listing${d.created!==1?'s':''} created.`, 'green');
+    const successMsg = d.sealed_only
+      ? 'Hold closed.'
+      : `Done! ${d.created} listing${d.created!==1?'s':''} created.`;
+    toast(successMsg, 'green');
     setTimeout(() => showView('holds'), 1500);
   } catch(e) {
     toast(e.message, 'red');
-    if (btn) { btn.disabled = false; btn.textContent = '✓ Finish Hold'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = originalLabel; }
   }
 }
 
@@ -1739,22 +1814,40 @@ async function confirmRelink(idx) {
 }
 
 // ── Display Case ──────────────────────────────────────────────────────────────
+let _cardTypeOptions = [];
+
 async function loadDisplay() {
   try {
     const d = await get('/api/display/cases');
+    _cardTypeOptions = d.card_type_options || [];
     renderDisplay(d.cases || []);
   } catch(e) {
     document.getElementById('display-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
   }
 }
 
+// Friendlier labels for the card_type dropdown.
+const _cardTypeLabel = {
+  pokemon:  'Pokemon',
+  magic:    'Magic',
+  onepiece: 'One Piece',
+  lorcana:  'Lorcana',
+  riftbound:'Riftbound',
+  yugioh:   'Yu-Gi-Oh!',
+  other:    'Mixed (non-Pokemon)',
+  mixed:    'Mixed (everything)',
+};
+
 function renderDisplay(cases) {
   const el = document.getElementById('display-content');
+  const addBtn = `<div style="margin-bottom:16px;display:flex;justify-content:flex-end;">
+    <button class="btn btn-sm btn-green" onclick="addDisplayCase()">+ Add Display Case</button>
+  </div>`;
   if (!cases.length) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">🪟</div><p>No display cases configured yet — run the migration.</p></div>';
+    el.innerHTML = addBtn + '<div class="empty"><div class="empty-icon">🪟</div><p>No display cases yet — click "Add Display Case" to set one up.</p></div>';
     return;
   }
-  el.innerHTML = cases.map(c => {
+  el.innerHTML = addBtn + cases.map(c => {
     const pct = c.capacity ? Math.round(c.current_count / c.capacity * 100) : 0;
     const cardsHtml = c.cards.length ? `
       <div class="editor-grid" style="margin-top:14px;">
@@ -1762,7 +1855,7 @@ function renderDisplay(cases) {
           const img = card.image_url
             ? `<img src="${esc(card.image_url)}" alt="${esc(card.card_name)}" loading="lazy">`
             : '<div class="no-img">🃏</div>';
-          return `<div class="ec" style="cursor:default;">
+          return `<div class="ec" title="Open editor (reprint, relink, refresh price)" onclick="openCaseCardEditor('${esc(card.barcode)}')">
             <div class="ec-img">${img}</div>
             <div class="ec-body">
               <div class="ec-name">${esc(card.card_name)}</div>
@@ -1776,21 +1869,34 @@ function renderDisplay(cases) {
           </div>`;
         }).join('')}
       </div>
-    ` : '<div style="font-size:0.85rem;color:var(--dim);text-align:center;padding:30px;">Empty case — Set Out flow ships next.</div>';
+    ` : '<div style="font-size:0.85rem;color:var(--dim);text-align:center;padding:30px;">Empty case — set out cards from the storage bins.</div>';
+
+    const typeOptionsHtml = _cardTypeOptions.map(t =>
+      `<option value="${esc(t)}" ${t===c.card_type?'selected':''}>${esc(_cardTypeLabel[t]||t)}</option>`
+    ).join('');
+
+    const canDelete = c.current_count === 0;
 
     return `
       <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px;">
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
           <div style="font-size:1.15rem;font-weight:700;">${esc(c.bin_label)}</div>
+          <span class="badge" style="background:rgba(232,197,71,0.18);color:var(--accent);font-size:0.7rem;padding:2px 8px;border-radius:6px;">
+            ${esc(_cardTypeLabel[c.card_type]||c.card_type||'unset')}
+          </span>
           <div style="font-family:var(--mono);font-size:0.9rem;color:var(--dim);">
             ${c.current_count} / ${c.capacity} cards
           </div>
           <div style="flex:1;min-width:120px;height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;">
             <div style="height:100%;background:${pct>=100?'var(--red)':pct>=80?'var(--accent)':'var(--green)'};width:${Math.min(100,pct)}%;"></div>
           </div>
+          <select onchange="setCaseType('${esc(c.id)}', this.value)" title="What goes in this case" style="background:var(--surface-2);border:1.5px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:0.78rem;">
+            ${typeOptionsHtml}
+          </select>
           <button class="btn btn-sm" onclick="editCaseCapacity('${esc(c.id)}', ${c.capacity})">Edit capacity</button>
           <button class="btn btn-sm btn-green" onclick="openSetOut('${esc(c.id)}', ${c.available})" ${c.available===0?'disabled title="Case full"':''}>+ Set Out</button>
           <button class="btn btn-sm" onclick="openReturnAll('${esc(c.id)}')" ${c.current_count===0?'disabled':''}>↩ Return cards</button>
+          <button class="btn btn-sm" style="background:none;border:1px solid var(--border);color:var(--red);" onclick="deleteCase('${esc(c.id)}','${esc(c.bin_label)}')" ${canDelete?'':'disabled title="Return all cards before deleting"'}>✕ Delete</button>
         </div>
         ${cardsHtml}
       </div>
@@ -1808,6 +1914,61 @@ async function editCaseCapacity(caseId, current) {
     toast(`Capacity updated → ${n}`, 'green');
     loadDisplay();
   } catch(e) { toast(e.message, 'red'); }
+}
+
+async function setCaseType(caseId, cardType) {
+  try {
+    await post(`/api/display/cases/${caseId}/card-type`, { card_type: cardType });
+    toast(`Case type → ${_cardTypeLabel[cardType]||cardType}`, 'green');
+    loadDisplay();
+  } catch(e) { toast(e.message, 'red'); loadDisplay(); }
+}
+
+async function addDisplayCase() {
+  const cap = prompt('Capacity for the new display case:', '64');
+  if (cap === null) return;
+  const n = parseInt(cap, 10);
+  if (!Number.isFinite(n) || n < 1) { toast('Capacity must be a positive integer', 'red'); return; }
+  // Pick a type from the available options.
+  const optList = _cardTypeOptions.map(t => `${t} (${_cardTypeLabel[t]||t})`).join('\n');
+  const ct = prompt(`What goes in this case? Type one of:\n\n${optList}`, 'pokemon');
+  if (ct === null) return;
+  const ctNorm = ct.trim().toLowerCase();
+  if (!_cardTypeOptions.includes(ctNorm)) {
+    toast(`Unknown type "${ct}"`, 'red');
+    return;
+  }
+  try {
+    const d = await post('/api/display/cases', { capacity: n, card_type: ctNorm });
+    toast(`Created ${d.bin_label}`, 'green');
+    loadDisplay();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function deleteCase(caseId, label) {
+  if (!await themedConfirm(`Delete ${label}?`, 'This case is empty. Removing it from the system is permanent.')) return;
+  try {
+    await fetch(`/api/display/cases/${caseId}`, { method: 'DELETE' }).then(async r => {
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Failed to delete');
+      return d;
+    });
+    toast(`Deleted ${label}`, 'green');
+    loadDisplay();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function openCaseCardEditor(barcode) {
+  // Reuse the Card Editor's barcode-resolve path: stash under the
+  // __scan__ key and open the detail modal — same UX as scanning the card
+  // with the editor open.
+  try {
+    const d = await get('/api/editor/lookup-barcode?barcode=' + encodeURIComponent(barcode));
+    _editorCardCache['__scan__'] = d.card;
+    openEditorDetail('__scan__');
+  } catch(e) {
+    toast(e.message || 'No card with that barcode', 'red');
+  }
 }
 
 // ── Display: Set Out flow ─────────────────────────────────────────────────────

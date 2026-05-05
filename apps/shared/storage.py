@@ -213,7 +213,7 @@ def assign_display_case(count: int, db) -> list[dict]:
 def get_display_case_capacity(db) -> list[dict]:
     """Return display-case locations with current capacity info."""
     return [dict(r) for r in db.query("""
-        SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
+        SELECT sl.id, sl.bin_label, sl.card_type, sl.capacity, sl.current_count,
                (sl.capacity - sl.current_count) AS available
         FROM storage_locations sl
         JOIN storage_rows sr ON sl.row_id = sr.id
