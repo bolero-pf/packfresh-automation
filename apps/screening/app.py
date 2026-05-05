@@ -876,10 +876,12 @@ def api_freshdesk_canned_response(response_id):
         return jsonify({"error": "Freshdesk not configured"}), 400
     try:
         canned = fd.get_canned_response(response_id)
+        # Freshdesk returns `content_html` (rich) and `content` (plain text).
+        # The reply endpoint expects HTML, and so does the in-modal preview.
         return jsonify({
             "id": canned.get("id"),
             "title": canned.get("title", ""),
-            "content": canned.get("content", canned.get("body", "")),
+            "content": canned.get("content_html") or canned.get("content") or canned.get("body", ""),
         })
     except Exception as e:
         logging.warning("Freshdesk canned response %s fetch failed: %s", response_id, e)
@@ -902,7 +904,7 @@ def api_freshdesk_reply():
 
     try:
         canned = fd.get_canned_response(canned_response_id)
-        body_html = canned.get("content", canned.get("body", ""))
+        body_html = canned.get("content_html") or canned.get("content") or canned.get("body", "")
         if not body_html:
             return jsonify({"error": "Canned response has no content"}), 400
         fd.reply_and_resolve(ticket_id, body_html)
@@ -1630,6 +1632,7 @@ function renderVerification(orders, groups) {
               <a href="https://admin.shopify.com/store/{{ shopify_store }}/orders/${o.numeric_id}" target="_blank" style="color:var(--accent);text-decoration:none;font-weight:600;">${o.name}</a>
               <span style="font-weight:600;">$${o.total.toFixed(2)}</span>
             </div>
+            ${o.shipping_address ? '<div style="font-size:0.78rem;color:var(--dim);margin-top:2px;">' + o.shipping_address + '</div>' : ''}
             <div class="items-list" style="margin-top:4px;">${o.items.map(i => i.title + ' ×' + i.qty).join(' · ')}</div>
             ${o.note ? '<em style="color:var(--amber);font-size:0.78rem;">' + o.note + '</em>' : ''}
           </div>
@@ -1730,7 +1733,6 @@ async function cancelOrder(orderId, orderName, email) {
   if (ticket && _fdCanned && _fdCanned.configured) {
     showFdReplyModal(ticket, 'deny', async (ticketId, cannedId) => {
       if (!confirm('Cancel ' + orderName + ' and issue full refund?')) return;
-      // Send Freshdesk reply first (non-blocking for the actual cancel)
       if (ticketId && cannedId) {
         try {
           await fetch('/api/freshdesk-reply', {
