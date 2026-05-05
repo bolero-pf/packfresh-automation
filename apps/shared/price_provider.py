@@ -227,8 +227,20 @@ class PriceProvider:
                     tcgplayer_id, include_history=include_history
                 )
                 if shadow_result:
-                    logger.info(f"Sealed TCG#{tcgplayer_id}: scrydex miss, ppt fallback hit")
+                    logger.info(f"Sealed TCG#{tcgplayer_id}: scrydex miss, ppt sealed-endpoint hit")
                     return self._stamp(shadow_result, "ppt")
+                # Some sealed-shaped products (Ultra Premium Collections, single-
+                # card promo boxes, etc.) get categorized under PPT's card
+                # endpoint rather than sealed-products. Try that before giving
+                # up — the response shape is compatible enough for the
+                # comparison panel (name + market price).
+                card_result = self.shadow.get_card_by_tcgplayer_id(
+                    tcgplayer_id, include_history=include_history
+                )
+                if card_result:
+                    logger.info(f"Sealed TCG#{tcgplayer_id}: scrydex miss, ppt card-endpoint hit")
+                    return self._stamp(card_result, "ppt")
+                logger.info(f"Sealed TCG#{tcgplayer_id}: scrydex AND ppt both miss")
             except (PPTError, ScrydexError) as e:
                 logger.warning(f"PPT fallback for sealed TCG#{tcgplayer_id} failed: {e}")
 
