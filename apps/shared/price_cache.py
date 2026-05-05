@@ -900,6 +900,18 @@ class PriceCache:
         # Group raw prices by variant -> condition
         variants_data: dict[str, dict] = {}
         graded_data: dict[str, dict] = {}
+        # Track which variants showed up in graded rows so the rebind
+        # chip-picker can surface "graded-only" variants (no raw price in
+        # cache, but the printing exists). ~14% of cached scrydex_ids are
+        # graded-only — almost all shinies / hyper rares / promos that
+        # mostly sell PSA-slabbed. Operator still needs to bind raw stock
+        # to them; the picker offers a "bind + auto-block" path so nightly
+        # leaves them alone and operator manages price manually.
+        graded_variants_seen: dict[str, dict] = {}  # {variantName: {top_grade, top_price}}
+
+        # Grade preference order: PSA 10 > PSA 9 > BGS 10 > ... — used to
+        # pick the top graded comp to display on the graded-only chip.
+        _GRADE_PREF = ['psa10','psa9','psa8','bgs10','bgs9.5','bgs9','cgc10','cgc9','sgc10','sgc9']
 
         for r in rows:
             variant = self._display_variant(r.get("variant", "normal"))
@@ -953,6 +965,16 @@ class PriceCache:
                         "dailyVolume7Day": None,
                         "marketTrend": self._trend_from_pct(r.get("trend_7d_pct")),
                     }
+                    # Track for the graded-only chip — keep the highest-pref
+                    # grade that has a price for this variant.
+                    existing = graded_variants_seen.get(variant)
+                    cur_pref = _GRADE_PREF.index(key) if key in _GRADE_PREF else 99
+                    if existing is None or cur_pref < existing.get("_pref", 99):
+                        graded_variants_seen[variant] = {
+                            "top_grade": key,
+                            "top_price": market_f,
+                            "_pref": cur_pref,
+                        }
 
         # Determine primary variant and market price
         primary = "Normal" if "Normal" in variants_data else (
@@ -967,6 +989,16 @@ class PriceCache:
 
         # Build conditions from primary variant
         conditions = variants_data.get(primary, {})
+
+        # Variants that exist only in graded rows (no raw price). Surfaced
+        # as a separate map so the rebind chip-picker can render them with
+        # a "graded only — bind + auto-block" affordance, distinct from
+        # bindable raw chips.
+        graded_only = {
+            v: {"top_grade": info["top_grade"], "top_price": info["top_price"]}
+            for v, info in graded_variants_seen.items()
+            if v not in variants_data
+        }
 
         return {
             "name": first.get("product_name"),
@@ -993,6 +1025,7 @@ class PriceCache:
                 "primaryPrinting": primary,
                 "conditions": conditions,
                 "variants": variants_data,
+                "gradedOnlyVariants": graded_only,
             },
             "ebay": {"salesByGrade": graded_data},
             "_from_cache": True,

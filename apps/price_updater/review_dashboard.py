@@ -1037,6 +1037,15 @@ FROM raw_cards i
 WHERE i.state IN ('STORED', 'DISPLAY')
   AND i.current_hold_id IS NULL
   AND i.is_graded = FALSE
+  -- Exclude auto-blocked bindings — operator marked these as
+  -- intentionally manual (graded-only printings, exotic shinies, etc.).
+  -- Nightly run already skips them; they shouldn't pollute the rebind
+  -- checklist either.
+  AND NOT EXISTS (
+    SELECT 1 FROM price_auto_block b
+    WHERE b.domain = 'raw'
+      AND b.block_key = COALESCE(i.scrydex_id, 'tcg:' || i.tcgplayer_id::text)
+  )
   AND NOT EXISTS (
     SELECT 1 FROM scrydex_price_cache c
     WHERE c.product_type = 'card' AND c.price_type = 'raw'
@@ -1114,7 +1123,14 @@ def api_raw_rebind_search():
 def api_raw_rebind_apply():
     """Bind a list of raw_cards to a chosen (scrydex_id, variant). Writes
     raw_cards.scrydex_id and raw_cards.variant; leaves tcgplayer_id alone
-    so we don't lose provenance for the original PPT mapping."""
+    so we don't lose provenance for the original PPT mapping.
+
+    `auto_block=true` (used for graded-only printings — shinies / hyper
+    rares with no raw market in Scrydex) ALSO inserts the scrydex_id into
+    price_auto_block raw domain. The nightly raw run will skip these
+    cleanly with reason='auto-block' and the operator manages
+    raw_cards.current_price by hand. Without this flag the card would
+    sit on the rebind list forever (no raw cache → can't be priced)."""
     from flask import jsonify
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
     import db as shared_db
@@ -1124,6 +1140,8 @@ def api_raw_rebind_apply():
     raw_card_ids = body.get("raw_card_ids") or []
     scrydex_id   = (body.get("scrydex_id") or "").strip()
     variant      = (body.get("variant") or "").strip()
+    auto_block   = bool(body.get("auto_block"))
+    block_label  = (body.get("block_label") or "").strip() or None
 
     if not raw_card_ids or not isinstance(raw_card_ids, list):
         return jsonify({"ok": False, "error": "raw_card_ids required"}), 400
@@ -1140,7 +1158,25 @@ def api_raw_rebind_apply():
         )
     except Exception as e:
         return jsonify({"ok": False, "error": f"DB update failed: {e}"}), 502
-    return jsonify({"ok": True, "updated": updated})
+
+    blocked = False
+    if auto_block:
+        try:
+            from price_auto_block import add_block
+            blocked = add_block(
+                shared_db, domain="raw", block_key=scrydex_id,
+                label=block_label or f"{scrydex_id} {variant}",
+                reason="graded-only printing (no raw market in Scrydex) — operator manages price manually",
+                blocked_by="raw-rebind",
+            )
+        except Exception as e:
+            return jsonify({
+                "ok": False,
+                "error": f"bind succeeded but auto-block failed: {e}",
+                "updated": updated,
+            }), 502
+
+    return jsonify({"ok": True, "updated": updated, "blocked": blocked})
 
 
 @app.route('/dashboard/slab-backfill')

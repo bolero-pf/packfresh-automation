@@ -45,6 +45,12 @@
         .chip .vname { font-weight: 600; }
         .chip .vprice { font-family: var(--font-mono); color: var(--text-dim); }
         .chip:hover .vprice { color: rgba(255,255,255,0.85); }
+        /* Graded-only — yellow, not red. Action is "bind + auto-block";
+           valid choice, not a dead end. */
+        .chip.chip-graded-only { background: rgba(234,179,8,0.12); border-color: rgba(234,179,8,0.45); color: #fde68a; }
+        .chip.chip-graded-only:hover { background: rgba(234,179,8,0.28); border-color: rgba(234,179,8,0.7); color: #fff; }
+        .chip.chip-graded-only .vprice { color: rgba(253,230,138,0.75); }
+        .chip.chip-graded-only:hover .vprice { color: rgba(255,255,255,0.85); }
         .game-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 0.65rem; font-weight: 700; background: var(--surface-2); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-right: 4px; vertical-align: middle; }
 
         .toast { position: fixed; bottom: 24px; right: 24px; padding: 10px 14px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border); color: var(--text); font-size: 0.9rem; opacity: 0; transition: opacity 200ms; }
@@ -267,7 +273,7 @@
             // One chip per variant. NM price is what the operator cares
             // about for picking the right printing.
             const variantNames = Object.keys(variantsMap).filter(v => !v.startsWith('_'));
-            const chips = variantNames
+            const rawChips = variantNames
                 .map(v => {
                     const conds = variantsMap[v] || {};
                     const nm = (conds['Near Mint'] || conds['NM'] || {});
@@ -278,29 +284,31 @@
                     </span>`;
                 }).join('');
 
-            // Graded-only fallback. ~14% of cached scrydex_ids have only
-            // graded rows (special / shiny / promo printings that mostly
-            // sell PSA-slabbed). Binding a raw card to one of these is a
-            // dead end — the nightly run will never find a raw price.
-            // Surface the top graded comp so the operator can tell at a
-            // glance "this is graded-only, try a different printing"
-            // instead of "no variants in cache" which doesn't explain why.
-            let chipsHtml;
-            if (chips) {
-                chipsHtml = chips;
-            } else {
-                const graded = (card.ebay && card.ebay.salesByGrade) || {};
-                const gradeOrder = ['psa10','psa9','psa8','bgs10','bgs9.5','bgs9','cgc10','cgc9'];
-                const gradeKey = gradeOrder.find(k => graded[k] && graded[k].marketPrice7Day != null);
-                const topPrice = gradeKey != null
-                    ? `$${Number(graded[gradeKey].marketPrice7Day).toFixed(2)}`
-                    : '';
-                const gradeLabel = gradeKey ? gradeKey.toUpperCase().replace(/(\D+)(\d.*)/, '$1 $2') : '';
-                chipsHtml = `<span class="chip" style="cursor:not-allowed; opacity:0.7; background:rgba(239,68,68,0.12); border-color:rgba(239,68,68,0.4); color:#fca5a5;" title="No raw price in Scrydex cache for this printing — the nightly raw run can't price it. Pick a different printing.">
-                    <span class="vname">graded only</span>
-                    ${gradeKey ? `<span class="vprice">${esc(gradeLabel)} ${topPrice}</span>` : ''}
+            // Graded-only chips. ~14% of cached scrydex_ids have only
+            // graded rows (shinies / hyper rares / promos that mostly
+            // sell PSA-slabbed). Sean's example: Frigibax sv4pt5-128 is a
+            // real Shiny Rare he stocks raw — the cache just has no raw
+            // market for it. Click these chips to bind AND auto-block in
+            // one shot: the nightly skips them cleanly, they drop off
+            // this checklist, operator manages current_price by hand.
+            // Yellow not red — this is a valid action, not a dead end.
+            const gradedOnly = (card.prices && card.prices.gradedOnlyVariants) || {};
+            const gradedChips = Object.keys(gradedOnly).map(v => {
+                const info = gradedOnly[v] || {};
+                const top = info.top_grade ? info.top_grade.toUpperCase().replace(/(\D+)(\d.*)/, '$1 $2') : '';
+                const price = info.top_price != null ? `$${Number(info.top_price).toFixed(2)}` : '';
+                return `<span class="chip chip-graded-only"
+                              data-variant="${esc(v)}"
+                              data-scrydex="${esc(scrydexId)}"
+                              data-block="1"
+                              title="No raw market in Scrydex for this printing (typical for shinies / promos). Click to bind anyway and auto-block from the nightly run — you'll manage price by hand.">
+                    <span class="vname">${esc(v)}</span>
+                    <span class="vprice">graded only · ${esc(top)} ${price}</span>
                 </span>`;
-            }
+            }).join('');
+
+            const chipsHtml = (rawChips + gradedChips)
+                || '<span class="mono" style="color:var(--text-dim);">no variants in cache for this printing</span>';
 
             // For non-EN cards (JP especially) show the English name as the
             // primary headline since that's what the operator searched on,
@@ -341,22 +349,27 @@
     }
 
     // Chip click → bind. Delegated on the results container so dynamic
-    // re-renders don't need re-binding. Graded-only chips don't carry
-    // data-scrydex/data-variant — they're informational, not bindable.
+    // re-renders don't need re-binding. Graded-only chips carry
+    // data-block="1"; the apply endpoint adds them to price_auto_block
+    // in the same request so the nightly skips them cleanly.
     results.addEventListener('click', ev => {
         const chip = ev.target.closest('.chip');
         if (!chip) return;
         const scrydexId = chip.dataset.scrydex;
         const variant = chip.dataset.variant;
         if (!scrydexId || !variant) {
-            showToast("Graded-only printing — no raw price in cache. Pick a different printing.", 'err');
+            showToast('Missing scrydex_id or variant on chip', 'err');
             return;
         }
-        applyBind(scrydexId, variant);
+        const autoBlock = chip.dataset.block === '1';
+        applyBind(scrydexId, variant, autoBlock);
     });
 
-    async function applyBind(scrydexId, variant) {
-        if (!confirm(`Bind ${activeIds.length} copy(ies) to ${scrydexId} / ${variant}?`)) return;
+    async function applyBind(scrydexId, variant, autoBlock) {
+        const prompt = autoBlock
+            ? `Bind ${activeIds.length} copy(ies) to ${scrydexId} / ${variant} AND auto-block from nightly pricing? Use this for graded-only printings (no raw market in Scrydex). You'll set current_price by hand via the raw editor.`
+            : `Bind ${activeIds.length} copy(ies) to ${scrydexId} / ${variant}?`;
+        if (!confirm(prompt)) return;
         applyStatus.textContent = 'Applying…';
         try {
             const resp = await fetch('/api/raw-rebind/apply', {
@@ -366,6 +379,7 @@
                     raw_card_ids: activeIds,
                     scrydex_id:   scrydexId,
                     variant:      variant,
+                    auto_block:   !!autoBlock,
                 }),
             });
             const d = await resp.json();
@@ -377,7 +391,10 @@
             modal.classList.remove('show');
             if (activeRow) activeRow.style.transition = 'opacity 300ms';
             if (activeRow) activeRow.style.opacity = '0.3';
-            showToast(`Bound ${d.updated} copy(ies). Reloading…`, 'ok');
+            const note = autoBlock
+                ? (d.blocked ? ' + auto-blocked' : ' (already blocked)')
+                : '';
+            showToast(`Bound ${d.updated} copy(ies)${note}. Reloading…`, 'ok');
             setTimeout(() => window.location.reload(), 800);
         } catch (err) {
             applyStatus.textContent = '';
