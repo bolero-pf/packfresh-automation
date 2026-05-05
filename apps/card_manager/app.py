@@ -1850,13 +1850,26 @@ def display_cases():
     cases = get_display_case_capacity(db)
     out = []
     for c in cases:
+        # Some raw_cards rows have a NULL image_url (image landed in
+        # scrydex_price_cache after ingest, or was never copied across).
+        # COALESCE through the cache so the case render matches what the
+        # editor's barcode-lookup endpoint would show.
         cards = db.query("""
-            SELECT id, barcode, card_name, set_name, card_number, condition,
-                   current_price, image_url, variant, tcgplayer_id, scrydex_id,
-                   stored_at
-            FROM raw_cards
-            WHERE state = 'DISPLAY' AND bin_id = %s
-            ORDER BY current_price DESC NULLS LAST, card_name ASC
+            SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number, rc.condition,
+                   rc.current_price,
+                   COALESCE(
+                     rc.image_url,
+                     (SELECT MAX(image_large)  FROM scrydex_price_cache WHERE scrydex_id   = rc.scrydex_id),
+                     (SELECT MAX(image_medium) FROM scrydex_price_cache WHERE scrydex_id   = rc.scrydex_id),
+                     (SELECT MAX(image_small)  FROM scrydex_price_cache WHERE scrydex_id   = rc.scrydex_id),
+                     (SELECT MAX(image_large)  FROM scrydex_price_cache WHERE tcgplayer_id = rc.tcgplayer_id),
+                     (SELECT MAX(image_medium) FROM scrydex_price_cache WHERE tcgplayer_id = rc.tcgplayer_id),
+                     (SELECT MAX(image_small)  FROM scrydex_price_cache WHERE tcgplayer_id = rc.tcgplayer_id)
+                   ) AS image_url,
+                   rc.variant, rc.tcgplayer_id, rc.scrydex_id, rc.stored_at
+            FROM raw_cards rc
+            WHERE rc.state = 'DISPLAY' AND rc.bin_id = %s
+            ORDER BY rc.current_price DESC NULLS LAST, rc.card_name ASC
         """, (c["id"],))
         out.append({
             "id":            str(c["id"]),
