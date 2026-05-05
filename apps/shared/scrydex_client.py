@@ -149,6 +149,12 @@ class ScrydexClient:
     # Supported game path prefixes for Scrydex API
     GAMES = ("pokemon", "magicthegathering", "lorcana", "onepiece", "riftbound")
 
+    # Process-wide negative cache for 5xx responses. Shared across instances
+    # because every PriceProvider creates its own ScrydexClient — instance-
+    # local would let us re-hit the same broken URL from another request.
+    _failed_urls: dict = {}
+    _NEGATIVE_CACHE_TTL = 300.0  # 5 minutes
+
     def __init__(self, api_key: str, team_id: str,
                  base_url: str = "https://api.scrydex.com",
                  db=None, game: str = "pokemon"):
@@ -171,6 +177,9 @@ class ScrydexClient:
         # Rate limiting — 100 req/sec hard limit
         self._request_times: list[float] = []  # sliding window
         self._credits_remaining = None
+        # Negative cache for known-failing URLs (5xx after retries exhausted).
+        # Some Scrydex sealed/card pages return 500 persistently (broken on
+        # their side); without this we'd burn ~3-4s of retries on every call.
 
     # ── rate limiting ─────────────────────────────────────────────
 
@@ -193,6 +202,17 @@ class ScrydexClient:
     def _request(self, method, url, *, params=None, max_tries=3):
         if self.should_throttle():
             time.sleep(0.1)  # brief pause to stay under rate limit
+
+        # Negative cache: short-circuit known-failing URLs so a single broken
+        # sealed product (e.g. /sealed/mep-23 returning 500) doesn't burn 3-4s
+        # of retries on every page load. URL alone is the key — Scrydex sealed
+        # responses don't vary by params we send.
+        skip_until = self._failed_urls.get(url)
+        if skip_until and time.time() < skip_until:
+            raise ScrydexError(
+                f"Scrydex {url} in negative cache (recent 5xx, retry after {int(skip_until - time.time())}s)",
+                503,
+            )
 
         last_err = None
         for attempt in range(1, max_tries + 1):
@@ -230,6 +250,8 @@ class ScrydexClient:
             last_err = r
             time.sleep(1.0 * attempt)
 
+        # All retries exhausted on 5xx — mark URL as known-failing for TTL.
+        self._failed_urls[url] = time.time() + self._NEGATIVE_CACHE_TTL
         status = last_err.status_code if last_err else "UNKNOWN"
         raise ScrydexError(f"Scrydex failed after {max_tries} tries: {status}", status)
 

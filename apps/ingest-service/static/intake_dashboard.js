@@ -3833,10 +3833,19 @@ async function _relinkFetchAndShowConditions(tcgId) {
     const resultsDiv = document.getElementById('relink-results');
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading pricing...</div>';
     try {
+        // Fold grade params into the initial lookup when the source item has
+        // any grade hint — the backend computes live eBay comps in the same
+        // call, saving a round-trip vs firing _relinkFetchGraded() afterwards.
+        const lookupBody = { tcgplayer_id: tcgId };
+        const looksGradedHint = rs.isGraded || !!rs.gradeCompany || !!rs.gradeValue;
+        if (looksGradedHint) {
+            lookupBody.grade_company = rs.gradeCompany || 'PSA';
+            lookupBody.grade_value = rs.gradeValue || '10';
+        }
         const r = await fetch('/api/lookup/card', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ tcgplayer_id: tcgId }),
+            body: JSON.stringify(lookupBody),
         });
         const d = await r.json();
         if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + (d.error||'Failed') + '</div>'; return; }
@@ -3853,6 +3862,10 @@ async function _relinkFetchAndShowConditions(tcgId) {
         rs.cardNum = card.cardNumber || '';
         rs.rarity = card.rarity || '';
         rs.gradedPrices = d.graded_prices || null;
+        // Live eBay comps come back from the same /api/lookup/card call
+        // when grade params were sent. Save them so the renderer can show
+        // the smart price + comp stats without a follow-up request.
+        rs.gradedLive = d.live_graded || null;
         // Treat any grade hint (is_graded flag OR grade_company/grade_value
         // set by the importer) as graded. Collectr CSVs sometimes populate
         // grade fields without flipping is_graded — without this, the modal
@@ -3864,8 +3877,8 @@ async function _relinkFetchAndShowConditions(tcgId) {
             rs._relinkGradeValue = rs.gradeValue || '10';
             rs._relinkSeeded = true;
         }
-        // Pull live eBay comps so the smart price + comp stats show up
-        // before the user confirms — no "backend will retry on save" placeholder.
+        // Only re-fetch if the initial lookup didn't include comps (e.g. the
+        // item had no grade hint at click time but the user toggled graded).
         if (rs._relinkMode === 'graded' && !rs.gradedLive) {
             _relinkFetchGraded();
         }

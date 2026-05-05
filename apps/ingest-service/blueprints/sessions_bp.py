@@ -561,10 +561,11 @@ def get_session(session_id):
     bd_map = {}
     if tcg_ids:
         try:
-            # Shared logic returns variant_resolution, expected/worst aggregates,
-            # full variants[] list, plus deep_bd_* — exactly what the frontend needs
-            # for the override picker and the avg/claimed badge formats.
-            bd_map = bd_logic.get_breakdown_summary_for_items(tcg_ids, db, ppt=pricing)
+            # Read path: don't pass ppt — JIT refresh is synchronous and blocks
+            # on Scrydex 5xx for known-broken sealed products (e.g. mep-23),
+            # easily blowing past Railway's worker timeout. Use whatever the
+            # nightly cron + the explicit /refresh-prices endpoint have written.
+            bd_map = bd_logic.get_breakdown_summary_for_items(tcg_ids, db, ppt=None)
         except Exception as e:
             logger.warning(f"breakdown summary lookup failed: {e}")
             bd_map = {}
