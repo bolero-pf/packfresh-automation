@@ -1426,11 +1426,7 @@ async function viewSession(sessionId, _preserveScroll) {
                                     } else {
                                         const linkLabel = i.is_mapped ? 'Relink' : 'Link';
                                         const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
-                                        if (i.product_type === 'raw') {
-                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkRawCard('${i.id}','${sessionId}')">${linkLabel}</button> `;
-                                        } else {
-                                            btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="openMappingFromSession('${i.id}')">${linkLabel}</button> `;
-                                        }
+                                        btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkItem('${i.id}','${sessionId}')">${linkLabel}</button> `;
                                         btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button><div class="action-dropdown">';
                                         if (!i.is_graded && i.product_type !== 'raw') {
                                             btns += status !== 'damaged' ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">&#9888; Damaged${i.quantity > 1 ? ' (partial?)' : ''}</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
@@ -3306,7 +3302,7 @@ async function editCondition(itemId, sessionId, currentCond, tcgplayerId, cardNa
     renderTiles();
 }
 
-async function relinkRawCard(itemId, sessionId) {
+async function relinkItem(itemId, sessionId) {
     const items = window._sessionItems || [];
     const i = items.find(x => String(x.id) === String(itemId));
     if (!i) { alert('Item not found in session'); return; }
@@ -3314,6 +3310,7 @@ async function relinkRawCard(itemId, sessionId) {
     if (!window._relinkLinkedCount) window._relinkLinkedCount = 0;
     window._relinkState = {
         itemId, sessionId,
+        productType: i.product_type === 'sealed' ? 'sealed' : 'raw',
         cardName: i.product_name || '', setName: i.set_name || '',
         cardNumber: i.card_number || '', isGraded: !!i.is_graded,
         gradeCompany: i.grade_company || '', gradeValue: i.grade_value || '',
@@ -3324,22 +3321,37 @@ async function relinkRawCard(itemId, sessionId) {
     openModal('relink-modal');
     _relinkDoSearch();
 }
+// Backwards-compat alias — old onclick handlers in cached templates may still
+// call relinkRawCard. Both raw and sealed flow through relinkItem now.
+const relinkRawCard = relinkItem;
 
 function _relinkShowSearch() {
     const rs = window._relinkState;
     const body = document.getElementById('relink-body');
-    // Count remaining unmapped raw items for progress display
+    // Count remaining unmapped items (raw + sealed) for progress display.
+    // Mixed collections need to flow through one queue without skipping types.
     const allItems = window._sessionItems || [];
-    const unmappedRaw = allItems.filter(x => !x.is_mapped && x.product_type === 'raw' && ['good','damaged'].includes(x.item_status || 'good'));
-    const remaining = unmappedRaw.length;
+    const unmapped = allItems.filter(x => !x.is_mapped
+        && (x.product_type === 'raw' || x.product_type === 'sealed')
+        && ['good','damaged'].includes(x.item_status || 'good'));
+    const remaining = unmapped.length;
     const linked = window._relinkLinkedCount || 0;
     const hasQueue = remaining > 1 || (remaining === 1 && linked > 0);
-    let titleText = '\u{1f517} Link: ' + rs.cardName + (rs.cardNumber ? ' #'+rs.cardNumber : '') + (rs.isGraded ? ' ['+rs.gradeCompany+' '+rs.gradeValue+']' : '') + (rs.quantity > 1 ? ' (\u00d7' + rs.quantity + ')' : '');
+    const isSealed = rs.productType === 'sealed';
+    const typeIcon = isSealed ? '\u{1f4e6}' : '\u{1f517}';
+    let titleText = typeIcon + ' Link: ' + rs.cardName + (rs.cardNumber ? ' #'+rs.cardNumber : '') + (rs.isGraded ? ' ['+rs.gradeCompany+' '+rs.gradeValue+']' : '') + (rs.quantity > 1 ? ' (\u00d7' + rs.quantity + ')' : '');
     if (hasQueue) titleText += ` (${remaining} remaining)`;
     document.getElementById('relink-title').textContent = titleText;
+    const nameLabel = isSealed ? 'Product Name' : 'Card Name';
+    const namePlaceholder = isSealed ? 'e.g. Paldean Fates ETB' : 'e.g. Charizard ex';
+    const metaBadge = isSealed
+        ? `<span style="background:rgba(79,125,249,0.18);color:#7aadff;font-weight:600;font-size:0.72rem;padding:1px 6px;border-radius:4px;">SEALED</span>`
+        : (rs.isGraded
+            ? `<span style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;font-size:0.75rem;padding:1px 6px;border-radius:4px;">${rs.gradeCompany||'PSA'} ${rs.gradeValue||'?'}</span>`
+            : `<span style="font-weight:600;">${rs.condition||'NM'}</span>`);
     body.innerHTML = `
-        <div class="form-group"><label>Card Name</label>
-            <input type="text" id="relink-search" value="${rs.cardName.replace(/"/g,'&quot;')}" placeholder="e.g. Charizard ex"></div>
+        <div class="form-group"><label>${nameLabel}</label>
+            <input type="text" id="relink-search" value="${rs.cardName.replace(/"/g,'&quot;')}" placeholder="${namePlaceholder}"></div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
             <div class="form-group"><label>Set</label>
                 <input type="text" id="relink-set" value="${(rs.setName||'').replace(/"/g,'&quot;')}" placeholder="e.g. Paldean Fates"></div>
@@ -3347,7 +3359,7 @@ function _relinkShowSearch() {
                 <input type="number" id="relink-tcgid" placeholder="e.g. 535090"></div>
         </div>
         <div style="background:var(--surface-2);border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:0.85rem;">
-            ${rs.cardNumber ? `<span style="color:var(--text-dim);">#${rs.cardNumber}</span> · ` : ''}${rs.isGraded ? `<span style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;font-size:0.75rem;padding:1px 6px;border-radius:4px;">${rs.gradeCompany||'PSA'} ${rs.gradeValue||'?'}</span>` : `<span style="font-weight:600;">${rs.condition||'NM'}</span>`}${rs.currentPrice > 0 ? ` · Current: <strong style="color:var(--accent);">$${rs.currentPrice.toFixed(2)}</strong>` : ''}${rs.quantity > 1 ? ` · Qty ${rs.quantity}` : ''}
+            ${rs.cardNumber ? `<span style="color:var(--text-dim);">#${rs.cardNumber}</span> · ` : ''}${metaBadge}${rs.currentPrice > 0 ? ` · Current: <strong style="color:var(--accent);">$${rs.currentPrice.toFixed(2)}</strong>` : ''}${rs.quantity > 1 ? ` · Qty ${rs.quantity}` : ''}
         </div>
         <button class="btn btn-primary" id="relink-search-btn" style="width:100%;">Search</button>
         <button class="btn btn-secondary" id="relink-manual-btn" style="width:100%;margin-top:6px;font-size:0.8rem;">💲 Manual Price (no TCGPlayer ID)</button>
@@ -3388,7 +3400,8 @@ async function _relinkAdvanceOrClose(sessionId, isSkip) {
 
     const items = window._sessionItems || [];
     const unmapped = items.filter(x =>
-        !x.is_mapped && x.product_type === 'raw' &&
+        !x.is_mapped &&
+        (x.product_type === 'raw' || x.product_type === 'sealed') &&
         ['good','damaged'].includes(x.item_status || 'good')
     );
 
@@ -3401,10 +3414,13 @@ async function _relinkAdvanceOrClose(sessionId, isSkip) {
             document.body.appendChild(toast);
             setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 2000);
         }
-        // Load next unmapped item
+        // Load next unmapped item — preserve product_type so the modal knows
+        // whether to render the card variant/condition picker or the sealed
+        // price-comparison panel.
         const next = unmapped[0];
         window._relinkState = {
             itemId: next.id, sessionId,
+            productType: next.product_type === 'sealed' ? 'sealed' : 'raw',
             cardName: next.product_name || '', setName: next.set_name || '',
             cardNumber: next.card_number || '', isGraded: !!next.is_graded,
             gradeCompany: next.grade_company || '', gradeValue: next.grade_value || '',
@@ -3433,9 +3449,13 @@ async function _relinkManualPrice() {
     const rs = window._relinkState;
     const body = document.getElementById('relink-body');
     const isGraded = rs.isGraded;
+    const isSealed = rs.productType === 'sealed';
 
     let condHtml = '';
-    if (isGraded) {
+    if (isSealed) {
+        // Sealed has no condition or grade — manual price is enough.
+        condHtml = '';
+    } else if (isGraded) {
         condHtml = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
             <div class="form-group"><label>Grading Company</label>
             <select id="manual-grade-company">
@@ -3482,15 +3502,15 @@ async function _relinkManualPrice() {
             });
             if (!r.ok) { const d = await r.json(); body.innerHTML = '<div class="alert alert-error">' + (d.error||'Failed') + '</div>'; return; }
 
-            // Update condition or grade
-            if (isGraded) {
+            // Update condition or grade — only for raw cards. Sealed has neither.
+            if (!isSealed && isGraded) {
                 const company = document.getElementById('manual-grade-company')?.value || rs.gradeCompany || 'PSA';
                 const gradeVal = document.getElementById('manual-grade-value')?.value || rs.gradeValue || '9';
                 await fetch('/api/intake/item/' + rs.itemId + '/mark-graded', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ session_id: rs.sessionId, grade_company: company, grade_value: gradeVal, market_price: price }),
                 });
-            } else {
+            } else if (!isSealed) {
                 const cond = document.getElementById('manual-condition')?.value || 'NM';
                 await fetch('/api/intake/item/' + rs.itemId + '/update-condition', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -3504,24 +3524,25 @@ async function _relinkManualPrice() {
 }
 
 function _relinkRenderResults(results, resultsDiv, append) {
-    // Render via the shared card-search renderer so relink shows the
-    // same images, set/printing/game badges, and variant chips that the
-    // Add Card flow does. Click handler resolves to the picked variant's
-    // tcgPlayer ID and opens the conditions panel for that card.
+    const rs = window._relinkState || {};
+    const isSealed = rs.productType === 'sealed';
     const renderInto = (container) => {
-        _renderCardSearchResults((results || []).slice(0, 12), container, {
-            condition: 'NM',
-            qty: 1,
-            offerPct: null,  // no per-chip offer projection in relink
-            onPick: (pick) => {
-                if (pick && pick.tcgId) _relinkFetchAndShowConditions(parseInt(pick.tcgId));
-            },
-        });
+        if (isSealed) {
+            _relinkRenderSealedResults((results || []).slice(0, 12), container);
+        } else {
+            // Shared card-search renderer — same images, set/printing/game
+            // badges, and variant chips as the Add Card flow.
+            _renderCardSearchResults((results || []).slice(0, 12), container, {
+                condition: 'NM',
+                qty: 1,
+                offerPct: null,
+                onPick: (pick) => {
+                    if (pick && pick.tcgId) _relinkFetchAndShowConditions(parseInt(pick.tcgId));
+                },
+            });
+        }
     };
     if (append) {
-        // Preserve any warning HTML already in resultsDiv (e.g. "set
-        // filter dropped — showing all results") and append a wrapper
-        // div that owns its own click listeners.
         const wrap = document.createElement('div');
         renderInto(wrap);
         resultsDiv.appendChild(wrap);
@@ -3530,8 +3551,71 @@ function _relinkRenderResults(results, resultsDiv, append) {
     }
 }
 
+function _relinkRenderSealedResults(results, container) {
+    const _esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    if (!results.length) {
+        container.innerHTML = '<div class="alert alert-warning">No sealed products found</div>';
+        return;
+    }
+    container.innerHTML = results.map((p, idx) => {
+        const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.tcgPlayerID || '';
+        const sid = p.scrydexId || p.scrydex_id || '';
+        const price = p.unopenedPrice || (p.prices && p.prices.market) || p.market_price || p.price || '';
+        const name = p.name || p.productName || '?';
+        const pSetName = p.setName || p.set || '';
+        const img = p.imageCdnUrl400 || p.imageCdnUrl || p.imageCdnUrl800 || p.image_url || '';
+        const source = p._price_source || '';
+        const sourceBadge = source
+            ? `<span style="font-size:0.7rem;color:var(--text-dim);background:var(--surface-2);padding:1px 6px;border-radius:3px;margin-left:6px;">${_esc(source)}</span>`
+            : '';
+        const imgHtml = img
+            ? `<img src="${_esc(img)}" loading="lazy" style="width:64px; height:84px; object-fit:contain; border-radius:6px; flex-shrink:0; background:var(--surface-2);">`
+            : `<div style="width:64px; height:84px; background:var(--surface-2); border-radius:6px; flex-shrink:0;"></div>`;
+        const priceText = price ? `<strong>$${Number(price).toFixed(2)}</strong>` : '<span style="color:var(--text-dim);">no price</span>';
+        if (!tcgId && !sid) {
+            return `<div class="search-result" style="display:flex; gap:12px; align-items:center; opacity:0.55; cursor:not-allowed; border-style:dashed;">
+                ${imgHtml}
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:700;">${_esc(name)}</div>
+                    <div style="font-size:0.8rem; color:var(--text-dim);">${_esc(pSetName)} · ${priceText}</div>
+                    <div style="font-size:0.72rem; color:var(--text-dim);">No identifier — not linkable</div>
+                </div>
+            </div>`;
+        }
+        return `<div class="search-result" data-relink-sealed-idx="${idx}" style="display:flex; gap:12px; align-items:center; cursor:pointer; margin-bottom:6px;">
+            ${imgHtml}
+            <div style="flex:1; min-width:0;">
+                <div style="font-weight:700;">${_esc(name)}${sourceBadge}</div>
+                <div style="font-size:0.8rem; color:var(--text-dim);">${_esc(pSetName)} · ${priceText}</div>
+                <div style="font-size:0.72rem; color:${tcgId?'var(--accent)':'var(--accent2,#c084fc)'};">${tcgId ? 'TCG#'+tcgId : 'Scrydex '+sid} — click to link</div>
+            </div>
+        </div>`;
+    }).join('');
+    window._relinkSealedResults = results;
+    container.querySelectorAll('[data-relink-sealed-idx]').forEach(el => {
+        el.addEventListener('click', () => {
+            const i = parseInt(el.dataset.relinkSealedIdx);
+            const p = (window._relinkSealedResults || [])[i];
+            if (!p) return;
+            const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.tcgPlayerID || null;
+            const sid = p.scrydexId || p.scrydex_id || null;
+            const price = p.unopenedPrice || (p.prices && p.prices.market) || p.market_price || p.price || null;
+            const source = p._price_source || '';
+            _relinkSealedShowComparison({
+                tcgId: tcgId ? parseInt(tcgId) : null,
+                scrydexId: sid || null,
+                name: p.name || p.productName || '',
+                setName: p.setName || p.set || '',
+                marketPrice: price != null ? Number(price) : null,
+                sourceLabel: source,
+            });
+        });
+    });
+}
+
     async function _relinkDoSearch() {
     const rs = window._relinkState;
+    const isSealed = rs.productType === 'sealed';
     const searchName = document.getElementById('relink-search').value.trim();
     const setFilter = document.getElementById('relink-set').value.trim();
     const tcgIdRaw = parseInt(document.getElementById('relink-tcgid').value);
@@ -3539,27 +3623,39 @@ function _relinkRenderResults(results, resultsDiv, append) {
 
     if (tcgIdRaw > 0) {
         resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up TCG#' + tcgIdRaw + '...</div>';
-        _relinkFetchAndShowConditions(tcgIdRaw);
+        if (isSealed) {
+            _relinkSealedFetchByTcgId(tcgIdRaw);
+        } else {
+            _relinkFetchAndShowConditions(tcgIdRaw);
+        }
         return;
     }
-    if (!searchName) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a card name or TCGPlayer ID</div>'; return; }
+    if (!searchName) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a name or TCGPlayer ID</div>'; return; }
 
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+    const endpoint = isSealed ? '/api/search/sealed' : '/api/search/cards';
+    const noneMsg = isSealed ? 'No sealed products found' : 'No cards found';
     try {
-        // Fold set into query string — PPT fuzzy-matches better than exact set filter
-        // e.g. "Jolteon ex EX Delta Species" finds the right card even if set name differs slightly
-        const combinedQuery = setFilter ? searchName + ' ' + setFilter : searchName;
-        const body = { query: combinedQuery };
-        const r = await fetch('/api/search/cards', {
+        // Fold set into query string for cards (PPT/Scrydex fuzzy-match across
+        // name+set tokens). Sealed cache search already handles set tokens.
+        const combinedQuery = (!isSealed && setFilter) ? searchName + ' ' + setFilter : searchName;
+        const body = isSealed
+            ? { query: searchName, set_name: setFilter || undefined }
+            : { query: combinedQuery };
+        const r = await fetch(endpoint, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body),
         });
         const d = await r.json();
-        const results = d.results || [];
+        let results = d.results || [];
+        // Filter Code Cards out of sealed results — almost never what staff want.
+        if (isSealed) {
+            const filtered = results.filter(p => !((p.name || p.productName || '').toLowerCase().startsWith('code card')));
+            if (filtered.length > 0) results = filtered;
+        }
         if (!r.ok || !results.length) {
-            // Retry with just the card name if the combined query found nothing
-            if (setFilter) {
+            if (setFilter && !isSealed) {
                 const r2 = await fetch('/api/search/cards', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -3567,16 +3663,168 @@ function _relinkRenderResults(results, resultsDiv, append) {
                 });
                 const d2 = await r2.json();
                 if (d2.results && d2.results.length) {
-                    // Show results but note the set filter was dropped
-                    resultsDiv.innerHTML = '<div class="alert alert-warning" style="font-size:0.8rem; padding:6px 10px; margin-bottom:8px;">No exact match for set \"' + setFilter + '\" — showing all results for \"' + searchName + '\"</div>';
+                    resultsDiv.innerHTML = '<div class="alert alert-warning" style="font-size:0.8rem; padding:6px 10px; margin-bottom:8px;">No exact match for set "' + setFilter + '" — showing all results for "' + searchName + '"</div>';
                     _relinkRenderResults(d2.results, resultsDiv, true);
                     return;
                 }
             }
-            resultsDiv.innerHTML = '<div class="alert alert-warning">No cards found</div>';
+            resultsDiv.innerHTML = '<div class="alert alert-warning">' + noneMsg + '</div>';
             return;
         }
         _relinkRenderResults(results, resultsDiv);
+    } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
+}
+
+async function _relinkSealedFetchByTcgId(tcgId) {
+    const rs = window._relinkState;
+    const resultsDiv = document.getElementById('relink-results');
+    try {
+        const r = await fetch('/api/lookup/sealed', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ tcgplayer_id: tcgId }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            resultsDiv.innerHTML = '<div class="alert alert-warning" style="margin-top:8px;">' + (d.error || 'Sealed lookup failed') + ' — you can still link with imported price.</div>'
+                + '<button id="relink-sealed-accept-import" class="btn btn-primary" style="width:100%; margin-top:8px;">Link with imported price ($' + (rs.currentPrice || 0).toFixed(2) + ')</button>';
+            document.getElementById('relink-sealed-accept-import')?.addEventListener('click', () => {
+                _relinkSealedConfirm({ tcgId, scrydexId: null, price: rs.currentPrice || 0 });
+            });
+            return;
+        }
+        const product = d.product || {};
+        const market = d.extracted_price
+            || (product.prices && product.prices.market)
+            || product.unopenedPrice
+            || product.market_price
+            || null;
+        const source = product._price_source || '';
+        _relinkSealedShowComparison({
+            tcgId,
+            scrydexId: product.scrydexId || product.scrydex_id || null,
+            name: product.name || product.productName || ('TCG#' + tcgId),
+            setName: product.setName || product.set || '',
+            marketPrice: market != null ? Number(market) : null,
+            sourceLabel: source,
+        });
+    } catch(err) {
+        resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
+    }
+}
+
+function _relinkSealedShowComparison(ctx) {
+    const rs = window._relinkState;
+    const resultsDiv = document.getElementById('relink-results');
+    const imported = Number(rs.currentPrice || 0);
+    const market = ctx.marketPrice;
+    const haveBoth = imported > 0 && market != null && market > 0;
+    const delta = haveBoth ? ((market - imported) / imported * 100) : 0;
+    const absDelta = Math.abs(delta);
+    const significant = haveBoth && absDelta > 10;
+    const deltaColor = significant ? (delta > 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+    const deltaIcon = delta > 0 ? '▲' : delta < 0 ? '▼' : '—';
+    const sourceLbl = (ctx.sourceLabel || '').toLowerCase();
+    const sourceDisplay = sourceLbl === 'cache' ? 'Cache (Scrydex)'
+                       : sourceLbl === 'scrydex' ? 'Scrydex'
+                       : sourceLbl === 'ppt' ? 'PPT (fallback)'
+                       : 'Market';
+    rs._sealedPick = ctx;
+    rs._sealedSelectedSource = haveBoth && significant ? 'market' : (imported > 0 ? 'imported' : 'market');
+    resultsDiv.innerHTML = `
+        <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:8px;">
+            <div style="font-size:0.85rem;font-weight:600;margin-bottom:8px;">${ctx.name}${ctx.setName ? ` <span style="color:var(--text-dim);font-weight:400;">— ${ctx.setName}</span>` : ''}</div>
+            <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center;margin:8px 0;">
+                <div id="relink-sealed-opt-imported" data-src="imported" style="background:var(--surface-1);border:2px solid var(--border);border-radius:8px;padding:10px;text-align:center;cursor:pointer;">
+                    <div style="font-size:0.7rem;color:var(--text-dim);font-weight:600;text-transform:uppercase;">Imported</div>
+                    <div style="font-size:1.2rem;font-weight:700;">${imported > 0 ? '$' + imported.toFixed(2) : '—'}</div>
+                    <div style="font-size:0.7rem;color:var(--text-dim);">From CSV / staff entry</div>
+                </div>
+                <div style="text-align:center;">
+                    ${haveBoth ? `<div style="font-size:1rem;font-weight:700;color:${deltaColor};">${deltaIcon} ${absDelta.toFixed(1)}%</div>${significant ? `<div style="font-size:0.65rem;color:${deltaColor};font-weight:600;">⚠ Flagged</div>` : ''}` : ''}
+                </div>
+                <div id="relink-sealed-opt-market" data-src="market" style="background:var(--surface-1);border:2px solid var(--border);border-radius:8px;padding:10px;text-align:center;cursor:pointer;">
+                    <div style="font-size:0.7rem;color:var(--text-dim);font-weight:600;text-transform:uppercase;">${sourceDisplay}</div>
+                    <div style="font-size:1.2rem;font-weight:700;">${market != null ? '$' + market.toFixed(2) : 'N/A'}</div>
+                    <div style="font-size:0.7rem;color:var(--text-dim);">${sourceLbl === 'cache' ? 'Scrydex nightly cache' : sourceLbl === 'scrydex' ? 'Scrydex live' : sourceLbl === 'ppt' ? 'PPT (fallback)' : 'Market data'}</div>
+                </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;margin:8px 0;">
+                <label style="font-size:0.78rem;color:var(--text-dim);white-space:nowrap;">Custom $</label>
+                <input type="number" id="relink-sealed-custom" min="0" step="0.01" placeholder="Override" style="flex:1;font-size:0.95rem;">
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+                <button id="relink-sealed-confirm" class="btn btn-primary" style="flex:1;">Confirm Link</button>
+                <button id="relink-sealed-back" class="btn btn-secondary">← Back</button>
+            </div>
+        </div>`;
+
+    const paint = () => {
+        const sel = rs._sealedSelectedSource;
+        ['imported','market'].forEach(s => {
+            const el = document.getElementById('relink-sealed-opt-' + s);
+            if (!el) return;
+            el.style.borderColor = s === sel ? 'var(--accent)' : 'var(--border)';
+            el.style.background = s === sel ? 'rgba(79,125,249,0.08)' : 'var(--surface-1)';
+        });
+        const btn = document.getElementById('relink-sealed-confirm');
+        if (!btn) return;
+        const customEl = document.getElementById('relink-sealed-custom');
+        const customVal = parseFloat(customEl && customEl.value);
+        if (!isNaN(customVal) && customVal > 0) {
+            btn.textContent = 'Confirm — Custom $' + customVal.toFixed(2);
+        } else if (sel === 'market' && market != null) {
+            btn.textContent = 'Confirm — ' + sourceDisplay + ' $' + market.toFixed(2);
+        } else if (sel === 'imported' && imported > 0) {
+            btn.textContent = 'Confirm — Imported $' + imported.toFixed(2);
+        } else {
+            btn.textContent = 'Pick a price above';
+        }
+    };
+    document.getElementById('relink-sealed-opt-imported').addEventListener('click', () => {
+        if (imported > 0) { rs._sealedSelectedSource = 'imported'; paint(); }
+    });
+    document.getElementById('relink-sealed-opt-market').addEventListener('click', () => {
+        if (market != null) { rs._sealedSelectedSource = 'market'; paint(); }
+    });
+    document.getElementById('relink-sealed-custom').addEventListener('input', paint);
+    document.getElementById('relink-sealed-back').addEventListener('click', () => { _relinkShowSearch(); _relinkDoSearch(); });
+    document.getElementById('relink-sealed-confirm').addEventListener('click', () => {
+        const customEl = document.getElementById('relink-sealed-custom');
+        const customVal = parseFloat(customEl && customEl.value);
+        let price;
+        if (!isNaN(customVal) && customVal > 0) price = customVal;
+        else if (rs._sealedSelectedSource === 'market' && market != null) price = market;
+        else if (rs._sealedSelectedSource === 'imported' && imported > 0) price = imported;
+        else { alert('Pick a price first'); return; }
+        _relinkSealedConfirm({ tcgId: ctx.tcgId, scrydexId: ctx.scrydexId, price, name: ctx.name, setName: ctx.setName });
+    });
+    paint();
+}
+
+async function _relinkSealedConfirm({ tcgId, scrydexId, price, name, setName }) {
+    const rs = window._relinkState;
+    const resultsDiv = document.getElementById('relink-results');
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Linking...</div>';
+    try {
+        const body = {
+            item_id: rs.itemId,
+            session_id: rs.sessionId,
+            verify_price: false,
+            override_price: price,
+        };
+        if (tcgId) body.tcgplayer_id = tcgId;
+        else if (scrydexId) body.scrydex_id = scrydexId;
+        else { resultsDiv.innerHTML = '<div class="alert alert-error">No identifier — cannot link</div>'; return; }
+        if (name) body.product_name = name;
+        if (setName) body.set_name = setName;
+        const r = await fetch('/api/intake/map-item', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + (d.error || 'Map failed') + '</div>'; return; }
+        window._relinkLinkedCount = (window._relinkLinkedCount || 0) + 1;
+        await _relinkAdvanceOrClose(rs.sessionId);
     } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
 }
 
@@ -3605,12 +3853,21 @@ async function _relinkFetchAndShowConditions(tcgId) {
         rs.cardNum = card.cardNumber || '';
         rs.rarity = card.rarity || '';
         rs.gradedPrices = d.graded_prices || null;
-        // Seed mode and grade from the item — always set on first load
-        if (!rs._relinkMode) rs._relinkMode = rs.isGraded ? 'graded' : 'raw';
+        // Treat any grade hint (is_graded flag OR grade_company/grade_value
+        // set by the importer) as graded. Collectr CSVs sometimes populate
+        // grade fields without flipping is_graded — without this, the modal
+        // opens in raw mode and the user has to toggle to load comps.
+        const looksGraded = rs.isGraded || !!rs.gradeCompany || !!rs.gradeValue;
+        if (!rs._relinkMode) rs._relinkMode = looksGraded ? 'graded' : 'raw';
         if (!rs._relinkSeeded) {
             rs._relinkGradeCompany = rs.gradeCompany || 'PSA';
             rs._relinkGradeValue = rs.gradeValue || '10';
             rs._relinkSeeded = true;
+        }
+        // Pull live eBay comps so the smart price + comp stats show up
+        // before the user confirms — no "backend will retry on save" placeholder.
+        if (rs._relinkMode === 'graded' && !rs.gradedLive) {
+            _relinkFetchGraded();
         }
         _relinkRenderConditions(rs.condition || 'NM');
     } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
@@ -3695,8 +3952,12 @@ function _relinkRenderConditions(selectedCond) {
         const live = ((rs.gradedLive || {})[selCompany] || {})[selGrade] || null;
         const cacheScalar = ((rs.gradedPrices || {})[selCompany] || {})[selGrade];
         const cachePrice = (cacheScalar != null) ? Number(cacheScalar) : null;
-        const gradePrice = (live && live.mid != null) ? Number(live.mid)
-                         : (live && live.market != null) ? Number(live.market)
+        // Headline = the smart price (IQR-cleaned, recency-weighted, 14d half-life).
+        // graded_pricing.py:_compute_smart_market returns it as `market`.
+        // `mid` is the raw median across ALL sales (no outlier removal) —
+        // useful as a sanity check, never as the headline.
+        const gradePrice = (live && live.market != null) ? Number(live.market)
+                         : (live && live.mid != null) ? Number(live.mid)
                          : cachePrice;
 
         html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
@@ -3713,18 +3974,45 @@ function _relinkRenderConditions(selectedCond) {
         if (rs._relinkGradedLoading) {
             html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;color:var(--text-dim);"><span class="spinner"></span> Fetching ${selCompany} ${selGrade} comps…</div>`;
         } else if (gradePrice != null) {
+            const usingSmart = !!(live && live.market != null);
             const sourceLabel = live
-                ? `<span style="color:#22c55e;font-size:0.72rem;font-weight:600;">live</span>`
+                ? (usingSmart
+                    ? `<span style="color:#22c55e;font-size:0.7rem;font-weight:700;background:rgba(34,197,94,0.12);padding:1px 6px;border-radius:3px;" title="IQR outlier removal + 14-day half-life recency weighting">SMART · live eBay</span>`
+                    : `<span style="color:#22c55e;font-size:0.72rem;font-weight:600;">live</span>`)
                 : `<span style="color:#f59e0b;font-size:0.72rem;font-weight:600;">cache</span>`;
-            const stats = [];
-            if (live && live.comps_count) stats.push(`${live.comps_count} comps`);
-            if (live && live.low != null && live.high != null) {
-                stats.push(`range $${Number(live.low).toFixed(0)}–$${Number(live.high).toFixed(0)}`);
+            // Top-line stats: comps used vs total + window
+            const headStats = [];
+            if (live && live.comps_count != null) {
+                const used = live.comps_kept != null ? Number(live.comps_kept) : null;
+                const dropped = live.outliers_dropped != null ? Number(live.outliers_dropped) : null;
+                if (used != null && dropped != null) {
+                    headStats.push(`${live.comps_count} comps · <strong>${used} used</strong>${dropped > 0 ? ` · ${dropped} outlier${dropped===1?'':'s'} dropped` : ''}`);
+                } else {
+                    headStats.push(`${live.comps_count} comps`);
+                }
             }
-            if (live && live.avg_7d != null) stats.push(`7d avg $${Number(live.avg_7d).toFixed(2)}`);
+            // Sanity-check row: median + 7d/30d averages + range
+            const sanityStats = [];
+            if (live && live.mid != null) sanityStats.push(`median $${Number(live.mid).toFixed(2)}`);
+            if (live && live.avg_7d != null) sanityStats.push(`7d $${Number(live.avg_7d).toFixed(2)}${live.comps_7d != null ? ` (${live.comps_7d})` : ''}`);
+            if (live && live.avg_30d != null) sanityStats.push(`30d $${Number(live.avg_30d).toFixed(2)}${live.comps_30d != null ? ` (${live.comps_30d})` : ''}`);
+            if (live && live.low != null && live.high != null) sanityStats.push(`range $${Number(live.low).toFixed(0)}–$${Number(live.high).toFixed(0)}`);
+            // Trend if we have it
+            const trendBits = [];
+            if (live && live.trend_7d_pct != null) {
+                const t = Number(live.trend_7d_pct);
+                const arrow = t > 0 ? '▲' : t < 0 ? '▼' : '—';
+                const col = t > 5 ? '#22c55e' : t < -5 ? '#ef4444' : 'var(--text-dim)';
+                trendBits.push(`<span style="color:${col};">${arrow} 7d ${t.toFixed(1)}%</span>`);
+            }
             html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;">
-                <strong style="font-size:1.15rem;">$${gradePrice.toFixed(2)}</strong> ${sourceLabel}
-                ${stats.length ? `<br><span style="color:var(--text-dim);font-size:0.72rem;">${stats.join(' · ')}</span>` : ''}
+                <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
+                    <strong style="font-size:1.25rem;">$${gradePrice.toFixed(2)}</strong>
+                    ${sourceLabel}
+                    ${trendBits.length ? `<span style="font-size:0.78rem;">${trendBits.join(' · ')}</span>` : ''}
+                </div>
+                ${headStats.length ? `<div style="color:var(--text-dim);font-size:0.74rem;margin-top:4px;">${headStats.join('')}</div>` : ''}
+                ${sanityStats.length ? `<div style="color:var(--text-dim);font-size:0.72rem;margin-top:2px;">${sanityStats.join(' · ')}</div>` : ''}
             </div>`;
         } else {
             html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;color:var(--text-dim);">No eBay data for ${selCompany} ${selGrade} — backend will retry on save.</div>`;

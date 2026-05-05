@@ -578,8 +578,8 @@ def create_price_provider(db=None, game: str = "pokemon") -> PriceProvider:
             logger.error("PRICE_PROVIDER=both but Scrydex credentials missing — falling back to PPT")
             primary = PPTClient(ppt_key)
             return PriceProvider(primary, mode="ppt", cache=cache)
-        primary = PPTClient(ppt_key)
-        shadow = ScrydexClient(scrydex_key, scrydex_team, db=db, game=game)
+        primary = ScrydexClient(scrydex_key, scrydex_team, db=db, game=game)
+        shadow = PPTClient(ppt_key) if ppt_key else None
         return PriceProvider(primary, shadow=shadow, mode="both", cache=cache)
 
     else:  # "ppt" (default)
