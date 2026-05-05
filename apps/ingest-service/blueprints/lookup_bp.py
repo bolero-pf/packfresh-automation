@@ -166,34 +166,86 @@ def debug_card_raw(tcgplayer_id):
 
 @bp.route("/api/lookup/debug-sealed/<int:tcgplayer_id>")
 def debug_sealed(tcgplayer_id):
-    """Debug: compare search vs direct lookup for a sealed product."""
-    if not pricing:
-        return jsonify({"error": "PPT not configured"}), 503
-    results = {}
-    
-    # Test 1: Direct lookup by tcgPlayerId
-    try:
-        url = f"{pricing.base_url}/v2/sealed-products"
-        params = {"tcgPlayerId": str(tcgplayer_id)}
-        raw = pricing._get(url, params)
-        results["direct_lookup"] = {
-            "url": f"{url}?tcgPlayerId={tcgplayer_id}",
-            "response": raw,
-        }
-    except PriceError as e:
-        results["direct_lookup"] = {"error": str(e), "status": e.status_code}
+    """Debug: dump raw responses from every layer of the sealed lookup chain
+    for a single TCG ID. Useful when 'sealed not found' shows up in the link
+    flow and you need to know which layer is empty.
 
-    # Test 2: Search (to compare structure)
+    Reaches under PriceProvider into both primary (Scrydex) and shadow (PPT)
+    clients — those are the layers whose raw responses matter for diagnosis.
+    """
+    if not pricing:
+        return jsonify({"error": "Price provider not configured"}), 503
+
+    results = {"tcgplayer_id": tcgplayer_id}
+
+    # Resolve the underlying clients regardless of mode (scrydex / ppt / both).
+    # Each client class has a different base_url + _get; pick by class name.
+    def _client_kind(c):
+        if c is None:
+            return None
+        return "scrydex" if "Scrydex" in type(c).__name__ else "ppt"
+
+    primary_kind = _client_kind(getattr(pricing, "primary", None))
+    shadow_kind = _client_kind(getattr(pricing, "shadow", None))
+    ppt_client = (pricing.primary if primary_kind == "ppt"
+                  else pricing.shadow if shadow_kind == "ppt"
+                  else None)
+    scrydex_client = (pricing.primary if primary_kind == "scrydex"
+                      else pricing.shadow if shadow_kind == "scrydex"
+                      else None)
+    results["mode"] = pricing.mode
+    results["primary"] = primary_kind
+    results["shadow"] = shadow_kind
+
+    # Layer 1: scrydex_price_cache
     try:
-        url2 = f"{pricing.base_url}/v2/sealed-products"
-        params2 = {"search": "Elite Trainer Box", "limit": 1}
-        raw2 = pricing._get(url2, params2)
-        results["search_example"] = {
-            "url": f"{url2}?search=Elite+Trainer+Box&limit=1",
-            "response": raw2,
-        }
-    except PriceError as e:
-        results["search_example"] = {"error": str(e), "status": e.status_code}
+        cache = getattr(pricing, "cache", None)
+        cached = cache.get_sealed_product_by_tcgplayer_id(tcgplayer_id) if cache else None
+        results["cache"] = {"hit": cached is not None, "response": cached}
+    except Exception as e:
+        results["cache"] = {"error": str(e), "type": type(e).__name__}
+
+    # Layer 2: scrydex_tcg_map / Scrydex direct
+    if scrydex_client:
+        try:
+            sx_id = scrydex_client._resolve_tcgplayer_id(tcgplayer_id)
+            results["scrydex"] = {"resolved_scrydex_id": sx_id}
+            if sx_id:
+                results["scrydex"]["product"] = scrydex_client.get_sealed_by_id(sx_id)
+        except Exception as e:
+            results["scrydex"] = {"error": str(e), "type": type(e).__name__}
+    else:
+        results["scrydex"] = {"skipped": "no Scrydex client configured"}
+
+    # Layer 3: PPT direct lookup by TCGPlayer ID — sealed-products endpoint
+    if ppt_client:
+        try:
+            url = f"{ppt_client.base_url}/v2/sealed-products"
+            params = {"tcgPlayerId": str(tcgplayer_id)}
+            raw = ppt_client._get(url, params)
+            results["ppt_sealed"] = {
+                "url": f"{url}?tcgPlayerId={tcgplayer_id}",
+                "response": raw,
+            }
+        except Exception as e:
+            results["ppt_sealed"] = {"error": str(e), "type": type(e).__name__,
+                                      "status": getattr(e, "status_code", None)}
+
+        # Layer 4: PPT cards endpoint — some 'sealed' products end up here
+        try:
+            url = f"{ppt_client.base_url}/v2/cards"
+            params = {"tcgPlayerId": str(tcgplayer_id), "limit": 1}
+            raw = ppt_client._get(url, params)
+            results["ppt_cards"] = {
+                "url": f"{url}?tcgPlayerId={tcgplayer_id}",
+                "response": raw,
+            }
+        except Exception as e:
+            results["ppt_cards"] = {"error": str(e), "type": type(e).__name__,
+                                     "status": getattr(e, "status_code", None)}
+    else:
+        results["ppt_sealed"] = {"skipped": "no PPT client configured (set PPT_API_KEY and PRICE_PROVIDER=both for fallback)"}
+        results["ppt_cards"] = {"skipped": "no PPT client configured"}
 
     return jsonify(results)
 
