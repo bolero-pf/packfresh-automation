@@ -215,11 +215,12 @@ class PriceProvider:
         except (PPTError, ScrydexError) as e:
             raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
 
-        # Scrydex's /sealed endpoint doesn't return tcgPlayerId, so a sealed
-        # product without a populated mapping in scrydex_tcg_map returns None
-        # from primary even when PPT can resolve it. Synchronously fall back
-        # to the shadow (PPT) for sealed-by-TCG-ID specifically — this is the
-        # one lookup PPT handles natively that Scrydex doesn't.
+        # ScrydexClient._resolve_tcgplayer_id reads from the local
+        # scrydex_tcg_map table — it doesn't ask Scrydex's API to resolve a
+        # TCG ID at lookup time. So a TCG ID we've never seeded (brand-new
+        # sealed product, never searched/synced) misses here even when
+        # Scrydex itself knows the mapping. PPT can resolve sealed by TCG ID
+        # directly, so fall back synchronously when primary is empty.
         if result is None and self.shadow and self._primary_source == "scrydex":
             try:
                 shadow_result = self.shadow.get_sealed_product_by_tcgplayer_id(
