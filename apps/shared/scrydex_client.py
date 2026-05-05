@@ -137,6 +137,28 @@ def _match_condition(ppt_cond: str) -> str | None:
     return None
 
 
+def _scrub_query(q: str) -> str:
+    """Sanitize a free-text query for Scrydex's q= param.
+
+    Scrydex uses Lucene-flavored search syntax. Apostrophes truncate the
+    query at the first occurrence (everything after gets dropped), and
+    parentheses + colons are operators that produce 400s on free text.
+    Replace those characters with spaces so a query like
+    "Team Rocket's Moltres ex Ultra Premium" becomes
+    "Team Rocket s Moltres ex Ultra Premium" — Scrydex's tokenizer then
+    matches the meaningful terms instead of bailing on the first apostrophe.
+    """
+    if not q:
+        return ""
+    out = []
+    for ch in q:
+        if ch in "'’()[]{}:\"":
+            out.append(" ")
+        else:
+            out.append(ch)
+    return " ".join("".join(out).split())
+
+
 class ScrydexError(Exception):
     def __init__(self, message: str, status_code: int = None, body=None):
         super().__init__(message)
@@ -667,7 +689,7 @@ class ScrydexClient:
 
     def search_cards(self, query, *, set_name=None, limit=5) -> list[dict]:
         """Search cards by name. Returns list of normalized PPT-shape dicts."""
-        q_parts = [query]
+        q_parts = [_scrub_query(query)]
         if set_name:
             q_parts.append(f'expansion.name:"{set_name}"')
         params = {
@@ -717,7 +739,7 @@ class ScrydexClient:
 
     def search_sealed_products(self, query, *, set_name=None, limit=5) -> list[dict]:
         """Search sealed products by name."""
-        q_parts = [query]
+        q_parts = [_scrub_query(query)]
         if set_name:
             q_parts.append(f'expansion.name:"{set_name}"')
         params = {

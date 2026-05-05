@@ -24,7 +24,14 @@ from typing import Optional
 # ingestion service's SCRYDEX_JPY_USD_RATE (same env var, same default).
 _JPY_USD_RATE = Decimal(os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
 
-_TOKEN_SPLIT = re.compile(r"[\s\-_/]+")
+# Split on whitespace, hyphen/underscore/slash, AND apostrophes (straight and
+# Unicode curly right-single-quote). Without splitting on apostrophes, a query
+# like "Team Rocket's Moltres ex" tokenizes to ["Team", "Rocket's", "Moltres",
+# "ex"] and ILIKE '%Rocket's%' only matches rows whose product_name contains
+# that exact contraction with the same apostrophe character — DB rows from
+# Scrydex sometimes use the curly U+2019 form, so the straight ASCII typed
+# query never hits.
+_TOKEN_SPLIT = re.compile(r"[\s\-_/'’]+")
 
 logger = logging.getLogger(__name__)
 

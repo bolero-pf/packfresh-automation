@@ -215,7 +215,23 @@ class PriceProvider:
         except (PPTError, ScrydexError) as e:
             raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
 
-        if self.shadow:
+        # Scrydex's /sealed endpoint doesn't return tcgPlayerId, so a sealed
+        # product without a populated mapping in scrydex_tcg_map returns None
+        # from primary even when PPT can resolve it. Synchronously fall back
+        # to the shadow (PPT) for sealed-by-TCG-ID specifically — this is the
+        # one lookup PPT handles natively that Scrydex doesn't.
+        if result is None and self.shadow and self._primary_source == "scrydex":
+            try:
+                shadow_result = self.shadow.get_sealed_product_by_tcgplayer_id(
+                    tcgplayer_id, include_history=include_history
+                )
+                if shadow_result:
+                    logger.info(f"Sealed TCG#{tcgplayer_id}: scrydex miss, ppt fallback hit")
+                    return self._stamp(shadow_result, "ppt")
+            except (PPTError, ScrydexError) as e:
+                logger.warning(f"PPT fallback for sealed TCG#{tcgplayer_id} failed: {e}")
+
+        if result is not None and self.shadow:
             self._compare_in_background(
                 "get_sealed_product_by_tcgplayer_id",
                 result,
@@ -223,7 +239,7 @@ class PriceProvider:
                     tcgplayer_id, include_history=include_history
                 ),
             )
-        return self._stamp(result, self._primary_source)
+        return self._stamp(result, self._primary_source) if result is not None else None
 
     def search_sealed_products(self, query, *, set_name=None, limit=5):
         if self.cache:

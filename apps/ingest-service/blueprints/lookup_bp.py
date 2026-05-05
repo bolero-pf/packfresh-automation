@@ -117,7 +117,7 @@ def lookup_sealed():
     try:
         product_data = pricing.get_sealed_product_by_tcgplayer_id(int(tcgplayer_id))
         if not product_data:
-            return jsonify({"error": "Sealed product not found in PPT"}), 404
+            return jsonify({"error": f"Sealed product TCG#{tcgplayer_id} not found in cache, Scrydex, or PPT — may be too new to have a mapping yet"}), 404
 
         # Extract market price with multiple fallback paths
         market_price = None
