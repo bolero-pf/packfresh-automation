@@ -1054,19 +1054,28 @@ def push_dry_run(session_id):
     tcg_ids = list(set(i["tcgplayer_id"] for i in sealed_items if i.get("tcgplayer_id")))
     normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids)
 
-    # Consolidate by (tcg_id, is_damaged)
+    # Consolidate. Key falls through tcg_id → scrydex_id → row id so
+    # Scrydex-only items (NULL tcg_id) stay separate instead of collapsing
+    # onto a single (None, False) bucket.
     consolidated = {}
     for item in sealed_items:
-        tcg_id = item["tcgplayer_id"]
+        tcg_id = item.get("tcgplayer_id")
+        sx_id = item.get("scrydex_id")
         is_damaged = item.get("item_status") == "damaged"
-        key = (tcg_id, is_damaged)
+        if tcg_id:
+            key = ("tcg", tcg_id, is_damaged)
+        elif sx_id:
+            key = ("sx", sx_id, is_damaged)
+        else:
+            key = ("row", item["id"], is_damaged)
         if key not in consolidated:
             consolidated[key] = {"tcg_id": tcg_id, "is_damaged": is_damaged, "total_qty": 0, "items": [], "product_name": item.get("product_name")}
         consolidated[key]["total_qty"] += item.get("quantity", 1)
         consolidated[key]["items"].append(item)
 
     for key, group in consolidated.items():
-        tcg_id, is_damaged = key
+        tcg_id = group["tcg_id"]
+        is_damaged = group["is_damaged"]
         qty = group["total_qty"]
         entry = {
             "product_name": group["product_name"],
@@ -1453,15 +1462,23 @@ def _push_session_worker(job_id, session_id, active):
                 errors.append({"product_name": item.get("product_name"), "action": "error", "error": str(e)})
             job["progress"] += 1
 
-        # Sealed items: consolidate
+        # Sealed items: consolidate. Key falls through tcg_id → scrydex_id →
+        # row id so Scrydex-only items (NULL tcg_id) don't all collide on the
+        # same (None, False) bucket and get dumped into a single listing.
         tcg_ids = list(set(i["tcgplayer_id"] for i in sealed_items if i.get("tcgplayer_id")))
         normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids) if tcg_ids else ({}, {})
 
         consolidated = {}
         for item in sealed_items:
-            tcg_id = item["tcgplayer_id"]
+            tcg_id = item.get("tcgplayer_id")
+            sx_id = item.get("scrydex_id")
             is_damaged = item.get("item_status") == "damaged"
-            key = (tcg_id, is_damaged)
+            if tcg_id:
+                key = ("tcg", tcg_id, is_damaged)
+            elif sx_id:
+                key = ("sx", sx_id, is_damaged)
+            else:
+                key = ("row", item["id"], is_damaged)
             if key not in consolidated:
                 consolidated[key] = {
                     "tcg_id": tcg_id,
@@ -1475,10 +1492,11 @@ def _push_session_worker(job_id, session_id, active):
 
         # Process normal items before damaged — ensures normal listing exists
         # for damaged to duplicate (even if it has to be created fresh)
-        sorted_keys = sorted(consolidated.keys(), key=lambda k: k[1])  # is_damaged=False first
+        sorted_keys = sorted(consolidated.keys(), key=lambda k: k[2])  # is_damaged=False first
         for key in sorted_keys:
             group = consolidated[key]
-            tcg_id, is_damaged = key
+            tcg_id = group["tcg_id"]
+            is_damaged = group["is_damaged"]
             qty = group["total_qty"]
             entry = {
                 "product_name": group["product_name"],
