@@ -1200,6 +1200,11 @@ let _filters = {
 let _draft = null;
 let _allSets = [];   // current /api/sets response, for in-sheet search filter
 let _filterMeta = null;  // /api/filter-meta response for current draft.game
+// Token bumped on every loadFilterMetaForDraft() call so out-of-order responses
+// can be discarded. Without this, rapid game-chip switching (Pokemon → Magic →
+// One Piece) lets a slow earlier request resolve last and overwrite the latest
+// game's pills with stale data — making "both sets of filters" appear at once.
+let _filterMetaReqId = 0;
 
 function _activeFilterCount() {
   let n = 0;
@@ -1337,6 +1342,9 @@ async function loadGames() {
           p.classList.toggle('active', p.getAttribute('data-game') === newGame));
         loadGames();          // refresh counts (re-renders pills)
         loadSetsForFilters(); // refresh available sets for this game
+        // Warm /api/filter-meta in the background — opening the Filters sheet
+        // right after a game switch otherwise blocks on this slow query.
+        if (newGame) loadFilterMetaForDraft();
         _refreshFiltersBtn();
         doSearch();
       });
@@ -1380,8 +1388,13 @@ function openFilterSheet() {
   renderEraChips();
   document.getElementById('set-search-input').value = '';
   renderSetList();
-  // Game-aware advanced filters (color/type/rarity) — fetch + render
-  loadFilterMetaForDraft().then(renderAdvancedFilterSections);
+  // Game-aware advanced filters (color/type/rarity). If a recent boot/top-
+  // strip prefetch left us with meta for this game, paint the pills from
+  // cache immediately — then re-fetch in the background to refresh counts.
+  if (_filterMeta && _filterMeta.game === _draft.game) {
+    renderAdvancedFilterSections();
+  }
+  loadFilterMetaForDraft().then(ok => { if (ok) renderAdvancedFilterSections(); });
 
   document.getElementById('filter-sheet-overlay').classList.add('open');
   document.body.style.overflow = 'hidden';
@@ -1470,14 +1483,23 @@ function renderGameChips() {
       _draft.colorMode = 'any';
       renderGameChips();
       _refreshSheetEraVisibility();
-      // Refetch sets/eras scoped to the new draft.game
-      await loadSetsForFilters(_draft.era, _draft.game);
+      // Hide the previous game's color/card-type/rarity pills immediately.
+      // Without this, a slow /api/filter-meta fetch leaves Pokemon's pills
+      // visible under a Magic-active game chip until the response lands.
+      _filterMeta = null;
+      renderAdvancedFilterSections();
+      // Sets and filter-meta are independent — fetch in parallel so the
+      // sheet doesn't wait for sets before kicking off the slower meta call.
+      const [, metaFresh] = await Promise.all([
+        loadSetsForFilters(_draft.era, _draft.game),
+        loadFilterMetaForDraft(),
+      ]);
+      // Discard if the user clicked another game while these were in flight.
+      if (_draft && _draft.game !== newGame) return;
       renderEraChips();
       document.getElementById('set-search-input').value = '';
       renderSetList();
-      // Refetch + render game-aware advanced filter sections
-      await loadFilterMetaForDraft();
-      renderAdvancedFilterSections();
+      if (metaFresh) renderAdvancedFilterSections();
     });
   });
 }
@@ -1489,9 +1511,11 @@ function renderGameChips() {
 // from "Creature: 26" to "Creature: 4" — but the colors group itself stays
 // stable (its own selection doesn't shrink its own options). Re-fetching on
 // every toggle keeps badges live; we debounce so rapid clicks don't thrash.
+// Returns true if the response is fresh (caller should re-render), false if
+// stale (a newer request is in flight — discard) or errored.
 async function loadFilterMetaForDraft() {
   const game = _draft ? _draft.game : _filters.game;
-  if (!game) { _filterMeta = null; return; }
+  if (!game) { _filterMeta = null; _filterMetaReqId++; return true; }
   const p = new URLSearchParams();
   p.set('game', game);
   if (_draft) {
@@ -1506,9 +1530,16 @@ async function loadFilterMetaForDraft() {
       p.set('card_rarity', Array.from(_draft.rarities).join(','));
     }
   }
+  const myReq = ++_filterMetaReqId;
   try {
-    _filterMeta = await get('/api/filter-meta?' + p.toString());
-  } catch(e) { _filterMeta = null; }
+    const data = await get('/api/filter-meta?' + p.toString());
+    if (myReq !== _filterMetaReqId) return false;  // a newer request superseded us
+    _filterMeta = data;
+    return true;
+  } catch(e) {
+    if (myReq === _filterMetaReqId) _filterMeta = null;
+    return false;
+  }
 }
 
 // Debounced refresh: fired after any chip toggle so qty badges across the
@@ -1523,8 +1554,8 @@ function refreshFacetCounts() {
     // Pull color/type/rarity counts AND era counts in parallel so the
     // sheet's chip badges all reflect the same selection state after one
     // round-trip cycle.
-    await Promise.all([loadFilterMetaForDraft(), loadEras()]);
-    renderAdvancedFilterSections();
+    const [metaFresh, ] = await Promise.all([loadFilterMetaForDraft(), loadEras()]);
+    if (metaFresh) renderAdvancedFilterSections();
     renderEraChips();
   }, 220);
 }
