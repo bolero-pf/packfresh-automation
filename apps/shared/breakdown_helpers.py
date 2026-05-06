@@ -32,10 +32,12 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
     if not variant_ids or not ppt:
         return 0
 
+    _t0 = time.perf_counter()
     ph = ",".join(["%s"] * len(variant_ids))
     cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
 
     # Find stale components: no timestamp or older than cutoff
+    _ts = time.perf_counter()
     stale = db.query(f"""
         SELECT id, variant_id, tcgplayer_id,
                COALESCE(component_type, 'sealed') AS component_type,
@@ -45,6 +47,7 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
           AND tcgplayer_id IS NOT NULL
           AND (market_price_updated_at IS NULL OR market_price_updated_at < %s)
     """, tuple(variant_ids) + (cutoff,))
+    _t_stale_q = time.perf_counter() - _ts
 
     if not stale:
         return 0
@@ -56,8 +59,9 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
         if tcg_id not in unique_components:
             unique_components[tcg_id] = row["component_type"]
 
-    # Fetch fresh prices from PPT
+    # Fetch fresh prices from PPT (cache-first; PPT only on miss)
     fresh_prices = {}
+    _ts = time.perf_counter()
     for tcg_id, comp_type in unique_components.items():
         if ppt.should_throttle():
             logger.warning("PPT rate limit reached — stopping component price refresh")
@@ -75,8 +79,17 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
                 fresh_prices[tcg_id] = price
         except Exception as e:
             logger.warning(f"Failed to fetch price for component TCG#{tcg_id}: {e}")
+    _t_fetch = time.perf_counter() - _ts
 
     if not fresh_prices:
+        _t_total = time.perf_counter() - _t0
+        if _t_total > 0.5:
+            logger.warning(
+                "refresh_stale_component_prices empty: variants=%d stale=%d unique=%d total=%.2fs "
+                "[stale_q=%.2fs fetch=%.2fs]",
+                len(variant_ids), len(stale), len(unique_components),
+                _t_total, _t_stale_q, _t_fetch,
+            )
         return 0
 
     # Update components with fresh prices
@@ -84,6 +97,7 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
     affected_variant_ids = set()
     now = datetime.utcnow()
 
+    _ts = time.perf_counter()
     for row in stale:
         tcg_id = int(row["tcgplayer_id"])
         if tcg_id in fresh_prices:
@@ -94,12 +108,24 @@ def refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=DEFAULT_M
             """, (fresh_prices[tcg_id], now, row["id"]))
             updated_count += 1
             affected_variant_ids.add(row["variant_id"])
+    _t_update = time.perf_counter() - _ts
 
     # Recompute denormalized totals for affected variants
+    _ts = time.perf_counter()
     if affected_variant_ids:
         _recompute_denormalized_totals(db, list(affected_variant_ids))
+    _t_recompute = time.perf_counter() - _ts
 
-    logger.info(f"Refreshed {updated_count} component prices ({len(fresh_prices)} unique from PPT)")
+    _t_total = time.perf_counter() - _t0
+    if _t_total > 0.5:
+        logger.warning(
+            "refresh_stale_component_prices: variants=%d stale=%d unique=%d updated=%d total=%.2fs "
+            "[stale_q=%.2fs fetch=%.2fs update=%.2fs recompute=%.2fs]",
+            len(variant_ids), len(stale), len(unique_components), updated_count,
+            _t_total, _t_stale_q, _t_fetch, _t_update, _t_recompute,
+        )
+    else:
+        logger.info(f"Refreshed {updated_count} component prices ({len(fresh_prices)} unique from PPT)")
     return updated_count
 
 

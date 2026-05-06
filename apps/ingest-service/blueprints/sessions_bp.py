@@ -699,9 +699,12 @@ def session_meta_stats(session_id):
     # variants[], best/expected/worst aggregates) so per-item offer math can
     # honor each row's claimed_variant_id via pick_offer_value().
     bd_summary_by_tcg: dict[int, dict] = {}
+    _t0 = time.perf_counter()
+    _t_cache_tcg = _t_bd = _t_cache_shopify = 0.0
     try:
         if tcg_ids:
             ph = ",".join(["%s"] * len(tcg_ids))
+            _ts = time.perf_counter()
             for r in db.query(
                 f"""SELECT tcgplayer_id, shopify_product_id, tags, shopify_price, shopify_qty, is_damaged
                     FROM inventory_product_cache WHERE tcgplayer_id IN ({ph})""",
@@ -714,13 +717,17 @@ def session_meta_stats(session_id):
                 if tcg in cache_by_tcg and r.get("is_damaged"):
                     continue
                 cache_by_tcg[tcg] = r
+            _t_cache_tcg = time.perf_counter() - _ts
             try:
+                _ts = time.perf_counter()
                 bd_summary_by_tcg = bd_logic.get_breakdown_summary_for_items(tcg_ids, db, ppt=pricing)
+                _t_bd = time.perf_counter() - _ts
             except Exception as e:
                 logger.warning(f"meta-stats breakdown summary lookup failed: {e}")
                 bd_summary_by_tcg = {}
         if shopify_ids:
             ph = ",".join(["%s"] * len(shopify_ids))
+            _ts = time.perf_counter()
             for r in db.query(
                 f"""SELECT shopify_product_id, tcgplayer_id, tags, shopify_price, shopify_qty, is_damaged
                     FROM inventory_product_cache WHERE shopify_product_id IN ({ph})""",
@@ -729,6 +736,7 @@ def session_meta_stats(session_id):
                 pid = str(r.get("shopify_product_id") or "")
                 if pid and (pid not in cache_by_shopify or not r.get("is_damaged")):
                     cache_by_shopify[pid] = r
+            _t_cache_shopify = time.perf_counter() - _ts
     except Exception as e:
         logger.warning(f"meta-stats: cache join failed: {e}")
 
@@ -868,6 +876,15 @@ def session_meta_stats(session_id):
         # by market value so drill-in shows the heavy hitters first.
         b["items"].sort(key=lambda x: -(float(x["market_price"] or 0) * (x["qty"] or 0)))
         out_cats.append(b)
+
+    _t_total = time.perf_counter() - _t0
+    if _t_total > 1.0:
+        logger.warning(
+            "meta-stats slow: session=%s items=%d tcg_ids=%d total=%.2fs "
+            "[cache_tcg=%.2fs bd_summary=%.2fs cache_shopify=%.2fs]",
+            session_id, len(items), len(tcg_ids),
+            _t_total, _t_cache_tcg, _t_bd, _t_cache_shopify,
+        )
 
     return jsonify({
         "session_id": session_id,
@@ -1043,13 +1060,6 @@ def merge_sessions():
 
 
 
-@bp.route("/api/intake/finalize/<session_id>", methods=["POST"])
-def finalize(session_id):
-    """Legacy finalize — now means 'offer'. Kept for backward compat."""
-    return offer_session(session_id)
-
-
-
 @bp.route("/api/intake/session/<session_id>/offer", methods=["POST"])
 def offer_session(session_id):
     """Lock in the offer. Validates all items are mapped."""
@@ -1075,61 +1085,39 @@ def offer_session(session_id):
 
 @bp.route("/api/intake/session/<session_id>/accept", methods=["POST"])
 def accept_session(session_id):
-    """Customer accepted the offer.
-
-    New shape (#7):
-      - `offer_type` ('cash' or 'credit') — the offer the customer chose.
-        Stamps `accepted_offer_type`, re-prices items at the chosen
-        percentage, and walk-in sessions short-circuit straight to
-        'received' (skip the pickup/mail wait).
-
-    Legacy shape (still supported for the deploy window):
-      - No `offer_type` → behaves like the old single-offer accept
-        (just flips status to 'accepted'). The dashboard switches to the
-        new shape in the same deploy, so this branch only matters for
-        in-flight sessions someone has open in another tab.
-    """
+    """Customer accepted the offer. `offer_type` ∈ {'cash','credit'} picks the
+    offer; walk-in sessions short-circuit straight to 'received'."""
     session = intake.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
     if session["status"] not in ("offered",):
         return jsonify({"error": f"Cannot accept — session is '{session['status']}'"}), 400
     data = request.get_json(silent=True) or {}
+    offer_type = (data.get("offer_type") or "").lower().strip()
+    if offer_type not in ("cash", "credit"):
+        return jsonify({"error": "offer_type must be 'cash' or 'credit'"}), 400
+
     fulfillment = data.get("fulfillment_method", "pickup")  # pickup or mail
     tracking = (data.get("tracking_number") or "").strip() or None
     pickup_date = (data.get("pickup_date") or "").strip() or None
 
-    offer_type = (data.get("offer_type") or "").lower().strip()
-    if offer_type in ("cash", "credit"):
-        try:
-            updated = intake.accept_offer(
-                session_id,
-                offer_type=offer_type,
-                fulfillment=fulfillment,
-                tracking_number=tracking,
-                pickup_date=pickup_date,
-            )
-            return jsonify({
-                "success": True,
-                "status": updated["status"],
-                "accepted_offer_type": offer_type,
-                "fulfillment_method": fulfillment,
-                "is_walk_in": bool(updated.get("is_walk_in")),
-            })
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-
-    # Legacy path — preserved for any in-flight client that hasn't picked
-    # up the new dashboard. Does NOT set accepted_offer_type, does NOT
-    # short-circuit walk-ins. Once the dashboard deploy is universal we
-    # can drop this branch.
-    db.execute("""
-        UPDATE intake_sessions
-        SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP,
-            fulfillment_method = %s, tracking_number = %s, pickup_date = %s
-        WHERE id = %s
-    """, (fulfillment, tracking, pickup_date, session_id))
-    return jsonify({"success": True, "status": "accepted", "fulfillment_method": fulfillment})
+    try:
+        updated = intake.accept_offer(
+            session_id,
+            offer_type=offer_type,
+            fulfillment=fulfillment,
+            tracking_number=tracking,
+            pickup_date=pickup_date,
+        )
+        return jsonify({
+            "success": True,
+            "status": updated["status"],
+            "accepted_offer_type": offer_type,
+            "fulfillment_method": fulfillment,
+            "is_walk_in": bool(updated.get("is_walk_in")),
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 
 

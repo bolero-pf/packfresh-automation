@@ -6,6 +6,7 @@ execute_returning) so any service can use them with its own DB connection pool.
 """
 
 import logging
+import time
 from decimal import Decimal
 from typing import Optional
 
@@ -184,10 +185,14 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
     if not tcg_ids:
         return {}
     ph = ",".join(["%s"] * len(tcg_ids))
+    _t0 = time.perf_counter()
+    _t_variants = _t_refresh = _t_components = _t_store = _t_all_variant_comps = 0.0
+    _t_nested = _t_recipes_full = 0.0
 
     # Step 1: get best variant per parent (highest total_component_market).
     # Any recipe with >1 variant is implicitly probabilistic at intake — the
     # operator only knows the actual variant when cracking it open in ingest.
+    _ts = time.perf_counter()
     variant_rows = db.query(f"""
         SELECT sbc.tcgplayer_id AS parent_id,
                sbc.variant_count, sbc.best_variant_market,
@@ -202,7 +207,11 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
         WHERE sbc.tcgplayer_id IN ({ph})
     """, tuple(tcg_ids))
 
+    _t_variants = time.perf_counter() - _ts
     if not variant_rows:
+        if time.perf_counter() - _t0 > 0.5:
+            logger.warning("bd_summary fast-exit: tcg_ids=%d variants=0 t=%.2fs",
+                           len(tcg_ids), time.perf_counter() - _t0)
         return {}
 
     # Step 2: get components for those variants
@@ -212,13 +221,16 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
     if ppt and variant_ids:
         try:
             from breakdown_helpers import refresh_stale_component_prices
+            _ts = time.perf_counter()
             refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=max_age_hours)
+            _t_refresh = time.perf_counter() - _ts
         except Exception as e:
             logger.warning(f"Component price refresh skipped: {e}")
 
     parent_ids = [r["parent_id"] for r in variant_rows]
     vph = ",".join(["%s"] * len(variant_ids))
 
+    _ts = time.perf_counter()
     comp_rows = db.query(f"""
         SELECT sbco.variant_id, sbco.tcgplayer_id AS comp_tcg_id,
                sbco.quantity_per_parent, sbco.market_price AS comp_market,
@@ -226,10 +238,12 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
         FROM sealed_breakdown_components sbco
         WHERE sbco.variant_id IN ({vph})
     """, tuple(variant_ids))
+    _t_components = time.perf_counter() - _ts
 
     # Step 3: batch store lookup for parents + all component tcg_ids
     comp_tcg_ids = list(set(r["comp_tcg_id"] for r in comp_rows if r.get("comp_tcg_id")))
     all_store_ids = list(set(parent_ids + comp_tcg_ids))
+    _ts = time.perf_counter()
     if all_store_ids:
         sph = ",".join(["%s"] * len(all_store_ids))
         store_rows = db.query(
@@ -240,9 +254,11 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
         store_map = {r["tcgplayer_id"]: r for r in store_rows}
     else:
         store_map = {}
+    _t_store = time.perf_counter() - _ts
 
     # Load ALL variants' components for deep value (not just the best variant)
     all_variant_comps = []
+    _ts = time.perf_counter()
     if tcg_ids:
         avph = ",".join(["%s"] * len(tcg_ids))
         all_variant_comps = db.query(f"""
@@ -254,6 +270,7 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
             JOIN sealed_breakdown_cache sbc ON sbc.id = sbv.breakdown_id
             WHERE sbc.tcgplayer_id IN ({avph}) AND sbco.tcgplayer_id IS NOT NULL
         """, tuple(tcg_ids))
+    _t_all_variant_comps = time.perf_counter() - _ts
 
     all_comp_tcg_ids = list(set(
         comp_tcg_ids + [int(c["comp_tcg_id"]) for c in all_variant_comps if c["comp_tcg_id"]]
@@ -262,6 +279,7 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
     # Nested breakdown lookup: which components have their own recipes?
     child_bd_map = {}
     child_bd_store_map = {}
+    _ts = time.perf_counter()
     if all_comp_tcg_ids:
         cbp = ",".join(["%s"] * len(all_comp_tcg_ids))
         child_bd_rows = db.query(
@@ -309,10 +327,12 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
                         child_bd_store_map[ctid] = sv
             except Exception:
                 pass
+    _t_nested = time.perf_counter() - _ts
 
     # Step 3.5: per-variant totals across ALL variants of these parents (for
     # avg/min and the variants[] list used by the override picker).
     parent_id_to_variants = {}  # parent_tcg_id -> [{id, name, market, store, ...}]
+    _ts = time.perf_counter()
     if tcg_ids:
         all_var_rows = db.query(f"""
             SELECT sbv.id AS variant_id, sbv.variant_name, sbv.display_order,
@@ -373,6 +393,7 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
                 "components_in_store": v_in_store,
                 "total_components": v_total_components,
             })
+    _t_recipes_full = time.perf_counter() - _ts
 
     # Step 4: assemble results
     comps_by_variant = {}
@@ -488,6 +509,17 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
             "deep_bd_store":        round(best_deep_store, 2) if best_deep_store > 0 else None,
             "variants":             pvariants,
         }
+
+    _t_total = time.perf_counter() - _t0
+    if _t_total > 1.0:
+        logger.warning(
+            "bd_summary slow: parents=%d variants=%d comps=%d total=%.2fs "
+            "[variants_q=%.2fs refresh=%.2fs comps_q=%.2fs store_q=%.2fs "
+            "all_var_comps_q=%.2fs nested=%.2fs recipes_full=%.2fs]",
+            len(tcg_ids), len(variant_rows), len(comp_rows),
+            _t_total, _t_variants, _t_refresh, _t_components, _t_store,
+            _t_all_variant_comps, _t_nested, _t_recipes_full,
+        )
 
     return result
 

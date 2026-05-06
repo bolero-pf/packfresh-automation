@@ -782,15 +782,20 @@ class PriceCache:
             where_parts.append("game = %s")
             params.append(self.game)
 
+        # variant is included in the WHERE so a search like "Masterball" or
+        # "Mystery of the Fossils" qualifies via variant alone, not just name.
+        # Without it, Pattern variants (PE Masterball/Pokeball) can't pass
+        # the WHERE and never appear.
         for forms in self._tokenize(query):
             ors = []
             for f in forms:
                 ors.append("(product_name ILIKE %s OR product_name_en ILIKE %s "
                            "OR card_number ILIKE %s OR printed_number ILIKE %s "
                            "OR expansion_id ILIKE %s "
-                           "OR expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
+                           "OR expansion_name ILIKE %s OR expansion_name_en ILIKE %s "
+                           "OR variant ILIKE %s)")
                 p = f"%{f}%"
-                params.extend([p, p, p, p, p, p, p])
+                params.extend([p, p, p, p, p, p, p, p])
             where_parts.append("(" + " OR ".join(ors) + ")")
 
         # set_name used to be a hard WHERE filter, but Collectr's set names
@@ -839,6 +844,34 @@ class PriceCache:
                     "THEN 8 ELSE 0 END)"
                 )
                 score_params.extend([f"%{tok}%", f"%{tok}%"])
+
+        # Per-token name + variant scoring. Without these, two cards that
+        # both pass the WHERE (e.g. "Master Ball" trainer card vs. a PE
+        # "Masterball Pattern" variant of Charizard ex) tie at score 0 and
+        # ORDER BY scrydex_id picks arbitrarily. Name match on
+        # product_name|product_name_en outranks variant match — the variant
+        # column is sometimes blank for the most common printing — and both
+        # outrank no match. No JP penalty: product_name_en exists exactly so
+        # English queries reach JP rows ("Zapdos Fossil" → "Mystery of the
+        # Fossils Zapdos"). Per-token (not whole-query) so multi-word queries
+        # like "Charizard ex Masterball" stack: 1× Charizard, 1× ex, 1× Masterball.
+        for forms in self._tokenize(query):
+            # Use the longer of each token's forms (the original, not the
+            # leading-zero-stripped variant) for ILIKE. Stripped forms are
+            # only meaningful for numeric card_number matching, not name.
+            primary = forms[0] if forms else ""
+            if len(primary) < 2:
+                continue
+            score_parts.append(
+                "(CASE WHEN product_name ILIKE %s OR product_name_en ILIKE %s "
+                "THEN 25 ELSE 0 END)"
+            )
+            score_params.extend([f"%{primary}%", f"%{primary}%"])
+            score_parts.append(
+                "(CASE WHEN variant ILIKE %s THEN 15 ELSE 0 END)"
+            )
+            score_params.append(f"%{primary}%")
+
         score_sql = " + ".join(score_parts)
 
         sql = f"""
