@@ -118,6 +118,7 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
         WHERE sl.card_type = %s
           AND sl.current_count < sl.capacity
           AND COALESCE(sr.active, TRUE) = TRUE
+          AND COALESCE(sr.location_type, 'bin') = 'bin'
     """, (ctype,))
 
     if not bins:
