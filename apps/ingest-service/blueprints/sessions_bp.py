@@ -267,6 +267,23 @@ def upload_collectr_html():
         "raw" if session_type == "raw" else None
     )
 
+    # Bulk-resolve slab UUIDs to (company, grade) up front. Unknown UUIDs come
+    # back missing from the dict and the row imports without a grade —
+    # surfaced as "Unknown slab" in the UI for one-time identification.
+    slab_uuids = list({i.slab_uuid for i in result.items if getattr(i, "slab_uuid", "")})
+    slab_lookup: dict[str, dict] = {}
+    if slab_uuids:
+        try:
+            ph = ",".join(["%s"] * len(slab_uuids))
+            for r in db.query(
+                f"SELECT slab_uuid, grade_company, grade_value FROM slab_grade_lookup "
+                f"WHERE slab_uuid IN ({ph})",
+                tuple(slab_uuids),
+            ):
+                slab_lookup[r["slab_uuid"]] = r
+        except Exception as e:
+            logger.warning(f"slab_grade_lookup read failed: {e}")
+
     processed = []
     for item in result.items:
         product_type = effective_product_type or item.product_type
@@ -282,6 +299,17 @@ def upload_collectr_html():
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
             tcgplayer_id = shopify_link["tcgplayer_id"]
 
+        # Slab UUID → grade (if known). Parser-supplied grade_company/value
+        # are always empty for Collectr HTML graded — Collectr doesn't put
+        # the grade in the HTML at all — so the lookup is the source.
+        slab_uuid = getattr(item, "slab_uuid", "") or ""
+        is_graded = bool(getattr(item, "is_graded", False))
+        grade_company = None
+        grade_value = None
+        if is_graded and slab_uuid and slab_uuid in slab_lookup:
+            grade_company = slab_lookup[slab_uuid]["grade_company"]
+            grade_value = slab_lookup[slab_uuid]["grade_value"]
+
         processed.append({
             "product_name": item.product_name,
             "product_type": product_type,
@@ -295,9 +323,10 @@ def upload_collectr_html():
             "offer_price": offer_price,
             "unit_cost_basis": unit_cost,
             "tcgplayer_id": tcgplayer_id,
-            "is_graded": getattr(item, "is_graded", False),
-            "grade_company": getattr(item, "grade_company", "") or None,
-            "grade_value": getattr(item, "grade_value", "") or None,
+            "is_graded": is_graded,
+            "grade_company": grade_company,
+            "grade_value": grade_value,
+            "slab_uuid": slab_uuid or None,
             "shopify_product_id": shopify_link["shopify_product_id"] if shopify_link else None,
             "shopify_product_name": shopify_link["shopify_product_name"] if shopify_link else None,
         })
@@ -862,6 +891,57 @@ def session_meta_stats(session_id):
         "categories": out_cats,
     })
 
+
+
+@bp.route("/api/intake/identify-slab", methods=["POST"])
+def identify_slab():
+    """Map a Collectr slab graphic UUID → (grading company, grade) and
+    backfill any intake_items waiting on that UUID. Collectr embeds the
+    grade only in the slab image (PSA 10, BGS 9.5, etc. as a PNG, not text),
+    but the image URL is stable per (company, grade) — so once an operator
+    identifies one slab, every future paste with that UUID auto-fills.
+
+    Backfill scope: only items where grade_company IS NULL. We never
+    overwrite a manually-set grade.
+    """
+    data = request.json or {}
+    slab_uuid = (data.get("slab_uuid") or "").strip()
+    company = (data.get("grade_company") or "").strip().upper()
+    grade = (data.get("grade_value") or "").strip()
+    sample_url = (data.get("sample_image_url") or "").strip() or None
+    if not slab_uuid or not company or not grade:
+        return jsonify({"error": "slab_uuid, grade_company, grade_value required"}), 400
+    if company not in ("PSA", "BGS", "CGC", "SGC", "TAG"):
+        return jsonify({"error": f"Unsupported grading company: {company}"}), 400
+
+    user = None
+    try:
+        user = (g.user or {}).get("email") if hasattr(g, "user") else None
+    except Exception:
+        user = None
+    user = user or "unknown"
+
+    db.execute("""
+        INSERT INTO slab_grade_lookup
+            (slab_uuid, grade_company, grade_value, sample_image_url, identified_by)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (slab_uuid) DO UPDATE
+           SET grade_company = EXCLUDED.grade_company,
+               grade_value = EXCLUDED.grade_value,
+               sample_image_url = COALESCE(EXCLUDED.sample_image_url, slab_grade_lookup.sample_image_url),
+               identified_at = CURRENT_TIMESTAMP,
+               identified_by = EXCLUDED.identified_by
+    """, (slab_uuid, company, grade, sample_url, user))
+
+    backfilled = db.execute("""
+        UPDATE intake_items
+           SET grade_company = %s, grade_value = %s
+         WHERE slab_uuid = %s
+           AND is_graded = TRUE
+           AND grade_company IS NULL
+    """, (company, grade, slab_uuid))
+
+    return jsonify({"ok": True, "backfilled_count": backfilled})
 
 
 @bp.route("/api/intake/sessions", methods=["GET"])

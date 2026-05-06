@@ -120,6 +120,9 @@ GRADE_KEY_MAP = {
     "cgc8":   ("CGC", "8"),
     "sgc10":  ("SGC", "10"),
     "sgc9":   ("SGC", "9"),
+    "tag10":  ("TAG", "10"),
+    "tag9":   ("TAG", "9"),
+    "tag8":   ("TAG", "8"),
 }
 
 # Reverse: (company, grade) -> PPT key

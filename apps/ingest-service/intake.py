@@ -235,9 +235,9 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             (session_id, product_name, tcgplayer_id, product_type,
              set_name, card_number, condition, rarity, variance,
              quantity, market_price, offer_price, unit_cost_basis, is_mapped,
-             is_graded, grade_company, grade_value,
+             is_graded, grade_company, grade_value, slab_uuid,
              shopify_product_id, shopify_product_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params_list = [
         (
@@ -259,6 +259,7 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             item.get("is_graded", False),
             item.get("grade_company") or None,
             item.get("grade_value") or None,
+            item.get("slab_uuid") or None,
             item.get("shopify_product_id") or None,
             item.get("shopify_product_name") or None,
         )

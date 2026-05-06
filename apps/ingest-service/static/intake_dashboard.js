@@ -308,7 +308,7 @@ document.getElementById('generic-csv-form').addEventListener('submit', async (e)
             name: 'Product Name *', quantity: 'Quantity *', price: 'Market Price *',
             set_name: 'Set Name', card_number: 'Card Number', rarity: 'Rarity',
             condition: 'Condition',
-            grade_company: 'Grading Co (PSA/BGS/CGC/SGC)',
+            grade_company: 'Grading Co (PSA/BGS/CGC/SGC/TAG)',
             grade_value: 'Grade (10, 9.5, …)',
             tcgplayer_id: 'TCGPlayer ID', product_type: 'Type',
             photo_url: 'Photo URL (extracts real TCG ID)',
@@ -1276,10 +1276,10 @@ async function viewSession(sessionId, _preserveScroll) {
                         addHtml += '<span style="font-weight:600;">Graded Card</span></label>';
                         addHtml += '<span id="session-graded-fields" style="display:none; align-items:center; gap:8px;">';
                         addHtml += '<select id="session-grade-company" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">';
-                        addHtml += '<option value="PSA">PSA</option><option value="BGS">BGS</option><option value="CGC">CGC</option><option value="SGC">SGC</option></select>';
+                        addHtml += '<option value="PSA">PSA</option><option value="BGS">BGS</option><option value="CGC">CGC</option><option value="SGC">SGC</option><option value="TAG">TAG</option></select>';
                         addHtml += '<select id="session-grade-value" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);">';
                         addHtml += '<option value="10">10</option><option value="9.5">9.5</option><option value="9">9</option><option value="8.5">8.5</option><option value="8">8</option><option value="7">7</option></select></span>';
-                        addHtml += '<span id="session-graded-hint" style="color:var(--text-dim); font-size:0.8rem;">Toggle for PSA/BGS/CGC graded cards — uses eBay market data</span>';
+                        addHtml += '<span id="session-graded-hint" style="color:var(--text-dim); font-size:0.8rem;">Toggle for PSA/BGS/CGC/SGC/TAG graded cards — uses eBay market data</span>';
                         addHtml += '</div>';
                         addHtml += '<div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">';
                         addHtml += '<div class="form-group" style="flex:2; min-width:160px; margin:0;"><label>Card Search</label>';
@@ -1401,13 +1401,16 @@ async function viewSession(sessionId, _preserveScroll) {
                             const confidence = hasOosData ? '' : ' ⚠';
                             velNote = `<br><small>📊 <span style="color:${rateColor};">${sold} sold · ${rateLabel}</span> · <span style="color:${stockColor};">${stockInfo}</span>${confidence}</small>`;
                         }
+                        const _varSuffix = (i.variance && i.variance.toLowerCase() !== 'normal') ? ' · ' + i.variance : '';
                         return `<tr style="${rowStyle}" data-item-id="${i.id}">
-                            <td class="name-cell" data-label="">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}</small>` : ''}${overrideNote}${parentNote}${variantMismatch}${bdNote}${velNote}</td>
+                            <td class="name-cell" data-label="">${i.product_name}${i.set_name ? `<br><small style="color:var(--text-dim);">${i.set_name}${i.card_number ? ' #'+i.card_number : ''}${_varSuffix}</small>` : (_varSuffix ? `<br><small style="color:var(--text-dim);">${_varSuffix.slice(3)}</small>` : '')}${overrideNote}${parentNote}${variantMismatch}${bdNote}${velNote}</td>
                             ${(s.session_type === 'raw' || s.session_type === 'mixed') ? `<td data-label="Type">${
                                 i.product_type === 'sealed'
                                 ? '<span class="badge" style="background:rgba(79,125,249,0.18);color:#7aadff;">Sealed</span>'
                                 : i.is_graded
-                                ? `<span class="badge" style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;">${i.grade_company || 'PSA'} ${i.grade_value || '?'}</span>`
+                                ? (i.grade_company
+                                    ? `<span class="badge" style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;">${i.grade_company} ${i.grade_value || '?'}</span>`
+                                    : `<span class="badge" style="background:#7c2d12;color:#fbbf24;font-weight:700;cursor:pointer;" title="Collectr doesn't put the grade in HTML — click to identify this slab. Future pastes with the same slab UUID auto-fill." onclick="openIdentifySlab('${i.slab_uuid||''}','${i.id}','${sessionId}')">⚠ Unknown slab</span>`)
                                 : (() => {
                                     const _c = i.condition || i.listing_condition || '—';
                                     const _condStyle = _c==='NM' ? 'background:#14532d;color:#4ade80;' : _c==='LP' ? 'background:rgba(79,125,249,0.18);color:#7aadff;' : _c==='MP' ? 'background:#422006;color:#fbbf24;' : _c==='HP' ? 'background:#431407;color:#fb923c;' : _c==='DMG' ? 'background:#450a0a;color:#f87171;' : 'background:var(--surface-2);color:var(--text-dim);';
@@ -3459,7 +3462,7 @@ async function _relinkManualPrice() {
         condHtml = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
             <div class="form-group"><label>Grading Company</label>
             <select id="manual-grade-company">
-                ${['PSA','BGS','CGC','SGC'].map(c => `<option value="${c}"${c===rs.gradeCompany?' selected':''}>${c}</option>`).join('')}
+                ${['PSA','BGS','CGC','SGC','TAG'].map(c => `<option value="${c}"${c===rs.gradeCompany?' selected':''}>${c}</option>`).join('')}
             </select></div>
             <div class="form-group"><label>Grade</label>
             <select id="manual-grade-value">
@@ -3976,7 +3979,7 @@ function _relinkRenderConditions(selectedCond) {
         html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
             <div class="form-group"><label>Grading Company</label>
             <select id="relink-grade-company" onchange="_relinkGradeChanged()">
-                ${['PSA','BGS','CGC','SGC'].map(c => `<option value="${c}"${c===selCompany?' selected':''}>${c}</option>`).join('')}
+                ${['PSA','BGS','CGC','SGC','TAG'].map(c => `<option value="${c}"${c===selCompany?' selected':''}>${c}</option>`).join('')}
             </select></div>
             <div class="form-group"><label>Grade</label>
             <select id="relink-grade-value" onchange="_relinkGradeChanged()">
@@ -4155,6 +4158,53 @@ async function _relinkFetchGraded() {
         rs._relinkGradedLoading = false;
         if (rs._relinkMode === 'graded') _relinkRenderConditions('NM');
     }
+}
+
+// ═══════════════════════════════ IDENTIFY SLAB ═══════════════════════════════
+// Collectr's graded HTML carries the grade only in the slab graphic. We
+// captured the slab UUID at parse time (intake_items.slab_uuid). Operator
+// identifies a slab once; the backend writes slab_grade_lookup and
+// backfills every other intake_item with the same UUID and a NULL grade.
+
+function openIdentifySlab(slabUuid, itemId, sessionId) {
+    if (!slabUuid) {
+        toast('No slab UUID on this item — can\'t auto-identify. Use ⋯ → Mark as Graded.', 'warn');
+        return;
+    }
+    window._isState = { slabUuid, itemId, sessionId };
+    document.getElementById('identify-slab-uuid').textContent = slabUuid;
+    // Collectr serves slab graphics at /public-assets/images/<UUID>.<ext>; we
+    // don't store the URL on the item, but the .png form is reliable enough
+    // to render a preview. The <img> falls back gracefully if it 404s.
+    const img = document.getElementById('identify-slab-img');
+    img.style.display = '';
+    img.src = `https://public.getcollectr.com/public-assets/images/${slabUuid}.png?optimizer=image&format=webp&width=400`;
+    openModal('identify-slab-modal');
+}
+
+async function confirmIdentifySlab() {
+    const s = window._isState;
+    if (!s || !s.slabUuid) { closeModal('identify-slab-modal'); return; }
+    const company = document.getElementById('is-company').value;
+    const grade = document.getElementById('is-grade').value;
+    try {
+        const r = await fetch('/api/intake/identify-slab', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                slab_uuid: s.slabUuid,
+                grade_company: company,
+                grade_value: grade,
+                sample_image_url: document.getElementById('identify-slab-img').src,
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Failed to save'); return; }
+        closeModal('identify-slab-modal');
+        const n = d.backfilled_count || 0;
+        toast(`Slab identified as ${company} ${grade} · backfilled ${n} card${n===1?'':'s'}`, 'ok');
+        if (s.sessionId) viewSession(s.sessionId, true);
+    } catch(err) { alert(err.message); }
 }
 
 // ═══════════════════════════════ MARK AS GRADED ═══════════════════════════════

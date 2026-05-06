@@ -793,27 +793,53 @@ class PriceCache:
                 params.extend([p, p, p, p, p, p, p])
             where_parts.append("(" + " OR ".join(ors) + ")")
 
-        if set_name:
-            where_parts.append("(expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
-            params.extend([f"%{set_name}%", f"%{set_name}%"])
-
+        # set_name used to be a hard WHERE filter, but Collectr's set names
+        # don't always match Scrydex's (Collectr says "Mega Evolution" for ME01
+        # but Scrydex calls it something else; "Pokemon 151" vs "SV: 151"; etc.)
+        # so a hard filter killed real matches. It's a soft score boost now —
+        # printed_number scoring still pins the right printing.
         where_clause = " AND ".join(where_parts)
 
         # Relevance score: exact printed_number > printed_number prefix >
-        # printed_number contains > anything else. Wrap in a subquery so we
-        # can DISTINCT ON (scrydex_id) for de-duplication, then ORDER BY score.
-        # NOTE: parameter order matters — score placeholders appear FIRST in
-        # the SQL (in the SELECT list), so they must come first in the params
-        # tuple too.
-        score_sql = "0"
+        # printed_number contains > set_name token match > anything else.
+        # Wrap in a subquery so we can DISTINCT ON (scrydex_id) for de-dup,
+        # then ORDER BY score. NOTE: parameter order matters — score
+        # placeholders appear FIRST in the SQL (in the SELECT list), so they
+        # must come first in the params tuple too.
+        score_parts = ["0"]
         score_params: list = []
         if full_query:
-            score_sql = (
-                "(CASE WHEN LOWER(printed_number) = LOWER(%s) THEN 100 ELSE 0 END) + "
-                "(CASE WHEN printed_number ILIKE %s THEN 30 ELSE 0 END) + "
+            score_parts.append(
+                "(CASE WHEN LOWER(printed_number) = LOWER(%s) THEN 100 ELSE 0 END)"
+            )
+            score_params.append(full_query)
+            score_parts.append(
+                "(CASE WHEN printed_number ILIKE %s THEN 30 ELSE 0 END)"
+            )
+            score_params.append(f"{full_query}%")
+            score_parts.append(
                 "(CASE WHEN printed_number ILIKE %s THEN 10 ELSE 0 END)"
             )
-            score_params = [full_query, f"{full_query}%", f"%{full_query}%"]
+            score_params.append(f"%{full_query}%")
+        if set_name:
+            # Whole-string match on expansion_name (or its EN twin) is the
+            # strongest set signal — beats per-token. Per-token boosts catch
+            # partial matches like Collectr "Mega Evolution" against Scrydex
+            # "Mega Evolution Base" / "Mega Evolution: Promo".
+            score_parts.append(
+                "(CASE WHEN expansion_name ILIKE %s OR expansion_name_en ILIKE %s "
+                "OR expansion_id ILIKE %s THEN 50 ELSE 0 END)"
+            )
+            score_params.extend([f"%{set_name}%", f"%{set_name}%", f"%{set_name}%"])
+            for tok in (set_name or "").split():
+                if len(tok) < 2:
+                    continue
+                score_parts.append(
+                    "(CASE WHEN expansion_name ILIKE %s OR expansion_name_en ILIKE %s "
+                    "THEN 8 ELSE 0 END)"
+                )
+                score_params.extend([f"%{tok}%", f"%{tok}%"])
+        score_sql = " + ".join(score_parts)
 
         sql = f"""
             SELECT scrydex_id, tcgplayer_id, score FROM (

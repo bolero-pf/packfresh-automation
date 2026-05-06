@@ -43,6 +43,8 @@ class CollectrHTMLItem:
     is_graded: bool = False
     grade_company: str = ""
     grade_value: str = ""
+    slab_uuid: str = ""     # Collectr's slab graphic UUID — stable per (company, grade)
+    slab_image_url: str = ""
 
 
 @dataclass
@@ -57,52 +59,15 @@ class CollectrHTMLResult:
     sealed_count: int = 0
 
 
-# Set name normalisation — Collectr uses full names, PPT expects abbreviations
-_SET_NAME_MAP = {
-    "sun & moon promo": "SM Promo",
-    "sun & moon promos": "SM Promo",
-    "sun and moon promo": "SM Promo",
-    "sun and moon promos": "SM Promo",
-    "xy promo": "XY Promo",
-    "xy promos": "XY Promo",
-    "mega evolution": "ME Promo",
-    "mega evolution promo": "ME Promo",
-    "mega evolution promos": "ME Promo",
-    "sword & shield promo": "SWSH Promo",
-    "sword & shield promos": "SWSH Promo",
-    "sword and shield promo": "SWSH Promo",
-    "sword and shield promos": "SWSH Promo",
-    "scarlet & violet promo": "SV Promo",
-    "scarlet & violet promos": "SV Promo",
-    "scarlet and violet promo": "SV Promo",
-    "scarlet and violet promos": "SV Promo",
-    "black & white promo": "BW Promo",
-    "black & white promos": "BW Promo",
-    "black and white promo": "BW Promo",
-    "black and white promos": "BW Promo",
-    "heartgold & soulsilver promo": "HGSS Promo",
-    "heartgold & soulsilver promos": "HGSS Promo",
-    "diamond & pearl promo": "DP Promo",
-    "diamond & pearl promos": "DP Promo",
-    "scarlet & violet base set": "Scarlet & Violet",
-    "sv: 151": "151",
-    "crown zenith: galarian gallery": "Crown Zenith Galarian Gallery",
-    "brilliant stars trainer gallery": "Brilliant Stars Trainer Gallery",
-    "astral radiance trainer gallery": "Astral Radiance Trainer Gallery",
-    "lost origin trainer gallery": "Lost Origin Trainer Gallery",
-    "silver tempest trainer gallery": "Silver Tempest Trainer Gallery",
-    "alternate art promos": "Alt Art Promo",
-    "wizards of the coast promo": "WoTC Promo",
-    "wotc promo": "WoTC Promo",
-    "wotc promos": "WoTC Promo",
-    "team rocket (japanese)": "Team Rocket Japanese",
-}
-
-
+# Set names from Collectr pass through verbatim — the cache search treats
+# set_name as a soft score boost (token overlap with expansion_name /
+# expansion_name_en / expansion_id), not a hard filter, so a Collectr name
+# that doesn't match Scrydex's name doesn't kill results. Hand-curating a
+# Collectr→Scrydex set map was lossy: e.g. Collectr's "Mega Evolution"
+# (ME01 base) and "Mega Evolution Promo" both rolled to "ME Promo", which
+# made every ME01 illustration rare unmatchable. Trust the search scorer.
 def _normalize_set_name(raw: str) -> str:
-    """Normalize Collectr set names to PPT-friendly equivalents."""
-    mapped = _SET_NAME_MAP.get(raw.strip().lower())
-    return mapped if mapped else raw.strip()
+    return raw.strip()
 
 
 # Condition normalisation (same mapping as CSV parser)
@@ -188,6 +153,26 @@ def parse_collectr_html(html_content: str) -> CollectrHTMLResult:
 
 def _parse_li_block(html: str, index: int) -> Optional[CollectrHTMLItem]:
     """Parse one <li> into a CollectrHTMLItem, or return None to skip."""
+
+    # ── Graded slab detection ──────────────────────────────────────
+    # Graded entries always carry an <img class="ratio-slab-card"> over the
+    # slab graphic. Raw entries never do. The grade itself is encoded only
+    # in the slab graphic image — Collectr doesn't put PSA/grade text in
+    # the HTML — but the slab image URL is stable per (company, grade), so
+    # we capture the UUID and look it up in slab_grade_lookup downstream.
+    is_graded = "ratio-slab-card" in html
+    slab_uuid = ""
+    slab_image_url = ""
+    if is_graded:
+        # The first <img> in the slab card div is the slab graphic itself
+        # (alt="" aria-hidden="true", points at /public-assets/images/<UUID>).
+        slab_m = re.search(
+            r'src="(https?://[^"]*?/public-assets/images/([a-f0-9-]{8,})\.[a-z]+[^"]*)"',
+            html,
+        )
+        if slab_m:
+            slab_image_url = slab_m.group(1).replace("&amp;", "&")
+            slab_uuid = slab_m.group(2)
 
     # ── Product name ────────────────────────────────────────────────
     name_m = re.search(
@@ -293,7 +278,13 @@ def _parse_li_block(html: str, index: int) -> Optional[CollectrHTMLItem]:
             pass
 
     # ── Determine raw vs sealed ──────────────────────────────────────
-    product_type = "raw" if (card_number and _is_card_number(card_number) and rarity) else "sealed"
+    # Graded slabs are always raw cards, regardless of rarity/card_number
+    # heuristics (the rarity block is reliably present in graded blocks too,
+    # but the slab signal is the truth).
+    if is_graded:
+        product_type = "raw"
+    else:
+        product_type = "raw" if (card_number and _is_card_number(card_number) and rarity) else "sealed"
 
     return CollectrHTMLItem(
         product_name=product_name,
@@ -301,10 +292,15 @@ def _parse_li_block(html: str, index: int) -> Optional[CollectrHTMLItem]:
         set_name=set_name,
         card_number=card_number if product_type == "raw" else "",
         rarity=rarity if product_type == "raw" else "",
-        condition=condition,
-        variance=variance,
+        # Graded slabs have no condition/variance text in the HTML — leave
+        # condition NM (the row gets graded comp prices, not raw NM/LP/etc.).
+        condition="NM" if is_graded else condition,
+        variance="" if is_graded else variance,
         quantity=quantity,
         market_price=market_price,
         price_change=price_change,
         price_change_pct=price_change_pct,
+        is_graded=is_graded,
+        slab_uuid=slab_uuid,
+        slab_image_url=slab_image_url,
     )

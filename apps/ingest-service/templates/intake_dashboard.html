@@ -98,6 +98,7 @@
                                         <option value="BGS">BGS</option>
                                         <option value="CGC">CGC</option>
                                         <option value="SGC">SGC</option>
+                                        <option value="TAG">TAG</option>
                                     </select>
                                     <select id="intake-grade-value" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);" onchange="onIntakeGradeChange()">
                                         <option value="10">10</option>
@@ -109,7 +110,7 @@
                                     </select>
                                     <span id="intake-graded-badge" style="display:none; background:var(--accent); color:#fff; padding:3px 8px; border-radius:4px; font-size:0.8rem; font-weight:600;"></span>
                                 </span>
-                                <span style="color:var(--text-dim); font-size:0.8rem;" id="intake-graded-hint">Toggle for PSA/BGS/CGC graded cards — uses eBay market data</span>
+                                <span style="color:var(--text-dim); font-size:0.8rem;" id="intake-graded-hint">Toggle for PSA/BGS/CGC/SGC/TAG graded cards — uses eBay market data</span>
                             </div>
                         </div>
 
@@ -446,6 +447,60 @@
         </div>
     </div>
 
+    <!-- Identify Slab Modal — for graded items pasted from Collectr where the
+         grade is encoded only in the slab graphic. Operator picks once per
+         unique slab UUID and we backfill all other rows with that UUID. -->
+    <div id="identify-slab-modal" class="modal-overlay">
+        <div class="modal" style="max-width:480px;">
+            <div class="modal-header">
+                <h3>🏷 Identify slab</h3>
+                <button class="modal-close" onclick="closeModal('identify-slab-modal')">&times;</button>
+            </div>
+            <div style="padding:16px;">
+                <div style="font-size:0.82rem; color:var(--text-dim); margin-bottom:10px;">
+                    Collectr embeds the grade in the slab image, not the HTML. Pick the company + grade once and we'll auto-fill every paste with this same slab graphic.
+                </div>
+                <div style="display:flex; gap:14px; align-items:flex-start; margin-bottom:14px;">
+                    <img id="identify-slab-img" src="" alt="slab"
+                         style="width:120px; height:auto; border-radius:6px; background:var(--surface-2); flex-shrink:0;"
+                         onerror="this.style.display='none';">
+                    <div style="font-size:0.78rem; color:var(--text-dim); word-break:break-all;">
+                        <strong>Slab UUID</strong><br>
+                        <code id="identify-slab-uuid"></code>
+                    </div>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px;">
+                    <div class="form-group">
+                        <label>Grading Company</label>
+                        <select id="is-company">
+                            <option value="PSA">PSA</option>
+                            <option value="BGS">BGS</option>
+                            <option value="CGC">CGC</option>
+                            <option value="SGC">SGC</option>
+                            <option value="TAG">TAG</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Grade</label>
+                        <select id="is-grade">
+                            <option value="10">10</option>
+                            <option value="9.5">9.5</option>
+                            <option value="9">9</option>
+                            <option value="8.5">8.5</option>
+                            <option value="8">8</option>
+                            <option value="7">7</option>
+                            <option value="6">6</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn btn-primary" style="flex:1;" onclick="confirmIdentifySlab()">Save & backfill</button>
+                    <button class="btn btn-secondary" onclick="closeModal('identify-slab-modal')">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Mark Graded Modal -->
     <div id="mark-graded-modal" class="modal-overlay">
         <div class="modal" style="max-width:420px;">
@@ -463,6 +518,7 @@
                             <option value="BGS">BGS</option>
                             <option value="CGC">CGC</option>
                             <option value="SGC">SGC</option>
+                            <option value="TAG">TAG</option>
                         </select>
                     </div>
                     <div class="form-group">
