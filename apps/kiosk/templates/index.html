@@ -1403,6 +1403,17 @@ function openFilterSheet() {
   }
   loadFilterMetaForDraft().then(ok => { if (ok) renderAdvancedFilterSections(); });
 
+  // Pre-warm filter-meta + sets for every other game in the strip so an
+  // in-sheet game switch (Pokemon → Magic → OP) is instant on first click.
+  // Only fires here on explicit user intent (Filters tap), never on boot
+  // or idle reset — the kiosk auto-refreshes and we don't want N speculative
+  // requests per refresh.
+  for (const g of (_gameCache || [])) {
+    if (!g.code || g.code === _draft.game) continue;
+    _prewarmFilterMeta(g.code);
+    _prewarmSets(g.code);
+  }
+
   document.getElementById('filter-sheet-overlay').classList.add('open');
   document.body.style.overflow = 'hidden';
 }
@@ -1881,6 +1892,22 @@ function renderSetList() {
       refreshFacetCounts();
     });
   });
+}
+
+// Background prewarmers that prime the URL caches without touching the live
+// `_filterMeta` / `_allSets` state — used to make in-sheet game switches feel
+// instant by the time the user actually clicks them.
+function _prewarmFilterMeta(game) {
+  if (!game) return;
+  const url = '/api/filter-meta?game=' + encodeURIComponent(game);
+  if (_filterMetaCache[url]) return;
+  get(url).then(d => { if (d) _filterMetaCache[url] = d; }).catch(() => {});
+}
+function _prewarmSets(game) {
+  if (!game) return;
+  const url = '/api/sets?game=' + encodeURIComponent(game);
+  if (_setsCache[url]) return;
+  get(url).then(d => { if (d) _setsCache[url] = d.sets || []; }).catch(() => {});
 }
 
 async function loadSetsForFilters(era, gameOverride) {
