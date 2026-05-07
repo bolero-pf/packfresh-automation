@@ -1659,10 +1659,8 @@ def filter_meta():
                 row = db.query_one(f"""
                     SELECT COUNT(DISTINCT rc.tcgplayer_id) AS n
                       FROM raw_cards rc
-                      JOIN scrydex_price_cache pc
-                        ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
                       JOIN scrydex_card_meta m
-                        ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                        ON m.game = %s AND m.scrydex_id = rc.scrydex_id
                      WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL
                        AND rc.game = %s
                            {where_extra}
@@ -1673,10 +1671,8 @@ def filter_meta():
             rows = db.query(f"""
                 SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
                   FROM raw_cards rc
-                  JOIN scrydex_price_cache pc
-                    ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
                   JOIN scrydex_card_meta m
-                    ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                    ON m.game = %s AND m.scrydex_id = rc.scrydex_id
                   JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
                  WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                        {extra_w}
@@ -1691,10 +1687,8 @@ def filter_meta():
                 row = db.query_one(f"""
                     SELECT COUNT(DISTINCT rc.tcgplayer_id) AS n
                       FROM raw_cards rc
-                      JOIN scrydex_price_cache pc
-                        ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
                       JOIN scrydex_card_meta m
-                        ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                        ON m.game = %s AND m.scrydex_id = rc.scrydex_id
                      WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                        AND jsonb_array_length({field}) = 0
                            {extra_w}
@@ -1719,10 +1713,8 @@ def filter_meta():
             rows = db.query(f"""
                 SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
                   FROM raw_cards rc
-                  JOIN scrydex_price_cache pc
-                    ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
                   JOIN scrydex_card_meta m
-                    ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                    ON m.game = %s AND m.scrydex_id = rc.scrydex_id
                   JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
                  WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                        {extra_w}
@@ -1732,10 +1724,8 @@ def filter_meta():
             rows = db.query(f"""
                 SELECT {field} AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
                   FROM raw_cards rc
-                  JOIN scrydex_price_cache pc
-                    ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
                   JOIN scrydex_card_meta m
-                    ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                    ON m.game = %s AND m.scrydex_id = rc.scrydex_id
                  WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                    AND {field} IS NOT NULL
                        {extra_w}
@@ -1758,10 +1748,8 @@ def filter_meta():
         rarity_rows = db.query(f"""
             SELECT rc.rarity AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
               FROM raw_cards rc
-              JOIN scrydex_price_cache pc
-                ON pc.tcgplayer_id = rc.tcgplayer_id AND pc.game = %s
               JOIN scrydex_card_meta m
-                ON m.game = pc.game AND m.scrydex_id = pc.scrydex_id
+                ON m.game = %s AND m.scrydex_id = rc.scrydex_id
              WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                AND rc.rarity IS NOT NULL AND rc.rarity <> ''
                    {extra_w}
