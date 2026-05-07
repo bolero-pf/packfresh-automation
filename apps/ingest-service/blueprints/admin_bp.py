@@ -407,9 +407,12 @@ def shopify_session_store_check(session_id):
                     WHERE sbc.tcgplayer_id IN ({ph})
                 """, tuple(all_tcg_ids))
                 if _vids:
+                    # Backgrounded — request stays fast. cache_only=False
+                    # (default) so PPT IS called for no-row components,
+                    # bounded by max_age_hours (1 PPT call per stale unique
+                    # tcg_id per window).
                     threading.Thread(target=refresh_stale_component_prices,
                         args=([v["variant_id"] for v in _vids], db, pricing),
-                        kwargs={"cache_only": True},
                         daemon=True).start()
             except Exception as e:
                 logger.warning(f"Component price refresh skipped: {e}")

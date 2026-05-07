@@ -720,10 +720,12 @@ def session_meta_stats(session_id):
             _t_cache_tcg = time.perf_counter() - _ts
             try:
                 _ts = time.perf_counter()
-                # cache_only=True: Collection Summary is a read endpoint; the
-                # component prices in the cache are good enough. Without this
-                # the JIT refresh used to spend 12s on a handful of cache-miss
-                # components hitting PPT serially.
+                # Sync read uses cache_only=True so the response is instant
+                # even when there are cache-miss components in the mix. Then
+                # below we background a cache_only=False refresh so PPT gets
+                # called (1 credit per unique stale component per max_age
+                # window, bounded by the staleness check) — next page load
+                # picks up the freshly-populated market_price.
                 bd_summary_by_tcg = bd_logic.get_breakdown_summary_for_items(
                     tcg_ids, db, ppt=pricing, cache_only=True,
                 )
@@ -731,6 +733,32 @@ def session_meta_stats(session_id):
             except Exception as e:
                 logger.warning(f"meta-stats breakdown summary lookup failed: {e}")
                 bd_summary_by_tcg = {}
+
+            # Background PPT refresh for next call. Pull the variant ids that
+            # back this session's tcg_ids so we only refresh what's relevant.
+            try:
+                if pricing and tcg_ids:
+                    import threading
+                    from breakdown_helpers import refresh_stale_component_prices
+                    _bg_ph = ",".join(["%s"] * len(tcg_ids))
+                    _bg_vids = [
+                        str(r["variant_id"]) for r in db.query(
+                            f"""SELECT sbv.id AS variant_id
+                                FROM sealed_breakdown_cache sbc
+                                JOIN sealed_breakdown_variants sbv
+                                    ON sbv.breakdown_id = sbc.id
+                                WHERE sbc.tcgplayer_id IN ({_bg_ph})""",
+                            tuple(tcg_ids),
+                        )
+                    ]
+                    if _bg_vids:
+                        threading.Thread(
+                            target=refresh_stale_component_prices,
+                            args=(_bg_vids, db, pricing),
+                            daemon=True,
+                        ).start()
+            except Exception as e:
+                logger.warning(f"meta-stats background refresh skipped: {e}")
         if shopify_ids:
             ph = ",".join(["%s"] * len(shopify_ids))
             _ts = time.perf_counter()
