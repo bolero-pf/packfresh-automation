@@ -1529,6 +1529,11 @@ async function loadFilterMetaForDraft() {
     if (_draft.rarities && _draft.rarities.size) {
       p.set('card_rarity', Array.from(_draft.rarities).join(','));
     }
+    // Era + set must facet the color/type/rarity counts too — otherwise
+    // picking 'Scarlet & Violet' still leaves Fairy in the Energy chips
+    // even though no S&V card is Fairy-typed.
+    if (_draft.era) p.set('era', _draft.era);
+    if (_draft.set) p.set('set', _draft.set);
   }
   const myReq = ++_filterMetaReqId;
   try {
@@ -1832,6 +1837,9 @@ function renderEraChips() {
       wrap.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === el && _draft.era === era));
       // Refresh sets to be era-scoped (also honor any draft-level game change)
       loadSetsForFilters(_draft.era, _draft.game).then(renderSetList);
+      // Era now facets color/type/rarity too — re-fetch their counts so
+      // picking S&V drops e.g. Fairy energy from the chip list.
+      refreshFacetCounts();
     });
   });
 }
@@ -1852,6 +1860,9 @@ function renderSetList() {
       const name = el.getAttribute('data-set');
       _draft.set = (_draft.set === name) ? '' : name;
       list.querySelectorAll('.set-row').forEach(x => x.classList.toggle('on', x === el && _draft.set === name));
+      // Set now facets color/type/rarity too — re-fetch their counts so
+      // picking a single set tightens the chip list to only what's in it.
+      refreshFacetCounts();
     });
   });
 }

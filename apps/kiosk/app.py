@@ -1547,6 +1547,8 @@ def filter_meta():
         sel_color_mode = "any"
     sel_card_types = _multi_param("card_type")
     sel_rarities   = _multi_param("card_rarity")
+    sel_era        = (request.args.get("era") or "").strip()
+    sel_set        = (request.args.get("set") or "").strip()
 
     # Build a set of "extra WHERE clauses + params" snippets, then for each
     # facet we'll OR-together the snippets it needs (i.e. all groups except
@@ -1606,9 +1608,34 @@ def filter_meta():
         ph = ",".join(["%s"] * len(sel_rarities))
         return f"rc.rarity IN ({ph})", list(sel_rarities)
 
+    def era_clause() -> tuple[str, list]:
+        # Era resolves to the actual list of distinct in-stock set_names that
+        # classify into it (mirrors /api/browse). Without this, picking
+        # 'Scarlet & Violet' wouldn't shrink the Energy / Rarity counts to
+        # only what's actually in S&V.
+        if not sel_era:
+            return "", []
+        all_sets = db.query(
+            "SELECT DISTINCT set_name FROM raw_cards "
+            "WHERE state IN ('STORED','DISPLAY') AND set_name IS NOT NULL AND game = %s",
+            (game,)
+        )
+        era_sets = [r["set_name"] for r in all_sets if _classify_era(r["set_name"]) == sel_era]
+        if not era_sets:
+            return "FALSE", []
+        ph = ",".join(["%s"] * len(era_sets))
+        return f"rc.set_name IN ({ph})", era_sets
+
+    def set_clause() -> tuple[str, list]:
+        if not sel_set:
+            return "", []
+        return "rc.set_name = %s", [sel_set]
+
     color_w,  color_p  = colors_clause()
     cardt_w,  cardt_p  = card_type_clause()
     rarity_w, rarity_p = rarity_clause()
+    era_w,    era_p    = era_clause()
+    set_w,    set_p    = set_clause()
 
     def merged_extra(*pairs: tuple[str, list]) -> tuple[str, list]:
         """AND together a subset of (where, params) pairs."""
@@ -1630,8 +1657,9 @@ def filter_meta():
 
     if "colors" in schema:
         spec = schema["colors"]
-        # Other filters ⇒ card_type + rarity (skip colors itself).
-        extra_w, extra_p = merged_extra((cardt_w, cardt_p), (rarity_w, rarity_p))
+        # Other filters ⇒ card_type + rarity + era + set (skip colors itself).
+        extra_w, extra_p = merged_extra((cardt_w, cardt_p), (rarity_w, rarity_p),
+                                        (era_w, era_p), (set_w, set_p))
         field = "m." + spec["field"]
         labels = spec.get("labels") or {}
         counts: dict[str, int] = {}
@@ -1721,8 +1749,9 @@ def filter_meta():
     # ── Card type facet ─────────────────────────────────────────────────────
     if "card_type" in schema:
         spec = schema["card_type"]
-        # Other filters ⇒ colors + rarity (skip card_type itself).
-        extra_w, extra_p = merged_extra((color_w, color_p), (rarity_w, rarity_p))
+        # Other filters ⇒ colors + rarity + era + set (skip card_type itself).
+        extra_w, extra_p = merged_extra((color_w, color_p), (rarity_w, rarity_p),
+                                        (era_w, era_p), (set_w, set_p))
         field = "m." + spec["field"]
         if spec["type"] == "jsonb":
             rows = db.query(f"""
@@ -1767,8 +1796,10 @@ def filter_meta():
 
     # ── Rarity facet (lives on raw_cards directly, no meta join needed for
     # the rarity column itself — but we may still need meta JOIN if colors
-    # or card_type filters are active). ─────────────────────────────────────
+    # or card_type filters are active). Era/set live on raw_cards too, so
+    # they slot into either path without a meta JOIN. ──────────────────────
     extra_w, extra_p = merged_extra((color_w, color_p), (cardt_w, cardt_p))
+    rc_only_w, rc_only_p = merged_extra((era_w, era_p), (set_w, set_p))
     if extra_w:
         rarity_rows = db.query(f"""
             SELECT rc.rarity AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
@@ -1782,18 +1813,19 @@ def filter_meta():
                 ON m.game = %s AND m.scrydex_id = pc.scrydex_id
              WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                AND rc.rarity IS NOT NULL AND rc.rarity <> ''
-                   {extra_w}
+                   {extra_w}{rc_only_w}
              GROUP BY rc.rarity
              ORDER BY n DESC
-        """, (sx_game, sx_game, game, *extra_p))
+        """, (sx_game, sx_game, game, *extra_p, *rc_only_p))
     else:
-        rarity_rows = db.query("""
-            SELECT rarity AS k, COUNT(*) AS n FROM raw_cards
-             WHERE state IN ('STORED','DISPLAY') AND current_hold_id IS NULL AND game = %s
-               AND rarity IS NOT NULL AND rarity <> ''
-             GROUP BY rarity
+        rarity_rows = db.query(f"""
+            SELECT rc.rarity AS k, COUNT(*) AS n FROM raw_cards rc
+             WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
+               AND rc.rarity IS NOT NULL AND rc.rarity <> ''
+                   {rc_only_w}
+             GROUP BY rc.rarity
              ORDER BY n DESC
-        """, (game,))
+        """, (game, *rc_only_p))
     # Pokemon: abbreviate the long names ("Special Illustration Rare" → "SIR"),
     # sort by collector tier (Common → Uncommon → Rare → ... → Promo) rather
     # than by qty. With 15+ Pokemon rarities the count order looks random —
