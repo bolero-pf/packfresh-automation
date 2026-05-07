@@ -1482,12 +1482,11 @@ function renderGameChips() {
       _draft.rarities  = new Set();
       _draft.colorMode = 'any';
       renderGameChips();
-      _refreshSheetEraVisibility();
-      // Leave the previous game's color/card-type/rarity pills in place
-      // while the new ones load — clearing them collapses the section and
-      // makes Condition/Price/Sort/Set jump up, then back down when fresh
-      // data lands. The request-token guard in loadFilterMetaForDraft
-      // ensures only the latest game's pills end up rendered.
+      // Don't toggle Era visibility yet — hiding the Pokemon Era row right
+      // now, before Magic's color/type/rarity pills land, makes everything
+      // below jump up and then back down when the new pills render. Defer
+      // ALL layout-affecting updates until after the fetches resolve so
+      // every change paints in one frame.
       // Sets and filter-meta are independent — fetch in parallel so the
       // sheet doesn't wait for sets before kicking off the slower meta call.
       const [, metaFresh] = await Promise.all([
@@ -1496,6 +1495,7 @@ function renderGameChips() {
       ]);
       // Discard if the user clicked another game while these were in flight.
       if (_draft && _draft.game !== newGame) return;
+      _refreshSheetEraVisibility();
       renderEraChips();
       document.getElementById('set-search-input').value = '';
       renderSetList();
