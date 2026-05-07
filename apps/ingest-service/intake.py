@@ -204,6 +204,33 @@ def check_duplicate_import(file_hash: str) -> Optional[str]:
 # ADDING ITEMS TO SESSION
 # ==========================================
 
+def _backfill_scrydex_ids(session_id: str) -> int:
+    """Fill in scrydex_id for any rows in this session that have a tcgplayer_id
+    but no scrydex_id, by looking up scrydex_price_cache.
+
+    All 5 INSERT INTO intake_items statements below omit scrydex_id from the
+    column list (the column was added later but the INSERTs were never updated).
+    Without this backfill, scrydex_id propagates as NULL into raw_cards, and
+    anything that reads raw_cards.scrydex_id directly (kiosk detail lookups,
+    dupe normalization, dependency-free pricing paths) breaks.
+
+    Per-tcg DISTINCT ON because scrydex_price_cache has one row per condition;
+    they all carry the same scrydex_id for a given tcgplayer_id."""
+    return execute("""
+        UPDATE intake_items i
+           SET scrydex_id = sub.scrydex_id
+          FROM (
+            SELECT DISTINCT ON (tcgplayer_id) tcgplayer_id, scrydex_id
+              FROM scrydex_price_cache
+             ORDER BY tcgplayer_id, scrydex_id
+          ) sub
+         WHERE i.session_id = %s
+           AND i.scrydex_id IS NULL
+           AND i.tcgplayer_id IS NOT NULL
+           AND sub.tcgplayer_id = i.tcgplayer_id
+    """, (session_id,))
+
+
 def add_items_to_session(session_id: str, items: list[dict]) -> int:
     """
     Batch-add items to an intake session.
@@ -250,7 +277,9 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
         )
         for item in items
     ]
-    return execute_many_batch(sql, params_list)
+    n = execute_many_batch(sql, params_list)
+    _backfill_scrydex_ids(session_id)
+    return n
 
 
 def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
@@ -300,6 +329,7 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
               i))
         if first_row is None:
             first_row = row
+    _backfill_scrydex_ids(session_id)
     return first_row
 
 
@@ -856,6 +886,7 @@ def split_damaged(item_id: str, damaged_qty: int) -> dict:
             item["is_mapped"], item_id,
         ))
 
+    _backfill_scrydex_ids(item["session_id"])
     _recalculate_session_totals(item["session_id"])
     return {
         "original_item": query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,)),
@@ -972,6 +1003,7 @@ def clone_item_with_overrides(source_item_id: str, session_id: str,
         source.get("listing_condition", "NM"), notes
     ))
 
+    _backfill_scrydex_ids(session_id)
     _recalculate_session_totals(session_id)
     return query_one("SELECT * FROM intake_items WHERE id = %s", (new_id,))
 
@@ -1097,6 +1129,7 @@ def add_sealed_item(session_id: str, product_name: str, tcgplayer_id: int = None
     if tcgplayer_id and product_name:
         save_mapping(product_name, tcgplayer_id, 'sealed')
 
+    _backfill_scrydex_ids(session_id)
     _recalculate_session_totals(session_id)
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
 
