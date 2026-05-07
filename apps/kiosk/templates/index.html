@@ -1205,6 +1205,13 @@ let _filterMeta = null;  // /api/filter-meta response for current draft.game
 // One Piece) lets a slow earlier request resolve last and overwrite the latest
 // game's pills with stale data — making "both sets of filters" appear at once.
 let _filterMetaReqId = 0;
+// Per-URL cache so a second visit to a game (or any same-params request) hits
+// instantly and the sheet re-paints without a network round-trip. The 300ms
+// wait per game switch was what made transitions feel laggy — counts can drift
+// during a sheet session as inventory changes, but for the lifetime of the
+// sheet the cache is fine, and Apply runs a fresh /api/browse anyway.
+let _filterMetaCache = {};  // url string -> response
+let _setsCache = {};        // url string -> _allSets array
 
 function _activeFilterCount() {
   let n = 0;
@@ -1535,11 +1542,20 @@ async function loadFilterMetaForDraft() {
     if (_draft.era) p.set('era', _draft.era);
     if (_draft.set) p.set('set', _draft.set);
   }
+  const url = '/api/filter-meta?' + p.toString();
+  // Cache hit → render synchronously, no network round-trip. This is what
+  // makes game switches feel instant after the first visit to each game.
+  if (_filterMetaCache[url]) {
+    _filterMeta = _filterMetaCache[url];
+    _filterMetaReqId++;  // invalidate any in-flight stale fetch
+    return true;
+  }
   const myReq = ++_filterMetaReqId;
   try {
-    const data = await get('/api/filter-meta?' + p.toString());
+    const data = await get(url);
     if (myReq !== _filterMetaReqId) return false;  // a newer request superseded us
     _filterMeta = data;
+    _filterMetaCache[url] = data;
     return true;
   } catch(e) {
     if (myReq === _filterMetaReqId) _filterMeta = null;
@@ -1874,8 +1890,10 @@ async function loadSetsForFilters(era, gameOverride) {
     if (g)   params.set('game', g);
     if (era) params.set('era', era);
     const url = '/api/sets' + (params.toString() ? '?' + params : '');
+    if (_setsCache[url]) { _allSets = _setsCache[url]; return; }
     const d = await get(url);
     _allSets = d.sets || [];
+    _setsCache[url] = _allSets;
   } catch(e) { _allSets = []; }
 }
 
