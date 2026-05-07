@@ -265,19 +265,26 @@ def search_sealed():
     if not q:
         return jsonify({"error": "No query"}), 400
     live_only = data.get("live", False)
+    prefer = (data.get("prefer") or "").strip().lower() or None
     try:
         results = []
-        cache = getattr(pricing, "cache", None)
-        if cache and not live_only:
+        if prefer == "ppt":
             try:
-                results = cache.search_sealed_products(q, limit=5, all_games=True)
-                results = pricing._stamp(results, "cache")
-            except Exception as e:
-                logger.warning(f"Cross-game sealed cache search failed: {e}")
-                results = []
-        if not results:
-            live = pricing.primary.search_sealed_products(q, limit=5) or []
-            results = pricing._stamp(live, pricing._primary_source)
+                results = pricing.search_sealed_products(q, limit=5, prefer="ppt") or []
+            except PriceError as e:
+                return jsonify({"error": str(e)}), e.status_code or 502
+        else:
+            cache = getattr(pricing, "cache", None)
+            if cache and not live_only:
+                try:
+                    results = cache.search_sealed_products(q, limit=5, all_games=True)
+                    results = pricing._stamp(results, "cache")
+                except Exception as e:
+                    logger.warning(f"Cross-game sealed cache search failed: {e}")
+                    results = []
+            if not results:
+                live = pricing.primary.search_sealed_products(q, limit=5) or []
+                results = pricing._stamp(live, pricing._primary_source)
         for r in (results or []):
             if not r.get("tcgplayer_id"):
                 tcg_id = r.get("tcgplayerId") or r.get("tcgPlayerId") or r.get("id")
@@ -310,9 +317,10 @@ def search_cards():
             set_name=data.get("set_name") or None,
             limit=int(data.get("limit") or 8),
             all_games=True,
+            prefer=(data.get("prefer") or "").strip().lower() or None,
         )})
     except PriceError as e:
-        return jsonify({"error": str(e)}), 502
+        return jsonify({"error": str(e)}), e.status_code or 502
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

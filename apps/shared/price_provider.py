@@ -151,8 +151,15 @@ class PriceProvider:
             )
         return self._stamp(result, self._primary_source)
 
+    def _get_ppt_client(self):
+        """Return whichever client is the PPT one (primary or shadow), or None."""
+        for client in (self.shadow, self.primary):
+            if client and "Scrydex" not in type(client).__name__:
+                return client
+        return None
+
     def search_cards(self, query, *, set_name=None, limit=8, all_games=True,
-                     cache_only=False):
+                     cache_only=False, prefer=None):
         """Browse-style card search for any UI that lets an operator pick a
         printing+variant. Cache first (multi-token across name / card_number /
         printed_number / expansion_id / expansion_name — JP sets work because
@@ -167,9 +174,33 @@ class PriceProvider:
         and PPT has no JP cards anyway). Also avoids surfacing PPT 401s on
         services that don't have PPT_API_KEY set.
 
+        ``prefer="ppt"`` skips cache + Scrydex entirely and queries PPT
+        directly. Operator escape hatch for when Scrydex returns wrong
+        matches (e.g. fuzzy hits a different card with the same partial
+        name). Raises PriceError if no PPT client is configured.
+
         Single source of truth — intake (/api/search/cards), ingestion, and
         price_updater (raw-rebind) all go through this. Don't reimplement the
         cache→live orchestration at the call site."""
+        if prefer == "ppt":
+            ppt_client = self._get_ppt_client()
+            if not ppt_client:
+                raise PriceError(
+                    "PPT not configured — set PPT_API_KEY to enable PPT fallback search",
+                    status_code=503,
+                )
+            try:
+                live = ppt_client.search_cards(query, set_name=set_name, limit=limit) or []
+                results = self._stamp(live, "ppt")
+            except (PPTError, ScrydexError) as e:
+                raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
+            for r in results or []:
+                if not r.get("market_price"):
+                    conds = (r.get("prices") or {}).get("conditions") or {}
+                    nm = conds.get("Near Mint") or conds.get("NM") or {}
+                    r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
+            return results
+
         results = []
         if self.cache:
             try:
@@ -254,7 +285,21 @@ class PriceProvider:
             )
         return self._stamp(result, self._primary_source) if result is not None else None
 
-    def search_sealed_products(self, query, *, set_name=None, limit=5):
+    def search_sealed_products(self, query, *, set_name=None, limit=5, prefer=None):
+        if prefer == "ppt":
+            ppt_client = self._get_ppt_client()
+            if not ppt_client:
+                raise PriceError(
+                    "PPT not configured — set PPT_API_KEY to enable PPT fallback search",
+                    status_code=503,
+                )
+            try:
+                return self._stamp(
+                    ppt_client.search_sealed_products(query, set_name=set_name, limit=limit) or [],
+                    "ppt",
+                )
+            except (PPTError, ScrydexError) as e:
+                raise PriceError(str(e), e.status_code, getattr(e, 'body', None)) from e
         if self.cache:
             try:
                 results = self.cache.search_sealed_products(query, set_name=set_name, limit=limit)

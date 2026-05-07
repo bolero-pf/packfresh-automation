@@ -1840,16 +1840,18 @@ function pickScrydexResult(scrydexId, name, setName) {
         </div>`;
 }
 
-async function fuzzySearch() {
+async function fuzzySearch(prefer) {
     const searchQuery = (document.getElementById('map-search-query').value || '').trim();
     if (!searchQuery) { return; }
     const container = document.getElementById('fuzzy-results');
-    container.innerHTML = '<div class="loading"><span class="spinner"></span> Searching prices...</div>';
+    container.innerHTML = `<div class="loading"><span class="spinner"></span> Searching ${prefer === 'ppt' ? 'PPT' : 'prices'}...</div>`;
 
-    // Endpoint name says "ppt" for legacy reasons but it's cache-first
-    // (Scrydex price_cache across multi-TCG) with PPT as live fallback.
+    // Cache-first (Scrydex price_cache across multi-TCG) with PPT as live
+    // fallback. ``prefer='ppt'`` is the operator escape hatch when Scrydex
+    // returned wrong matches.
     const endpoint = currentMapProductType === 'raw' ? '/api/search/cards' : '/api/search/sealed';
     const body = { query: searchQuery };
+    if (prefer) body.prefer = prefer;
 
     try {
         const r = await fetch(endpoint, {
@@ -1896,6 +1898,7 @@ async function fuzzySearch() {
                     const inp = document.getElementById('map-tcgplayer-id');
                     if (inp) { inp.style.outline = '2px solid var(--accent)'; setTimeout(() => inp.style.outline = '', 600); }
                 },
+                onTryPpt: () => fuzzySearch('ppt'),
             });
             return;
         }
@@ -1946,6 +1949,20 @@ async function fuzzySearch() {
                 </div>
             </div>`;
         }).join('');
+
+        // Sealed Try-PPT escape hatch — same pattern as cards.
+        const anyPpt = (results || []).some(r => r && r._price_source === 'ppt');
+        if (!anyPpt && prefer !== 'ppt') {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'margin-top:8px; text-align:center;';
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.style.cssText = 'font-size:0.78rem; opacity:0.8;';
+            btn.textContent = "Don't see it? Try PPT →";
+            btn.onclick = () => fuzzySearch('ppt');
+            wrap.appendChild(btn);
+            container.appendChild(wrap);
+        }
     } catch(err) {
         container.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
@@ -3542,6 +3559,7 @@ function _relinkRenderResults(results, resultsDiv, append) {
                 onPick: (pick) => {
                     if (pick && pick.tcgId) _relinkFetchAndShowConditions(parseInt(pick.tcgId));
                 },
+                onTryPpt: () => _relinkDoSearch('ppt'),
             });
         }
     };
@@ -3595,6 +3613,21 @@ function _relinkRenderSealedResults(results, container) {
         </div>`;
     }).join('');
     window._relinkSealedResults = results;
+
+    // Try-PPT escape hatch — when Scrydex returned wrong sealed matches.
+    const anyPpt = (results || []).some(r => r && r._price_source === 'ppt');
+    if (!anyPpt) {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'margin-top:8px; text-align:center;';
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary btn-sm';
+        btn.style.cssText = 'font-size:0.78rem; opacity:0.8;';
+        btn.textContent = "Don't see it? Try PPT →";
+        btn.onclick = () => _relinkDoSearch('ppt');
+        wrap.appendChild(btn);
+        container.appendChild(wrap);
+    }
+
     container.querySelectorAll('[data-relink-sealed-idx]').forEach(el => {
         el.addEventListener('click', () => {
             const i = parseInt(el.dataset.relinkSealedIdx);
@@ -3616,7 +3649,7 @@ function _relinkRenderSealedResults(results, container) {
     });
 }
 
-    async function _relinkDoSearch() {
+    async function _relinkDoSearch(prefer) {
     const rs = window._relinkState;
     const isSealed = rs.productType === 'sealed';
     const searchName = document.getElementById('relink-search').value.trim();
@@ -3635,7 +3668,7 @@ function _relinkRenderSealedResults(results, container) {
     }
     if (!searchName) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a name or TCGPlayer ID</div>'; return; }
 
-    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching...</div>';
+    resultsDiv.innerHTML = `<div class="loading"><span class="spinner"></span> Searching${prefer === 'ppt' ? ' PPT' : ''}...</div>`;
     const endpoint = isSealed ? '/api/search/sealed' : '/api/search/cards';
     const noneMsg = isSealed ? 'No sealed products found' : 'No cards found';
     try {
@@ -3645,6 +3678,7 @@ function _relinkRenderSealedResults(results, container) {
         const body = isSealed
             ? { query: searchName, set_name: setFilter || undefined }
             : { query: combinedQuery };
+        if (prefer) body.prefer = prefer;
         const r = await fetch(endpoint, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -3658,7 +3692,7 @@ function _relinkRenderSealedResults(results, container) {
             if (filtered.length > 0) results = filtered;
         }
         if (!r.ok || !results.length) {
-            if (setFilter && !isSealed) {
+            if (setFilter && !isSealed && !prefer) {
                 const r2 = await fetch('/api/search/cards', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -3671,7 +3705,7 @@ function _relinkRenderSealedResults(results, container) {
                     return;
                 }
             }
-            resultsDiv.innerHTML = '<div class="alert alert-warning">' + noneMsg + '</div>';
+            resultsDiv.innerHTML = '<div class="alert alert-warning">' + noneMsg + (prefer === 'ppt' ? ' on PPT' : '') + '</div>';
             return;
         }
         _relinkRenderResults(results, resultsDiv);
@@ -4462,15 +4496,15 @@ async function submitManualSealedAdd(sessionId, offerPct) {
     } catch(err) { alert(err.message); }
 }
 
-async function searchSealedForSession(sessionId, offerPct, live) {
+async function searchSealedForSession(sessionId, offerPct, tryPpt) {
     const searchTerm = document.getElementById('session-sealed-search').value.trim();
     const resultsDiv = document.getElementById('session-sealed-results');
     if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a search term</div>'; return; }
 
-    resultsDiv.innerHTML = `<div class="loading"><span class="spinner"></span> Searching${live ? ' PPT live' : ''}...</div>`;
+    resultsDiv.innerHTML = `<div class="loading"><span class="spinner"></span> Searching${tryPpt ? ' PPT' : ''}...</div>`;
     try {
         const body = { query: searchTerm };
-        if (live) body.live = true;
+        if (tryPpt) body.prefer = 'ppt';
         const r = await fetch('/api/search/sealed', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -4514,12 +4548,12 @@ async function searchSealedForSession(sessionId, offerPct, live) {
             </div>`;
         }).join('');
 
-        // If results came from cache, offer a PPT live search fallback
-        const anyCache = products.some(p => p._price_source === 'cache');
-        if (anyCache) {
+        // Escape hatch: when Scrydex/cache returned wrong matches, force PPT.
+        const anyPpt = products.some(p => p._price_source === 'ppt');
+        if (!anyPpt) {
             resultsDiv.innerHTML += `<div style="margin-top:8px; text-align:center;">
                 <button class="btn btn-secondary btn-sm" onclick="searchSealedForSession('${sessionId}', ${offerPct}, true)" style="font-size:0.78rem; opacity:0.8;">
-                    Don't see it? Search live →
+                    Don't see it? Try PPT →
                 </button>
             </div>`;
         }
@@ -4777,6 +4811,9 @@ async function searchCardsForSession(sessionId, offerPct) {
 //   onPick(pick)  — called when the row or a variant chip is clicked.
 //                   `pick` is { tcgId, cardName, setName, cardNum, rarity,
 //                   condition, qty, price, variant }
+//   onTryPpt()    — optional. When set and current results aren't already
+//                   PPT-sourced, renders a "Don't see it? Try PPT →" button
+//                   under the list. Caller's job to refetch with prefer=ppt.
 function _renderCardSearchResults(rawCards, container, opts) {
     opts = opts || {};
     const condition = opts.condition || 'NM';
@@ -4786,6 +4823,7 @@ function _renderCardSearchResults(rawCards, container, opts) {
     const gradeCompany = opts.gradeCompany || 'PSA';
     const gradeValue = opts.gradeValue || '10';
     const onPick = typeof opts.onPick === 'function' ? opts.onPick : null;
+    const onTryPpt = typeof opts.onTryPpt === 'function' ? opts.onTryPpt : null;
 
     if (!rawCards || !rawCards.length) {
         container.innerHTML = '<div class="alert alert-warning">No cards found. Try a different name or set.</div>';
@@ -4905,14 +4943,34 @@ function _renderCardSearchResults(rawCards, container, opts) {
         const pick = picks.get(t.getAttribute('data-pickid'));
         if (pick && onPick) onPick(pick);
     };
+
+    // Escape hatch: when Scrydex returned hits but they're wrong (fuzzy
+    // matched a different card), let the operator force a PPT-only search.
+    // Only show when not already a PPT result set.
+    if (onTryPpt) {
+        const anyPpt = (rawCards || []).some(c => c && c._price_source === 'ppt');
+        if (!anyPpt) {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'margin-top:8px; text-align:center;';
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.style.cssText = 'font-size:0.78rem; opacity:0.8;';
+            btn.textContent = "Don't see it? Try PPT →";
+            btn.onclick = (e) => { e.stopPropagation(); onTryPpt(); };
+            wrap.appendChild(btn);
+            container.appendChild(wrap);
+        }
+    }
 }
 
-async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offerPct, context) {
+async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offerPct, context, prefer) {
     try {
+        const body = { query: searchTerm, set_name: setFilter || undefined };
+        if (prefer) body.prefer = prefer;
         const r = await fetch('/api/search/cards', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ query: searchTerm, set_name: setFilter || undefined }),
+            body: JSON.stringify(body),
         });
         const contentType = r.headers.get('content-type') || '';
         if (!contentType.includes('application/json')) {
@@ -4930,6 +4988,11 @@ async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offer
         const inGraded = _isGradedContext(context);
         const gf = inGraded ? _getGradeFields(context) : null;
 
+        if (prefer === 'ppt' && !cards.length) {
+            resultsDiv.innerHTML = `<div class="alert alert-warning">No PPT results for "${searchTerm}".</div>`;
+            return;
+        }
+
         _renderCardSearchResults(cards, resultsDiv, {
             condition, qty, offerPct,
             inGraded,
@@ -4939,6 +5002,10 @@ async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offer
                 addCardFromSearch(sessionId, pick.tcgId, pick.cardName, pick.setName,
                     pick.cardNum, pick.rarity, pick.condition, pick.qty, pick.price,
                     context, pick.variant);
+            },
+            onTryPpt: () => {
+                resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
+                _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offerPct, context, 'ppt');
             },
         });
     } catch(err) {
