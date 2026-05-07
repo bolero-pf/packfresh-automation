@@ -720,7 +720,13 @@ def session_meta_stats(session_id):
             _t_cache_tcg = time.perf_counter() - _ts
             try:
                 _ts = time.perf_counter()
-                bd_summary_by_tcg = bd_logic.get_breakdown_summary_for_items(tcg_ids, db, ppt=pricing)
+                # cache_only=True: Collection Summary is a read endpoint; the
+                # component prices in the cache are good enough. Without this
+                # the JIT refresh used to spend 12s on a handful of cache-miss
+                # components hitting PPT serially.
+                bd_summary_by_tcg = bd_logic.get_breakdown_summary_for_items(
+                    tcg_ids, db, ppt=pricing, cache_only=True,
+                )
                 _t_bd = time.perf_counter() - _ts
             except Exception as e:
                 logger.warning(f"meta-stats breakdown summary lookup failed: {e}")

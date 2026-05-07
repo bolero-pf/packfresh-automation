@@ -171,7 +171,8 @@ def _refresh_cache_totals(cache_id: str, db):
 # ─── Batch Summary (with store prices + deep values) ───────────────
 
 
-def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4) -> dict:
+def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4,
+                                     cache_only=False) -> dict:
     """
     Batch lookup: tcg_id -> breakdown summary with market + store values.
     Includes deep value (nested breakdown) computation.
@@ -181,6 +182,11 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
       parent in store, no child -> compare children market vs parent store
       children in store, no parent -> compare children store vs parent market
       neither in store -> compare market totals
+
+    cache_only=True forwards to refresh_stale_component_prices so it never
+    hits PPT/Scrydex on a cache miss. Pass it from read endpoints like
+    Collection Summary; leave it False for editor/verify paths that genuinely
+    need a fresh component price.
     """
     if not tcg_ids:
         return {}
@@ -222,7 +228,11 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
         try:
             from breakdown_helpers import refresh_stale_component_prices
             _ts = time.perf_counter()
-            refresh_stale_component_prices(variant_ids, db, ppt, max_age_hours=max_age_hours)
+            refresh_stale_component_prices(
+                variant_ids, db, ppt,
+                max_age_hours=max_age_hours,
+                cache_only=cache_only,
+            )
             _t_refresh = time.perf_counter() - _ts
         except Exception as e:
             logger.warning(f"Component price refresh skipped: {e}")
