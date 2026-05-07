@@ -1483,11 +1483,11 @@ function renderGameChips() {
       _draft.colorMode = 'any';
       renderGameChips();
       _refreshSheetEraVisibility();
-      // Hide the previous game's color/card-type/rarity pills immediately.
-      // Without this, a slow /api/filter-meta fetch leaves Pokemon's pills
-      // visible under a Magic-active game chip until the response lands.
-      _filterMeta = null;
-      renderAdvancedFilterSections();
+      // Leave the previous game's color/card-type/rarity pills in place
+      // while the new ones load — clearing them collapses the section and
+      // makes Condition/Price/Sort/Set jump up, then back down when fresh
+      // data lands. The request-token guard in loadFilterMetaForDraft
+      // ensures only the latest game's pills end up rendered.
       // Sets and filter-meta are independent — fetch in parallel so the
       // sheet doesn't wait for sets before kicking off the slower meta call.
       const [, metaFresh] = await Promise.all([

@@ -1659,25 +1659,35 @@ def filter_meta():
                 row = db.query_one(f"""
                     SELECT COUNT(DISTINCT rc.tcgplayer_id) AS n
                       FROM raw_cards rc
+                      JOIN LATERAL (
+                        SELECT scrydex_id FROM scrydex_price_cache
+                         WHERE tcgplayer_id = rc.tcgplayer_id AND game = %s
+                         LIMIT 1
+                      ) pc ON TRUE
                       JOIN scrydex_card_meta m
-                        ON m.game = %s AND m.scrydex_id = rc.scrydex_id
+                        ON m.game = %s AND m.scrydex_id = pc.scrydex_id
                      WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL
                        AND rc.game = %s
                            {where_extra}
-                """, (sx_game, game, *where_params))
+                """, (sx_game, sx_game, game, *where_params))
                 counts[v] = int((row or {}).get("n") or 0)
         else:
             # any-mode: unfold color_identity into rows and group-count.
             rows = db.query(f"""
                 SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
                   FROM raw_cards rc
+                  JOIN LATERAL (
+                    SELECT scrydex_id FROM scrydex_price_cache
+                     WHERE tcgplayer_id = rc.tcgplayer_id AND game = %s
+                     LIMIT 1
+                  ) pc ON TRUE
                   JOIN scrydex_card_meta m
-                    ON m.game = %s AND m.scrydex_id = rc.scrydex_id
+                    ON m.game = %s AND m.scrydex_id = pc.scrydex_id
                   JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
                  WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                        {extra_w}
                  GROUP BY elem
-            """, (sx_game, game, *extra_p))
+            """, (sx_game, sx_game, game, *extra_p))
             counts = {r["k"]: int(r["n"]) for r in rows}
 
             # MTG: a colorless card has color_identity=[] and never shows up
@@ -1687,12 +1697,17 @@ def filter_meta():
                 row = db.query_one(f"""
                     SELECT COUNT(DISTINCT rc.tcgplayer_id) AS n
                       FROM raw_cards rc
+                      JOIN LATERAL (
+                        SELECT scrydex_id FROM scrydex_price_cache
+                         WHERE tcgplayer_id = rc.tcgplayer_id AND game = %s
+                         LIMIT 1
+                      ) pc ON TRUE
                       JOIN scrydex_card_meta m
-                        ON m.game = %s AND m.scrydex_id = rc.scrydex_id
+                        ON m.game = %s AND m.scrydex_id = pc.scrydex_id
                      WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                        AND jsonb_array_length({field}) = 0
                            {extra_w}
-                """, (sx_game, game, *extra_p))
+                """, (sx_game, sx_game, game, *extra_p))
                 counts["C"] = int((row or {}).get("n") or 0)
 
         out["filters"]["colors"] = {
@@ -1713,24 +1728,34 @@ def filter_meta():
             rows = db.query(f"""
                 SELECT elem AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
                   FROM raw_cards rc
+                  JOIN LATERAL (
+                    SELECT scrydex_id FROM scrydex_price_cache
+                     WHERE tcgplayer_id = rc.tcgplayer_id AND game = %s
+                     LIMIT 1
+                  ) pc ON TRUE
                   JOIN scrydex_card_meta m
-                    ON m.game = %s AND m.scrydex_id = rc.scrydex_id
+                    ON m.game = %s AND m.scrydex_id = pc.scrydex_id
                   JOIN LATERAL jsonb_array_elements_text({field}) AS elem ON TRUE
                  WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                        {extra_w}
                  GROUP BY elem
-            """, (sx_game, game, *extra_p))
+            """, (sx_game, sx_game, game, *extra_p))
         else:
             rows = db.query(f"""
                 SELECT {field} AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
                   FROM raw_cards rc
+                  JOIN LATERAL (
+                    SELECT scrydex_id FROM scrydex_price_cache
+                     WHERE tcgplayer_id = rc.tcgplayer_id AND game = %s
+                     LIMIT 1
+                  ) pc ON TRUE
                   JOIN scrydex_card_meta m
-                    ON m.game = %s AND m.scrydex_id = rc.scrydex_id
+                    ON m.game = %s AND m.scrydex_id = pc.scrydex_id
                  WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                    AND {field} IS NOT NULL
                        {extra_w}
                  GROUP BY {field}
-            """, (sx_game, game, *extra_p))
+            """, (sx_game, sx_game, game, *extra_p))
         counts = {r["k"]: int(r["n"]) for r in rows}
         out["filters"]["card_type"] = {
             "label":   spec["label"],
@@ -1748,14 +1773,19 @@ def filter_meta():
         rarity_rows = db.query(f"""
             SELECT rc.rarity AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n
               FROM raw_cards rc
+              JOIN LATERAL (
+                SELECT scrydex_id FROM scrydex_price_cache
+                 WHERE tcgplayer_id = rc.tcgplayer_id AND game = %s
+                 LIMIT 1
+              ) pc ON TRUE
               JOIN scrydex_card_meta m
-                ON m.game = %s AND m.scrydex_id = rc.scrydex_id
+                ON m.game = %s AND m.scrydex_id = pc.scrydex_id
              WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL AND rc.game = %s
                AND rc.rarity IS NOT NULL AND rc.rarity <> ''
                    {extra_w}
              GROUP BY rc.rarity
              ORDER BY n DESC
-        """, (sx_game, game, *extra_p))
+        """, (sx_game, sx_game, game, *extra_p))
     else:
         rarity_rows = db.query("""
             SELECT rarity AS k, COUNT(*) AS n FROM raw_cards
