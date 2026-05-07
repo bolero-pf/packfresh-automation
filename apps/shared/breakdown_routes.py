@@ -151,6 +151,135 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
         )
         return jsonify({"summaries": _serialize(summaries)})
 
+    # ─── Cache audit: which recipe components are missing from Scrydex ─
+    # Sean's class of bug: recipe editor stores tcgplayer_id; cache lookup
+    # is by tcgplayer_id; if Scrydex hasn't synced that ID (common for new
+    # promo cards inside sealed bundles), every Collection Summary on a
+    # session containing the parent box would burn 12s+ on PPT timeouts.
+    # cache_only flag now suppresses the timeout, but the recipes are still
+    # silently missing prices. This endpoint surfaces the broken set so
+    # operators can fix at the source instead of grepping logs.
+    @bp.route("/audit-missing")
+    def audit_missing():
+        """Components whose tcgplayer_id has no matching scrydex_price_cache row
+        of the expected product_type. Sealed components expect product_type='sealed';
+        promo components expect product_type='card'.
+
+        Returns one row per (tcgplayer_id, component_type), with the parent
+        recipes that wire it in so operators know what to fix.
+
+        Optional query param ?include_any_row=1 also returns rows where the
+        tcgplayer_id IS in the cache but under a different product_type
+        (recipe author may have picked the wrong component_type).
+        """
+        include_any = request.args.get("include_any_row") == "1"
+
+        rows = db_module.query("""
+            WITH comp_recipes AS (
+                SELECT sbco.tcgplayer_id,
+                       COALESCE(sbco.component_type, 'sealed') AS component_type,
+                       sbc.tcgplayer_id AS parent_tcg_id,
+                       MAX(sbco.market_price) AS last_market_price,
+                       MAX(sbco.market_price_updated_at) AS last_priced_at
+                FROM sealed_breakdown_components sbco
+                JOIN sealed_breakdown_variants sbv ON sbv.id = sbco.variant_id
+                JOIN sealed_breakdown_cache sbc ON sbc.id = sbv.breakdown_id
+                WHERE sbco.tcgplayer_id IS NOT NULL
+                GROUP BY sbco.tcgplayer_id, sbco.component_type, sbc.tcgplayer_id
+            ),
+            agg AS (
+                SELECT tcgplayer_id,
+                       component_type,
+                       array_agg(DISTINCT parent_tcg_id) AS parent_tcg_ids,
+                       COUNT(DISTINCT parent_tcg_id) AS recipe_count,
+                       MAX(last_market_price) AS last_market_price,
+                       MAX(last_priced_at) AS last_priced_at
+                FROM comp_recipes
+                GROUP BY tcgplayer_id, component_type
+            )
+            SELECT a.tcgplayer_id,
+                   a.component_type,
+                   a.parent_tcg_ids,
+                   a.recipe_count,
+                   a.last_market_price,
+                   a.last_priced_at,
+                   EXISTS (
+                       SELECT 1 FROM scrydex_price_cache spc
+                       WHERE spc.tcgplayer_id = a.tcgplayer_id
+                         AND spc.product_type = (CASE WHEN a.component_type = 'promo'
+                                                       THEN 'card' ELSE 'sealed' END)
+                   ) AS in_cache_correct_type,
+                   EXISTS (
+                       SELECT 1 FROM scrydex_price_cache spc
+                       WHERE spc.tcgplayer_id = a.tcgplayer_id
+                   ) AS in_cache_any_type,
+                   (SELECT product_type FROM scrydex_price_cache spc
+                     WHERE spc.tcgplayer_id = a.tcgplayer_id LIMIT 1) AS cached_product_type
+            FROM agg a
+            ORDER BY a.recipe_count DESC, a.tcgplayer_id
+        """)
+
+        # Default: only rows missing the expected type. With include_any_row=1,
+        # also surface rows where the cache has a row of a *different* type —
+        # those usually mean the recipe author tagged a card as sealed (or
+        # vice versa) and the lookup goes to the wrong column.
+        broken = []
+        for r in rows:
+            in_correct = r["in_cache_correct_type"]
+            if include_any:
+                if in_correct:
+                    continue  # this one's fine
+            else:
+                if in_correct:
+                    continue
+                if r["in_cache_any_type"]:
+                    # Tagged with wrong component_type — surface separately
+                    pass
+            broken.append({
+                "tcgplayer_id": int(r["tcgplayer_id"]),
+                "component_type": r["component_type"],
+                "expected_cache_type": "card" if r["component_type"] == "promo" else "sealed",
+                "in_cache_any_type": bool(r["in_cache_any_type"]),
+                "cached_product_type": r["cached_product_type"],
+                "wrong_type_in_cache": (
+                    bool(r["in_cache_any_type"]) and not r["in_cache_correct_type"]
+                ),
+                "recipe_count": int(r["recipe_count"]),
+                "parent_tcg_ids": [int(p) for p in (r["parent_tcg_ids"] or [])],
+                "last_market_price": float(r["last_market_price"]) if r["last_market_price"] is not None else None,
+                "last_priced_at": r["last_priced_at"].isoformat() if r["last_priced_at"] else None,
+            })
+
+        # Enrich parent TCG IDs with their Shopify titles so the UI/JSON
+        # reader can identify the recipe without a second lookup.
+        all_parents = sorted({p for row in broken for p in row["parent_tcg_ids"]})
+        parent_titles: dict[int, str] = {}
+        if all_parents:
+            try:
+                ph = ",".join(["%s"] * len(all_parents))
+                for r in db_module.query(
+                    f"SELECT tcgplayer_id, title FROM inventory_product_cache "
+                    f"WHERE tcgplayer_id IN ({ph})",
+                    tuple(all_parents),
+                ):
+                    parent_titles[int(r["tcgplayer_id"])] = r["title"] or ""
+            except Exception as e:
+                logger.warning(f"audit-missing: parent title enrichment failed: {e}")
+
+        for row in broken:
+            row["parents"] = [
+                {"tcgplayer_id": p, "title": parent_titles.get(p)}
+                for p in row["parent_tcg_ids"]
+            ]
+            del row["parent_tcg_ids"]
+
+        return jsonify({
+            "missing_count": len(broken),
+            "wrong_type_count": sum(1 for b in broken if b["wrong_type_in_cache"]),
+            "no_row_count": sum(1 for b in broken if not b["in_cache_any_type"]),
+            "missing": broken,
+        })
+
     # ─── PPT search (sealed products) ──────────────────────────────
 
     @bp.route("/search")
