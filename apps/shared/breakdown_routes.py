@@ -76,7 +76,10 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
         if not result:
             return jsonify({"found": False, "cache": None})
 
-        # JIT refresh stale component market prices in background
+        # JIT refresh stale component market prices in background. cache_only:
+        # this endpoint is just opening the breakdown modal — a slightly stale
+        # market_price is fine, and the previous behavior burned 12s+ of PPT
+        # time on cards Scrydex doesn't cover (promos from new sealed bundles).
         ppt = _get_ppt()
         if ppt:
             try:
@@ -86,6 +89,7 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
                     threading.Thread(
                         target=refresh_stale_component_prices,
                         args=(variant_ids, db_module, ppt),
+                        kwargs={"cache_only": True},
                         daemon=True
                     ).start()
             except Exception as e:
@@ -140,8 +144,10 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
         if not tcg_ids:
             return jsonify({"summaries": {}})
         ppt = _get_ppt()
+        # Read endpoint — don't fall through to PPT on cache miss (avoids 12s
+        # network stalls on promos Scrydex doesn't cover yet).
         summaries = logic.get_breakdown_summary_for_items(
-            tcg_ids, db_module, ppt=ppt, max_age_hours=24
+            tcg_ids, db_module, ppt=ppt, max_age_hours=24, cache_only=True,
         )
         return jsonify({"summaries": _serialize(summaries)})
 
