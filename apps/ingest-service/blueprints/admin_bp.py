@@ -7,7 +7,7 @@ import time
 import requests as _requests
 from decimal import Decimal, InvalidOperation
 
-from flask import Blueprint, request, jsonify, render_template, send_file, Response, g
+from flask import Blueprint, request, jsonify, render_template, Response, g
 
 import db
 import intake
@@ -46,47 +46,6 @@ def configure(*, _pricing=None, _shopify=None, _cache_mgr=None,
 
 
 bp = Blueprint("admin", __name__)
-
-from barcode_gen import generate_barcode_image
-
-
-
-@bp.route("/api/mappings", methods=["GET"])
-def list_mappings():
-    """List cached product mappings."""
-    product_type = request.args.get("product_type")
-    mappings = intake.get_all_mappings(product_type)
-    return jsonify({"mappings": [_serialize(m) for m in mappings]})
-
-
-# ==========================================
-# BARCODE
-# ==========================================
-
-
-@bp.route("/api/barcode/<barcode_id>.png")
-def get_barcode(barcode_id):
-    """Generate and return a barcode label image."""
-    # Optionally look up card details for the label
-    card = db.query_one(
-        "SELECT card_name, set_name, condition, current_price FROM raw_cards WHERE barcode = %s",
-        (barcode_id,)
-    )
-
-    import io
-    png = generate_barcode_image(
-        barcode_id,
-        card_name=card["card_name"] if card else "",
-        set_name=card["set_name"] if card else "",
-        condition=card["condition"] if card else "",
-        price=f"${card['current_price']:.2f}" if card else "",
-    )
-    return send_file(io.BytesIO(png), mimetype="image/png")
-
-
-# ==========================================
-# HEALTH CHECK
-# ==========================================
 
 
 @bp.route("/api/shopify/sync", methods=["POST"])
@@ -202,50 +161,6 @@ def cache_invalidate():
     cache_mgr.invalidate(reason)
     return jsonify({"success": True, "reason": reason})
 
-
-
-@bp.route("/api/admin/tag-frequencies")
-def tag_frequencies():
-    """Tag-distribution snapshot for the categorizer.
-
-    Splits inventory_product_cache.tags (CSV strings) into individual
-    tags and counts product rows per tag. Used to verify which tags
-    actually exist + how often, so the categorizer rules can be
-    tightened to real data instead of guesses. Pure read; no writes.
-
-    Query params:
-        min_count   — drop tags appearing fewer than N times (default 1)
-        limit       — cap on rows returned (default 200)
-    """
-    try:
-        min_count = int(request.args.get("min_count", 1))
-        limit = int(request.args.get("limit", 200))
-    except (TypeError, ValueError):
-        min_count, limit = 1, 200
-
-    try:
-        rows = db.query("""
-            SELECT lower(trim(tag)) AS tag, COUNT(*) AS cnt
-            FROM inventory_product_cache,
-                 LATERAL unnest(string_to_array(tags, ',')) AS tag
-            WHERE tags IS NOT NULL AND tags <> ''
-              AND (is_damaged = false OR is_damaged IS NULL)
-            GROUP BY 1
-            HAVING COUNT(*) >= %s
-            ORDER BY cnt DESC, tag ASC
-            LIMIT %s
-        """, (min_count, limit))
-    except Exception as e:
-        logger.warning(f"tag_frequencies query failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-    total = db.query_one(
-        "SELECT COUNT(*) AS n FROM inventory_product_cache WHERE is_damaged = false OR is_damaged IS NULL"
-    ) or {"n": 0}
-    return jsonify({
-        "total_products": total["n"],
-        "tags": [{"tag": r["tag"], "count": r["cnt"]} for r in rows],
-    })
 
 
 @bp.route("/api/cache/refresh", methods=["POST"])
@@ -468,7 +383,12 @@ def shopify_session_store_check(session_id):
     bd_summary_map = {}
     if all_tcg_ids:
         try:
-            bd_summary_map = bd_logic.get_breakdown_summary_for_items(all_tcg_ids, db, ppt=pricing)
+            # cache_only: deal-candidates is a read endpoint, no need to
+            # block on PPT cache misses for promo components Scrydex doesn't
+            # cover. Stale market_price is fine here.
+            bd_summary_map = bd_logic.get_breakdown_summary_for_items(
+                all_tcg_ids, db, ppt=pricing, cache_only=True,
+            )
         except Exception as e:
             logger.warning(f"deal-candidates: shared breakdown summary failed: {e}")
     if all_tcg_ids:
@@ -488,7 +408,9 @@ def shopify_session_store_check(session_id):
                 """, tuple(all_tcg_ids))
                 if _vids:
                     threading.Thread(target=refresh_stale_component_prices,
-                        args=([v["variant_id"] for v in _vids], db, pricing), daemon=True).start()
+                        args=([v["variant_id"] for v in _vids], db, pricing),
+                        kwargs={"cache_only": True},
+                        daemon=True).start()
             except Exception as e:
                 logger.warning(f"Component price refresh skipped: {e}")
 
@@ -720,7 +642,6 @@ def shopify_session_store_check(session_id):
 
 
 
-@bp.route("/api/store/search", methods=["GET"])
 @bp.route("/api/store/search", methods=["GET"])
 def store_search():
     """Search inventory_product_cache by title — fuzzy token matching so partial/reordered names hit."""

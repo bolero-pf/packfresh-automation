@@ -63,7 +63,7 @@ railway up
 | POST | `/api/intake/upload-collectr` | Upload & parse CSV (multipart form) |
 | GET | `/api/intake/session/<id>` | Get session details + items |
 | POST | `/api/intake/map-item` | Link item to tcgplayer_id |
-| POST | `/api/intake/finalize/<id>` | Finalize session |
+| POST | `/api/intake/session/<id>/offer` | Lock prices and present offer to customer |
 
 ### Raw Card Manual Entry
 | Method | Path | Description |
@@ -76,13 +76,10 @@ railway up
 |--------|------|-------------|
 | POST | `/api/lookup/card` | Raw card price by tcgplayer_id |
 | POST | `/api/lookup/sealed` | Sealed product price by tcgplayer_id |
-| POST | `/api/lookup/parse-title` | Fuzzy match product name |
 
 ### Utility
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/mappings` | List cached product mappings |
-| GET | `/api/barcode/<id>.png` | Generate barcode label image |
 | GET | `/health` | Health check (DB + PPT status) |
 
 ## Key Design Decisions
@@ -91,23 +88,15 @@ railway up
 - **Product mappings are cached** — First time you link "Astral Radiance ETB" → tcgplayer_id 12345, it's remembered for all future imports
 - **`shopify_product_id` is nullable** — Gets linked later by a separate Shopify sync process, not during intake
 - **Connection pooling** — `psycopg2.ThreadedConnectionPool` instead of per-request connections
-- **Barcode format: `PF-YYYYMMDD-XXXXXX`** — Code 128, compatible with Brother QL thermal printers and standard USB scanners
-
-## Barcode Printing
-
-Recommended hardware:
-- **Printer:** Brother QL-820NWB (supports 62mm labels, USB + WiFi)
-- **Labels:** DK-11209 (62mm x 29mm address labels) or DK-22205 (continuous 62mm roll for custom sizes)
-- **Scanner:** Any USB HID barcode scanner ($30-50, reads Code 128)
-
-The `/api/barcode/<id>.png` endpoint generates print-ready label images at 300 DPI.
+- **Barcode format: `PF-YYYYMMDD-XXXXXX`** — Code 128, compatible with Brother QL thermal printers and standard USB scanners. Barcode generation lives in the ingest service (`ingestion/`), not here.
 
 ## Schema Notes
 
-The `sealed_cogs` table uses weighted-average costing:
+Sealed COGS lives on the Shopify variant `cost_per_item` field, maintained by the ingest service at push-live using weighted-average costing:
 ```
 new_avg = (old_qty × old_avg + new_qty × new_unit_cost) / (old_qty + new_qty)
 ```
+Mirrored locally as `inventory_product_cache.unit_cost` via the cache refresh.
 
-Raw cards get individual `cost_basis` values calculated from `offer_price / quantity`.
+Raw cards get individual `cost_basis` values calculated from `offer_price / quantity` and stored on the `raw_cards` row itself (also written by ingest at push-live).
 "# retry" 

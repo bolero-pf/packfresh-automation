@@ -108,34 +108,6 @@ CREATE INDEX idx_intake_items_session ON intake_items(session_id);
 CREATE INDEX idx_intake_items_unmapped ON intake_items(is_mapped) WHERE is_mapped = FALSE;
 
 -- ==========================================
--- SEALED PRODUCT COGS
--- Tracks weighted average cost for Shopify products
--- ==========================================
-CREATE TABLE sealed_cogs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    
-    -- Shopify linkage
-    shopify_product_id BIGINT UNIQUE,  -- NULL until linked to Shopify product
-    shopify_variant_id BIGINT,
-    tcgplayer_id BIGINT NOT NULL,
-    
-    -- Product info (denormalized for convenience)
-    product_name VARCHAR(500),
-    
-    -- COGS calculation
-    current_quantity INTEGER NOT NULL DEFAULT 0,
-    total_cost DECIMAL(10, 2) NOT NULL DEFAULT 0.00, -- Running total
-    avg_cogs DECIMAL(10, 2) NOT NULL DEFAULT 0.00, -- total_cost / current_quantity
-    
-    -- Audit
-    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_intake_session_id UUID REFERENCES intake_sessions(id)
-);
-
-CREATE INDEX idx_sealed_cogs_shopify ON sealed_cogs(shopify_product_id);
-CREATE INDEX idx_sealed_cogs_tcgplayer ON sealed_cogs(tcgplayer_id);
-
--- ==========================================
 -- BOXES (Physical Storage)
 -- For raw card organization
 -- ==========================================
@@ -239,33 +211,6 @@ CREATE INDEX idx_audit_log_card ON audit_log(card_id);
 CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp DESC);
 CREATE INDEX idx_audit_log_employee ON audit_log(employee_id);
 CREATE INDEX idx_audit_log_action ON audit_log(action);
-
--- ==========================================
--- COGS HISTORY
--- Track COGS changes over time for sealed products
--- ==========================================
-CREATE TABLE cogs_history (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    
-    sealed_cogs_id UUID REFERENCES sealed_cogs(id) ON DELETE CASCADE,
-    
-    -- Before/after snapshot
-    old_quantity INTEGER,
-    new_quantity INTEGER,
-    old_avg_cogs DECIMAL(10, 2),
-    new_avg_cogs DECIMAL(10, 2),
-    
-    -- What changed
-    quantity_delta INTEGER, -- Positive = added inventory
-    cost_added DECIMAL(10, 2),
-    
-    -- Context
-    intake_session_id UUID REFERENCES intake_sessions(id),
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_cogs_history_sealed ON cogs_history(sealed_cogs_id);
-CREATE INDEX idx_cogs_history_session ON cogs_history(intake_session_id);
 
 -- ==========================================
 -- HELPER VIEWS

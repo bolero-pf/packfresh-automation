@@ -342,18 +342,6 @@ class CacheManager:
                 except Exception as e:
                     logger.warning(f"[{self._cache_table}] stale row purge failed: {e}")
 
-            if self.table_prefix == "":
-                # Intake-specific: backfill sealed_cogs linkage
-                try:
-                    self.db.execute("""
-                        UPDATE sealed_cogs sc SET shopify_product_id = spc.shopify_product_id
-                        FROM shopify_product_cache spc
-                        WHERE sc.tcgplayer_id = spc.tcgplayer_id
-                          AND sc.shopify_product_id IS NULL
-                    """)
-                except Exception:
-                    pass  # table may not exist in all environments
-
             elapsed = (datetime.now(timezone.utc) - start).total_seconds()
             logger.info(f"[{self._cache_table}] refresh complete: {upserted} rows in {elapsed:.1f}s")
             self._set_meta(

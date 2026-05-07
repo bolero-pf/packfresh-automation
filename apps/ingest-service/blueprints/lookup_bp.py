@@ -318,21 +318,3 @@ def search_cards():
 
 
 
-@bp.route("/api/lookup/parse-title", methods=["POST"])
-def parse_title():
-    """Fuzzy-match a product name via PPT's parse-title endpoint (best for card titles)."""
-    if not pricing:
-        return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
-
-    data = request.json or {}
-    title = data.get("title", "").strip()
-    if not title:
-        return jsonify({"error": "title required"}), 400
-
-    matches = pricing.parse_title(title)
-    return jsonify({"matches": matches})
-
-
-# ==========================================
-# PRODUCT MAPPINGS
-# ==========================================

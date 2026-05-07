@@ -919,7 +919,7 @@ async function loadIntakeItems() {
         const items = d.items;
         const s = d.session;
         const tableDiv = document.getElementById('intake-items-table');
-        document.getElementById('intake-finalize-btn').style.display = items.length ? '' : 'none';
+        document.getElementById('intake-lockoffer-btn').style.display = items.length ? '' : 'none';
         document.getElementById('intake-view-btn').style.display = items.length ? '' : 'none';
         if (!items.length) { tableDiv.innerHTML = '<p style="color:var(--text-dim);">No items added yet.</p>'; return; }
 
@@ -966,9 +966,9 @@ async function deleteIntakeItem(itemId) {
     } catch(err) { alert(err.message); }
 }
 
-async function finalizeIntakeSession() {
+async function lockAndOfferIntakeSession() {
     if (!intakeSessionId) return;
-    await finalizeSession(intakeSessionId);
+    await lockAndOfferSession(intakeSessionId);
     intakeSessionId = null;
     document.getElementById('intake-entry').style.display = 'none';
     document.getElementById('intake-setup').style.display = '';
@@ -5446,7 +5446,7 @@ async function transitionSession(sessionId, action) {
     } catch(err) { alert(err.message); }
 }
 
-async function finalizeSession(sessionId) {
+async function lockAndOfferSession(sessionId) {
     return transitionSession(sessionId, 'offer');
 }
 

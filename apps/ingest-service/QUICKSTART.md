@@ -119,8 +119,8 @@ Title,Set,Card Number,Rarity,Condition,Quantity,Market Price
 2. Click "Map" on each product
 3. Enter TCGPlayer ID (or search)
 4. System fetches current price
-5. Click "Finalize"
-6. Check `sealed_cogs` table - should see new entries
+5. Click "Lock & Offer"
+6. After ingest's push-live, check `inventory_product_cache.unit_cost` (mirrors Shopify's weighted-average `cost_per_item`)
 
 ---
 
