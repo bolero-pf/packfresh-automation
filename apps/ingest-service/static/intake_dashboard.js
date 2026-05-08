@@ -75,6 +75,7 @@ document.addEventListener('keydown', (e) => {
             closeModal('relink-modal');
             if (window._relinkLinkedCount > 0) viewSession(currentSessionId, true);
             window._relinkLinkedCount = 0;
+            window._relinkSkipped = new Set();
             return;
         }
         const mapping = document.getElementById('mapping-modal');
@@ -3326,8 +3327,9 @@ async function relinkItem(itemId, sessionId) {
     const items = window._sessionItems || [];
     const i = items.find(x => String(x.id) === String(itemId));
     if (!i) { alert('Item not found in session'); return; }
-    // Initialize linked count on first entry into the flow
+    // Initialize linked count + skipped-set on first entry into the flow
     if (!window._relinkLinkedCount) window._relinkLinkedCount = 0;
+    if (!window._relinkSkipped) window._relinkSkipped = new Set();
     window._relinkState = {
         itemId, sessionId,
         productType: i.product_type === 'sealed' ? 'sealed' : 'raw',
@@ -3351,9 +3353,11 @@ function _relinkShowSearch() {
     // Count remaining unmapped items (raw + sealed) for progress display.
     // Mixed collections need to flow through one queue without skipping types.
     const allItems = window._sessionItems || [];
+    const skipped = window._relinkSkipped || new Set();
     const unmapped = allItems.filter(x => !x.is_mapped
         && (x.product_type === 'raw' || x.product_type === 'sealed')
-        && ['good','damaged'].includes(x.item_status || 'good'));
+        && ['good','damaged'].includes(x.item_status || 'good')
+        && !skipped.has(String(x.id)));
     const remaining = unmapped.length;
     const linked = window._relinkLinkedCount || 0;
     const hasQueue = remaining > 1 || (remaining === 1 && linked > 0);
@@ -3406,7 +3410,10 @@ function _relinkShowSearch() {
     document.getElementById('relink-manual-btn').addEventListener('click', _relinkManualPrice);
     document.getElementById('relink-search').addEventListener('keydown', function(e) { if (e.key === 'Enter') _relinkDoSearch(); });
     const skipBtn = document.getElementById('relink-skip-btn');
-    if (skipBtn) skipBtn.addEventListener('click', () => _relinkAdvanceOrClose(rs.sessionId, true));
+    if (skipBtn) skipBtn.addEventListener('click', () => {
+        if (rs.itemId) (window._relinkSkipped || (window._relinkSkipped = new Set())).add(String(rs.itemId));
+        _relinkAdvanceOrClose(rs.sessionId, true);
+    });
     const doneBtn = document.getElementById('relink-done-btn');
     if (doneBtn) doneBtn.addEventListener('click', () => {
         closeModal('relink-modal');
@@ -3419,6 +3426,7 @@ function _relinkShowSearch() {
             setTimeout(() => toast.remove(), 3500);
         }
         window._relinkLinkedCount = 0;
+        window._relinkSkipped = new Set();
         viewSession(currentSessionId, true);
     });
 }
@@ -3433,10 +3441,12 @@ async function _relinkAdvanceOrClose(sessionId, isSkip) {
     } catch(e) { /* proceed with stale data */ }
 
     const items = window._sessionItems || [];
+    const skipped = window._relinkSkipped || new Set();
     const unmapped = items.filter(x =>
         !x.is_mapped &&
         (x.product_type === 'raw' || x.product_type === 'sealed') &&
-        ['good','damaged'].includes(x.item_status || 'good')
+        ['good','damaged'].includes(x.item_status || 'good') &&
+        !skipped.has(String(x.id))
     );
 
     if (unmapped.length > 0) {
@@ -3475,6 +3485,7 @@ async function _relinkAdvanceOrClose(sessionId, isSkip) {
             setTimeout(() => toast.remove(), 3500);
         }
         window._relinkLinkedCount = 0;
+        window._relinkSkipped = new Set();
         viewSession(sessionId, true);
     }
 }
