@@ -6,8 +6,9 @@ Per product group (one or more product photos sharing a name), generates:
     msrp_usd + msrp_source_url, variant_option_name, per-variant SKU/barcode/option_value,
     notes (operator review flags).
 
-Uses claude-sonnet-4-6 with web_search_20260209 tool for MSRP lookup
-and structured JSON output via output_config.format.
+Uses claude-haiku-4-5 (separate rate-limit pool from Sonnet, cheaper) with
+web_search_20260209 tool for MSRP lookup and structured JSON output via
+output_config.format.
 
 Env vars required:
     ANTHROPIC_API_KEY
@@ -125,7 +126,7 @@ OUTPUT_SCHEMA = {
 }
 
 
-def _resize_for_vision(image_path: str, max_long_edge: int = 1024) -> tuple[bytes, str]:
+def _resize_for_vision(image_path: str, max_long_edge: int = 768) -> tuple[bytes, str]:
     """Open image, resize so long edge <= max_long_edge, return (bytes, media_type)."""
     im = Image.open(image_path)
     media_type = "image/jpeg"
@@ -158,7 +159,7 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
         raise RuntimeError("ANTHROPIC_API_KEY not set")
 
     import anthropic
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=5)
 
     content_blocks = []
     for v in variants:
@@ -181,14 +182,13 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
     content_blocks.append({"type": "text", "text": prompt_text})
 
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5",
         max_tokens=4000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content_blocks}],
         tools=[{"type": "web_search_20260209", "name": "web_search"}],
         output_config={
             "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
-            "effort": "medium",
         },
     )
 
