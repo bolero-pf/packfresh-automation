@@ -31,7 +31,11 @@ _JPY_USD_RATE = Decimal(os.getenv("SCRYDEX_JPY_USD_RATE", "0.0066"))
 # that exact contraction with the same apostrophe character — DB rows from
 # Scrydex sometimes use the curly U+2019 form, so the straight ASCII typed
 # query never hits.
-_TOKEN_SPLIT = re.compile(r"[\s\-_/'’]+")
+# Parens and commas split too — Collectr-style names like
+# "Espeon VMAX (Alternate Art Secret)" otherwise tokenize into "(Alternate"
+# and "Secret)" which never ILIKE-match anything Scrydex stores, and the
+# per-token AND'd WHERE then drops the whole row.
+_TOKEN_SPLIT = re.compile(r"[\s\-_/'’(),]+")
 
 logger = logging.getLogger(__name__)
 
@@ -871,6 +875,20 @@ class PriceCache:
                 "(CASE WHEN variant ILIKE %s THEN 15 ELSE 0 END)"
             )
             score_params.append(f"%{primary}%")
+            # Per-token printed_number / card_number boost for numeric tokens.
+            # The whole-query printed_number scorer above only fires when the
+            # entire input equals the printed number, so a query like
+            # "Espeon VMAX 270" got 0 from it — the right printing then tied
+            # with wrong-set siblings on name-only score. Boost both forms
+            # ("270" and the leading-zero-stripped variant) since cache stores
+            # unpadded but Collectr can have either.
+            if primary.isdigit():
+                pn_or = " OR ".join(
+                    ["printed_number = %s"] * len(forms)
+                    + ["card_number = %s"] * len(forms)
+                )
+                score_parts.append(f"(CASE WHEN {pn_or} THEN 60 ELSE 0 END)")
+                score_params.extend(forms + forms)
 
         score_sql = " + ".join(score_parts)
 

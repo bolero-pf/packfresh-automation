@@ -3369,13 +3369,20 @@ function _relinkShowSearch() {
         : (rs.isGraded
             ? `<span style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;font-size:0.75rem;padding:1px 6px;border-radius:4px;">${rs.gradeCompany||'PSA'} ${rs.gradeValue||'?'}</span>`
             : `<span style="font-weight:600;">${rs.condition||'NM'}</span>`);
-    // Default raw search to "<name> <card_number>" — printed_number scoring
-    // (=100 exact, +30 prefix) crushes set-name fuzz, and Collectr-imported
-    // set names are often wrong ("ME: Promo" for ME01 base etc.) so folding
-    // them into the query poisons matches. Sealed has no card_number.
-    const defaultSearch = (!isSealed && rs.cardNumber)
-        ? `${rs.cardName} ${rs.cardNumber}`
-        : rs.cardName;
+    // Default raw search to "<clean name> <printed number>". Strip:
+    //   - parenthetical qualifiers like "(Alt Full Art Secret)" — they don't
+    //     appear in Scrydex product_name and tokens like "(Alt" / "Secret)"
+    //     fail the cache search's per-token AND'd WHERE.
+    //   - denominator on card numbers like "270/264" — "264" is the set
+    //     total, not anything Scrydex has on the row, so requiring it as
+    //     a token wipes out the actual hit.
+    // Variance/rarity is still surfaced in the meta badge below.
+    const defaultSearch = (() => {
+        if (isSealed) return rs.cardName || '';
+        const cleanName = (rs.cardName || '').replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();
+        const cleanNum = (rs.cardNumber || '').replace(/\/.*$/, '').trim();
+        return cleanName + (cleanNum ? ' ' + cleanNum : '');
+    })();
     body.innerHTML = `
         <div class="form-group"><label>${nameLabel}</label>
             <input type="text" id="relink-search" value="${defaultSearch.replace(/"/g,'&quot;')}" placeholder="${namePlaceholder}"></div>
