@@ -364,7 +364,8 @@ table.variants input{background:var(--bg);border:1px solid var(--border);border-
   <div id="groups-area"></div>
 
   <div id="batch-bar" style="display:none;text-align:center;margin:16px 0;">
-    <button class="btn btn-ghost" onclick="analyzeAll()">⚡ Analyze All</button>
+    <button class="btn btn-ghost" id="analyze-all-btn" onclick="analyzeAll()">⚡ Analyze All</button>
+    <div id="batch-progress" style="font-size:.82rem;color:var(--dim);margin-top:6px;"></div>
   </div>
 </div>
 
@@ -462,9 +463,23 @@ async function analyzeGroup(idx){
 }
 
 async function analyzeAll(){
-  for(let i=0; i<GROUPS.length; i++){
-    if(!GROUPS[i].analysis) await analyzeGroup(i);
+  const btn = document.getElementById('analyze-all-btn');
+  const prog = document.getElementById('batch-progress');
+  const todo = GROUPS.map((g,i)=>i).filter(i => !GROUPS[i].analysis);
+  if(!todo.length){ prog.textContent = 'Nothing to analyze.'; return; }
+
+  btn.disabled = true;
+  let ok = 0, err = 0;
+  for(let n=0; n<todo.length; n++){
+    const i = todo[n];
+    prog.innerHTML = `<span class="spinner"></span>Analyzing ${n+1}/${todo.length} · ${esc(GROUPS[i].name)}`;
+    try{
+      await analyzeGroup(i);
+      if(GROUPS[i].analysis) ok++; else err++;
+    }catch(e){ err++; }
   }
+  btn.disabled = false;
+  prog.textContent = `Done — ${ok} analyzed, ${err} error${err===1?'':'s'}. Re-click Analyze on any errored row to retry.`;
 }
 
 const PRODUCT_TYPES = [

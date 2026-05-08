@@ -186,7 +186,11 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
         max_tokens=4000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content_blocks}],
-        tools=[{"type": "web_search_20260209", "name": "web_search"}],
+        tools=[{
+            "type": "web_search_20260209",
+            "name": "web_search",
+            "allowed_callers": ["direct"],
+        }],
         output_config={
             "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
         },
