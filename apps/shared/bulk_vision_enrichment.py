@@ -1,18 +1,19 @@
 """
-bulk_vision_enrichment.py — Vision-only Claude pass for non-TCG bulk product creation.
+bulk_vision_enrichment.py — Vision + bounded web-search Claude pass for non-TCG bulk product creation.
 
 Per product group (one or more product photos sharing a name), generates:
     title, product_type, publisher, body_html, tags, weight_oz_estimate,
-    variant_option_name, per-variant SKU/barcode/option_value, notes.
+    msrp_usd + msrp_source_url, variant_option_name, per-variant
+    SKU/barcode/option_value, notes.
 
-Uses claude-haiku-4-5 with structured JSON output via output_config.format.
+Uses claude-haiku-4-5 with structured JSON output via output_config.format
+and web_search with max_uses=1 (one search max per product, keeps token
+cost bounded so Analyze All doesn't saturate the 50K TPM window).
 
-NO web_search — earlier versions used it for MSRP/UPC lookup but each search
-fed multiple KB of results back into the model context, so a single call
-consumed 30-50K input tokens. With Analyze All on a folder of products this
-saturated the 50K TPM rate limit and the SDK retry loop couldn't escape.
-MSRPs are now filled by the operator on the review screen — faster and more
-accurate than the announcement-pages Claude was finding anyway.
+The prompt heavily emphasizes using TRAINING-DATA KNOWLEDGE first — Haiku
+knows mainstream board games (player count, age range, play time, designer,
+mechanics, publisher, year released). Web search is for MSRP and obscure
+products only.
 
 Env vars required:
     ANTHROPIC_API_KEY
@@ -44,13 +45,21 @@ PRODUCT_TYPES = [
     "Misc",
 ]
 
-SYSTEM_PROMPT_TMPL = f"""You are a product data specialist for Common Lands, a hobby and collectibles retailer expanding into board games, non-TCG card games, and tabletop accessories.
+SYSTEM_PROMPT_TMPL = f"""You are a product data specialist for Common Lands, a hobby and collectibles retailer carrying board games, non-TCG card games, and tabletop accessories.
 
-Your job is to look at product photos and produce a clean Shopify product draft. The operator will review every field before saving — so be honest about what you can see and what's uncertain. Surface uncertainty in the `notes` field rather than guessing.
+USE YOUR KNOWLEDGE. You know mainstream board games — Horrified, Disney Villainous, Catan, Ticket to Ride, Pandemic, Wingspan, Azul, Splendor, Sushi Go, Dixit, Carcassonne, etc. For these you already know:
+- Publisher (Ravensburger publishes Horrified and Disney Villainous; Asmodee owns Days of Wonder which makes Ticket to Ride; Z-Man Games makes Pandemic; etc.)
+- Player count, age range, play time
+- Mechanics, theme, designer
+- Whether it's a base game vs expansion vs standalone
+
+Fill these in from training knowledge — don't say "play time not visible on box front, operator should confirm" when you literally know Horrified: American Monsters is 1-5 players, age 10+, 60 minutes, designed by Prospero Hall, published by Ravensburger. Box photos rarely show every spec — that's what your knowledge is for.
+
+ONLY say "not visible / not certain" in the notes field for things you genuinely don't know. Don't sandbag fields you should be filling.
 
 INPUTS:
 - One or more photos of the same product. If there are multiple photos with different filenames, treat them as variants of the SAME product (e.g. color or size variants), unless the photos clearly show different products.
-- A name hint extracted from the filename. Use this as a starting point, but trust the photos when they conflict.
+- A name hint extracted from the filename. Use this as a starting point.
 
 PRODUCT TYPE — pick exactly one from this list:
 {", ".join(PRODUCT_TYPES)}
@@ -61,19 +70,29 @@ VARIANTS:
 - Generate a SKU per variant in the form CL-<short-product-slug>-<short-option-slug>, uppercase, dashes only.
 - If you can clearly read a UPC/EAN barcode in any photo, return it on that variant. Otherwise null.
 
-MSRP:
-- You do NOT have web access. Set msrp_usd to null by default.
-- Only return a number if the price is visibly printed on the product photo (rare — most boxes don't show price). If you do read it from the photo, preserve exact cents ($29.99 not $30).
-- The operator will fill MSRP from the manufacturer's website during review.
+MSRP — you have ONE web_search call to spend per product:
+- Use it ONLY if you don't already know the price from training. For mainstream titles you may already have a confident answer.
+- When searching, target a live retailer page: "<title> site:target.com" or "<title> site:ravensburger.us". Don't waste the search on press releases or BoardGameGeek.
+- Preserve the exact cents shown ($29.99 not $30). $34.99 not $35.
+- If you can't get a confident live-page price in one search, return null and explain in `notes`. Operator will fill from manufacturer site.
+- msrp_source_url should be the live shopping page if you have one, otherwise null.
 
 UPC / Barcode:
 - Look at every photo for a visible UPC barcode (often on the back or bottom of the box). Read the digits below the bars. 12 digits = UPC-A, 13 digits = EAN-13.
-- If no UPC is visible, return null. Operator will fill from manufacturer site if needed.
-- Better to return null than a wrong UPC.
+- If no UPC is visible in the photos, return null. Don't waste the search budget on barcode lookups.
 
-BODY HTML:
-- A short <h2> hook, a 1-2 sentence pitch, and an <h3>About:</h3> section with a <ul> of relevant facts (player count, age range, play time, components — only what you can confirm from the box or a credible source).
-- Clean semantic HTML, no inline styles, no marketing fluff.
+BODY HTML — write a real listing, not a stub:
+- An <h2> hook (NOT the product title). Punchy, draws a player in. e.g. "Survive the night before the monsters reach town." or "The villains finally get their happy ending."
+- A 2-3 sentence pitch describing what playing this game feels like, what makes it interesting, what player or audience would love it. Use your training knowledge of the actual gameplay.
+- An <h3>About:</h3> section with a <ul> of concrete facts. For mainstream titles fill ALL of these from your knowledge:
+  * Player count (e.g., "1-5 players")
+  * Age range (e.g., "Ages 10+")
+  * Play time (e.g., "60 minutes")
+  * Designer (e.g., "Designed by Prospero Hall")
+  * Publisher
+  * Year released (if you know it)
+  * Mechanic / category (e.g., "Cooperative survival")
+- Clean semantic HTML, no inline styles, no fluff.
 
 TAGS — Common Lands has a fixed canonical tag set that drives storefront collections. Inventing new tags BREAKS the store.
 - The allowed tag list is provided below. You may ONLY return tags that are spelled exactly as they appear on this list (case-insensitive).
@@ -227,7 +246,9 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
     prompt_text = (
         f"Name hint from filenames: {name_hint}\n\n"
         f"Variants in this group:\n{variant_lines}\n\n"
-        "Look at the images and return the JSON product draft."
+        "Look at the images, use your training knowledge of this product to fill in "
+        "specs and description, and use your one web_search only if you need to "
+        "verify the current MSRP. Return the JSON product draft."
     )
     content_blocks.append({"type": "text", "text": prompt_text})
 
@@ -240,9 +261,15 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
 
     response = client.messages.create(
         model="claude-haiku-4-5",
-        max_tokens=2000,
+        max_tokens=3000,
         system=system_prompt,
         messages=[{"role": "user", "content": content_blocks}],
+        tools=[{
+            "type": "web_search_20260209",
+            "name": "web_search",
+            "allowed_callers": ["direct"],
+            "max_uses": 1,
+        }],
         output_config={
             "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
         },
