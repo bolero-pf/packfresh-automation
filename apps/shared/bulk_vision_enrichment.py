@@ -51,10 +51,22 @@ VARIANTS:
 - Generate a SKU per variant in the form CL-<short-product-slug>-<short-option-slug>, uppercase, dashes only.
 - If you can clearly read a UPC/EAN barcode in any photo, return it on that variant. Otherwise null.
 
-MSRP:
-- Use the web_search tool to find the typical retail price for this product in USD. Prefer manufacturer or major retailer sources.
-- Return one canonical msrp_usd as a number (no currency symbol) and the URL you trusted most as msrp_source_url.
-- If you can't find a confident price after a couple of searches, return null for both. The operator will fill it in.
+MSRP — be diligent, this is the price the store will list at:
+- Search the manufacturer/publisher's official site FIRST (e.g. ravensburger.com, asmodee.com, mattel.com). Manufacturer MSRP is the source of truth — Common Lands sells at MSRP.
+- If the manufacturer site doesn't list a price, search 2-3 major retailers (Target, Barnes & Noble, Walmart, Amazon's own listing — NOT third-party sellers). Take the most common price.
+- Ignore eBay, Etsy, marketplace third-party prices, and anything that looks discounted/closeout. Those reflect demand, not MSRP.
+- Run multiple searches if needed: try the exact product title, try "<title> MSRP", try "<title> site:<manufacturer>.com".
+- If you find conflicting prices, prefer the manufacturer's number and note the discrepancy in `notes`.
+- Return msrp_usd as a number with no currency symbol; msrp_source_url should be the page that showed the price you used.
+- Only return null/null if multiple searches turn up nothing — in that case explain in `notes`.
+
+UPC / Barcode:
+- First, look at every photo for a visible UPC barcode (often on the back or bottom of the box). Read the digits below the bars. 12-13 digits.
+- If no UPC is visible in the photos, search upcitemdb.com for the product (e.g. `site:upcitemdb.com "<exact product title>"`). Their listing pages show the UPC at the top.
+- Also try barcodelookup.com or the manufacturer's product page (sometimes lists UPC in spec table).
+- Validate: 12 digits = UPC-A, 13 digits = EAN-13. Reject anything else.
+- If you find variant-specific UPCs (one per color/size), assign them per variant. If only one UPC for the whole product line, leave variant barcodes null and note that in `notes`.
+- Better to return null than a wrong UPC. The barcode goes on the Shopify variant and customers may scan it in store.
 
 BODY HTML:
 - A short <h2> hook, a 1-2 sentence pitch, and an <h3>About:</h3> section with a <ul> of relevant facts (player count, age range, play time, components — only what you can confirm from the box or a credible source).
@@ -176,7 +188,7 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
         tools=[{"type": "web_search_20260209", "name": "web_search"}],
         output_config={
             "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
-            "effort": "low",
+            "effort": "medium",
         },
     )
 

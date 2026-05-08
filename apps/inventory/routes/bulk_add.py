@@ -421,18 +421,43 @@ function renderEditor(idx){
     `<option value="${esc(t)}" ${t===a.product_type?'selected':''}>${esc(t)}</option>`
   ).join('');
 
-  const variantRows = a.variants.map((v,vi) => `
-    <tr>
-      <td><img src="/inventory/api/bulk-add/img/${SESSION_ID}/${encodeURIComponent(v.filename)}" style="width:36px;height:36px;object-fit:contain;background:var(--bg);border:1px solid var(--border);border-radius:4px;"></td>
-      <td><input data-vi="${vi}" data-vk="option_value" value="${esc(v.option_value || '')}"></td>
-      <td><input data-vi="${vi}" data-vk="sku" value="${esc(v.sku || '')}"></td>
-      <td><input data-vi="${vi}" data-vk="barcode" value="${esc(v.barcode || '')}" placeholder="(optional)"></td>
-    </tr>
-  `).join('');
+  const isSingle = (a.variants || []).length === 1;
+  const v0 = (a.variants && a.variants[0]) || {};
 
   const msrpLink = a.msrp_source_url
     ? `<a class="msrp-link" href="${esc(a.msrp_source_url)}" target="_blank" rel="noopener">source ↗</a>`
     : '';
+
+  const variantsBlock = isSingle ? `
+      <div class="field">
+        <label class="lbl">SKU</label>
+        <input data-vi="0" data-vk="sku" value="${esc(v0.sku || '')}">
+      </div>
+      <div class="field">
+        <label class="lbl">Barcode / UPC</label>
+        <input data-vi="0" data-vk="barcode" value="${esc(v0.barcode || '')}" placeholder="(optional)">
+      </div>
+  ` : `
+      <div class="field">
+        <label class="lbl">Variant Option Name</label>
+        <input data-k="variant_option_name" value="${esc(a.variant_option_name || 'Variant')}">
+      </div>
+      <div class="field"></div>
+      <div class="field full">
+        <label class="lbl">Variants</label>
+        <table class="variants">
+          <thead><tr><th></th><th>Option Value</th><th>SKU</th><th>Barcode</th></tr></thead>
+          <tbody>${(a.variants || []).map((v,vi) => `
+            <tr>
+              <td><img src="/inventory/api/bulk-add/img/${SESSION_ID}/${encodeURIComponent(v.filename)}" style="width:36px;height:36px;object-fit:contain;background:var(--bg);border:1px solid var(--border);border-radius:4px;"></td>
+              <td><input data-vi="${vi}" data-vk="option_value" value="${esc(v.option_value || '')}"></td>
+              <td><input data-vi="${vi}" data-vk="sku" value="${esc(v.sku || '')}"></td>
+              <td><input data-vi="${vi}" data-vk="barcode" value="${esc(v.barcode || '')}" placeholder="(optional)"></td>
+            </tr>
+          `).join('')}</tbody>
+        </table>
+      </div>
+  `;
 
   body.innerHTML = `
     ${a.notes ? `<div class="notes-box">⚠ ${esc(a.notes)}</div>` : ''}
@@ -446,7 +471,7 @@ function renderEditor(idx){
         <select data-k="product_type">${typeOptions}</select>
       </div>
       <div class="field">
-        <label class="lbl">Publisher (informational only — vendor=Common Lands)</label>
+        <label class="lbl">Publisher (informational — vendor stays Common Lands)</label>
         <input data-k="publisher" value="${esc(a.publisher || '')}">
       </div>
       <div class="field">
@@ -465,20 +490,10 @@ function renderEditor(idx){
         <label class="lbl">Description (HTML)</label>
         <textarea data-k="body_html">${esc(a.body_html || '')}</textarea>
       </div>
-      <div class="field">
-        <label class="lbl">Variant Option Name</label>
-        <input data-k="variant_option_name" value="${esc(a.variant_option_name || 'Title')}">
-      </div>
+      ${variantsBlock}
       <div class="field">
         <label class="lbl">Initial Inventory (qty)</label>
         <input data-k="qty" type="number" min="0" value="0">
-      </div>
-      <div class="field full">
-        <label class="lbl">Variants</label>
-        <table class="variants">
-          <thead><tr><th></th><th>Option Value</th><th>SKU</th><th>Barcode</th></tr></thead>
-          <tbody>${variantRows}</tbody>
-        </table>
       </div>
     </div>
     <div class="action-bar">
@@ -507,6 +522,11 @@ function collectPayload(idx){
     const vk = el.dataset.vk;
     a.variants[vi][vk] = el.value || (vk === 'barcode' ? null : '');
   });
+
+  if((a.variants || []).length === 1){
+    a.variant_option_name = 'Title';
+    a.variants[0].option_value = 'Default Title';
+  }
   return a;
 }
 

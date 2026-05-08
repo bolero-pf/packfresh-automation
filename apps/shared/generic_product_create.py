@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 
 SHOPIFY_VERSION = "2025-10"
 VENDOR = "Common Lands"
+TEMPLATE_SUFFIX = "cro-alt"
+
+# Search terms used to look up Shopify taxonomy categories at runtime.
+# None = don't bother (too generic to map well).
+PRODUCT_TYPE_TAXONOMY_SEARCH = {
+    "Board Game": "Board Games",
+    "Card Game (Non-TCG)": "Card Games",
+    "Puzzle": "Jigsaw Puzzles",
+    "Toy / Plush": "Stuffed Animals",
+    "Accessory": None,
+    "Collectible": None,
+    "Misc": None,
+}
+
+_TAXONOMY_CACHE: dict[str, str | None] = {}
 
 
 def _slugify(s: str) -> str:
@@ -205,6 +220,7 @@ def create_draft_product(
             "status": "draft",
             "product_type": product_type,
             "vendor": VENDOR,
+            "template_suffix": TEMPLATE_SUFFIX,
             "body_html": body_html,
             "tags": ", ".join(tags),
             "variants": rest_variants,
@@ -253,6 +269,18 @@ def create_draft_product(
     except Exception as e:
         summary["errors"].append(f"publish: {e}")
 
+    try:
+        cat_gid = _find_taxonomy_gid(product_type)
+        if cat_gid:
+            _set_product_category(product_gid, cat_gid)
+    except Exception as e:
+        summary["errors"].append(f"category: {e}")
+
+    try:
+        _set_agentic_metafields(product_gid, payload)
+    except Exception as e:
+        summary["errors"].append(f"agentic: {e}")
+
     if qty > 0 and created_variants:
         try:
             _set_inventory(created_variants[0]["id"], qty)
@@ -283,6 +311,86 @@ def _publish_to_all_channels(product_gid: str) -> None:
             """, {"id": product_gid, "pub": pub["id"]})
         except Exception as e:
             logger.warning("Publish to %s failed: %s", pub.get("name"), e)
+
+
+def _find_taxonomy_gid(product_type: str) -> str | None:
+    """Look up best-match Shopify taxonomy category for a product_type. Cached."""
+    if product_type in _TAXONOMY_CACHE:
+        return _TAXONOMY_CACHE[product_type]
+    search = PRODUCT_TYPE_TAXONOMY_SEARCH.get(product_type)
+    if not search:
+        _TAXONOMY_CACHE[product_type] = None
+        return None
+    try:
+        data = _gql("""
+            query TaxonomyLookup($s: String!) {
+              taxonomy {
+                categories(search: $s, first: 5) {
+                  nodes { id name fullName isLeaf }
+                }
+              }
+            }
+        """, {"s": search})
+        nodes = (data.get("taxonomy") or {}).get("categories", {}).get("nodes", []) or []
+        leaf = next((n for n in nodes if n.get("isLeaf")), None)
+        gid = (leaf or (nodes[0] if nodes else {})).get("id")
+        _TAXONOMY_CACHE[product_type] = gid
+        if gid:
+            logger.info("Taxonomy %r → %s (%s)", product_type, gid,
+                        (leaf or nodes[0]).get("fullName"))
+        return gid
+    except Exception as e:
+        logger.warning("Taxonomy lookup failed for %r: %s", product_type, e)
+        _TAXONOMY_CACHE[product_type] = None
+        return None
+
+
+def _set_product_category(product_gid: str, category_gid: str) -> None:
+    result = _gql("""
+        mutation SetCategory($id: ID!, $cat: ID!) {
+          productUpdate(product: { id: $id, category: $cat }) {
+            product { id category { fullName } }
+            userErrors { field message }
+          }
+        }
+    """, {"id": product_gid, "cat": category_gid})
+    errs = result.get("productUpdate", {}).get("userErrors", [])
+    if errs:
+        logger.warning("set_product_category errors: %s", errs)
+
+
+def _strip_html(html: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _set_agentic_metafields(product_gid: str, payload: dict) -> None:
+    """Mirror the TCG Add Item flow's agentic.* metafields for AI shopping agents."""
+    title = payload["title"]
+    product_type = payload.get("product_type", "")
+    body_text = _strip_html(payload.get("body_html", ""))
+    sentences = re.split(r"(?<=[.!?])\s+", body_text)
+    agentic_desc = " ".join(sentences[:2])[:300] or f"{product_type} sold by {VENDOR}."
+
+    metafields = [
+        {"ownerId": product_gid, "namespace": "agentic", "key": "title",
+         "value": title, "type": "single_line_text_field"},
+        {"ownerId": product_gid, "namespace": "agentic", "key": "description",
+         "value": agentic_desc, "type": "multi_line_text_field"},
+        {"ownerId": product_gid, "namespace": "agentic", "key": "category",
+         "value": product_type, "type": "single_line_text_field"},
+    ]
+    result = _gql("""
+        mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id }
+            userErrors { field message }
+          }
+        }
+    """, {"metafields": metafields})
+    errs = result.get("metafieldsSet", {}).get("userErrors", [])
+    if errs:
+        raise RuntimeError(f"metafieldsSet errors: {errs}")
 
 
 def _set_inventory(variant_id: int, quantity: int) -> None:
