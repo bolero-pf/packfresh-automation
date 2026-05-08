@@ -76,23 +76,39 @@ def _gql(query: str, variables: dict = None) -> dict:
     return body.get("data", {})
 
 
-def _normalize_image_for_shopify(path: str, max_long_edge: int = 2048) -> tuple[bytes, str]:
-    """Read source image, downscale if huge, return (bytes, ext)."""
+def _normalize_image_for_shopify(path: str, max_long_edge: int = 2048) -> tuple[bytes, str, str]:
+    """Read source image, downscale if huge. Preserves transparency when present.
+
+    Returns (bytes, ext, mime_type). Transparent PNGs stay PNG (alpha preserved);
+    everything else becomes JPEG for size.
+    """
     im = Image.open(path)
-    if im.mode in ("RGBA", "LA", "P"):
-        im = im.convert("RGB")
+    has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+
+    if has_alpha:
+        im = im.convert("RGBA")
+    else:
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+
     w, h = im.size
     if max(w, h) > max_long_edge:
         scale = max_long_edge / max(w, h)
         im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
     buf = io.BytesIO()
+    if has_alpha:
+        im.save(buf, format="PNG", optimize=True)
+        return buf.getvalue(), "png", "image/png"
     im.save(buf, format="JPEG", quality=90, optimize=True)
-    return buf.getvalue(), "jpg"
+    return buf.getvalue(), "jpg", "image/jpeg"
 
 
-def _upload_image_to_shopify(slug: str, idx: int, jpg_bytes: bytes, alt: str) -> str:
+def _upload_image_to_shopify(slug: str, idx: int, img_bytes: bytes,
+                              alt: str, ext: str = "jpg",
+                              mime: str = "image/jpeg") -> str:
     """Stage upload + fileCreate, poll until URL ready. Returns hosted URL."""
-    filename = f"{slug}-{idx}.jpg"
+    filename = f"{slug}-{idx}.{ext}"
 
     staged = _gql("""
         mutation StagedUploads($input: [StagedUploadInput!]!) {
@@ -104,7 +120,7 @@ def _upload_image_to_shopify(slug: str, idx: int, jpg_bytes: bytes, alt: str) ->
     """, {"input": [{
         "resource": "IMAGE",
         "filename": filename,
-        "mimeType": "image/jpeg",
+        "mimeType": mime,
         "httpMethod": "POST",
     }]})
     errs = staged.get("stagedUploadsCreate", {}).get("userErrors", [])
@@ -115,7 +131,7 @@ def _upload_image_to_shopify(slug: str, idx: int, jpg_bytes: bytes, alt: str) ->
     form = {p["name"]: p["value"] for p in target["parameters"]}
     s3 = requests.post(
         target["url"], data=form,
-        files={"file": (filename, jpg_bytes, "image/jpeg")},
+        files={"file": (filename, img_bytes, mime)},
         timeout=60,
     )
     s3.raise_for_status()
@@ -255,8 +271,12 @@ def create_draft_product(
             summary["errors"].append(f"image missing for {fn}")
             continue
         try:
-            jpg, _ = _normalize_image_for_shopify(path)
-            url = _upload_image_to_shopify(slug, idx, jpg, alt=f"{title} {v.get('option_value', '')}")
+            img_bytes, ext, mime = _normalize_image_for_shopify(path)
+            url = _upload_image_to_shopify(
+                slug, idx, img_bytes,
+                alt=f"{title} {v.get('option_value', '')}",
+                ext=ext, mime=mime,
+            )
             variant_id = fn_to_variant_id.get(fn)
             _attach_image(product_gid, url, alt=title,
                           variant_ids=[variant_id] if (variant_id and not is_single) else None)
