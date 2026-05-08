@@ -17,6 +17,7 @@ Env vars required:
 import os
 import io
 import json
+import time
 import base64
 import logging
 from PIL import Image
@@ -24,6 +25,10 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+
+_CANONICAL_TAGS_CACHE: list[str] = []
+_CANONICAL_TAGS_AT: float = 0.0
+_CANONICAL_TAGS_TTL = 3600  # 1 hour
 
 PRODUCT_TYPES = [
     "Board Game",
@@ -35,7 +40,7 @@ PRODUCT_TYPES = [
     "Misc",
 ]
 
-SYSTEM_PROMPT = f"""You are a product data specialist for Common Lands, a hobby and collectibles retailer expanding into board games, non-TCG card games, and tabletop accessories.
+SYSTEM_PROMPT_TMPL = f"""You are a product data specialist for Common Lands, a hobby and collectibles retailer expanding into board games, non-TCG card games, and tabletop accessories.
 
 Your job is to look at product photos and produce a clean Shopify product draft. The operator will review every field before saving — so be honest about what you can see and what's uncertain. Surface uncertainty in the `notes` field rather than guessing.
 
@@ -61,7 +66,8 @@ MSRP — be diligent, this is the price the store will list at:
 - If two sources disagree, prefer the higher one if both are live retailers (the lower may be a sale).
 - If you find an article quoting an MSRP, do a follow-up search to verify on a live shopping page before trusting it.
 - Run searches like: "<title> site:target.com", "<title> site:ravensburger.us", "<title> buy", "<title> in stock". Avoid "<title> MSRP" — that returns articles, not shopping pages.
-- Return msrp_usd as a number with no currency symbol; msrp_source_url must be the live shopping page where you saw the price.
+- Return msrp_usd as a number with no currency symbol AND with the exact cents shown on the page. $29.99 is NOT $30 — preserve the .99 / .95 / .49 etc. Rounding to whole dollars is wrong; the cents are part of the actual MSRP.
+- msrp_source_url must be the live shopping page where you saw the price.
 - If you can't confirm a price on a live shopping page, return null and explain in `notes` (e.g., "found $29.99 in a 2023 announcement but couldn't verify on a live shopping page").
 
 UPC / Barcode:
@@ -76,13 +82,12 @@ BODY HTML:
 - A short <h2> hook, a 1-2 sentence pitch, and an <h3>About:</h3> section with a <ul> of relevant facts (player count, age range, play time, components — only what you can confirm from the box or a credible source).
 - Clean semantic HTML, no inline styles, no marketing fluff.
 
-TAGS — these drive storefront collections, so wrong tags break them:
-- 3-8 short lowercase tags. Be specific to THIS product.
-- DO NOT include the product_type as a tag. It already lives in its own field — duplicating it ("board game", "puzzle") in tags clutters collection filters.
-- DO NOT include the publisher's other product lines. If Ravensburger is the publisher and this is a board game, do NOT add "puzzle" — Ravensburger also makes puzzles, but this specific product isn't one. The tag describes THIS item, not the publisher's catalog.
-- DO NOT include the publisher name as a tag.
-- Good tags describe: theme (horror, fantasy, sci-fi, party), mechanic (cooperative, deckbuilding, area-control, dexterity), audience (family, adult, kids), or franchise (adventure-time, monsters, etc.).
-- If you only have 3 confident tags, return 3. Padding with generic tags hurts more than helps.
+TAGS — Common Lands has a fixed canonical tag set that drives storefront collections. Inventing new tags BREAKS the store.
+- The allowed tag list is provided below. You may ONLY return tags that are spelled exactly as they appear on this list (case-insensitive).
+- Pick zero or more that genuinely apply to THIS product. Returning an empty array is correct and expected when nothing fits — do not pad.
+- Do NOT invent tags like "maze-game" or "labyrinth" or "family-game". If a perfect tag doesn't exist on the list, omit it.
+- Allowed tags:
+{{allowed_tags_block}}
 
 WEIGHT:
 - Best estimate in ounces for shipping. Standard board game box ~32oz, large box ~64oz, small card game ~6oz. Be conservative; operator can adjust.
@@ -132,6 +137,50 @@ OUTPUT_SCHEMA = {
     ],
     "additionalProperties": False,
 }
+
+
+def _get_canonical_tags() -> list[str]:
+    """Fetch all tags currently used by products in the store. Cached 1h.
+
+    Returns a sorted list. Empty list on failure (caller should handle —
+    means we'll skip tags entirely rather than invent garbage).
+    """
+    global _CANONICAL_TAGS_CACHE, _CANONICAL_TAGS_AT
+    now = time.time()
+    if _CANONICAL_TAGS_CACHE and (now - _CANONICAL_TAGS_AT) < _CANONICAL_TAGS_TTL:
+        return _CANONICAL_TAGS_CACHE
+    try:
+        from shopify_graphql import shopify_gql
+        all_tags: set[str] = set()
+        cursor = None
+        for _ in range(40):  # safety bound: 40 * 250 = 10K tags
+            after = f', after: "{cursor}"' if cursor else ""
+            data = shopify_gql(f"""
+                query {{
+                  productTags(first: 250{after}) {{
+                    edges {{ node cursor }}
+                    pageInfo {{ hasNextPage }}
+                  }}
+                }}
+            """)
+            edges = (data.get("data", {}).get("productTags", {}) or {}).get("edges", []) or []
+            if not edges:
+                break
+            for e in edges:
+                t = (e.get("node") or "").strip()
+                if t:
+                    all_tags.add(t)
+            page_info = (data.get("data", {}).get("productTags", {}) or {}).get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = edges[-1].get("cursor")
+        _CANONICAL_TAGS_CACHE = sorted(all_tags)
+        _CANONICAL_TAGS_AT = now
+        logger.info("Loaded %d canonical tags from Shopify", len(_CANONICAL_TAGS_CACHE))
+        return _CANONICAL_TAGS_CACHE
+    except Exception as e:
+        logger.warning("Canonical tag fetch failed (%s); falling back to empty list", e)
+        return _CANONICAL_TAGS_CACHE or []
 
 
 def _resize_for_vision(image_path: str, max_long_edge: int = 768) -> tuple[bytes, str]:
@@ -189,10 +238,17 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
     )
     content_blocks.append({"type": "text", "text": prompt_text})
 
+    canonical_tags = _get_canonical_tags()
+    if canonical_tags:
+        allowed_block = "\n".join(f"  - {t}" for t in canonical_tags)
+    else:
+        allowed_block = "  (no canonical tags loaded — return an empty array)"
+    system_prompt = SYSTEM_PROMPT_TMPL.replace("{{allowed_tags_block}}", allowed_block)
+
     response = client.messages.create(
         model="claude-haiku-4-5",
         max_tokens=4000,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{"role": "user", "content": content_blocks}],
         tools=[{
             "type": "web_search_20260209",
@@ -209,12 +265,14 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
         raise RuntimeError(f"No text in Claude response (stop_reason={response.stop_reason})")
     result = json.loads(text_blocks[-1])
 
-    result["tags"] = _scrub_tags(result.get("tags") or [])
+    result["title"] = _clean_title(result.get("title", ""), name_hint)
+    result["tags"] = _scrub_tags(result.get("tags") or [], canonical_tags)
 
     logger.info(
-        "Bulk vision enrichment for %r: type=%s variants=%d msrp=%s",
+        "Bulk vision enrichment for %r: type=%s variants=%d msrp=%s tags=%d",
         name_hint, result.get("product_type"),
         len(result.get("variants", [])), result.get("msrp_usd"),
+        len(result.get("tags", [])),
     )
     return result
 
@@ -232,13 +290,36 @@ _BANNED_TAG_TOKENS = {
 }
 
 
-def _scrub_tags(tags: list) -> list:
+def _scrub_tags(tags: list, canonical: list[str] | None = None) -> list:
+    """Filter to canonical tags only (case-insensitive). Banned tokens always
+    stripped, even if they ended up in canonical somehow. Preserves the
+    canonical casing/spelling on output so Shopify de-dupes properly."""
+    canon_lower = {t.lower(): t for t in (canonical or [])}
     seen = set()
     out = []
     for t in tags:
         tl = (t or "").strip().lower()
         if not tl or tl in _BANNED_TAG_TOKENS or tl in seen:
             continue
+        if canonical:
+            if tl not in canon_lower:
+                continue
+            tag_out = canon_lower[tl]
+        else:
+            tag_out = tl
         seen.add(tl)
-        out.append(tl)
+        out.append(tag_out)
     return out
+
+
+def _clean_title(title: str, fallback: str) -> str:
+    """If Claude returns junk (empty, whitespace, just punctuation, < 3 chars),
+    fall back to the filename-derived name_hint. Strips leading/trailing
+    whitespace + dangling punctuation."""
+    import re
+    t = (title or "").strip().strip(",.;:!?-_ ").strip()
+    letters = re.sub(r"[^A-Za-z0-9]", "", t)
+    if len(letters) < 3:
+        logger.warning("Bulk vision returned junk title %r; falling back to %r", title, fallback)
+        return fallback.strip()
+    return t
