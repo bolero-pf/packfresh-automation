@@ -3369,9 +3369,16 @@ function _relinkShowSearch() {
         : (rs.isGraded
             ? `<span style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;font-size:0.75rem;padding:1px 6px;border-radius:4px;">${rs.gradeCompany||'PSA'} ${rs.gradeValue||'?'}</span>`
             : `<span style="font-weight:600;">${rs.condition||'NM'}</span>`);
+    // Default raw search to "<name> <card_number>" — printed_number scoring
+    // (=100 exact, +30 prefix) crushes set-name fuzz, and Collectr-imported
+    // set names are often wrong ("ME: Promo" for ME01 base etc.) so folding
+    // them into the query poisons matches. Sealed has no card_number.
+    const defaultSearch = (!isSealed && rs.cardNumber)
+        ? `${rs.cardName} ${rs.cardNumber}`
+        : rs.cardName;
     body.innerHTML = `
         <div class="form-group"><label>${nameLabel}</label>
-            <input type="text" id="relink-search" value="${rs.cardName.replace(/"/g,'&quot;')}" placeholder="${namePlaceholder}"></div>
+            <input type="text" id="relink-search" value="${defaultSearch.replace(/"/g,'&quot;')}" placeholder="${namePlaceholder}"></div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
             <div class="form-group"><label>Set</label>
                 <input type="text" id="relink-set" value="${(rs.setName||'').replace(/"/g,'&quot;')}" placeholder="e.g. Paldean Fates"></div>
@@ -3672,12 +3679,14 @@ function _relinkRenderSealedResults(results, container) {
     const endpoint = isSealed ? '/api/search/sealed' : '/api/search/cards';
     const noneMsg = isSealed ? 'No sealed products found' : 'No cards found';
     try {
-        // Fold set into query string for cards (PPT/Scrydex fuzzy-match across
-        // name+set tokens). Sealed cache search already handles set tokens.
-        const combinedQuery = (!isSealed && setFilter) ? searchName + ' ' + setFilter : searchName;
+        // Raw card search uses the search box verbatim — it's pre-filled
+        // with "<name> <card_number>" which hits printed_number scoring.
+        // Don't fold the Set field in: Collectr-imported set names are often
+        // wrong and folding them poisons the query. Set field still works
+        // for sealed (passed as set_name= soft-filter on the cache side).
         const body = isSealed
             ? { query: searchName, set_name: setFilter || undefined }
-            : { query: combinedQuery };
+            : { query: searchName };
         if (prefer) body.prefer = prefer;
         const r = await fetch(endpoint, {
             method: 'POST',
@@ -3692,19 +3701,6 @@ function _relinkRenderSealedResults(results, container) {
             if (filtered.length > 0) results = filtered;
         }
         if (!r.ok || !results.length) {
-            if (setFilter && !isSealed && !prefer) {
-                const r2 = await fetch('/api/search/cards', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ query: searchName }),
-                });
-                const d2 = await r2.json();
-                if (d2.results && d2.results.length) {
-                    resultsDiv.innerHTML = '<div class="alert alert-warning" style="font-size:0.8rem; padding:6px 10px; margin-bottom:8px;">No exact match for set "' + setFilter + '" — showing all results for "' + searchName + '"</div>';
-                    _relinkRenderResults(d2.results, resultsDiv, true);
-                    return;
-                }
-            }
             resultsDiv.innerHTML = '<div class="alert alert-warning">' + noneMsg + (prefer === 'ppt' ? ' on PPT' : '') + '</div>';
             return;
         }
