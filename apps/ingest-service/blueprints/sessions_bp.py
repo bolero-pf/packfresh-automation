@@ -787,11 +787,21 @@ def session_meta_stats(session_id):
     grand_with_bd = 0
 
     for item in items:
+        # Non-sealed items (raw cards, graded slabs) MUST NOT auto-match the
+        # inventory cache by tcgplayer_id alone — one tcg_id legitimately
+        # has many listings (raw NM/LP/HP/DMG, PSA 9, PSA 10, BGS 9.5, etc.)
+        # and the cache row picked is whichever happens to come back first.
+        # That conflates a PSA 9 intake with a $700 PSA 10 listing, polluting
+        # margin math both directions. classify_item() ignores tags for raw
+        # anyway (returns Graded/Raw straight from product_type+is_graded),
+        # so dropping the cache row costs nothing for those rows.
+        is_sealed_item = (item.get("product_type") or "").lower() == "sealed"
         cache_row = None
-        if item.get("tcgplayer_id"):
-            cache_row = cache_by_tcg.get(item["tcgplayer_id"])
-        if not cache_row and item.get("shopify_product_id"):
-            cache_row = cache_by_shopify.get(str(item["shopify_product_id"]))
+        if is_sealed_item:
+            if item.get("tcgplayer_id"):
+                cache_row = cache_by_tcg.get(item["tcgplayer_id"])
+            if not cache_row and item.get("shopify_product_id"):
+                cache_row = cache_by_shopify.get(str(item["shopify_product_id"]))
         tags_csv = (cache_row or {}).get("tags") or ""
 
         label = classify_item(item, tags_csv)

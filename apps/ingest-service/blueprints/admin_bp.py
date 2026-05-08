@@ -288,36 +288,46 @@ def shopify_session_store_check(session_id):
         tcg_id = item["tcgplayer_id"]
         item_status = item.get("item_status", "good")
         is_damaged_item = (item_status == "damaged")
+        # Only sealed products auto-match by tcgplayer_id. For raw cards and
+        # graded slabs, one tcg_id maps to many listings (NM/LP/HP, PSA 9,
+        # PSA 10, BGS, etc.) — auto-matching picks whichever row comes back
+        # first and shows e.g. a PSA 10 $700 sticker on a PSA 9 intake row.
+        # Honour an explicit shopify_product_id link (Find-in-Store) below;
+        # otherwise leave non-sealed items as "Not in store".
+        is_sealed_item = (item.get("product_type") or "").lower() == "sealed"
 
         sd = None
-        damaged_variant_exists = tcg_id in damaged_map
-        normal_variant = normal_map.get(tcg_id)
+        damaged_variant_exists = is_sealed_item and (tcg_id in damaged_map)
+        normal_variant = normal_map.get(tcg_id) if is_sealed_item else None
         store_note = None
 
-        if is_damaged_item:
-            if damaged_variant_exists:
-                # Best case: we have a damaged listing in the store
-                sd = damaged_map[tcg_id]
-                store_note = "Matched damaged variant"
-            elif normal_variant and normal_variant["shopify_price"]:
-                # Fallback: use normal price × 88%
-                sd = {
-                    **normal_variant,
-                    "shopify_price": round(normal_variant["shopify_price"] * DAMAGED_DISCOUNT, 2),
-                    "shopify_qty": 0,  # we don't have damaged stock
-                    "title": normal_variant["title"] + " [est. damaged]",
-                    "is_damaged": True,
-                }
-                store_note = f"No damaged variant — estimated at {int(DAMAGED_DISCOUNT*100)}% of ${normal_variant['shopify_price']:.2f}"
-            # else: sd stays None — not in store at all
-        else:
-            # Normal item — use non-damaged variant
-            sd = normal_variant
+        if is_sealed_item:
+            if is_damaged_item:
+                if damaged_variant_exists:
+                    # Best case: we have a damaged listing in the store
+                    sd = damaged_map[tcg_id]
+                    store_note = "Matched damaged variant"
+                elif normal_variant and normal_variant["shopify_price"]:
+                    # Fallback: use normal price × 88%
+                    sd = {
+                        **normal_variant,
+                        "shopify_price": round(normal_variant["shopify_price"] * DAMAGED_DISCOUNT, 2),
+                        "shopify_qty": 0,  # we don't have damaged stock
+                        "title": normal_variant["title"] + " [est. damaged]",
+                        "is_damaged": True,
+                    }
+                    store_note = f"No damaged variant — estimated at {int(DAMAGED_DISCOUNT*100)}% of ${normal_variant['shopify_price']:.2f}"
+                # else: sd stays None — not in store at all
+            else:
+                # Normal item — use non-damaged variant
+                sd = normal_variant
 
         # Fallback: a Find-in-Store action can attach a shopify_product_id
         # to an item whose tcgplayer_id never matched the cache (CN/JP
         # listings, custom titles). Honour the shopify link so the Store
-        # tab shows it as found instead of "Not Found".
+        # tab shows it as found instead of "Not Found". This path is also
+        # the only way non-sealed items can show as in-store, since the
+        # auto-match above is gated on is_sealed_item.
         if sd is None and item.get("shopify_product_id"):
             sd = shopify_direct_map.get(str(item["shopify_product_id"]))
             if sd:
