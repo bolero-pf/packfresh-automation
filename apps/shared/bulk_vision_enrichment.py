@@ -1,14 +1,18 @@
 """
-bulk_vision_enrichment.py — Vision + web-search Claude pass for non-TCG bulk product creation.
+bulk_vision_enrichment.py — Vision-only Claude pass for non-TCG bulk product creation.
 
 Per product group (one or more product photos sharing a name), generates:
     title, product_type, publisher, body_html, tags, weight_oz_estimate,
-    msrp_usd + msrp_source_url, variant_option_name, per-variant SKU/barcode/option_value,
-    notes (operator review flags).
+    variant_option_name, per-variant SKU/barcode/option_value, notes.
 
-Uses claude-haiku-4-5 (separate rate-limit pool from Sonnet, cheaper) with
-web_search_20260209 tool for MSRP lookup and structured JSON output via
-output_config.format.
+Uses claude-haiku-4-5 with structured JSON output via output_config.format.
+
+NO web_search — earlier versions used it for MSRP/UPC lookup but each search
+fed multiple KB of results back into the model context, so a single call
+consumed 30-50K input tokens. With Analyze All on a folder of products this
+saturated the 50K TPM rate limit and the SDK retry loop couldn't escape.
+MSRPs are now filled by the operator on the review screen — faster and more
+accurate than the announcement-pages Claude was finding anyway.
 
 Env vars required:
     ANTHROPIC_API_KEY
@@ -57,26 +61,15 @@ VARIANTS:
 - Generate a SKU per variant in the form CL-<short-product-slug>-<short-option-slug>, uppercase, dashes only.
 - If you can clearly read a UPC/EAN barcode in any photo, return it on that variant. Otherwise null.
 
-MSRP — be diligent, this is the price the store will list at:
-- You are looking for the CURRENT retail price on a LIVE product page where someone could buy the item right now. NOT press releases, announcements, news articles, BoardGameGeek listings, Reddit posts, blog reviews, or unboxing videos. Those often quote launch prices that are now out of date.
-- Acceptable sources, in priority order:
-  (1) The manufacturer's own shop page (ravensburger.us, asmodee.com, target.com, etc.) — must be a current product page with an "add to cart" button or visible in-stock price, not a "coming soon" or "announcement" page.
-  (2) Target.com, BarnesAndNoble.com, Walmart.com, Amazon.com (Amazon-sold, not third-party) product pages with a current price.
-- Reject signals: "announcement", "preview", "coming soon", "release date", "originally priced at", "launched at $X", or any article older than 6 months that quotes a price as a sentence rather than a live shopping element.
-- If two sources disagree, prefer the higher one if both are live retailers (the lower may be a sale).
-- If you find an article quoting an MSRP, do a follow-up search to verify on a live shopping page before trusting it.
-- Run searches like: "<title> site:target.com", "<title> site:ravensburger.us", "<title> buy", "<title> in stock". Avoid "<title> MSRP" — that returns articles, not shopping pages.
-- Return msrp_usd as a number with no currency symbol AND with the exact cents shown on the page. $29.99 is NOT $30 — preserve the .99 / .95 / .49 etc. Rounding to whole dollars is wrong; the cents are part of the actual MSRP.
-- msrp_source_url must be the live shopping page where you saw the price.
-- If you can't confirm a price on a live shopping page, return null and explain in `notes` (e.g., "found $29.99 in a 2023 announcement but couldn't verify on a live shopping page").
+MSRP:
+- You do NOT have web access. Set msrp_usd to null by default.
+- Only return a number if the price is visibly printed on the product photo (rare — most boxes don't show price). If you do read it from the photo, preserve exact cents ($29.99 not $30).
+- The operator will fill MSRP from the manufacturer's website during review.
 
 UPC / Barcode:
-- First, look at every photo for a visible UPC barcode (often on the back or bottom of the box). Read the digits below the bars. 12-13 digits.
-- If no UPC is visible in the photos, search upcitemdb.com for the product (e.g. `site:upcitemdb.com "<exact product title>"`). Their listing pages show the UPC at the top.
-- Also try barcodelookup.com or the manufacturer's product page (sometimes lists UPC in spec table).
-- Validate: 12 digits = UPC-A, 13 digits = EAN-13. Reject anything else.
-- If you find variant-specific UPCs (one per color/size), assign them per variant. If only one UPC for the whole product line, leave variant barcodes null and note that in `notes`.
-- Better to return null than a wrong UPC. The barcode goes on the Shopify variant and customers may scan it in store.
+- Look at every photo for a visible UPC barcode (often on the back or bottom of the box). Read the digits below the bars. 12 digits = UPC-A, 13 digits = EAN-13.
+- If no UPC is visible, return null. Operator will fill from manufacturer site if needed.
+- Better to return null than a wrong UPC.
 
 BODY HTML:
 - A short <h2> hook, a 1-2 sentence pitch, and an <h3>About:</h3> section with a <ul> of relevant facts (player count, age range, play time, components — only what you can confirm from the box or a credible source).
@@ -216,7 +209,7 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
         raise RuntimeError("ANTHROPIC_API_KEY not set")
 
     import anthropic
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=5)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=10)
 
     content_blocks = []
     for v in variants:
@@ -234,7 +227,7 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
     prompt_text = (
         f"Name hint from filenames: {name_hint}\n\n"
         f"Variants in this group:\n{variant_lines}\n\n"
-        "Look at the images, search the web for MSRP if useful, and return the JSON product draft."
+        "Look at the images and return the JSON product draft."
     )
     content_blocks.append({"type": "text", "text": prompt_text})
 
@@ -247,14 +240,9 @@ def analyze_product_group(name_hint: str, variants: list[dict]) -> dict:
 
     response = client.messages.create(
         model="claude-haiku-4-5",
-        max_tokens=4000,
+        max_tokens=2000,
         system=system_prompt,
         messages=[{"role": "user", "content": content_blocks}],
-        tools=[{
-            "type": "web_search_20260209",
-            "name": "web_search",
-            "allowed_callers": ["direct"],
-        }],
         output_config={
             "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
         },
