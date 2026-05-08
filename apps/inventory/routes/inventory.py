@@ -1150,6 +1150,12 @@ hr{{border:none;border-top:1px solid var(--border);margin:16px 0;}}
   <div id="result"></div>
 
   <div class="card" style="margin-top:24px;">
+    <h2>Bulk Add from Photos (non-TCG)</h2>
+    <p>For board games, non-TCG card games, accessories. Drop a folder of product photos and Claude pre-fills everything — title, type, MSRP, variants. Filename = product name; <code>_suffix</code> marks variants (e.g. <code>Monster Prism Tube_Blue.jpg</code>).</p>
+    <a href="/inventory/bulk-add" class="btn" style="display:inline-flex;align-items:center;line-height:40px;text-decoration:none;">Open Bulk Add →</a>
+  </div>
+
+  <div class="card" style="margin-top:24px;">
     <h2>Stub Listing (no TCGPlayer ID)</h2>
     <p>For slabs, accessories, or anything not on PPT.</p>
     <div class="row">
