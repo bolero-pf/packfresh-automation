@@ -715,15 +715,15 @@ function toggleIntakeManualDirect() {
     el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
-async function intakeSealedSearch(live) {
+async function intakeSealedSearch(tryPpt) {
     const searchTerm = document.getElementById('intake-sealed-search').value.trim();
     const resultsDiv = document.getElementById('intake-search-results');
     if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a search term</div>'; return; }
 
-    resultsDiv.innerHTML = `<div class="loading"><span class="spinner"></span> Searching${live ? ' PPT live' : ''}...</div>`;
+    resultsDiv.innerHTML = `<div class="loading"><span class="spinner"></span> Searching${tryPpt ? ' PPT' : ''}...</div>`;
     try {
         const body = { query: searchTerm };
-        if (live) body.live = true;
+        if (tryPpt) body.prefer = 'ppt';
         const r = await fetch('/api/search/sealed', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -770,12 +770,12 @@ async function intakeSealedSearch(live) {
             </div>`;
         }).join('');
 
-        // If results came from cache, offer PPT live fallback
-        const anyCache = products.some(p => p._price_source === 'cache');
-        if (anyCache) {
+        // Escape hatch: when Scrydex/cache returned wrong matches, force PPT.
+        const anyPpt = products.some(p => p._price_source === 'ppt');
+        if (!anyPpt) {
             resultsDiv.innerHTML += `<div style="margin-top:8px; text-align:center;">
                 <button class="btn btn-secondary btn-sm" onclick="intakeSealedSearch(true)" style="font-size:0.78rem; opacity:0.8;">
-                    Don't see it? Search live →
+                    Don't see it? Try PPT →
                 </button>
             </div>`;
         }
