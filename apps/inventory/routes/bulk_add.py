@@ -22,6 +22,7 @@ import secrets
 import logging
 import tempfile
 import unicodedata
+from collections import Counter
 from pathlib import Path
 
 from flask import Blueprint, request, jsonify, send_file, abort
@@ -67,12 +68,48 @@ def _slug_key(name: str) -> str:
 
 
 def _parse_filename(filename: str) -> tuple[str, str]:
-    """`Monster Prism Tube_Blue.jpg` -> ("Monster Prism Tube", "Blue")."""
+    """`Monster Prism Tube_Blue.jpg` -> ("Monster Prism Tube", "Blue").
+    Caller must still check whether the underscore separator actually marks a
+    variant (i.e. multiple files share the base) — see _build_groups."""
     stem = Path(filename).stem
     if "_" in stem:
         name_part, _, variant_part = stem.partition("_")
         return name_part.strip(), variant_part.replace("_", " ").strip()
     return stem.strip(), ""
+
+
+def _build_groups(parsed: list[dict]) -> dict[str, dict]:
+    """
+    Cross-file grouping. If a base name appears in multiple files, the
+    underscore is a variant separator (`Foo_Blue` + `Foo_Red`). If a base
+    appears only once and has a non-empty variant_part, the underscore was
+    just a filename-friendly space (download managers do this) — treat the
+    whole filename as the product name.
+    """
+    base_counts = Counter(_slug_key(p["base"]) for p in parsed)
+    groups: dict[str, dict] = {}
+
+    for p in parsed:
+        base_key = _slug_key(p["base"])
+        is_real_variant = base_counts[base_key] > 1
+
+        if not is_real_variant and p["variant"]:
+            full_name = f"{p['base']} {p['variant']}".strip()
+            key = _slug_key(full_name)
+            display = full_name
+            option_hint = ""
+        else:
+            key = base_key
+            display = p["base"]
+            option_hint = p["variant"]
+
+        g = groups.setdefault(key, {"key": key, "name": display, "variants": []})
+        g["variants"].append({
+            "filename": p["safe"],
+            "original": p["original"],
+            "option_hint": option_hint,
+        })
+    return groups
 
 
 @bp.route("/bulk-add")
@@ -91,7 +128,7 @@ def upload():
     sdir = _session_dir(session_id)
     sdir.mkdir(parents=True, exist_ok=True)
 
-    groups: dict[str, dict] = {}
+    parsed: list[dict] = []
     skipped: list[str] = []
 
     for f in files:
@@ -108,29 +145,33 @@ def upload():
         save_path = sdir / safe
         f.save(save_path)
 
-        display_name, option_hint = _parse_filename(original)
-        if not display_name:
+        base, variant = _parse_filename(original)
+        if not base:
             skipped.append(f"{original} (no name)")
-            continue
-
-        key = _slug_key(display_name)
-        g = groups.setdefault(key, {
-            "key": key,
-            "name": display_name,
-            "variants": [],
-        })
-        if len(g["variants"]) >= MAX_VARIANTS_PER_GROUP:
-            skipped.append(f"{original} (group full)")
             try:
                 save_path.unlink()
             except Exception:
                 pass
             continue
-        g["variants"].append({
-            "filename": safe,
+
+        parsed.append({
+            "safe": safe,
             "original": original,
-            "option_hint": option_hint,
+            "base": base,
+            "variant": variant,
         })
+
+    groups = _build_groups(parsed)
+
+    for key, g in list(groups.items()):
+        if len(g["variants"]) > MAX_VARIANTS_PER_GROUP:
+            for extra in g["variants"][MAX_VARIANTS_PER_GROUP:]:
+                skipped.append(f"{extra['original']} (group full)")
+                try:
+                    (sdir / extra["filename"]).unlink()
+                except Exception:
+                    pass
+            g["variants"] = g["variants"][:MAX_VARIANTS_PER_GROUP]
 
     return jsonify({
         "session_id": session_id,
@@ -165,12 +206,23 @@ def analyze():
     sdir = _session_dir(session_id)
     enriched_variants = []
     for v in variants:
-        fn = secure_filename(v.get("filename") or "")
+        raw_name = v.get("filename") or ""
+        fn = secure_filename(raw_name)
         if not fn:
             return jsonify({"error": "missing filename"}), 400
         path = sdir / fn
         if not path.is_file():
-            return jsonify({"error": f"image not found: {fn}"}), 404
+            on_disk = sorted(p.name for p in sdir.iterdir()) if sdir.is_dir() else []
+            logger.warning(
+                "bulk-add image not found: requested=%r safe=%r sdir=%s on_disk=%s",
+                raw_name, fn, sdir, on_disk,
+            )
+            return jsonify({
+                "error": f"image not found: {fn}",
+                "requested_filename": raw_name,
+                "secured_filename": fn,
+                "files_on_disk": on_disk,
+            }), 404
         enriched_variants.append({
             "filename": fn,
             "image_path": str(path),
@@ -390,7 +442,14 @@ async function analyzeGroup(idx){
       })
     });
     const d = await r.json();
-    if(!r.ok) throw new Error(d.error || 'analyze failed');
+    if(!r.ok){
+      let msg = d.error || 'analyze failed';
+      if(d.files_on_disk){
+        msg += '\\nrequested: ' + d.requested_filename + '\\nsecured: ' + d.secured_filename
+             + '\\non disk: ' + (d.files_on_disk.length ? d.files_on_disk.join(', ') : '(empty)');
+      }
+      throw new Error(msg);
+    }
     g.analysis = d;
     renderEditor(idx);
     tag.className = 'status-tag ok';
