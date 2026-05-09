@@ -2886,17 +2886,20 @@ def _cleanup_hold(hold_id):
             except Exception as e:
                 logger.warning(f"Failed to delete Shopify product {pid}: {e}")
 
-    # Route abandoned-hold cards to PENDING_RETURN regardless of source bin.
-    # card_manager's Return Queue (store_returns) is source-aware: cards
-    # whose bin is a front-glass / binder slot go back to DISPLAY at that
-    # bin, real storage cards run through assign_bins. Routing through the
-    # Return Queue gives staff an explicit "put it back" task and prevents
-    # /api/display/return/scan from accidentally picking up the card and
-    # moving it to storage.
+    # Champion abandons: cards never left their bin during checkout (state
+    # stayed STORED/DISPLAY), so the cleanup just releases the lock and
+    # leaves them where they are. CASE handles edge cases (paid-then-
+    # abandoned-cleaned, or any other path where state moved past
+    # STORED/DISPLAY) by routing them to Return Queue for explicit re-
+    # shelving — that path's source-aware so display-family cards still
+    # land back at the right bin.
     db.execute("""
         UPDATE raw_cards
-           SET current_hold_id = NULL,
-               state = 'PENDING_RETURN',
+           SET state = CASE
+                         WHEN state IN ('STORED','DISPLAY') THEN state
+                         ELSE 'PENDING_RETURN'
+                       END,
+               current_hold_id = NULL,
                updated_at = CURRENT_TIMESTAMP
          WHERE current_hold_id = %s
     """, (hold_id,))

@@ -685,17 +685,19 @@ def cancel_hold(hold_id):
          )
     """, (hold_id,))
 
-    # Route cards to PENDING_RETURN regardless of source bin. Return Queue
-    # (store_returns) is source-aware: display-family bin → restore state
-    # DISPLAY at the same bin; real storage bin → assign_bins to a fresh
-    # slot. Putting cards in DISPLAY state directly here would let
-    # /api/display/return/scan pick them up and route to storage by
-    # accident — exactly the bug Sean caught with the Porygon. bin_id is
-    # preserved so the Return Queue knows the card's last-known location
-    # for routing.
+    # State routing — REQUESTED items that never left their bin (state still
+    # STORED or DISPLAY) just need their lock released; the card is right
+    # where it always was, no need to drag it through Return Queue. Items
+    # the puller was physically holding (PULLED, deferred-REJECTED in
+    # PULLED state, or any edge case where state has already moved past
+    # STORED/DISPLAY) route to PENDING_RETURN so the Return Queue can put
+    # them back. CASE keeps it one round-trip.
     db.execute("""
         UPDATE raw_cards
-           SET state = 'PENDING_RETURN',
+           SET state = CASE
+                         WHEN state IN ('STORED','DISPLAY') THEN state
+                         ELSE 'PENDING_RETURN'
+                       END,
                current_hold_id = NULL,
                updated_at = CURRENT_TIMESTAMP
          WHERE id IN (
