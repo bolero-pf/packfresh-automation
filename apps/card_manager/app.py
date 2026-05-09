@@ -781,6 +781,33 @@ def scan_card(hold_id):
         WHERE id = %s
     """, (hold_id, str(scanned["id"])))
 
+    # Pre-create the Shopify listing now (status=active, draft i.e. not on a
+    # sales channel — POS still finds it by SKU). Doing this at scan time
+    # rather than at finish_hold/decision lets the listing propagate to the
+    # POS register over the seconds the customer spends reviewing their
+    # picks, so the final "Finish" press is instant. _create_raw_listing is
+    # idempotent: if `scanned.shopify_product_id` already points at a live
+    # product (or an archived one from a prior reject), reuse / un-archive
+    # rather than creating a duplicate. Pre-create failures don't block the
+    # scan — the decision/finish paths still call _create_raw_listing and
+    # will retry there.
+    try:
+        listing = _create_raw_listing(dict(scanned))
+        db.execute("""
+            UPDATE raw_cards
+            SET shopify_product_id = %s, shopify_variant_id = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (listing["product_id"], listing["variant_id"], str(scanned["id"])))
+        db.execute("""
+            UPDATE hold_items
+            SET shopify_product_id = %s, shopify_variant_id = %s
+            WHERE id = %s
+        """, (listing["product_id"], listing["variant_id"], str(match["id"])))
+    except Exception as e:
+        logger.warning(f"scan_card pre-create listing failed for {barcode}: {e} "
+                       f"(retry on decision)")
+
     return jsonify({
         "success":   True,
         "card_name": scanned["card_name"],
@@ -813,6 +840,18 @@ def item_decision(hold_id, hold_item_id):
         return jsonify({"error": "Hold item not found"}), 404
 
     if decision == "REJECTED":
+        # Archive the pre-created listing (scan_card creates it on PULL so
+        # the customer's "Finish" press is fast). Archive rather than delete:
+        # if the customer reverses the decision, _create_raw_listing's
+        # idempotency check un-archives instead of making a duplicate.
+        existing_pid = item.get("shopify_product_id")
+        if existing_pid:
+            try:
+                _shopify("PUT", f"/products/{existing_pid}.json",
+                         json={"product": {"id": existing_pid, "status": "archived"}})
+            except Exception as e:
+                logger.warning(f"Failed to archive listing on REJECT for "
+                               f"item {hold_item_id}: {e}")
         db.execute("""
             UPDATE hold_items SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP
             WHERE id = %s

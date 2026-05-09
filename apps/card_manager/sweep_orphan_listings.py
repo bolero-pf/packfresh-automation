@@ -26,13 +26,35 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import requests
+from dotenv import load_dotenv
 
-from app import _shopify, db  # noqa: E402
-from shopify_graphql import shopify_gql  # noqa: E402
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "shared"))
+load_dotenv(os.path.join(_HERE, ".env"))
+load_dotenv(os.path.join(_HERE, "..", "admin", ".env"))
+
+import db  # noqa: E402  (shared/db.py)
+from shopify_graphql import shopify_gql  # noqa: E402  (shared/shopify_graphql.py)
+
+SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "")
+SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN", "")
+SHOPIFY_VERSION = os.environ.get("SHOPIFY_VERSION", "2025-01")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _shopify_rest(method: str, path: str, **kwargs) -> dict:
+    url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_VERSION}{path}"
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    r = requests.request(method, url, headers=headers, timeout=30, **kwargs)
+    r.raise_for_status()
+    return r.json() if r.content else {}
 
 
 def find_active_products_for_sku(sku: str) -> list[dict]:
@@ -81,8 +103,8 @@ def archive(pid: str, dry_run: bool) -> bool:
     if dry_run:
         return True
     try:
-        _shopify("PUT", f"/products/{pid}.json",
-                 json={"product": {"id": pid, "status": "archived"}})
+        _shopify_rest("PUT", f"/products/{pid}.json",
+                      json={"product": {"id": pid, "status": "archived"}})
         return True
     except Exception as e:
         logger.error(f"Archive failed for product {pid}: {e}")
@@ -97,6 +119,12 @@ def main():
                     help="Process at most N raw_cards rows (debug)")
     args = ap.parse_args()
     dry_run = not args.apply
+
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        logger.error("SHOPIFY_STORE / SHOPIFY_TOKEN not set in env")
+        sys.exit(1)
+
+    db.init_pool()
 
     sql = """
         SELECT id, barcode, state, shopify_product_id, card_name
