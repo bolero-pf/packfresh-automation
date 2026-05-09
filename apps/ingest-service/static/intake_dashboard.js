@@ -4693,12 +4693,14 @@ async function lookupByTcgId(sessionId, offerPct, context) {
         const cardNum = card.cardNumber || card.number || '';
         const rarity = card.rarity || '';
 
-        // Update graded badge if in graded mode
-        if (gradedPrices && Object.keys(gradedPrices).length) {
-            _updateGradedBadge(gradedPrices, context);
-        }
-
         const inGradedMode = _isGradedContext(context);
+
+        // Update graded badge if in graded mode — pass live_graded so the
+        // badge can fall back to it when the cache aggregate has nothing
+        // (otherwise the badge says "no data" while the panel shows comps).
+        if (inGradedMode) {
+            _updateGradedBadge(gradedPrices, context, liveGraded);
+        }
 
         if (inGradedMode) {
             const _gf = _getGradeFields(context);
@@ -4706,63 +4708,105 @@ async function lookupByTcgId(sessionId, offerPct, context) {
             const gradeVal = _gf.value;
             const companyGrades = gradedPrices[gradeCompany] || {};
             const gradeEntry = companyGrades[gradeVal] || {};
-            const gradedPrice = gradeEntry.price;
+            const cachedPrice = gradeEntry.price;
             const nmRaw = variantData['NM'];
             const safeName = (card.name||'').replace(/'/g, "\'");
             const safeSet = setName.replace(/'/g, "\'");
-
-            // Merge live comps over cache aggregates — live is truth
             const liveCompany = liveGraded[gradeCompany] || {};
+            const live = liveCompany[gradeVal] || null;
+
+            // Use the recency-weighted, outlier-cleaned `market` from
+            // get_live_graded_comps as the primary price — `mid` (raw
+            // median) gets blown up by single delusional listings.
+            const effectivePrice = (live && live.market != null)
+                ? live.market
+                : (live && live.mid != null) ? live.mid : cachedPrice;
+
+            // Quality flags mirror the Route preview: a single-comp sale
+            // shouldn't be trusted, an 80%+ spread means there are wildly
+            // different listings (likely an outlier or mis-graded slab).
+            const allSame = live && live.low != null && live.low === live.mid && live.mid === live.high && live.high === live.market;
+            const thinData = live && (live.comps_count <= 1 || allSame || (live.low != null && live.high != null && live.low === live.high));
+            const wideSpread = live && live.low != null && live.high != null && live.high > 0
+                && ((live.high - live.low) / live.high * 100) > 80;
+            const ageStr = (() => {
+                if (!live || !live.fetched_at) return null;
+                const hours = Math.round((Date.now() - new Date(live.fetched_at).getTime()) / 3600000);
+                return hours < 1 ? '< 1h ago' : hours < 48 ? hours + 'h ago' : Math.round(hours/24) + 'd ago';
+            })();
+
+            const fmt$ = (v) => v == null ? '—' : '$' + Number(v).toFixed(2);
+            const fmtPct = (v) => {
+                if (v == null) return '—';
+                const arrow = v > 0.5 ? ' ↑' : v < -0.5 ? ' ↓' : '';
+                const color = v > 0.5 ? 'var(--green,#22c55e)' : v < -0.5 ? 'var(--red,#ef4444)' : 'var(--text-dim)';
+                const sign = v > 0 ? '+' : '';
+                return '<span style="color:' + color + ';">' + sign + Number(v).toFixed(1) + '%' + arrow + '</span>';
+            };
 
             let gradedHtml = '<div style="background:var(--surface-2); border-radius:8px; padding:14px; margin-top:8px;">';
             gradedHtml += '<div style="margin-bottom:10px;"><strong style="color:var(--accent);">' + (card.name||'') + '</strong>';
             gradedHtml += '<span style="color:var(--text-dim);"> — ' + setName + (cardNum ? ' #'+cardNum : '') + '</span></div>';
 
-            // Collect all grades we know about (union of cache + live keys)
-            const allGrades = new Set([...Object.keys(companyGrades), ...Object.keys(liveCompany)]);
-            if (allGrades.size) {
-                gradedHtml += '<div style="margin-bottom:12px;"><div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:6px;">' + gradeCompany + ' eBay Comps</div>';
-                gradedHtml += '<div style="display:flex; gap:8px; flex-wrap:wrap;">';
-                [...allGrades].sort((a,b) => parseFloat(b)-parseFloat(a)).forEach(g => {
-                    const live = liveCompany[g];
-                    const cached = companyGrades[g] || {};
-                    const isSel = g === gradeVal;
-                    const price = live ? live.mid : cached.price;
-                    const comps = live ? live.comps_count : cached.count;
-                    const src = live ? (live.source === 'live_listings' ? 'live' : 'cache') : 'cache';
-                    const srcColor = src === 'live' ? '#22c55e' : '#f59e0b';
+            // Header — selected slab + price
+            const sourceLbl = live && live.source === 'live_listings'
+                ? '<span style="color:var(--green,#22c55e);font-weight:500;">live eBay</span>'
+                : '<span style="color:var(--text-dim);">cached</span>';
+            const priceColor = thinData ? 'var(--red,#ef4444)' : 'var(--text)';
+            const priceStrike = thinData ? 'text-decoration:line-through;' : '';
+            gradedHtml += '<div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:10px;">';
+            gradedHtml += '<div style="font-size:1.6rem; font-weight:800; color:' + priceColor + ';' + priceStrike + '">' + fmt$(effectivePrice) + '</div>';
+            gradedHtml += '<div style="font-size:0.78rem; color:var(--text-dim);"><strong>' + gradeCompany + ' ' + gradeVal + '</strong> · ' + sourceLbl + (ageStr ? ' · ' + ageStr : '') + '</div>';
+            gradedHtml += '</div>';
 
-                    gradedHtml += '<div style="background:' + (isSel ? 'var(--accent)' : 'var(--surface)') + ';color:' + (isSel ? '#fff' : 'var(--text)') + ';border:1px solid var(--border);border-radius:6px;padding:8px 12px;text-align:center;min-width:80px;">';
-                    gradedHtml += '<div style="font-size:0.75rem;font-weight:600;">' + gradeCompany + ' ' + g + '</div>';
-                    gradedHtml += '<div style="font-size:1rem;font-weight:700;">' + (price != null ? '$' + Number(price).toFixed(2) : '—') + '</div>';
-                    if (live && live.low != null && live.high != null) {
-                        gradedHtml += '<div style="font-size:0.6rem;opacity:0.7;">$' + live.low.toFixed(0) + '–$' + live.high.toFixed(0) + '</div>';
-                    }
-                    if (comps) gradedHtml += '<div style="font-size:0.6rem;color:' + srcColor + ';">' + comps + ' comps (' + src + ')</div>';
-                    gradedHtml += '</div>';
-                });
-                gradedHtml += '</div></div>';
+            if (thinData) {
+                gradedHtml += '<div style="margin-bottom:10px; padding:8px 10px; background:rgba(239,68,68,0.12); border-left:3px solid var(--red,#ef4444); font-size:0.78rem; color:var(--red,#ef4444);">⚠ Single comp — do not trust this price. Look up manually before committing.</div>';
+            } else if (wideSpread) {
+                gradedHtml += '<div style="margin-bottom:10px; padding:8px 10px; background:rgba(245,158,11,0.12); border-left:3px solid var(--amber,#f59e0b); font-size:0.78rem; color:var(--amber,#f59e0b);">Wide spread (low to high &gt; 80%) — check the comps yourself before committing.</div>';
             }
-            if (nmRaw) gradedHtml += '<div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:10px;">Raw NM: $' + Number(nmRaw).toFixed(2) + '</div>';
 
-            // Use live median for the selected grade if available, else cache price
-            const liveSelected = liveCompany[gradeVal];
-            const effectivePrice = liveSelected ? liveSelected.mid : gradedPrice;
+            if (live) {
+                // Stat table: market, 7d, 30d, range, trends, comp counts
+                gradedHtml += '<table style="width:100%; font-size:0.8rem; margin-bottom:10px;">';
+                gradedHtml += '<tr><td style="color:var(--text-dim); padding:3px 8px 3px 0;">Market</td><td style="padding:3px 0;"><strong>' + fmt$(live.market) + '</strong> <small style="color:var(--text-dim);">weighted, ' + (live.comps_kept || live.comps_count || 0) + ' comps' + (live.outliers_dropped ? ', ' + live.outliers_dropped + ' outliers dropped' : '') + '</small></td></tr>';
+                gradedHtml += '<tr><td style="color:var(--text-dim); padding:3px 8px 3px 0;">Median</td><td style="padding:3px 0;">' + fmt$(live.mid) + '</td></tr>';
+                gradedHtml += '<tr><td style="color:var(--text-dim); padding:3px 8px 3px 0;">7d avg</td><td style="padding:3px 0;">' + fmt$(live.avg_7d) + (live.comps_7d ? ' <small style="color:var(--text-dim);">(' + live.comps_7d + ' sales)</small>' : '') + '</td></tr>';
+                gradedHtml += '<tr><td style="color:var(--text-dim); padding:3px 8px 3px 0;">30d avg</td><td style="padding:3px 0;">' + fmt$(live.avg_30d) + (live.comps_30d ? ' <small style="color:var(--text-dim);">(' + live.comps_30d + ' sales)</small>' : '') + '</td></tr>';
+                gradedHtml += '<tr><td style="color:var(--text-dim); padding:3px 8px 3px 0;">Range</td><td style="padding:3px 0;">' + fmt$(live.low) + ' – ' + fmt$(live.high) + '</td></tr>';
+                if (live.trend_7d_pct != null || live.trend_30d_pct != null) {
+                    gradedHtml += '<tr><td style="color:var(--text-dim); padding:3px 8px 3px 0;">Trend</td><td style="padding:3px 0;">7d ' + fmtPct(live.trend_7d_pct) + ' · 30d ' + fmtPct(live.trend_30d_pct) + '</td></tr>';
+                }
+                gradedHtml += '</table>';
+
+                // Recent sales (top 5)
+                if (live.sales && live.sales.length) {
+                    const recent = live.sales.slice(0, 5);
+                    gradedHtml += '<div style="margin-bottom:10px;"><div style="font-size:0.72rem; color:var(--text-dim); margin-bottom:4px;">Recent sales</div>';
+                    gradedHtml += '<table style="font-size:0.78rem; width:100%; border-collapse:collapse;">';
+                    recent.forEach(s => {
+                        const dt = s.date ? new Date(s.date).toLocaleDateString('en-US', {month:'short', day:'numeric'}) : 'undated';
+                        const dtColor = s.date ? 'var(--text-dim)' : 'var(--red,#ef4444)';
+                        gradedHtml += '<tr><td style="padding:2px 8px 2px 0; color:' + dtColor + ';">' + dt + '</td><td style="padding:2px 0; font-weight:600;">' + fmt$(s.price) + '</td></tr>';
+                    });
+                    gradedHtml += '</table></div>';
+                }
+            } else if (cachedPrice != null) {
+                gradedHtml += '<div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:10px;">Cache only — no fresh eBay comps for ' + gradeCompany + ' ' + gradeVal + '. Verify before committing.</div>';
+            } else {
+                gradedHtml += '<div class="alert alert-warning" style="margin-bottom:10px;">No ' + gradeCompany + ' ' + gradeVal + ' comps. Look it up manually before adding.</div>';
+            }
+
+            if (nmRaw) gradedHtml += '<div style="font-size:0.78rem; color:var(--text-dim); margin-bottom:10px;">Raw NM reference: $' + Number(nmRaw).toFixed(2) + '</div>';
+
+            // Add buttons
             if (effectivePrice) {
                 const offerAmt = (effectivePrice * qty * offerPct / 100).toFixed(2);
-                const priceLabel = liveSelected
-                    ? 'Median: $' + effectivePrice.toFixed(2) + ' (' + (liveSelected.comps_count||'?') + ' comps)'
-                    : 'Market: $' + effectivePrice.toFixed(2) + ' (cache)';
-                // Bypass addCardFromSearch's variant/condition picker — slabs
-                // don't have raw conditions and the picker would loop us back
-                // here. _finalizeCardAdd reads is_graded + grade_company/value
-                // off the form fields directly.
                 gradedHtml += '<div class="search-result" onclick="_finalizeCardAdd(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + effectivePrice + ', \'' + context + '\', null, \'\')">' +
                     '<h4>Add ' + gradeCompany + ' ' + gradeVal + ' — ' + (card.name||'') + '</h4>' +
-                    '<p>' + priceLabel + ' · Qty ' + qty + ' · Offer: $' + offerAmt + '</p></div>';
-            } else {
-                gradedHtml += '<div class="alert alert-warning">No ' + gradeCompany + ' ' + gradeVal + ' data.</div>';
-                if (nmRaw) gradedHtml += '<div class="search-result" onclick="_finalizeCardAdd(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + nmRaw + ', \'' + context + '\', null, \'\')">' +
+                    '<p>$' + Number(effectivePrice).toFixed(2) + ' · Qty ' + qty + ' · Offer: $' + offerAmt + '</p></div>';
+            }
+            if (nmRaw && (!effectivePrice || thinData)) {
+                gradedHtml += '<div class="search-result" onclick="_finalizeCardAdd(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + nmRaw + ', \'' + context + '\', null, \'\')">' +
                     '<h4>Add at Raw NM — ' + (card.name||'') + '</h4><p>$' + Number(nmRaw).toFixed(2) + ' · Qty ' + qty + '</p></div>';
             }
             gradedHtml += '</div>';
@@ -5554,18 +5598,24 @@ async function lockAndOfferSession(sessionId) {
     return transitionSession(sessionId, 'offer');
 }
 
-// Show the graded price badge after a card lookup returns graded_prices
-function _updateGradedBadge(gradedPrices, context) {
+// Show the graded price badge after a card lookup returns graded_prices.
+// Falls back to live_graded when the cache aggregate is empty so we don't
+// say "no data" while the panel below clearly shows live eBay comps.
+function _updateGradedBadge(gradedPrices, context, liveGraded) {
     const _gf = _getGradeFields(context || 'raw');
     const badge = _gf.badge;
     if (!badge) return;
     const company = _gf.company.toUpperCase();
     const grade = _gf.value;
     const gd = gradedPrices?.[company]?.[grade] || {};
-    const price = gd.price;
+    const live = liveGraded?.[company]?.[grade] || null;
+    // Live `market` is the recency-weighted, outlier-cleaned price — prefer
+    // it over `mid` (raw median, can be skewed) and over the cache aggregate.
+    const livePrice = live ? (live.market != null ? live.market : live.mid) : null;
+    const price = livePrice != null ? livePrice : gd.price;
     if (price != null) {
-        const conf = gd.confidence ? ` (${gd.confidence})` : '';
-        badge.textContent = company + ' ' + grade + ': $' + Number(price).toFixed(2) + conf;
+        const suffix = live ? ' (live)' : (gd.confidence ? ` (${gd.confidence})` : '');
+        badge.textContent = company + ' ' + grade + ': $' + Number(price).toFixed(2) + suffix;
         badge.style.background = '';
         badge.style.display = '';
     } else {
