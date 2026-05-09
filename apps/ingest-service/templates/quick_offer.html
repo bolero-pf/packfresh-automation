@@ -16,6 +16,7 @@
             margin-bottom: 18px;
         }
         .qo-header .container { display: flex; align-items: center; gap: 16px; }
+        .qo-icon { flex-shrink: 0; display: flex; align-items: center; }
         .qo-title { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px; }
         .qo-title span { color: var(--accent); }
         .qo-sub { font-size: 0.85rem; color: var(--text-dim); }
@@ -114,6 +115,14 @@
 <body>
     <header class="qo-header">
         <div class="container">
+            <div class="qo-icon" aria-hidden="true">
+                <svg width="44" height="44" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="3" y="15" width="26" height="13" rx="2" fill="#16a34a"/>
+                    <rect x="4.5" y="10.5" width="23" height="13" rx="2" fill="#22c55e"/>
+                    <rect x="6" y="6" width="20" height="13" rx="2" fill="#4ade80"/>
+                    <text x="16" y="16.5" font-size="10" font-weight="800" text-anchor="middle" fill="#0f3d1a" font-family="ui-sans-serif, system-ui, sans-serif">$</text>
+                </svg>
+            </div>
             <div>
                 <div class="qo-title">Pack <span>Fresh</span> · Quick Offer</div>
                 <div class="qo-sub">Walk-in counter · 75% credit / 65% cash</div>
