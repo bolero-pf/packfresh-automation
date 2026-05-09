@@ -1210,6 +1210,73 @@ def reject_session(session_id):
 
 
 
+@bp.route("/api/intake/session/<session_id>/quick-accept", methods=["POST"])
+def quick_accept_session(session_id):
+    """Quick Offer counter accept: fold offer→accept into one click.
+
+    Walk-in only — the session must already have is_walk_in=TRUE so
+    accept_offer short-circuits straight to 'received'. Skips the
+    is_mapped gate the regular /offer endpoint enforces because the
+    register flow allows manual fallbacks for cards Scrydex doesn't
+    track.
+    """
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    if session["status"] != "in_progress":
+        return jsonify({"error": f"Cannot accept — session is '{session['status']}'"}), 400
+    if not session.get("is_walk_in"):
+        return jsonify({"error": "quick-accept is for walk-in sessions only"}), 400
+
+    data = request.get_json(silent=True) or {}
+    offer_type = (data.get("offer_type") or "").lower().strip()
+    if offer_type not in ("cash", "credit"):
+        return jsonify({"error": "offer_type must be 'cash' or 'credit'"}), 400
+
+    items = intake.get_session_items(session_id)
+    active = [i for i in items if i.get("item_status", "good") in ("good", "damaged")]
+    if not active:
+        return jsonify({"error": "No items to accept"}), 400
+
+    # Lock prices: in_progress → offered (mirrors offer_session, no mapping gate)
+    db.execute(
+        "UPDATE intake_sessions SET status = 'offered', offered_at = CURRENT_TIMESTAMP WHERE id = %s",
+        (session_id,),
+    )
+    try:
+        updated = intake.accept_offer(session_id, offer_type=offer_type, fulfillment="pickup")
+    except ValueError as e:
+        # Roll the offered transition back so the page can recover.
+        db.execute(
+            "UPDATE intake_sessions SET status = 'in_progress', offered_at = NULL WHERE id = %s",
+            (session_id,),
+        )
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({
+        "success": True,
+        "status": updated["status"],
+        "accepted_offer_type": offer_type,
+    })
+
+
+
+@bp.route("/api/intake/session/<session_id>/quick-discard", methods=["POST"])
+def quick_discard_session(session_id):
+    """Quick Offer counter reject: hard-delete an in_progress session so
+    nothing is logged. CASCADE handles intake_items; session_overrides has
+    ON DELETE SET NULL. Only allowed while still in_progress — once an
+    offer has been locked, use /reject instead."""
+    session = intake.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    if session["status"] != "in_progress":
+        return jsonify({"error": f"Cannot discard — session is '{session['status']}'"}), 400
+    db.execute("DELETE FROM intake_sessions WHERE id = %s", (session_id,))
+    return jsonify({"success": True})
+
+
+
 @bp.route("/api/intake/session/<session_id>/reopen", methods=["POST"])
 def reopen_session(session_id):
     """Reopen a session back to in_progress (for edits before ingest)."""

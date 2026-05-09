@@ -122,6 +122,15 @@ def index():
     return render_template("intake_dashboard.html")
 
 
+@app.route("/quick-offer")
+def quick_offer():
+    """Slim register-friendly view: walk-in walk-up, search → add → accept/reject.
+    Pre-creates a walk-in session at 75/65 and surfaces three big buttons.
+    Linked from card_manager (cards.pack-fresh.com) so register staff don't
+    have to navigate the full intake dashboard."""
+    return render_template("quick_offer.html")
+
+
 @app.route("/health")
 def health():
     try:

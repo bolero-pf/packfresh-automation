@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quick Offer — Pack Fresh</title>
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
+    <script src="/pf-static/card_badges.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='intake_dashboard.css') }}">
+    <style>
+        .qo-header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 14px 0;
+            margin-bottom: 18px;
+        }
+        .qo-header .container { display: flex; align-items: center; gap: 16px; }
+        .qo-title { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px; }
+        .qo-title span { color: var(--accent); }
+        .qo-sub { font-size: 0.85rem; color: var(--text-dim); }
+        .qo-status { margin-left: auto; font-size: 0.8rem; color: var(--text-dim); font-family: var(--font-mono, ui-monospace, monospace); }
+
+        .qo-totals {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 16px;
+        }
+        .qo-totals .col { text-align: center; }
+        .qo-totals .lbl {
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-dim);
+            margin-bottom: 4px;
+        }
+        .qo-totals .val { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+        .qo-totals .col.credit .val { color: var(--green, #22c55e); }
+        .qo-totals .col.cash .val { color: var(--amber, #f59e0b); }
+
+        .qo-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-top: 14px;
+        }
+        .qo-actions button {
+            padding: 18px 10px;
+            font-size: 1rem;
+            font-weight: 700;
+            border-radius: 10px;
+            border: none;
+            cursor: pointer;
+            transition: filter 0.12s, transform 0.05s;
+        }
+        .qo-actions button:hover { filter: brightness(1.1); }
+        .qo-actions button:active { transform: translateY(1px); }
+        .qo-actions button:disabled { opacity: 0.4; cursor: not-allowed; filter: none; }
+        .qo-btn-cash { background: var(--amber, #f59e0b); color: #000; }
+        .qo-btn-credit { background: var(--green, #22c55e); color: #000; }
+        .qo-btn-reject { background: var(--red, #ef4444); color: #fff; }
+        .qo-btn-sub {
+            display: block;
+            font-size: 0.75rem;
+            font-weight: 500;
+            opacity: 0.85;
+            margin-top: 2px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .qo-items { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        .qo-items th, .qo-items td {
+            padding: 10px 8px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
+        .qo-items th {
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-dim);
+            font-weight: 600;
+        }
+        .qo-items td.num { text-align: right; font-variant-numeric: tabular-nums; }
+        .qo-items td.market { color: var(--text-dim); }
+        .qo-items td.credit { color: var(--green, #22c55e); font-weight: 600; }
+        .qo-items td.cash { color: var(--amber, #f59e0b); font-weight: 600; }
+        .qo-items .x-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--red, #ef4444);
+            border-radius: 6px;
+            padding: 4px 10px;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+        .qo-items .x-btn:hover { background: rgba(239, 68, 68, 0.12); }
+        .qo-empty {
+            text-align: center;
+            color: var(--text-dim);
+            padding: 28px 12px;
+            border: 2px dashed var(--border);
+            border-radius: 10px;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <header class="qo-header">
+        <div class="container">
+            <div>
+                <div class="qo-title">Pack <span>Fresh</span> · Quick Offer</div>
+                <div class="qo-sub">Walk-in counter · 75% credit / 65% cash</div>
+            </div>
+            <div class="qo-status" id="qo-session-info">Starting session…</div>
+            <!-- The shared intake_dashboard.js's checkHealth() pulses these every
+                 30s; without the elements present, the call throws on null. -->
+            <span style="display:none;" id="health-dot"></span>
+            <span style="display:none;" id="health-text"></span>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Running totals + offer -->
+        <div class="qo-totals">
+            <div class="col">
+                <div class="lbl">Market value</div>
+                <div class="val" id="qo-total-market">$0.00</div>
+            </div>
+            <div class="col credit">
+                <div class="lbl">Store credit (75%)</div>
+                <div class="val" id="qo-total-credit">$0.00</div>
+            </div>
+            <div class="col cash">
+                <div class="lbl">Cash (65%)</div>
+                <div class="val" id="qo-total-cash">$0.00</div>
+            </div>
+        </div>
+
+        <!-- Search panel — slimmed copy of the manual entry from intake_dashboard.html -->
+        <div class="card">
+            <h2 style="font-size:1rem; margin-bottom:12px;">Add an item</h2>
+
+            <!-- Type toggle -->
+            <div style="display:flex; gap:4px; margin-bottom:12px;">
+                <button class="btn btn-sm btn-primary" id="intake-type-btn-sealed" onclick="switchIntakeType('sealed')">Sealed Product</button>
+                <button class="btn btn-sm btn-secondary" id="intake-type-btn-card" onclick="switchIntakeType('card')">Individual Card</button>
+            </div>
+
+            <!-- Card-only: graded toggle -->
+            <div id="intake-card-fields" style="display:none;">
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px; padding:10px 14px; background:var(--surface-2); border-radius:8px; border:1px solid var(--border);">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9rem;">
+                        <input type="checkbox" id="intake-is-graded" onchange="toggleIntakeGraded()" style="width:16px;height:16px;">
+                        <span style="font-weight:600;">Graded Card</span>
+                    </label>
+                    <span id="intake-graded-fields" style="display:none; align-items:center; gap:8px;">
+                        <select id="intake-grade-company" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);" onchange="onIntakeGradeChange()">
+                            <option value="PSA">PSA</option><option value="BGS">BGS</option><option value="CGC">CGC</option><option value="SGC">SGC</option><option value="TAG">TAG</option>
+                        </select>
+                        <select id="intake-grade-value" style="width:80px; padding:4px 8px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text);" onchange="onIntakeGradeChange()">
+                            <option value="10">10</option><option value="9.5">9.5</option><option value="9">9</option><option value="8.5">8.5</option><option value="8">8</option><option value="7">7</option>
+                        </select>
+                        <span id="intake-graded-badge" style="display:none; background:var(--accent); color:#fff; padding:3px 8px; border-radius:4px; font-size:0.8rem; font-weight:600;"></span>
+                    </span>
+                    <span style="color:var(--text-dim); font-size:0.8rem;" id="intake-graded-hint">Toggle for PSA/BGS/CGC/SGC/TAG graded cards — uses eBay market data</span>
+                </div>
+            </div>
+
+            <!-- Sealed search -->
+            <div id="intake-sealed-search-area">
+                <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                    <div class="form-group" style="flex:2; min-width:160px; margin:0;">
+                        <label>Product Name</label>
+                        <input type="text" id="intake-sealed-search" placeholder="e.g. Booster Box, ETB..." onkeydown="if(event.key==='Enter') intakeSealedSearch()">
+                    </div>
+                    <div class="form-group" style="width:70px; margin:0;">
+                        <label>Qty</label>
+                        <input type="number" id="intake-sealed-qty" value="1" min="1">
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="intakeSealedSearch()">Search</button>
+                    <button class="btn btn-secondary btn-sm" onclick="toggleIntakeManualDirect()">Manual</button>
+                </div>
+
+                <div id="intake-manual-direct" style="display:none; margin-bottom:12px; padding:12px; background:var(--surface-1); border-radius:6px; border:1px solid var(--border);">
+                    <h5 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Manual Add (for items not in PPT)</h5>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+                        <div class="form-group" style="flex:2; min-width:160px; margin:0;"><label style="font-size:0.8rem;">Product Name</label><input type="text" id="intake-direct-name" placeholder="e.g. Terastal Festival ex Box"></div>
+                        <div class="form-group" style="flex:1; min-width:100px; margin:0;"><label style="font-size:0.8rem;">Set Name</label><input type="text" id="intake-direct-set" placeholder="optional"></div>
+                        <div class="form-group" style="width:100px; margin:0;"><label style="font-size:0.8rem;">TCGPlayer ID</label><input type="number" id="intake-direct-tcgid" placeholder="optional"></div>
+                        <div class="form-group" style="width:90px; margin:0;"><label style="font-size:0.8rem;">Price</label><input type="number" id="intake-direct-price" step="0.01" min="0" placeholder="$0.00"></div>
+                        <div class="form-group" style="width:55px; margin:0;"><label style="font-size:0.8rem;">Qty</label><input type="number" id="intake-direct-qty" value="1" min="1"></div>
+                        <button class="btn btn-success btn-sm" onclick="submitIntakeManualDirect()">Add</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card search -->
+            <div id="intake-card-search-area" style="display:none;">
+                <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                    <div class="form-group" style="flex:2; min-width:140px; margin:0;">
+                        <label>Card Name</label>
+                        <input type="text" id="intake-card-search" placeholder="e.g. Charizard ex" onkeydown="if(event.key==='Enter') intakeCardSearch()">
+                    </div>
+                    <div class="form-group" style="flex:1; min-width:100px; margin:0;">
+                        <label>Set (optional)</label>
+                        <input type="text" id="intake-card-set" placeholder="e.g. Paldean Fates">
+                    </div>
+                    <div class="form-group" style="width:90px; margin:0;">
+                        <label>TCG ID</label>
+                        <input type="number" id="intake-card-tcgid" placeholder="optional" onkeydown="if(event.key==='Enter') intakeCardSearch()">
+                    </div>
+                    <div class="form-group" id="intake-cond-group" style="width:70px; margin:0;">
+                        <label>Cond</label>
+                        <select id="intake-card-condition">
+                            <option value="NM">NM</option><option value="LP">LP</option><option value="MP">MP</option><option value="HP">HP</option><option value="DMG">DMG</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="width:50px; margin:0;">
+                        <label>Qty</label>
+                        <input type="number" id="intake-card-qty" value="1" min="1">
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="intakeCardSearch()">Search</button>
+                    <button class="btn btn-secondary btn-sm" onclick="toggleIntakeCardManual()" title="Use when Scrydex doesn't track this printing">Manual</button>
+                </div>
+                <div id="intake-card-manual" style="display:none; margin-bottom:12px; padding:12px; background:var(--surface-1); border-radius:6px; border:1px solid var(--border);">
+                    <h5 style="margin-bottom:8px; font-size:0.85rem; color:var(--text-dim);">Manual Card Add (for cards Scrydex doesn't track — MTG PEOE, prerelease stamps)</h5>
+                    <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                        <div class="form-group" style="flex:2; min-width:180px; margin:0;"><label>Name *</label><input type="text" id="intake-card-manual-name" placeholder="Consult the Star Charts"></div>
+                        <div class="form-group" style="flex:1; min-width:140px; margin:0;"><label>Set</label><input type="text" id="intake-card-manual-set" placeholder="Edge of Eternities Promos"></div>
+                        <div class="form-group" style="width:90px; margin:0;"><label>Card #</label><input type="text" id="intake-card-manual-cardnum" placeholder="51s"></div>
+                    </div>
+                    <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                        <div class="form-group" style="width:100px; margin:0;"><label>TCG ID</label><input type="number" id="intake-card-manual-tcgid" placeholder="optional"></div>
+                        <div class="form-group" style="flex:1; min-width:140px; margin:0;"><label>Variant</label><input type="text" id="intake-card-manual-variant" placeholder="Foil / Prerelease / Normal"></div>
+                        <div class="form-group" style="width:100px; margin:0;"><label>Price * ($)</label><input type="number" id="intake-card-manual-price" step="0.01" min="0" placeholder="0.00"></div>
+                        <div class="form-group" style="width:75px; margin:0;"><label>Cond</label><select id="intake-card-manual-cond"><option>NM</option><option>LP</option><option>MP</option><option>HP</option><option>DMG</option></select></div>
+                        <div class="form-group" style="width:60px; margin:0;"><label>Qty</label><input type="number" id="intake-card-manual-qty" value="1" min="1"></div>
+                        <button class="btn btn-success btn-sm" onclick="submitIntakeCardManual()">Add Card</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Search results -->
+            <div id="intake-search-results"></div>
+
+            <!-- Hidden table the upstream JS targets after add — we ignore it visually but keep the element so loadIntakeItems doesn't choke. -->
+            <div id="intake-items-table" style="display:none;"></div>
+        </div>
+
+        <!-- Items list -->
+        <div class="card">
+            <h2 style="font-size:1rem; margin-bottom:12px;">Cart</h2>
+            <div id="qo-items-wrap">
+                <div class="qo-empty">Search and add items to see the offer.</div>
+            </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="qo-actions">
+            <button class="qo-btn-credit" id="qo-btn-credit" onclick="quickAccept('credit')" disabled>
+                Accept Credit
+                <span class="qo-btn-sub" id="qo-btn-credit-sub">$0.00</span>
+            </button>
+            <button class="qo-btn-cash" id="qo-btn-cash" onclick="quickAccept('cash')" disabled>
+                Accept Cash
+                <span class="qo-btn-sub" id="qo-btn-cash-sub">$0.00</span>
+            </button>
+            <button class="qo-btn-reject" id="qo-btn-reject" onclick="quickReject()">
+                Reject
+                <span class="qo-btn-sub">Clear &amp; reset</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ STUB MODALS ═══════════════════════════════════
+         The shared intake_dashboard.js script references these by ID at load and on
+         every keydown; without the elements present, the global Escape handler throws.
+         We keep them as inert overlays — quick-offer flow never opens them. -->
+    <div id="themed-prompt-overlay" class="modal-overlay">
+        <div class="prompt-modal">
+            <h3 id="tp-title"></h3>
+            <p id="tp-message"></p>
+            <div id="tp-inputs"></div>
+            <div class="prompt-buttons">
+                <button class="btn btn-secondary" id="tp-cancel">Cancel</button>
+                <button class="btn btn-primary" id="tp-confirm">Confirm</button>
+            </div>
+        </div>
+    </div>
+    <div id="mapping-modal" class="modal-overlay"><div class="modal"></div></div>
+    <div id="relink-modal" class="modal-overlay"><div class="modal"><div id="relink-body"></div></div></div>
+    <div id="identify-slab-modal" class="modal-overlay"><div class="modal"></div></div>
+
+    <script src="{{ url_for('static', filename='intake_dashboard.js') }}"></script>
+    <script>
+    // ═══════════════════════════════ QUICK OFFER PAGE LOGIC ═══════════════════════════════
+
+    const QO_CASH_PCT = 65;
+    const QO_CREDIT_PCT = 75;
+
+    async function qoStartSession() {
+        document.getElementById('qo-session-info').textContent = 'Starting session…';
+        try {
+            const r = await fetch('/api/intake/create-session', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    customer_name: 'Quick Offer',
+                    session_type: 'mixed',
+                    cash_percentage: QO_CASH_PCT,
+                    credit_percentage: QO_CREDIT_PCT,
+                    is_walk_in: true,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || 'Failed to start session');
+            // Match the global the upstream search/add functions read.
+            intakeSessionId = d.session.id;
+            document.getElementById('qo-session-info').textContent = 'Session ' + d.session.id.slice(0, 8) + '…';
+            return d.session.id;
+        } catch (err) {
+            document.getElementById('qo-session-info').textContent = 'Error starting session: ' + err.message;
+            throw err;
+        }
+    }
+
+    // Override the upstream loader. The dashboard table layout doesn't fit the
+    // register UX — we render market / credit / cash inline and update totals
+    // + button states.
+    async function loadIntakeItems() {
+        if (!intakeSessionId) return;
+        const wrap = document.getElementById('qo-items-wrap');
+        let items = [], session = null;
+        try {
+            const r = await fetch('/api/intake/session/' + intakeSessionId);
+            const d = await r.json();
+            items = d.items || [];
+            session = d.session || null;
+        } catch (err) {
+            wrap.innerHTML = '<div class="alert alert-error">' + err.message + '</div>';
+            return;
+        }
+
+        if (!items.length) {
+            wrap.innerHTML = '<div class="qo-empty">Search and add items to see the offer.</div>';
+            qoUpdateTotals(0, 0, 0);
+            qoSetActionsEnabled(false);
+            return;
+        }
+
+        let totalMarket = 0, totalCredit = 0, totalCash = 0;
+        const rows = items.map(i => {
+            const qty = i.quantity || 1;
+            const unitMarket = Number(i.market_price || 0);
+            const lineMarket = unitMarket * qty;
+            // The session is created with our 75/65 split, so server-side
+            // offer_price already reflects cash_percentage. To show both
+            // sides, compute them off market_price directly.
+            const lineCredit = lineMarket * QO_CREDIT_PCT / 100;
+            const lineCash = lineMarket * QO_CASH_PCT / 100;
+            totalMarket += lineMarket;
+            totalCredit += lineCredit;
+            totalCash += lineCash;
+
+            const isCard = i.product_type === 'raw';
+            let badge;
+            if (i.is_graded) {
+                badge = '<span class="badge" style="background:var(--accent-alt,#7c3aed); color:#fff;">' + (i.grade_company || '') + ' ' + (i.grade_value || '') + '</span>';
+            } else if (isCard) {
+                const c = i.condition || '';
+                badge = '<span class="badge" style="background:var(--surface-2); color:var(--text-dim);">' + c + '</span>';
+            } else {
+                badge = '<span class="badge" style="background:rgba(79,125,249,0.18); color:#7aadff;">Sealed</span>';
+            }
+            const sub = (i.set_name || '') + (i.card_number ? ' #' + i.card_number : '') + (i.variance && i.variance !== 'Normal' ? ' · ' + i.variance : '');
+            const name = (i.product_name || '') + (sub ? '<br><small style="color:var(--text-dim);">' + sub + '</small>' : '');
+            return '<tr>' +
+                '<td>' + name + '</td>' +
+                '<td>' + badge + '</td>' +
+                '<td class="num">×' + qty + '</td>' +
+                '<td class="num market">$' + lineMarket.toFixed(2) + '</td>' +
+                '<td class="num credit">$' + lineCredit.toFixed(2) + '</td>' +
+                '<td class="num cash">$' + lineCash.toFixed(2) + '</td>' +
+                '<td class="num"><button class="x-btn" onclick="qoRemove(\'' + i.id + '\')" title="Remove">✕</button></td>' +
+                '</tr>';
+        }).join('');
+
+        wrap.innerHTML =
+            '<table class="qo-items">' +
+            '<thead><tr><th>Item</th><th></th><th class="num">Qty</th><th class="num">Market</th><th class="num">Credit (75%)</th><th class="num">Cash (65%)</th><th></th></tr></thead>' +
+            '<tbody>' + rows + '</tbody></table>';
+
+        qoUpdateTotals(totalMarket, totalCredit, totalCash);
+        qoSetActionsEnabled(true);
+    }
+
+    function qoUpdateTotals(market, credit, cash) {
+        document.getElementById('qo-total-market').textContent = '$' + market.toFixed(2);
+        document.getElementById('qo-total-credit').textContent = '$' + credit.toFixed(2);
+        document.getElementById('qo-total-cash').textContent = '$' + cash.toFixed(2);
+        document.getElementById('qo-btn-credit-sub').textContent = '$' + credit.toFixed(2);
+        document.getElementById('qo-btn-cash-sub').textContent = '$' + cash.toFixed(2);
+    }
+
+    function qoSetActionsEnabled(on) {
+        document.getElementById('qo-btn-credit').disabled = !on;
+        document.getElementById('qo-btn-cash').disabled = !on;
+    }
+
+    async function qoRemove(itemId) {
+        try {
+            await fetch('/api/intake/item/' + itemId + '/delete', { method: 'POST' });
+            loadIntakeItems();
+        } catch (err) { alert(err.message); }
+    }
+
+    async function quickAccept(offerType) {
+        if (!intakeSessionId) return;
+        const btn = document.getElementById(offerType === 'cash' ? 'qo-btn-cash' : 'qo-btn-credit');
+        btn.disabled = true;
+        try {
+            const r = await fetch('/api/intake/session/' + intakeSessionId + '/quick-accept', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ offer_type: offerType }),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                alert(d.error || 'Failed to accept');
+                qoSetActionsEnabled(true);
+                return;
+            }
+            await qoFlash(offerType === 'cash' ? '💵 Cash offer accepted' : '💳 Credit offer accepted', '#22c55e');
+            await qoReset();
+        } catch (err) {
+            alert(err.message);
+            qoSetActionsEnabled(true);
+        }
+    }
+
+    async function quickReject() {
+        if (!intakeSessionId) {
+            await qoReset();
+            return;
+        }
+        try {
+            await fetch('/api/intake/session/' + intakeSessionId + '/quick-discard', { method: 'POST' });
+        } catch (err) { /* swallow — we're resetting either way */ }
+        await qoFlash('✕ Cleared', '#ef4444');
+        await qoReset();
+    }
+
+    async function qoReset() {
+        intakeSessionId = null;
+        document.getElementById('qo-items-wrap').innerHTML = '<div class="qo-empty">Search and add items to see the offer.</div>';
+        document.getElementById('intake-search-results').innerHTML = '';
+        qoUpdateTotals(0, 0, 0);
+        qoSetActionsEnabled(false);
+        // Clear the search inputs so the next customer starts fresh
+        ['intake-sealed-search','intake-card-search','intake-card-set','intake-card-tcgid'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.value = '';
+        });
+        ['intake-sealed-qty','intake-card-qty'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.value = '1';
+        });
+        const graded = document.getElementById('intake-is-graded');
+        if (graded && graded.checked) { graded.checked = false; toggleIntakeGraded(); }
+        switchIntakeType('sealed');
+        await qoStartSession();
+        document.getElementById('intake-sealed-search').focus();
+    }
+
+    function qoFlash(msg, color) {
+        return new Promise(resolve => {
+            const el = document.createElement('div');
+            el.textContent = msg;
+            el.style.cssText = 'position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:' + color + '; color:#fff; padding:24px 40px; border-radius:14px; font-size:1.4rem; font-weight:700; z-index:9999; box-shadow:0 10px 40px rgba(0,0,0,0.4); pointer-events:none;';
+            document.body.appendChild(el);
+            setTimeout(() => { el.remove(); resolve(); }, 700);
+        });
+    }
+
+    // Bootstrap on load
+    document.addEventListener('DOMContentLoaded', async () => {
+        try {
+            await qoStartSession();
+            switchIntakeType('sealed');
+            document.getElementById('intake-sealed-search').focus();
+        } catch (err) {
+            // qoStartSession already surfaced the error in the header
+        }
+    });
+
+    // The upstream JS uses themedConfirm/themedPrompt for some flows
+    // (e.g. _finalizeCardAdd's "no price found" prompt). Those use the
+    // themed-prompt-overlay we stubbed above, so they'll work fine.
+    </script>
+</body>
+</html>
