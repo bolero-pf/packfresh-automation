@@ -37,6 +37,19 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 }
 .nav-badge.visible { display: inline; }
 
+.nav-section {
+  margin: 12px 20px 6px;
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+.nav-divider {
+  margin: 8px 20px;
+  border-top: 1px solid var(--border);
+}
+
 .scanner-status {
   margin-top: auto; padding: 14px 20px;
   border-top: 1px solid var(--border);
@@ -377,9 +390,17 @@ body { display: flex; flex-direction: column; overflow: hidden; }
       <div class="logo-name">Pack Fresh</div>
       <div class="logo-sub">Card Manager</div>
     </div>
+    <div class="nav-section">Customer Flow</div>
+    <a class="nav-item" href="/price-check/" target="_blank" style="text-decoration:none;">
+      🔍 Price Check
+    </a>
     <div class="nav-item active" onclick="showView('holds')" id="nav-holds">
       📋 Hold Queue
       <span class="nav-badge" id="badge-holds"></span>
+    </div>
+    <div class="nav-item" onclick="showView('sell')" id="nav-sell">
+      💵 Sell
+      <span class="nav-badge" id="badge-sell"></span>
     </div>
     <div class="nav-item" onclick="showView('returns')" id="nav-returns">
       ↩ Return Queue
@@ -389,15 +410,14 @@ body { display: flex; flex-direction: column; overflow: hidden; }
       ⚠ Missing Cards
       <span class="nav-badge" id="badge-missing"></span>
     </div>
+
+    <div class="nav-divider"></div>
+    <div class="nav-section">Inventory</div>
     <div class="nav-item" onclick="showView('display')" id="nav-display">
       🪟 Display Case
     </div>
     <div class="nav-item" onclick="showView('binders')" id="nav-binders">
       📒 Binders
-    </div>
-    <div class="nav-item" onclick="showView('sell')" id="nav-sell">
-      💵 Sell
-      <span class="nav-badge" id="badge-sell"></span>
     </div>
     <div class="nav-item" onclick="showView('editor')" id="nav-editor">
       ✎ Card Editor
@@ -405,12 +425,12 @@ body { display: flex; flex-direction: column; overflow: hidden; }
     <div class="nav-item" onclick="showView('featured')" id="nav-featured">
       ★ Featured Cards
     </div>
-    <a class="nav-item" href="/price-check/" target="_blank" style="text-decoration:none;">
-      🔍 Price Check
-    </a>
     <div class="scanner-status">
       <span class="scanner-dot" id="scanner-dot"></span>
       <span id="scanner-label">Scanner ready</span>
+      <a href="javascript:void(0)" onclick="try { pfSound.notify(); } catch(e) {}"
+         style="margin-left:auto;font-size:0.7rem;color:var(--dim);text-decoration:none;"
+         title="Click to verify your browser is playing the new-hold ping">🔔 Test</a>
     </div>
   </nav>
 

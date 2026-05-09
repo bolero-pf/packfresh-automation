@@ -99,6 +99,8 @@ function themedConfirm(title, message, opts) {
    ─────────────────────────────────────────────────────────── */
 var pfSound = (function () {
   var ctx = null;
+  var unlocked = false;
+
   function _ctx() {
     if (ctx) return ctx;
     try {
@@ -107,6 +109,39 @@ var pfSound = (function () {
       ctx = new Ctor();
       return ctx;
     } catch (e) { return null; }
+  }
+
+  // Browsers (especially Chrome) start the AudioContext suspended and only
+  // resume during an actual user gesture. The polling that drives the new-
+  // hold ping fires from setInterval, far from any user click — so without
+  // a pre-emptive unlock the context stays suspended and notify() goes
+  // silent. We listen for the first click/keydown/touch on the page,
+  // create + resume the context, and play a zero-volume tick so iOS Safari
+  // also fully unlocks. After that, all later tones go through normally.
+  function _unlock() {
+    if (unlocked) return;
+    var c = _ctx();
+    if (!c) return;
+    var resume = (c.state === 'suspended') ? c.resume() : Promise.resolve();
+    Promise.resolve(resume).then(function () { unlocked = true; }).catch(function () {});
+    try {
+      var osc = c.createOscillator();
+      var g = c.createGain();
+      g.gain.value = 0;
+      osc.connect(g); g.connect(c.destination);
+      osc.start(0); osc.stop(c.currentTime + 0.001);
+    } catch (e) {}
+  }
+  if (typeof document !== 'undefined') {
+    var _once = function () {
+      _unlock();
+      document.removeEventListener('click', _once);
+      document.removeEventListener('keydown', _once);
+      document.removeEventListener('touchstart', _once);
+    };
+    document.addEventListener('click', _once);
+    document.addEventListener('keydown', _once);
+    document.addEventListener('touchstart', _once);
   }
 
   function _tone(freq, duration, type, gain, when) {
@@ -133,9 +168,14 @@ var pfSound = (function () {
     /* Rising chirp — "scan accepted / action committed". */
     success: function () { _tone(660, 0.08, 'sine', 0.18, 0);
                            _tone(990, 0.12, 'sine', 0.18, 0.07); },
-    /* Single warm bell — "new hold dropped, look at me". */
-    notify:  function () { _tone(880, 0.18, 'triangle', 0.22, 0);
-                           _tone(660, 0.22, 'triangle', 0.18, 0.16); }
+    /* New-hold ping — three rising bells, loud enough to cut through
+       background music or chatter so staff actually notice the badge. */
+    notify:  function () { _tone(740, 0.20, 'triangle', 0.40, 0);
+                           _tone(990, 0.22, 'triangle', 0.40, 0.18);
+                           _tone(1320, 0.30, 'triangle', 0.40, 0.38); },
+    /* Test ping — exposed so a "Test sound" button can verify audio works. */
+    _test:   function () { _tone(880, 0.18, 'triangle', 0.30, 0);
+                           _tone(660, 0.22, 'triangle', 0.25, 0.16); }
   };
 })();
 
