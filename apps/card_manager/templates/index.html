@@ -1173,7 +1173,6 @@ function renderReturns(cards, recentBatches) {
     </div>
     <div class="btn-row" style="margin-bottom:16px;">
       <button class="btn btn-green" onclick="storeBatch()">📦 Store Scanned Cards</button>
-      <button class="btn btn-ghost" onclick="storeAll()">Store All (no scan)</button>
     </div>
     <div id="return-cards-list">
       ${cards.map(c => {
@@ -1255,7 +1254,7 @@ async function sellInstead(barcode) {
 
 async function storeBatch() {
   if (!_returnScanned.size) {
-    toast('Scan some cards first, or use "Store All"', 'red');
+    toast('Scan some cards first', 'red');
     return;
   }
   await _storeCards(Array.from(_returnScanned));
