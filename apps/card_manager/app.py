@@ -876,11 +876,14 @@ def tap_pull_display(hold_id, hold_item_id):
             "error": "Tap-pull is only allowed for display-case / binder items; "
                      "STORED items must be scanned from the bin.",
         }), 409
-    # DISPLAY = in-store hold; PENDING_SALE = Champion paid (webhook flipped
-    # state on order-paid so Display Set Out reconciliation excludes it).
-    if item["card_state"] not in ("DISPLAY", "PENDING_SALE"):
+    # bin_type already proved this is a display-family row, so the physical
+    # location is known. card_state can lag the bin_id (legacy migration miss
+    # or a re-bin that didn't flip state) — don't reject the puller on a
+    # data-shape technicality. Block only states where pull genuinely doesn't
+    # make sense (already-pulled, sold, missing, return-pending).
+    if item["card_state"] not in ("STORED", "DISPLAY", "PENDING_SALE"):
         return jsonify({
-            "error": f"Card is in state {item['card_state']}, expected DISPLAY or PENDING_SALE",
+            "error": f"Card is in state {item['card_state']}, can't tap-pull",
         }), 409
 
     db.execute("""
