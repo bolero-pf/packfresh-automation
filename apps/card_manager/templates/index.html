@@ -1153,9 +1153,11 @@ function renderReturns(cards, recentBatches) {
     </div>
     <div id="return-cards-list">
       ${cards.map(c => {
-        const isDisplay = c.bin_type === 'display_case' || c.bin_type === 'binder';
+        const isBinder  = c.bin_type === 'binder';
+        const isDisplay = c.bin_type === 'display_case' || isBinder;
+        const placeLabel = isBinder ? 'Put back in binder' : 'Put back on display';
         const binNote = isDisplay
-          ? `Goes back to ${esc(c.last_bin||'?')} (display)`
+          ? `Goes back to ${esc(c.last_bin||'?')}`
           : `${esc(c.condition)} · last bin: ${esc(c.last_bin||'no bin')}`;
         return `
         <div class="return-card${isDisplay ? ' return-card-display' : ''}" id="rc-${esc(c.barcode)}">
@@ -1167,7 +1169,7 @@ function renderReturns(cards, recentBatches) {
           <div class="return-barcode">${esc(c.barcode)}</div>
           ${isDisplay ? `
             <button class="btn btn-sm" style="background:var(--green);color:#000;font-size:0.72rem;font-weight:700;padding:4px 10px;"
-                    onclick="event.stopPropagation();tapRestore('${c.id}','${esc(c.card_name)}')">✓ Tap to restore</button>
+                    onclick="event.stopPropagation();tapRestore('${c.id}','${esc(c.card_name)}')">✓ ${placeLabel}</button>
           ` : `
             <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 8px;" title="Reprint with a new barcode if the current label won't scan"
                     onclick="event.stopPropagation();regenerateAndPrint('${c.id}','${esc(c.card_name)}')">🆕 New BC</button>
@@ -1206,7 +1208,7 @@ async function tapRestore(cardId, cardName) {
   try {
     const d = await post(`/api/returns/${cardId}/tap-restore`, {});
     if (d && d.success) {
-      toast(`✓ ${d.card_name} back on ${d.bin_label || 'display'}`, 'green');
+      toast(`✓ ${d.card_name} back in ${d.bin_label || 'display'}`, 'green');
       loadReturns();
       refreshBadges();
     }
