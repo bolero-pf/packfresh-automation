@@ -637,7 +637,7 @@ def cancel_hold(hold_id):
         FROM hold_items hi
         LEFT JOIN raw_cards rc ON hi.raw_card_id = rc.id
         WHERE hi.hold_id = %s
-          AND hi.status IN ('REQUESTED','PULLED')
+          AND hi.status IN ('REQUESTED','PULLED','REJECTED')
           AND COALESCE(hi.shopify_product_id, rc.shopify_product_id) IS NOT NULL
     """, (hold_id,))
     for row in pids_to_delete:
@@ -651,11 +651,13 @@ def cancel_hold(hold_id):
                            f"of hold {hold_id}: {e}")
     # Clear the now-stale stamps so a future re-pull doesn't try to
     # un-archive a deleted product (the idempotency GET will 404 either
-    # way, but cleaner to nil out).
+    # way, but cleaner to nil out). REJECTED-but-deferred items live in
+    # PULLED state with stamped product_ids until finish_hold or cancel
+    # commits — so they're caught here too.
     db.execute("""
         UPDATE hold_items
            SET shopify_product_id = NULL, shopify_variant_id = NULL
-         WHERE hold_id = %s AND status IN ('REQUESTED','PULLED')
+         WHERE hold_id = %s AND status IN ('REQUESTED','PULLED','REJECTED')
     """, (hold_id,))
     db.execute("""
         UPDATE raw_cards
@@ -664,7 +666,7 @@ def cancel_hold(hold_id):
              SELECT raw_card_id FROM hold_items
               WHERE hold_id = %s
                 AND raw_card_id IS NOT NULL
-                AND status IN ('REQUESTED','PULLED')
+                AND status IN ('REQUESTED','PULLED','REJECTED')
          )
     """, (hold_id,))
 
@@ -685,7 +687,7 @@ def cancel_hold(hold_id):
              SELECT raw_card_id FROM hold_items
               WHERE hold_id = %s
                 AND raw_card_id IS NOT NULL
-                AND status IN ('REQUESTED','PULLED')
+                AND status IN ('REQUESTED','PULLED','REJECTED')
          )
     """, (hold_id,))
 
@@ -694,7 +696,7 @@ def cancel_hold(hold_id):
         UPDATE hold_items
            SET status = 'CANCELLED', resolved_at = CURRENT_TIMESTAMP
          WHERE hold_id = %s
-           AND status IN ('REQUESTED','PULLED')
+           AND status IN ('REQUESTED','PULLED','REJECTED')
     """, (hold_id,))
 
     # Mark the hold itself
@@ -1006,29 +1008,17 @@ def item_decision(hold_id, hold_item_id):
         return jsonify({"error": "Hold item not found"}), 404
 
     if decision == "REJECTED":
-        # Delete the pre-created listing (scan_card creates it on PULL).
-        # Leaving even archived ones around clutters the Shopify admin
-        # product list. Re-accept after reject calls _create_raw_listing
-        # which 404s on the deleted product and creates a fresh one.
-        existing_pid = item.get("shopify_product_id")
-        if existing_pid:
-            try:
-                _shopify("DELETE", f"/products/{existing_pid}.json")
-            except Exception as e:
-                logger.warning(f"Failed to delete listing on REJECT for "
-                               f"item {hold_item_id}: {e}")
+        # Decision tracked on hold_items only — raw_cards.state stays PULLED
+        # so the card doesn't enter Return Queue until finish_hold commits.
+        # Until then, the customer can reverse via 'Re-accept' and the
+        # listing (pre-created on scan) stays alive — no churn, no race
+        # against another staff member processing the Return Queue while
+        # the customer is still mid-review.
         db.execute("""
             UPDATE hold_items
-               SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP,
-                   shopify_product_id = NULL, shopify_variant_id = NULL
+               SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP
              WHERE id = %s
         """, (hold_item_id,))
-        db.execute("""
-            UPDATE raw_cards
-               SET state = 'PENDING_RETURN', current_hold_id = NULL,
-                   shopify_product_id = NULL, shopify_variant_id = NULL
-             WHERE id = %s
-        """, (str(item["card_id"]),))
     else:
         # ACCEPTED — create Shopify listing immediately
         try:
@@ -1432,28 +1422,56 @@ def finish_hold(hold_id):
             f"{[s['barcode'] for s in skipped_already_listed]}"
         )
 
-    # RAW items still REQUESTED or PULLED (not yet decided) → auto-reject.
-    # MISSING items are already resolved — leave them alone.
+    # Commit all rejections at finish time. Three populations get folded in:
+    #   - REJECTED  : customer explicitly rejected during review (item_decision
+    #                 deferred the state change so a reverse stayed cheap)
+    #   - REQUESTED/PULLED : never decided → auto-reject
+    # For each, delete the pre-created Shopify listing (so the admin product
+    # list stays clean) and route the raw_card to PENDING_RETURN. Pre-create
+    # may have stamped product_ids on either hold_items or raw_cards; the
+    # COALESCE picks whichever side has it.
+    to_reject = db.query("""
+        SELECT hi.id AS hold_item_id, hi.raw_card_id,
+               COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS pid
+        FROM hold_items hi
+        JOIN raw_cards rc ON hi.raw_card_id = rc.id
+        WHERE hi.hold_id = %s
+          AND hi.item_kind = 'raw'
+          AND hi.status IN ('REQUESTED','PULLED','REJECTED')
+    """, (hold_id,))
+    for r in to_reject:
+        pid = r.get("pid")
+        if pid:
+            try:
+                _shopify("DELETE", f"/products/{pid}.json")
+            except Exception as e:
+                logger.warning(f"finish_hold {hold_id}: failed to delete "
+                               f"rejected listing {pid}: {e}")
+    db.execute("""
+        UPDATE raw_cards
+        SET state = 'PENDING_RETURN', current_hold_id = NULL,
+            shopify_product_id = NULL, shopify_variant_id = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (
+            SELECT raw_card_id FROM hold_items
+            WHERE hold_id = %s
+              AND item_kind = 'raw'
+              AND status IN ('REQUESTED','PULLED','REJECTED')
+        )
+    """, (hold_id,))
+    db.execute("""
+        UPDATE hold_items
+        SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP,
+            shopify_product_id = NULL, shopify_variant_id = NULL
+        WHERE hold_id = %s
+          AND item_kind = 'raw'
+          AND status IN ('REQUESTED','PULLED','REJECTED')
+    """, (hold_id,))
     # SEALED/SLAB items are NEVER auto-rejected — they aren't tracked the way
     # raw is (no bin lock, no Shopify listing to create), they just live on
     # the shelf. Mark them ACCEPTED so the closed hold doesn't show stale
     # REQUESTED/PULLED rows; if the customer doesn't buy them at POS, Shopify
     # inventory stays unchanged and the items go back on the shelf.
-    db.execute("""
-        UPDATE raw_cards SET state = 'PENDING_RETURN', current_hold_id = NULL
-        WHERE id IN (
-            SELECT raw_card_id FROM hold_items
-            WHERE hold_id = %s
-              AND item_kind = 'raw'
-              AND status IN ('REQUESTED','PULLED')
-        )
-    """, (hold_id,))
-    db.execute("""
-        UPDATE hold_items SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP
-        WHERE hold_id = %s
-          AND item_kind = 'raw'
-          AND status IN ('REQUESTED','PULLED')
-    """, (hold_id,))
     db.execute("""
         UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
         WHERE hold_id = %s
