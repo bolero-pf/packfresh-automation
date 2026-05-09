@@ -727,8 +727,13 @@ function renderHoldDetail(d) {
     const binBuckets = new Map();
     const binTypes   = new Map();
     pull.forEach(group => {
+      // Match on the same identity tuple the backend grouped by — for JP /
+      // Scrydex-only cards (no tcgplayer_id), scrydex_id is the only stable
+      // ID, and using just tcgplayer_id collapses every JP card together.
       const groupItems = items.filter(i =>
-        i.tcgplayer_id == group.tcgplayer_id && i.condition === group.condition
+        i.tcgplayer_id == group.tcgplayer_id
+        && (i.scrydex_id || '') === (group.scrydex_id || '')
+        && i.condition === group.condition
       );
       const primaryBinObj = (group.best_bins && group.best_bins[0]) || null;
       const primaryBin = primaryBinObj ? primaryBinObj.bin_label : '— No bin';

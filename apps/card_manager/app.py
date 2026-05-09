@@ -478,7 +478,7 @@ def get_hold(hold_id):
                hi.image_url AS hi_image_url, hi.unit_price AS hi_unit_price,
                ipc.barcode AS prod_barcode,
                rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
-               rc.condition, rc.current_price, rc.tcgplayer_id,
+               rc.condition, rc.current_price, rc.tcgplayer_id, rc.scrydex_id,
                rc.image_url AS rc_image_url, rc.state AS card_state,
                sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
         FROM hold_items hi
@@ -509,6 +509,7 @@ def get_hold(hold_id):
             d["card_number"] = None
             d["condition"]   = None
             d["tcgplayer_id"] = None
+            d["scrydex_id"]  = None
         else:
             d["image_url"] = d.get("rc_image_url")
             d["sku"]       = None
@@ -516,11 +517,14 @@ def get_hold(hold_id):
 
     # Build optimized pull list FROM RAW ITEMS ONLY — the bin-grouping logic
     # is meaningless for sealed/slab (no bins, no condition matching).
+    # Identity key is (tcgplayer_id, scrydex_id, condition): JP / Scrydex-only
+    # cards have no tcgplayer_id, so grouping by tcg alone collapses every
+    # JP card into one bucket. Carrying scrydex_id keeps them distinct.
     pull_groups = {}
     for item in norm_items:
         if (item.get("item_kind") or "raw") != "raw":
             continue
-        key = (item["tcgplayer_id"], item["condition"])
+        key = (item["tcgplayer_id"], item.get("scrydex_id") or "", item["condition"])
         if key not in pull_groups:
             pull_groups[key] = {
                 "card_name":    item["card_name"],
@@ -528,6 +532,7 @@ def get_hold(hold_id):
                 "card_number":  item["card_number"],
                 "condition":    item["condition"],
                 "tcgplayer_id": item["tcgplayer_id"],
+                "scrydex_id":   item.get("scrydex_id"),
                 "image_url":    item["image_url"],
                 "items":        [],
             }
@@ -536,24 +541,44 @@ def get_hold(hold_id):
     # For each group, find the best bin (most copies available)
     pull_list = []
     for key, group in pull_groups.items():
-        tcg_id, condition = key
+        tcg_id, sx_id, condition = key
         qty_needed = len(group["items"])
+        # Match on whichever ID the card has — JP cards are scrydex-only,
+        # most US cards have tcgplayer_id (and increasingly also scrydex_id).
+        # OR'd so a single query handles both kinds without splitting.
+        if tcg_id or sx_id:
+            id_clause = []
+            id_params = []
+            if tcg_id:
+                id_clause.append("rc.tcgplayer_id = %s")
+                id_params.append(tcg_id)
+            if sx_id:
+                id_clause.append("rc.scrydex_id = %s")
+                id_params.append(sx_id)
+            id_where = "(" + " OR ".join(id_clause) + ")"
 
-        # Find bins containing this card ordered by count DESC. location_type
-        # ('bin' / 'binder' / 'display_case') flows through so the puller UI
-        # can show FG-1 and Binder-N as tap-to-confirm rather than scan-from-bin.
-        best_bins = db.query("""
-            SELECT sl.bin_label, sl.id AS bin_id,
-                   COALESCE(sr.location_type, 'bin') AS bin_type,
-                   COUNT(*) AS available_here
-            FROM raw_cards rc
-            JOIN storage_locations sl ON rc.bin_id = sl.id
-            JOIN storage_rows sr ON sl.row_id = sr.id
-            WHERE rc.tcgplayer_id = %s
-              AND rc.condition = %s
-            GROUP BY sl.bin_label, sl.id, sr.location_type
-            ORDER BY available_here DESC
-        """, (tcg_id, condition)) if tcg_id else []
+            best_bins = db.query(f"""
+                SELECT sl.bin_label, sl.id AS bin_id,
+                       COALESCE(sr.location_type, 'bin') AS bin_type,
+                       COUNT(*) AS available_here
+                FROM raw_cards rc
+                JOIN storage_locations sl ON rc.bin_id = sl.id
+                JOIN storage_rows sr ON sl.row_id = sr.id
+                WHERE {id_where}
+                  AND rc.condition = %s
+                GROUP BY sl.bin_label, sl.id, sr.location_type
+                ORDER BY available_here DESC
+            """, tuple(id_params) + (condition,))
+
+            valid = db.query(f"""
+                SELECT barcode FROM raw_cards rc
+                WHERE {id_where}
+                  AND rc.condition = %s
+                  AND rc.state IN ('STORED','DISPLAY')
+            """, tuple(id_params) + (condition,))
+        else:
+            best_bins = []
+            valid = []
 
         group["best_bins"] = [
             {"bin_label": b["bin_label"], "count": b["available_here"],
@@ -561,16 +586,6 @@ def get_hold(hold_id):
             for b in best_bins
         ]
         group["qty_needed"] = qty_needed
-
-        # Collect all valid barcodes for this (tcgplayer_id, condition).
-        # Includes DISPLAY-state copies so a scan still works on a sibling
-        # currently in FG / a binder, but the UI defaults to tap-to-confirm
-        # for those rows (no scan required).
-        valid = db.query("""
-            SELECT barcode FROM raw_cards
-            WHERE tcgplayer_id = %s AND condition = %s
-              AND state IN ('STORED','DISPLAY')
-        """, (tcg_id, condition)) if tcg_id else []
         group["valid_barcodes"] = [v["barcode"] for v in valid]
 
         pull_list.append(group)
@@ -792,11 +807,29 @@ def scan_card(hold_id):
             })
         return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
 
-    # Find a REQUESTED hold_item on this hold matching tcgplayer_id + condition.
-    # `hi_product_id` lets pre-create reuse the listing kiosk Champion checkout
-    # already stamped on the hold_item; without it, scan_card would create a
+    # Find a REQUESTED hold_item on this hold matching the scanned card's
+    # identity (tcgplayer_id OR scrydex_id) + condition. JP cards typically
+    # have no tcgplayer_id and must match by scrydex_id; US cards usually
+    # have both.
+    # `hi_product_id` lets pre-create reuse the listing kiosk Champion
+    # checkout already stamped — without it, scan_card would create a
     # duplicate Shopify product alongside the existing kiosk-created one.
-    match = db.query_one("""
+    id_clauses = []
+    id_params: list = []
+    if scanned.get("tcgplayer_id"):
+        id_clauses.append("rc.tcgplayer_id = %s")
+        id_params.append(scanned["tcgplayer_id"])
+    if scanned.get("scrydex_id"):
+        id_clauses.append("rc.scrydex_id = %s")
+        id_params.append(scanned["scrydex_id"])
+    if not id_clauses:
+        return jsonify({
+            "error": "Scanned card has no identity (no tcgplayer_id or scrydex_id)",
+            "barcode": barcode,
+        }), 409
+    id_where = "(" + " OR ".join(id_clauses) + ")"
+
+    match = db.query_one(f"""
         SELECT hi.id, hi.barcode, hi.raw_card_id AS original_raw_id,
                hi.shopify_product_id AS hi_product_id,
                rc.card_name, rc.condition
@@ -804,10 +837,10 @@ def scan_card(hold_id):
         JOIN raw_cards rc ON hi.raw_card_id = rc.id
         WHERE hi.hold_id = %s
           AND hi.status = 'REQUESTED'
-          AND rc.tcgplayer_id = %s
+          AND {id_where}
           AND rc.condition = %s
         LIMIT 1
-    """, (hold_id, scanned["tcgplayer_id"], scanned["condition"]))
+    """, (hold_id, *id_params, scanned["condition"]))
 
     if not match:
         return jsonify({
