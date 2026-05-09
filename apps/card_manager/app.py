@@ -737,9 +737,13 @@ def scan_card(hold_id):
             })
         return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
 
-    # Find a REQUESTED hold_item on this hold matching tcgplayer_id + condition
+    # Find a REQUESTED hold_item on this hold matching tcgplayer_id + condition.
+    # `hi_product_id` lets pre-create reuse the listing kiosk Champion checkout
+    # already stamped on the hold_item; without it, scan_card would create a
+    # duplicate Shopify product alongside the existing kiosk-created one.
     match = db.query_one("""
         SELECT hi.id, hi.barcode, hi.raw_card_id AS original_raw_id,
+               hi.shopify_product_id AS hi_product_id,
                rc.card_name, rc.condition
         FROM hold_items hi
         JOIN raw_cards rc ON hi.raw_card_id = rc.id
@@ -805,7 +809,13 @@ def scan_card(hold_id):
     # scan — the decision/finish paths still call _create_raw_listing and
     # will retry there.
     try:
-        listing = _create_raw_listing(dict(scanned))
+        # Idempotency: prefer hi_product_id (kiosk Champion checkout) over
+        # raw_cards.shopify_product_id; without this, Champion holds would
+        # double-up listings since raw_cards isn't stamped at checkout time.
+        item_for_listing = dict(scanned)
+        if match.get("hi_product_id"):
+            item_for_listing["shopify_product_id"] = match["hi_product_id"]
+        listing = _create_raw_listing(item_for_listing)
         db.execute("""
             UPDATE raw_cards
             SET shopify_product_id = %s, shopify_variant_id = %s,
@@ -843,6 +853,7 @@ def tap_pull_display(hold_id, hold_item_id):
     item = db.query_one("""
         SELECT hi.id AS hold_item_id, hi.status AS hi_status,
                hi.raw_card_id,
+               hi.shopify_product_id AS hi_product_id,
                rc.id AS card_id, rc.barcode, rc.card_name, rc.set_name,
                rc.card_number, rc.condition, rc.current_price, rc.image_url,
                rc.tcgplayer_id, rc.state AS card_state,
@@ -865,9 +876,11 @@ def tap_pull_display(hold_id, hold_item_id):
             "error": "Tap-pull is only allowed for display-case / binder items; "
                      "STORED items must be scanned from the bin.",
         }), 409
-    if item["card_state"] != "DISPLAY":
+    # DISPLAY = in-store hold; PENDING_SALE = Champion paid (webhook flipped
+    # state on order-paid so Display Set Out reconciliation excludes it).
+    if item["card_state"] not in ("DISPLAY", "PENDING_SALE"):
         return jsonify({
-            "error": f"Card is in state {item['card_state']}, expected DISPLAY",
+            "error": f"Card is in state {item['card_state']}, expected DISPLAY or PENDING_SALE",
         }), 409
 
     db.execute("""
@@ -882,9 +895,14 @@ def tap_pull_display(hold_id, hold_item_id):
         WHERE id = %s
     """, (hold_id, str(item["card_id"])))
 
-    # Pre-create the listing — same rationale as scan_card.
+    # Pre-create the listing — same rationale as scan_card. Prefer
+    # hi_product_id (kiosk Champion checkout) so Champion holds reuse the
+    # listing kiosk already created instead of stamping a duplicate.
     try:
-        listing = _create_raw_listing(dict(item))
+        item_for_listing = dict(item)
+        if item.get("hi_product_id"):
+            item_for_listing["shopify_product_id"] = item["hi_product_id"]
+        listing = _create_raw_listing(item_for_listing)
         db.execute("""
             UPDATE raw_cards
             SET shopify_product_id = %s, shopify_variant_id = %s,
@@ -1523,14 +1541,20 @@ def _finish_champion_hold(hold_id):
             UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
             WHERE id = %s
         """, (str(item["hold_item_id"]),))
+        # PULLED items were physically confirmed by scan/tap, so they're
+        # being shipped right now → SOLD. REQUESTED items at finish time
+        # weren't confirmed; they stay at PENDING_SALE (set by the order-paid
+        # webhook) so Sean can see them in the dashboard and chase them
+        # down rather than auto-marking them as shipped.
+        new_state = 'SOLD' if item["status"] == 'PULLED' else 'PENDING_SALE'
         db.execute("""
             UPDATE raw_cards
-            SET state = 'PENDING_SALE',
+            SET state = %s,
                 shopify_product_id = COALESCE(%s, shopify_product_id),
                 shopify_variant_id = COALESCE(%s, shopify_variant_id),
                 current_hold_id = NULL
             WHERE id = %s
-        """, (item.get("shopify_product_id"), item.get("shopify_variant_id"),
+        """, (new_state, item.get("shopify_product_id"), item.get("shopify_variant_id"),
               str(item["raw_card_id"])))
 
     # Handle MISSING items — release them

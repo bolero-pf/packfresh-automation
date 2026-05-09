@@ -2764,6 +2764,23 @@ def webhook_order_paid():
             if hold_item:
                 hold_ids.add(str(hold_item["hold_id"]))
 
+    # Champion paid → flip the locked raw_cards out of DISPLAY/STORED into
+    # PENDING_SALE. This removes them from Display Set Out reconciliation
+    # (which keys on state='DISPLAY') so end-of-day "Return All" doesn't
+    # expect to find a card that's been sold and is awaiting ship-pull.
+    # bin_id is preserved so the puller knows where to look. State
+    # transitions to SOLD when card_manager finalizes the hold (after
+    # physical confirmation of the pulled card).
+    for hid in hold_ids:
+        try:
+            db.execute("""
+                UPDATE raw_cards
+                SET state = 'PENDING_SALE', updated_at = CURRENT_TIMESTAMP
+                WHERE current_hold_id = %s AND state IN ('STORED','DISPLAY')
+            """, (hid,))
+        except Exception as e:
+            logger.warning(f"Champion lifecycle flip failed for hold {hid}: {e}")
+
     # ── 2. POS sale: match by line-item SKU ───────────────────────────────────
     # Covers sealed/slab hold items AND raw card active listings.
     # Card manager creates raw listings with SKU = barcode; sealed/slab hold
