@@ -624,6 +624,50 @@ def cancel_hold(hold_id):
                      "Use 'Return' on each accepted card before cancelling."
         }), 409
 
+    # Delete any pre-created Shopify listings before releasing the lock.
+    # scan_card and tap_pull both pre-create on PULL so the register flow
+    # is fast; without this step, a cancelled hold would leave those
+    # listings live in Shopify forever (showing as "active · 1 in stock"
+    # in the admin product list). DELETE rather than archive so the admin
+    # product list stays clean — re-pulling the same physical card on a
+    # future hold creates a fresh listing (the stamped product_id 404s
+    # and _create_raw_listing falls through to the create path).
+    pids_to_delete = db.query("""
+        SELECT DISTINCT COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS pid
+        FROM hold_items hi
+        LEFT JOIN raw_cards rc ON hi.raw_card_id = rc.id
+        WHERE hi.hold_id = %s
+          AND hi.status IN ('REQUESTED','PULLED')
+          AND COALESCE(hi.shopify_product_id, rc.shopify_product_id) IS NOT NULL
+    """, (hold_id,))
+    for row in pids_to_delete:
+        pid = row.get("pid")
+        if not pid:
+            continue
+        try:
+            _shopify("DELETE", f"/products/{pid}.json")
+        except Exception as e:
+            logger.warning(f"Failed to delete listing {pid} on cancel "
+                           f"of hold {hold_id}: {e}")
+    # Clear the now-stale stamps so a future re-pull doesn't try to
+    # un-archive a deleted product (the idempotency GET will 404 either
+    # way, but cleaner to nil out).
+    db.execute("""
+        UPDATE hold_items
+           SET shopify_product_id = NULL, shopify_variant_id = NULL
+         WHERE hold_id = %s AND status IN ('REQUESTED','PULLED')
+    """, (hold_id,))
+    db.execute("""
+        UPDATE raw_cards
+           SET shopify_product_id = NULL, shopify_variant_id = NULL
+         WHERE id IN (
+             SELECT raw_card_id FROM hold_items
+              WHERE hold_id = %s
+                AND raw_card_id IS NOT NULL
+                AND status IN ('REQUESTED','PULLED')
+         )
+    """, (hold_id,))
+
     # Release raw_card locks for any non-terminal raw items. Recompute state
     # from bin location_type — if the card was on display (FG / binder), it
     # goes back to DISPLAY; otherwise STORED. Without this CASE the cancel
@@ -967,25 +1011,28 @@ def item_decision(hold_id, hold_item_id):
         return jsonify({"error": "Hold item not found"}), 404
 
     if decision == "REJECTED":
-        # Archive the pre-created listing (scan_card creates it on PULL so
-        # the customer's "Finish" press is fast). Archive rather than delete:
-        # if the customer reverses the decision, _create_raw_listing's
-        # idempotency check un-archives instead of making a duplicate.
+        # Delete the pre-created listing (scan_card creates it on PULL).
+        # Leaving even archived ones around clutters the Shopify admin
+        # product list. Re-accept after reject calls _create_raw_listing
+        # which 404s on the deleted product and creates a fresh one.
         existing_pid = item.get("shopify_product_id")
         if existing_pid:
             try:
-                _shopify("PUT", f"/products/{existing_pid}.json",
-                         json={"product": {"id": existing_pid, "status": "archived"}})
+                _shopify("DELETE", f"/products/{existing_pid}.json")
             except Exception as e:
-                logger.warning(f"Failed to archive listing on REJECT for "
+                logger.warning(f"Failed to delete listing on REJECT for "
                                f"item {hold_item_id}: {e}")
         db.execute("""
-            UPDATE hold_items SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP
-            WHERE id = %s
+            UPDATE hold_items
+               SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP,
+                   shopify_product_id = NULL, shopify_variant_id = NULL
+             WHERE id = %s
         """, (hold_item_id,))
         db.execute("""
-            UPDATE raw_cards SET state = 'PENDING_RETURN', current_hold_id = NULL
-            WHERE id = %s
+            UPDATE raw_cards
+               SET state = 'PENDING_RETURN', current_hold_id = NULL,
+                   shopify_product_id = NULL, shopify_variant_id = NULL
+             WHERE id = %s
         """, (str(item["card_id"]),))
     else:
         # ACCEPTED — create Shopify listing immediately
@@ -1701,49 +1748,83 @@ def store_returns():
         return jsonify({"error": "No barcodes provided — scan cards before storing"}), 400
 
     cards = db.query("""
-        SELECT id, barcode, card_name, COALESCE(game, 'pokemon') AS game
-        FROM raw_cards WHERE barcode = ANY(%s) AND state IN ('PENDING_RETURN', 'MISSING')
+        SELECT rc.id, rc.barcode, rc.card_name, COALESCE(rc.game, 'pokemon') AS game,
+               rc.bin_id, sl.bin_label,
+               COALESCE(sr.location_type, 'bin') AS bin_type
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE rc.barcode = ANY(%s) AND rc.state IN ('PENDING_RETURN', 'MISSING')
     """, (list(barcodes),))
 
     if not cards:
         return jsonify({"error": "No scanned cards found in PENDING_RETURN state"}), 400
 
-    # Group by game (pokemon / magic / etc.) and run one assign_bins pass per
-    # type so MTG cards land in MTG rows, not Pokemon bins.
-    from collections import defaultdict
-    by_game = defaultdict(list)
-    for c in cards:
-        by_game[c["game"]].append(c)
-
     bin_summary = []
     errors      = []
-    for game, gcards in by_game.items():
-        try:
-            assignments = assign_bins(game, len(gcards), db)
-        except ValueError as e:
-            errors.append({"game": game, "error": str(e)})
-            continue
 
-        idx = 0
-        for a in assignments:
-            take      = a["count"]
-            batch     = gcards[idx:idx + take]
-            batch_ids = [str(c["id"]) for c in batch]
-            idx += take
-
-            db.execute("""
-                UPDATE raw_cards
-                SET state = 'STORED', bin_id = %s, current_hold_id = NULL,
-                    stored_at = CURRENT_TIMESTAMP
-                WHERE id::text = ANY(%s)
-            """, (a["bin_id"], batch_ids))
-
+    # Display-family cards (FG / Binder) go back to their original bin —
+    # the puller is physically restoring the card to its case/binder slot,
+    # so no new assignment is needed. Just flip state DISPLAY and preserve
+    # bin_id. The Return Queue surfaces these for the explicit "remember
+    # to put it back" task without funnelling them into storage bins.
+    display_cards = [c for c in cards if c["bin_type"] in ("display_case", "binder")]
+    if display_cards:
+        ids = [str(c["id"]) for c in display_cards]
+        db.execute("""
+            UPDATE raw_cards
+            SET state = 'DISPLAY', current_hold_id = NULL,
+                stored_at = CURRENT_TIMESTAMP
+            WHERE id::text = ANY(%s)
+        """, (ids,))
+        # Group by original bin for the operator-facing summary.
+        by_bin: dict = {}
+        for c in display_cards:
+            label = c["bin_label"] or "(unknown)"
+            by_bin.setdefault(label, []).append(c["card_name"])
+        for label, names in by_bin.items():
             bin_summary.append({
-                "bin_label": a["bin_label"],
-                "count":     take,
-                "game":      game,
-                "cards":     [c["card_name"] for c in batch][:5],
+                "bin_label": label,
+                "count":     len(names),
+                "game":      "display",
+                "cards":     names[:5],
             })
+
+    # Storage-bound cards (real bins or no bin yet) go through assign_bins
+    # as today, grouped by game so MTG/Pokemon land in their own rows.
+    storage_cards = [c for c in cards if c["bin_type"] not in ("display_case", "binder")]
+    if storage_cards:
+        from collections import defaultdict
+        by_game = defaultdict(list)
+        for c in storage_cards:
+            by_game[c["game"]].append(c)
+        for game, gcards in by_game.items():
+            try:
+                assignments = assign_bins(game, len(gcards), db)
+            except ValueError as e:
+                errors.append({"game": game, "error": str(e)})
+                continue
+
+            idx = 0
+            for a in assignments:
+                take      = a["count"]
+                batch     = gcards[idx:idx + take]
+                batch_ids = [str(c["id"]) for c in batch]
+                idx += take
+
+                db.execute("""
+                    UPDATE raw_cards
+                    SET state = 'STORED', bin_id = %s, current_hold_id = NULL,
+                        stored_at = CURRENT_TIMESTAMP
+                    WHERE id::text = ANY(%s)
+                """, (a["bin_id"], batch_ids))
+
+                bin_summary.append({
+                    "bin_label": a["bin_label"],
+                    "count":     take,
+                    "game":      game,
+                    "cards":     [c["card_name"] for c in batch][:5],
+                })
 
     return jsonify({
         "success":     not errors,

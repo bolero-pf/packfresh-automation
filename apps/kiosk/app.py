@@ -2402,13 +2402,13 @@ def _shopify_gql(query, variables=None):
     return shopify_gql(query, variables)
 
 
-def _archive_all_products_for_sku(sku: str) -> list[str]:
-    """Archive every active Shopify product carrying this SKU.
+def _delete_all_products_for_sku(sku: str) -> list[str]:
+    """Delete every Shopify product carrying this SKU (any status).
 
     Defense-in-depth against orphan listings: if accept→return→accept
-    toggling left duplicate live products sharing one SKU, the webhook
-    only archives the one stamped on raw_cards. This sweeps the rest so
-    POS doesn't keep finding ghosts on the next scan.
+    toggling left duplicate products sharing one SKU, the webhook only
+    deletes the one stamped on raw_cards. This sweeps the rest so the
+    admin product list and POS don't keep tripping over ghosts.
     """
     if not sku:
         return []
@@ -2427,10 +2427,10 @@ def _archive_all_products_for_sku(sku: str) -> list[str]:
         """, {"q": f"sku:{sku}"})
         edges = (result.get("data", {}).get("productVariants", {}).get("edges") or [])
     except Exception as e:
-        logger.warning(f"archive_all_products_for_sku lookup failed for {sku}: {e}")
+        logger.warning(f"delete_all_products_for_sku lookup failed for {sku}: {e}")
         return []
 
-    archived = []
+    deleted = []
     seen_pids = set()
     for edge in edges:
         node = edge.get("node") or {}
@@ -2442,14 +2442,12 @@ def _archive_all_products_for_sku(sku: str) -> list[str]:
         if not pid or gid in seen_pids:
             continue
         seen_pids.add(gid)
-        if (prod.get("status") or "").upper() == "ACTIVE":
-            try:
-                _shopify_rest("PUT", f"/products/{pid}.json",
-                              json={"product": {"id": pid, "status": "archived"}})
-                archived.append(str(pid))
-            except Exception as e:
-                logger.warning(f"Failed to archive orphan product {pid} for sku {sku}: {e}")
-    return archived
+        try:
+            _shopify_rest("DELETE", f"/products/{pid}.json")
+            deleted.append(str(pid))
+        except Exception as e:
+            logger.warning(f"Failed to delete orphan product {pid} for sku {sku}: {e}")
+    return deleted
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2821,35 +2819,22 @@ def webhook_order_paid():
                 sold_raw = cur.fetchall()
             for card in (sold_raw or []):
                 pid = card.get("shopify_product_id")
-                vid = card.get("shopify_variant_id")
                 if pid:
                     try:
-                        # Zero inventory first to bust Shopify's stale cache,
-                        # then archive. Without the explicit set, variant-level
-                        # inv_quantity can stay at 1 indefinitely after POS sale.
-                        if vid:
-                            vdata = _shopify_rest("GET", f"/variants/{vid}.json")
-                            iid = vdata.get("variant", {}).get("inventory_item_id")
-                            if iid:
-                                _shopify_rest("POST", "/inventory_levels/set.json",
-                                              json={"location_id": 80312369372,
-                                                    "inventory_item_id": iid,
-                                                    "available": 0})
-                        _shopify_rest("PUT", f"/products/{pid}.json",
-                                      json={"product": {"id": pid, "status": "archived"}})
+                        _shopify_rest("DELETE", f"/products/{pid}.json")
                     except Exception:
                         logger.warning(f"Failed to clean up raw listing product_id={pid}")
                 logger.info(f"Raw card POS sold: barcode={card['barcode']}")
         except Exception as e:
             logger.warning(f"raw card POS match failed: {e}")
 
-        # Sweep any orphan listings that share these SKUs but weren't the
+        # Sweep any other listings that share these SKUs but weren't the
         # one stamped on raw_cards (caused historically by reverseDecision
-        # toggling). Stamps the lid on the duplicate-listing problem.
+        # toggling). Closes the duplicate-listing problem.
         for sku in set(order_skus):
-            extras = _archive_all_products_for_sku(sku)
+            extras = _delete_all_products_for_sku(sku)
             if extras:
-                logger.info(f"Archived {len(extras)} orphan listing(s) for sku={sku}: {extras}")
+                logger.info(f"Deleted {len(extras)} extra listing(s) for sku={sku}: {extras}")
 
     if not hold_ids:
         return jsonify({"ok": True, "kiosk": "pos_match_attempted"}), 200

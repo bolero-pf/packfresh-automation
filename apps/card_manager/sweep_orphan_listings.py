@@ -5,13 +5,13 @@ Background: accept→return→accept toggling on hold items used to create a new
 Shopify product on every re-accept without verifying whether one already
 existed for that SKU. Shopify doesn't enforce SKU uniqueness, so toggle-thrash
 left duplicate active products sharing one barcode. raw_cards only stamps the
-latest one, so the order-paid webhook only archived that. Older duplicates
+latest one, so the order-paid webhook only deleted that. Older duplicates
 remained live in Shopify and confused POS.
 
 This script walks every raw_cards row that has a barcode, queries Shopify for
 all active products with that SKU, and archives every one that isn't the
 legitimate stamped listing for a PENDING_SALE card. Cards in any other state
-shouldn't have a live listing at all — those are archived in full.
+shouldn't have a live listing at all — those are deleted in full.
 
 Default mode is dry-run. Pass --apply to actually archive.
 
@@ -57,10 +57,10 @@ def _shopify_rest(method: str, path: str, **kwargs) -> dict:
     return r.json() if r.content else {}
 
 
-def find_active_products_for_sku(sku: str) -> list[dict]:
-    """Return [{pid, gid, title, status}] for every active Shopify product
-    carrying this SKU. Filters server-side via GraphQL `sku:X` and re-checks
-    exact-match locally (the search is loose)."""
+def find_products_for_sku(sku: str) -> list[dict]:
+    """Return [{pid, gid, title, status}] for every Shopify product
+    carrying this SKU (any status — active or archived). Filters
+    server-side via GraphQL `sku:X` and re-checks exact-match locally."""
     if not sku:
         return []
     try:
@@ -96,18 +96,17 @@ def find_active_products_for_sku(sku: str) -> list[dict]:
             "title":  prod.get("title") or "",
             "status": (prod.get("status") or "").upper(),
         }
-    return [p for p in products.values() if p["status"] == "ACTIVE" and p["pid"]]
+    return [p for p in products.values() if p["pid"]]
 
 
-def archive(pid: str, dry_run: bool) -> bool:
+def delete_product(pid: str, dry_run: bool) -> bool:
     if dry_run:
         return True
     try:
-        _shopify_rest("PUT", f"/products/{pid}.json",
-                      json={"product": {"id": pid, "status": "archived"}})
+        _shopify_rest("DELETE", f"/products/{pid}.json")
         return True
     except Exception as e:
-        logger.error(f"Archive failed for product {pid}: {e}")
+        logger.error(f"Delete failed for product {pid}: {e}")
         return False
 
 
@@ -140,44 +139,46 @@ def main():
     mode = "DRY-RUN" if dry_run else "LIVE"
     logger.info(f"[{mode}] scanning {total} raw_cards rows")
 
-    archived = 0
+    deleted = 0
     kept = 0
     no_listings = 0
 
     for i, card in enumerate(cards, start=1):
         if i % 50 == 0:
-            logger.info(f"  progress {i}/{total} (archived={archived}, kept={kept})")
+            logger.info(f"  progress {i}/{total} (deleted={deleted}, kept={kept})")
 
         sku = card["barcode"]
         state = card["state"]
         keep_pid = str(card["shopify_product_id"]) if card.get("shopify_product_id") else None
 
-        active = find_active_products_for_sku(sku)
-        if not active:
+        matches = find_products_for_sku(sku)
+        if not matches:
             no_listings += 1
             time.sleep(0.05)
             continue
 
-        for prod in active:
+        for prod in matches:
             pid = prod["pid"]
-            keep_this = (state == "PENDING_SALE" and pid == keep_pid)
+            keep_this = (state == "PENDING_SALE" and pid == keep_pid
+                         and prod["status"] == "ACTIVE")
             if keep_this:
                 kept += 1
                 continue
             logger.info(
-                f"  archive sku={sku} pid={pid} card_state={state} "
-                f"title={prod['title']!r} card={card.get('card_name')!r}"
+                f"  delete sku={sku} pid={pid} status={prod['status']} "
+                f"card_state={state} title={prod['title']!r} "
+                f"card={card.get('card_name')!r}"
             )
-            if archive(pid, dry_run):
-                archived += 1
+            if delete_product(pid, dry_run):
+                deleted += 1
 
         time.sleep(0.1)  # gentle pacing for Shopify rate limits
 
     logger.info(
-        f"[{mode}] done. archived={archived}, kept={kept}, "
+        f"[{mode}] done. deleted={deleted}, kept={kept}, "
         f"no-listings={no_listings}, total={total}"
     )
-    if dry_run and archived:
+    if dry_run and deleted:
         logger.info("Re-run with --apply to actually archive.")
 
 
