@@ -4753,12 +4753,16 @@ async function lookupByTcgId(sessionId, offerPct, context) {
                 const priceLabel = liveSelected
                     ? 'Median: $' + effectivePrice.toFixed(2) + ' (' + (liveSelected.comps_count||'?') + ' comps)'
                     : 'Market: $' + effectivePrice.toFixed(2) + ' (cache)';
-                gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + effectivePrice + ', \'' + context + '\')">' +
+                // Bypass addCardFromSearch's variant/condition picker — slabs
+                // don't have raw conditions and the picker would loop us back
+                // here. _finalizeCardAdd reads is_graded + grade_company/value
+                // off the form fields directly.
+                gradedHtml += '<div class="search-result" onclick="_finalizeCardAdd(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + effectivePrice + ', \'' + context + '\', null, \'\')">' +
                     '<h4>Add ' + gradeCompany + ' ' + gradeVal + ' — ' + (card.name||'') + '</h4>' +
                     '<p>' + priceLabel + ' · Qty ' + qty + ' · Offer: $' + offerAmt + '</p></div>';
             } else {
                 gradedHtml += '<div class="alert alert-warning">No ' + gradeCompany + ' ' + gradeVal + ' data.</div>';
-                if (nmRaw) gradedHtml += '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + nmRaw + ', \'' + context + '\')">' +
+                if (nmRaw) gradedHtml += '<div class="search-result" onclick="_finalizeCardAdd(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + nmRaw + ', \'' + context + '\', null, \'\')">' +
                     '<h4>Add at Raw NM — ' + (card.name||'') + '</h4><p>$' + Number(nmRaw).toFixed(2) + ' · Qty ' + qty + '</p></div>';
             }
             gradedHtml += '</div>';
@@ -5015,7 +5019,7 @@ async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offer
             onPick: (pick) => {
                 addCardFromSearch(sessionId, pick.tcgId, pick.cardName, pick.setName,
                     pick.cardNum, pick.rarity, pick.condition, pick.qty, pick.price,
-                    context, pick.variant);
+                    context, pick.variant, offerPct);
             },
             onTryPpt: () => {
                 resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
@@ -5027,8 +5031,27 @@ async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offer
     }
 }
 
-async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, preselectedVariant) {
+async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, preselectedVariant, offerPctHint) {
     const resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : context === 'intake' ? 'intake-search-results' : 'raw-search-results');
+
+    // Graded fast-path: condition pickers don't apply to slabs. The variant
+    // chip prices in the name-search picker are raw-card prices, so for
+    // graded mode we re-route to the eBay comps grid (same view the TCG-ID
+    // entry path renders) and let the operator pick the slab from there.
+    if (_isGradedContext(context)) {
+        const ids = _getCardFormIds(context);
+        const tcgInput = document.getElementById(ids.tcgid);
+        if (tcgInput) tcgInput.value = String(tcgId);
+        // offerPctHint is the captured session/intake percentage from the
+        // search caller; falls back to the dashboard input or 65 (the
+        // associate cash default + Quick Offer's locked %).
+        let offerPct = (offerPctHint != null) ? Number(offerPctHint) : NaN;
+        if (!Number.isFinite(offerPct)) {
+            const cashEl = document.getElementById('intake-cash-pct');
+            offerPct = parseFloat(cashEl?.value) || 65;
+        }
+        return lookupByTcgId(sessionId, offerPct, context);
+    }
 
     // Detail lookup to get all variant/condition prices
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading pricing...</div>';
