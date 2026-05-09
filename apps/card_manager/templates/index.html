@@ -725,13 +725,16 @@ function renderHoldDetail(d) {
     // assignment) the group goes into a "— No bin" bucket so staff still see
     // the work to do.
     const binBuckets = new Map();
+    const binTypes   = new Map();
     pull.forEach(group => {
       const groupItems = items.filter(i =>
         i.tcgplayer_id == group.tcgplayer_id && i.condition === group.condition
       );
-      const primaryBin = (group.best_bins && group.best_bins[0]) ? group.best_bins[0].bin_label : '— No bin';
+      const primaryBinObj = (group.best_bins && group.best_bins[0]) || null;
+      const primaryBin = primaryBinObj ? primaryBinObj.bin_label : '— No bin';
       if (!binBuckets.has(primaryBin)) binBuckets.set(primaryBin, []);
       binBuckets.get(primaryBin).push({ group, groupItems });
+      if (primaryBinObj) binTypes.set(primaryBin, primaryBinObj.bin_type || 'bin');
     });
 
     const sortedBins = Array.from(binBuckets.keys()).sort(_binCompare);
@@ -744,9 +747,14 @@ function renderHoldDetail(d) {
         s + r.groupItems.filter(i => ['PULLED','ACCEPTED','REJECTED','MISSING'].includes(i.item_status)).length, 0);
       const binDone    = pulledQty === totalQty;
 
-      return `<div class="bin-group ${binDone ? 'all-pulled' : ''}">
+      const binType   = binTypes.get(binLabel) || 'bin';
+      const binSubtitle =
+        binType === 'display_case' ? 'Display case · tap to pull, no scan' :
+        binType === 'binder'       ? 'Binder · tap to pull, no scan' :
+        '';
+      return `<div class="bin-group ${binDone ? 'all-pulled' : ''}" data-bin-type="${esc(binType)}">
         <div class="bin-group-header">
-          <div class="bin-group-label">${esc(binLabel)}</div>
+          <div class="bin-group-label">${esc(binLabel)}${binSubtitle ? ` <span style="font-size:0.68rem;color:var(--dim);font-weight:500;text-transform:none;letter-spacing:0;margin-left:6px;">${esc(binSubtitle)}</span>` : ''}</div>
           <div class="bin-group-count">${pulledQty}/${totalQty} pulled</div>
         </div>
         ${rows.map(({ group, groupItems }) => {
@@ -767,18 +775,23 @@ function renderHoldDetail(d) {
               </div>
               ${altBins.length ? `<div class="pull-card-altbins">also in: ${altBins.map(b => `<span>${esc(b.bin_label)}×${b.count}</span>`).join(' ')}</div>` : ''}
               <div class="scan-items" style="margin-top:8px;">
-                ${groupItems.map(item => `
+                ${groupItems.map(item => {
+                  const isDisplay = item.bin_type === 'display_case' || item.bin_type === 'binder';
+                  return `
                   <div class="scan-item ${item.item_status.toLowerCase()}" id="scan-item-${item.hold_item_id}">
                     <div class="scan-check">${item.item_status === 'PULLED' || item.item_status === 'ACCEPTED' ? '✓' : item.item_status === 'REJECTED' ? '✕' : item.item_status === 'MISSING' ? '⚠' : ''}</div>
                     <span style="font-family:var(--mono);font-size:0.72rem;flex:1;">${esc(item.barcode || '—')}</span>
                     <span style="font-size:0.72rem;color:var(--dim);">${esc(item.bin_label||'')}</span>
-                    ${item.item_status === 'REQUESTED' ? `
+                    ${item.item_status === 'REQUESTED' && isDisplay ? `
+                      <button class="btn btn-sm" style="background:var(--green);color:#000;font-size:0.72rem;font-weight:700;padding:3px 10px;" onclick="tapPullItem('${item.hold_item_id}')">✓ Tap to pull</button>
+                      <button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:2px 8px;" onclick="markMissing('${item.hold_item_id}')">Can't Find</button>
+                    ` : item.item_status === 'REQUESTED' ? `
                       <button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;" title="Reprint label with a new barcode if the current one won't scan" onclick="regenerateAndPrint('${item.card_id}','${esc(item.card_name||'')}')">🆕 New BC</button>
                       <button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:2px 8px;" onclick="markMissing('${item.hold_item_id}')">Can't Find</button>
                     ` : ''}
                     ${item.item_status === 'MISSING' ? '<span style="font-size:0.68rem;color:var(--red);font-weight:600;">MISSING</span>' : ''}
                   </div>
-                `).join('')}
+                `;}).join('')}
               </div>
             </div>
             ${qtyBig
@@ -1263,6 +1276,21 @@ function renderMissing(cards) {
       </div>
     `).join('')}
   `;
+}
+
+async function tapPullItem(holdItemId) {
+  // Display-case / binder pull confirmation. The puller is holding the only
+  // card with that barcode in their hand — re-scanning is theater, so one
+  // tap flips the row to PULLED and pre-creates the Shopify listing.
+  try {
+    const r = await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/tap-pull`, {});
+    if (r && r.success) {
+      toast(`Pulled: ${r.card_name}`, 'green');
+      await refreshHoldDetail();
+    }
+  } catch(e) {
+    toast(e.message, 'red');
+  }
 }
 
 async function markMissing(holdItemId) {

@@ -480,10 +480,11 @@ def get_hold(hold_id):
                rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
                rc.condition, rc.current_price, rc.tcgplayer_id,
                rc.image_url AS rc_image_url, rc.state AS card_state,
-               sl.bin_label
+               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
         FROM hold_items hi
         LEFT JOIN raw_cards rc ON hi.raw_card_id = rc.id
         LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
         LEFT JOIN inventory_product_cache ipc
           ON ipc.shopify_variant_id = hi.shopify_variant_id
          AND hi.item_kind IN ('sealed','slab')
@@ -538,25 +539,37 @@ def get_hold(hold_id):
         tcg_id, condition = key
         qty_needed = len(group["items"])
 
-        # Find bins containing this card ordered by count DESC
+        # Find bins containing this card ordered by count DESC. location_type
+        # ('bin' / 'binder' / 'display_case') flows through so the puller UI
+        # can show FG-1 and Binder-N as tap-to-confirm rather than scan-from-bin.
         best_bins = db.query("""
             SELECT sl.bin_label, sl.id AS bin_id,
+                   COALESCE(sr.location_type, 'bin') AS bin_type,
                    COUNT(*) AS available_here
             FROM raw_cards rc
             JOIN storage_locations sl ON rc.bin_id = sl.id
+            JOIN storage_rows sr ON sl.row_id = sr.id
             WHERE rc.tcgplayer_id = %s
               AND rc.condition = %s
-            GROUP BY sl.bin_label, sl.id
+            GROUP BY sl.bin_label, sl.id, sr.location_type
             ORDER BY available_here DESC
         """, (tcg_id, condition)) if tcg_id else []
 
-        group["best_bins"]  = [{"bin_label": b["bin_label"], "count": b["available_here"]} for b in best_bins]
+        group["best_bins"] = [
+            {"bin_label": b["bin_label"], "count": b["available_here"],
+             "bin_type": b["bin_type"]}
+            for b in best_bins
+        ]
         group["qty_needed"] = qty_needed
 
-        # Collect all valid barcodes for this (tcgplayer_id, condition) — any can be scanned
+        # Collect all valid barcodes for this (tcgplayer_id, condition).
+        # Includes DISPLAY-state copies so a scan still works on a sibling
+        # currently in FG / a binder, but the UI defaults to tap-to-confirm
+        # for those rows (no scan required).
         valid = db.query("""
             SELECT barcode FROM raw_cards
-            WHERE tcgplayer_id = %s AND condition = %s AND state = 'STORED'
+            WHERE tcgplayer_id = %s AND condition = %s
+              AND state IN ('STORED','DISPLAY')
         """, (tcg_id, condition)) if tcg_id else []
         group["valid_barcodes"] = [v["barcode"] for v in valid]
 
@@ -814,6 +827,85 @@ def scan_card(hold_id):
         "condition": scanned["condition"],
         "bin_label": scanned.get("bin_label"),
         "hold_item_id": str(match["id"]),
+    })
+
+
+@app.route("/api/holds/<hold_id>/items/<hold_item_id>/tap-pull", methods=["POST"])
+def tap_pull_display(hold_id, hold_item_id):
+    """Confirm-pull for a hold item whose card lives in a display-family
+    location (front glass or a binder). The puller is holding the only card
+    with that barcode in their hand — re-scanning is theater. One tap flips
+    the hold item to PULLED, the raw_card to PULLED, and pre-creates the
+    Shopify listing so the register flow stays fast.
+
+    Gated to display-family rows only: STORED-state items still require a
+    real scan (the bin search is the validation)."""
+    item = db.query_one("""
+        SELECT hi.id AS hold_item_id, hi.status AS hi_status,
+               hi.raw_card_id,
+               rc.id AS card_id, rc.barcode, rc.card_name, rc.set_name,
+               rc.card_number, rc.condition, rc.current_price, rc.image_url,
+               rc.tcgplayer_id, rc.state AS card_state,
+               rc.shopify_product_id,
+               COALESCE(sr.location_type, 'bin') AS bin_type,
+               sl.bin_label
+        FROM hold_items hi
+        JOIN raw_cards rc ON hi.raw_card_id = rc.id
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE hi.id = %s AND hi.hold_id = %s
+    """, (hold_item_id, hold_id))
+
+    if not item:
+        return jsonify({"error": "Hold item not found"}), 404
+    if item["hi_status"] != "REQUESTED":
+        return jsonify({"error": f"Item is {item['hi_status']}, not REQUESTED"}), 409
+    if item["bin_type"] not in ("display_case", "binder"):
+        return jsonify({
+            "error": "Tap-pull is only allowed for display-case / binder items; "
+                     "STORED items must be scanned from the bin.",
+        }), 409
+    if item["card_state"] != "DISPLAY":
+        return jsonify({
+            "error": f"Card is in state {item['card_state']}, expected DISPLAY",
+        }), 409
+
+    db.execute("""
+        UPDATE hold_items
+        SET status = 'PULLED',
+            pulled_at = CURRENT_TIMESTAMP,
+            barcode = %s
+        WHERE id = %s
+    """, (item["barcode"], hold_item_id))
+    db.execute("""
+        UPDATE raw_cards SET state = 'PULLED', current_hold_id = %s
+        WHERE id = %s
+    """, (hold_id, str(item["card_id"])))
+
+    # Pre-create the listing — same rationale as scan_card.
+    try:
+        listing = _create_raw_listing(dict(item))
+        db.execute("""
+            UPDATE raw_cards
+            SET shopify_product_id = %s, shopify_variant_id = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (listing["product_id"], listing["variant_id"], str(item["card_id"])))
+        db.execute("""
+            UPDATE hold_items
+            SET shopify_product_id = %s, shopify_variant_id = %s
+            WHERE id = %s
+        """, (listing["product_id"], listing["variant_id"], hold_item_id))
+    except Exception as e:
+        logger.warning(f"tap_pull pre-create listing failed for {item['barcode']}: {e} "
+                       f"(retry on decision)")
+
+    return jsonify({
+        "success":      True,
+        "card_name":    item["card_name"],
+        "condition":    item["condition"],
+        "bin_label":    item["bin_label"],
+        "hold_item_id": hold_item_id,
     })
 
 
