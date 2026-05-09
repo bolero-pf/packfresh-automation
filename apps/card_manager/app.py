@@ -1646,17 +1646,60 @@ def _finish_champion_hold(hold_id):
 
 @app.route("/api/returns")
 def list_returns():
-    """All PENDING_RETURN cards."""
+    """All PENDING_RETURN cards. `bin_type` lets the UI render display-family
+    rows with a one-tap restore button (no scan needed) — the card is going
+    back to the same case/binder slot it came from. Storage rows still go
+    through scan + store_returns to get a fresh bin assignment."""
     rows = db.query("""
         SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.condition,
                rc.card_number, rc.image_url, rc.current_price,
-               sl.bin_label AS last_bin
+               sl.bin_label AS last_bin,
+               COALESCE(sr.location_type, 'bin') AS bin_type
         FROM raw_cards rc
         LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
         WHERE rc.state = 'PENDING_RETURN'
         ORDER BY rc.updated_at DESC NULLS LAST
     """)
     return jsonify({"cards": [_ser(dict(r)) for r in rows]})
+
+
+@app.route("/api/returns/<card_id>/tap-restore", methods=["POST"])
+def tap_restore_display(card_id):
+    """One-tap restore for a PENDING_RETURN card whose origin bin is a
+    front-glass / binder slot. The puller is physically placing the card
+    back where it came from — no scan needed. Storage-bound cards still
+    go through /api/returns/store to get a fresh bin assignment."""
+    card = db.query_one("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.state,
+               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE rc.id::text = %s
+    """, (card_id,))
+    if not card:
+        return jsonify({"error": "Card not found"}), 404
+    if card["state"] != "PENDING_RETURN":
+        return jsonify({"error": f"Card is {card['state']}, not PENDING_RETURN"}), 409
+    if card["bin_type"] not in ("display_case", "binder"):
+        return jsonify({
+            "error": "Tap-restore is only for display-case / binder cards. "
+                     "Storage-bound cards must go through Return Queue's "
+                     "scan + Store flow."
+        }), 409
+
+    db.execute("""
+        UPDATE raw_cards
+        SET state = 'DISPLAY', current_hold_id = NULL,
+            stored_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (card_id,))
+    return jsonify({
+        "success":   True,
+        "card_name": card["card_name"],
+        "bin_label": card["bin_label"],
+    })
 
 
 @app.route("/api/missing")

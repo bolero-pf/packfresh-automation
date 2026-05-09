@@ -1147,20 +1147,30 @@ function renderReturns(cards, recentBatches) {
       <button class="btn btn-ghost" onclick="storeAll()">Store All (no scan)</button>
     </div>
     <div id="return-cards-list">
-      ${cards.map(c => `
-        <div class="return-card" id="rc-${esc(c.barcode)}">
+      ${cards.map(c => {
+        const isDisplay = c.bin_type === 'display_case' || c.bin_type === 'binder';
+        const binNote = isDisplay
+          ? `Goes back to ${esc(c.last_bin||'?')} (display)`
+          : `${esc(c.condition)} · last bin: ${esc(c.last_bin||'no bin')}`;
+        return `
+        <div class="return-card${isDisplay ? ' return-card-display' : ''}" id="rc-${esc(c.barcode)}">
           ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:36px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">` : ''}
           <div style="flex:1;">
             <div style="font-weight:600;">${esc(c.card_name)}</div>
-            <div style="font-size:0.75rem;color:var(--dim);">${esc(c.condition)} · ${esc(c.last_bin||'no bin')}</div>
+            <div style="font-size:0.75rem;color:var(--dim);">${binNote}</div>
           </div>
           <div class="return-barcode">${esc(c.barcode)}</div>
-          <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 8px;" title="Reprint with a new barcode if the current label won't scan"
-                  onclick="event.stopPropagation();regenerateAndPrint('${c.id}','${esc(c.card_name)}')">🆕 New BC</button>
+          ${isDisplay ? `
+            <button class="btn btn-sm" style="background:var(--green);color:#000;font-size:0.72rem;font-weight:700;padding:4px 10px;"
+                    onclick="event.stopPropagation();tapRestore('${c.id}','${esc(c.card_name)}')">✓ Tap to restore</button>
+          ` : `
+            <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 8px;" title="Reprint with a new barcode if the current label won't scan"
+                    onclick="event.stopPropagation();regenerateAndPrint('${c.id}','${esc(c.card_name)}')">🆕 New BC</button>
+          `}
           <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--green);color:var(--green);"
                   onclick="event.stopPropagation();sellInstead('${esc(c.barcode)}')">💵 Sell instead</button>
         </div>
-      `).join('')}
+      `;}).join('')}
     </div>
     ${recentHtml}
   `;
@@ -1181,6 +1191,23 @@ function renderReturnScanned() {
     const el = document.getElementById(`rc-${bc}`);
     if (el) el.classList.add('scanned');
   });
+}
+
+async function tapRestore(cardId, cardName) {
+  // Display-case / binder cards in Return Queue go back to their original
+  // bin without a scan — the puller is physically placing the card on the
+  // case/binder shelf. One tap flips state PENDING_RETURN → DISPLAY at
+  // the same bin_id.
+  try {
+    const d = await post(`/api/returns/${cardId}/tap-restore`, {});
+    if (d && d.success) {
+      toast(`✓ ${d.card_name} back on ${d.bin_label || 'display'}`, 'green');
+      loadReturns();
+      refreshBadges();
+    }
+  } catch(e) {
+    toast(e.message, 'red');
+  }
 }
 
 async function sellInstead(barcode) {
