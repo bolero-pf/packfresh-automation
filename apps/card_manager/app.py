@@ -624,10 +624,24 @@ def cancel_hold(hold_id):
                      "Use 'Return' on each accepted card before cancelling."
         }), 409
 
-    # Release raw_card locks for any non-terminal raw items
+    # Release raw_card locks for any non-terminal raw items. Recompute state
+    # from bin location_type — if the card was on display (FG / binder), it
+    # goes back to DISPLAY; otherwise STORED. Without this CASE the cancel
+    # would silently leave display-family cards with state='STORED' but
+    # bin_id still pointing at FG-1, breaking tap-pull and Display Set Out
+    # reconciliation.
     db.execute("""
         UPDATE raw_cards
-           SET state = 'STORED', current_hold_id = NULL
+           SET state = CASE
+                         WHEN EXISTS (
+                           SELECT 1 FROM storage_locations sl
+                           JOIN storage_rows sr ON sl.row_id = sr.id
+                           WHERE sl.id = raw_cards.bin_id
+                             AND sr.location_type IN ('display_case', 'binder')
+                         ) THEN 'DISPLAY'
+                         ELSE 'STORED'
+                       END,
+               current_hold_id = NULL
          WHERE id IN (
              SELECT raw_card_id FROM hold_items
               WHERE hold_id = %s

@@ -2901,10 +2901,24 @@ def _cleanup_hold(hold_id):
             except Exception as e:
                 logger.warning(f"Failed to delete Shopify product {pid}: {e}")
 
-    # Release cards back to STORED
+    # Release cards back to their pre-hold state — DISPLAY if the bin is a
+    # front-glass / binder slot, else STORED. Without the CASE, a Champion
+    # who locked a display card and then abandoned would leave the card with
+    # state=STORED but bin_id still pointing at FG-1, which breaks tap-pull
+    # and Display Set Out reconciliation.
     db.execute("""
-        UPDATE raw_cards SET current_hold_id = NULL, state = 'STORED'
-        WHERE current_hold_id = %s
+        UPDATE raw_cards
+           SET current_hold_id = NULL,
+               state = CASE
+                         WHEN EXISTS (
+                           SELECT 1 FROM storage_locations sl
+                           JOIN storage_rows sr ON sl.row_id = sr.id
+                           WHERE sl.id = raw_cards.bin_id
+                             AND sr.location_type IN ('display_case', 'binder')
+                         ) THEN 'DISPLAY'
+                         ELSE 'STORED'
+                       END
+         WHERE current_hold_id = %s
     """, (hold_id,))
 
     # Mark hold abandoned
