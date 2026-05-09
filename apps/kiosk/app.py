@@ -822,14 +822,10 @@ def browse():
     # so single-variant cards stay in one tile. variant_raw is preserved for
     # display when a card has multiple printings in Scrydex.
     #
-    # Two condition aggregations per tile:
-    #   conditions          → STORED only (drives cart eligibility / +Add)
-    #   display_conditions  → DISPLAY only (frontend merges with the above
-    #                         so the tile shows full condition coverage,
-    #                         but cart logic still keys off conditions)
-    # Inner subquery groups by (state, condition) only — no bin_label —
-    # otherwise jsonb_object_agg sees duplicate keys when a card sits in
-    # multiple bins and only the last write is kept.
+    # conditions / available_qty count both STORED and DISPLAY (FG + binders),
+    # since both are cartable. Inner subquery groups by (state, condition)
+    # only — no bin_label — otherwise jsonb_object_agg sees duplicate keys
+    # when a card sits in multiple bins and only the last write is kept.
     rows = db.query(f"""
         SELECT
             card_name,
@@ -839,14 +835,12 @@ def browse():
             MAX(variant_raw) AS variant_raw,
             variant_key,
             MAX(image_url) AS image_url,
-            SUM(cond_qty) FILTER (WHERE state='STORED') AS available_qty,
-            SUM(cond_qty) FILTER (WHERE state='DISPLAY') AS display_qty,
+            SUM(cond_qty) FILTER (WHERE state IN ('STORED','DISPLAY')) AS available_qty,
             SUM(cond_qty) AS total_qty,
             MIN(min_price) AS min_price,
             MAX(max_price) AS max_price,
             MAX(created_at) AS created_at,
-            jsonb_object_agg(condition, cond_qty) FILTER (WHERE state='STORED') AS conditions,
-            jsonb_object_agg(condition, cond_qty) FILTER (WHERE state='DISPLAY') AS display_conditions
+            jsonb_object_agg(condition, cond_qty) FILTER (WHERE state IN ('STORED','DISPLAY')) AS conditions
         FROM (
             SELECT card_name, set_name, tcgplayer_id, scrydex_id,
                    state,
@@ -936,17 +930,10 @@ def browse():
             "variant_label": variant_label,
             "image_url":     image_url,
             "total_qty":     int(r["total_qty"] or 0),
-            # conditions: STORED counts (drives cart eligibility).
-            # display_conditions: DISPLAY counts (frontend merges with the
-            # above for the tile pill display so location stays out of the
-            # cascade — see renderGrid). Per-copy locations live on the
-            # detail panel via /api/card.
-            "available_qty":      int(r["available_qty"] or 0),
-            "display_qty":        int(r["display_qty"] or 0),
-            "min_price":          float(r["min_price"]) if r["min_price"] else None,
-            "max_price":          float(r["max_price"]) if r["max_price"] else None,
-            "conditions":         r["conditions"] or {},
-            "display_conditions": r["display_conditions"] or {},
+            "available_qty": int(r["available_qty"] or 0),
+            "min_price":     float(r["min_price"]) if r["min_price"] else None,
+            "max_price":     float(r["max_price"]) if r["max_price"] else None,
+            "conditions":    r["conditions"] or {},
         })
 
     return jsonify({
@@ -2088,7 +2075,7 @@ def create_hold():
             available = db.query(f"""
                 SELECT id, barcode FROM raw_cards
                 WHERE card_name = %s AND set_name = %s
-                  AND condition = %s AND state = 'STORED'
+                  AND condition = %s AND state IN ('STORED','DISPLAY')
                   AND current_hold_id IS NULL
                   AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s
                   {id_filter}
@@ -2415,6 +2402,56 @@ def _shopify_gql(query, variables=None):
     return shopify_gql(query, variables)
 
 
+def _archive_all_products_for_sku(sku: str) -> list[str]:
+    """Archive every active Shopify product carrying this SKU.
+
+    Defense-in-depth against orphan listings: if accept→return→accept
+    toggling left duplicate live products sharing one SKU, the webhook
+    only archives the one stamped on raw_cards. This sweeps the rest so
+    POS doesn't keep finding ghosts on the next scan.
+    """
+    if not sku:
+        return []
+    try:
+        result = _shopify_gql("""
+            query($q: String!) {
+              productVariants(first: 50, query: $q) {
+                edges {
+                  node {
+                    sku
+                    product { id status legacyResourceId }
+                  }
+                }
+              }
+            }
+        """, {"q": f"sku:{sku}"})
+        edges = (result.get("data", {}).get("productVariants", {}).get("edges") or [])
+    except Exception as e:
+        logger.warning(f"archive_all_products_for_sku lookup failed for {sku}: {e}")
+        return []
+
+    archived = []
+    seen_pids = set()
+    for edge in edges:
+        node = edge.get("node") or {}
+        if (node.get("sku") or "") != sku:
+            continue
+        prod = node.get("product") or {}
+        pid = prod.get("legacyResourceId")
+        gid = prod.get("id")
+        if not pid or gid in seen_pids:
+            continue
+        seen_pids.add(gid)
+        if (prod.get("status") or "").upper() == "ACTIVE":
+            try:
+                _shopify_rest("PUT", f"/products/{pid}.json",
+                              json={"product": {"id": pid, "status": "archived"}})
+                archived.append(str(pid))
+            except Exception as e:
+                logger.warning(f"Failed to archive orphan product {pid} for sku {sku}: {e}")
+    return archived
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Champion Identification
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2594,7 +2631,7 @@ def champion_checkout():
                    condition, current_price, image_url
             FROM raw_cards
             WHERE card_name = %s AND set_name = %s
-              AND condition = %s AND state = 'STORED'
+              AND condition = %s AND state IN ('STORED','DISPLAY')
               AND current_hold_id IS NULL
               AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s
               {id_filter}
@@ -2788,6 +2825,14 @@ def webhook_order_paid():
                 logger.info(f"Raw card POS sold: barcode={card['barcode']}")
         except Exception as e:
             logger.warning(f"raw card POS match failed: {e}")
+
+        # Sweep any orphan listings that share these SKUs but weren't the
+        # one stamped on raw_cards (caused historically by reverseDecision
+        # toggling). Stamps the lid on the duplicate-listing problem.
+        for sku in set(order_skus):
+            extras = _archive_all_products_for_sku(sku)
+            if extras:
+                logger.info(f"Archived {len(extras)} orphan listing(s) for sku={sku}: {extras}")
 
     if not hold_ids:
         return jsonify({"ok": True, "kiosk": "pos_match_attempted"}), 200

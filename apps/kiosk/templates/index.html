@@ -2389,14 +2389,7 @@ function renderGrid(cards) {
   window._cardCache = {};
   grid.innerHTML = cards.map((c, idx) => {
     window._cardCache[idx] = c;
-    // Tile pills show TOTAL coverage (stored + display) so a card sitting
-    // only in a binder still surfaces its NM/LP availability on the tile.
-    // Cart eligibility logic still keys off c.conditions (STORED only) —
-    // detail panel splits cartable rows from "ask staff" rows.
-    const allConds = {};
-    Object.entries(c.conditions || {}).forEach(([k,v]) => allConds[k] = (allConds[k]||0) + v);
-    Object.entries(c.display_conditions || {}).forEach(([k,v]) => allConds[k] = (allConds[k]||0) + v);
-    const conds = Object.entries(allConds)
+    const conds = Object.entries(c.conditions || {})
       .sort(([a],[b]) => ['NM','LP','MP','HP','DMG'].indexOf(a) - ['NM','LP','MP','HP','DMG'].indexOf(b));
     const pills = conds.map(([cond, qty]) =>
       `<span class="cond-pill cond-${cond}">${cond} ×${qty}</span>`).join('');
@@ -2934,14 +2927,14 @@ function renderDetail(card, copies, meta) {
     ? `<span class="variant-badge" style="vertical-align:middle;margin-left:10px;font-size:1rem;padding:4px 11px;border-radius:8px;">${esc(card.variant_label)}</span>`
     : '';
 
-  // Group STORED copies by condition for qty selection. DISPLAY copies are
-  // tracked separately — they're customer-visible (so we show them so people
-  // know the card exists) but not cartable, so they get their own info-only
-  // rows under the cartable conditions.
-  const storedCopies  = copies.filter(c => (c.state || 'STORED') === 'STORED');
-  const displayCopies = copies.filter(c => c.state === 'DISPLAY');
+  // STORED + DISPLAY copies are both cartable. Per-copy bin location is
+  // available downstream for the puller via raw_cards.bin_id; the customer
+  // doesn't need to know whether their pick is in a bin, on display, or in
+  // a binder.
+  const cartableCopies = copies.filter(c =>
+    (c.state || 'STORED') === 'STORED' || c.state === 'DISPLAY');
   const byCondition = {};
-  storedCopies.forEach(c => {
+  cartableCopies.forEach(c => {
     if (!byCondition[c.condition]) byCondition[c.condition] = [];
     byCondition[c.condition].push(c);
   });
@@ -2973,22 +2966,6 @@ function renderDetail(card, copies, meta) {
           <div class="copy-price">$${avgPrice > 0 ? avgPrice.toFixed(2) : '—'}</div>
         </div>
         ${actionHtml}
-      </div>`;
-    }).join('') +
-    // Each DISPLAY copy renders as its own info row — customers can see
-    // condition + location (binder / case label) and ask staff to bring
-    // it over. No qty stepper / add button: it's not cartable.
-    displayCopies.map(c => {
-      const cond = c.condition || 'NM';
-      const price = parseFloat(c.current_price) || 0;
-      const loc = c.location || 'On Display';
-      return `<div class="copy-row display-only-row">
-        <div class="copy-info">
-          <div class="copy-cond"><span class="cond-pill cond-${cond}">${cond}</span></div>
-          <div class="copy-num">On display · ${esc(loc)}${c.card_number ? ' · #'+esc(c.card_number) : ''}</div>
-          <div class="copy-price">$${price > 0 ? price.toFixed(2) : '—'}</div>
-        </div>
-        <div class="copy-action"><span class="copy-display-note">Ask staff</span></div>
       </div>`;
     }).join('');
 

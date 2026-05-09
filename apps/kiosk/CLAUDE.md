@@ -91,7 +91,7 @@ The cohort is determined per-request in `_resolve_kiosk_mode` (sets `g.kiosk_mod
 ## Key Patterns
 - Delegated click handlers for condition rows + cart remove (data attributes, no inline onclick with user data)
 - `esc()` escapes `& < > " '` to prevent XSS in HTML attribute contexts
-- Cards shown only if `state = 'STORED'` and `current_hold_id IS NULL`
+- Cards shown only if `state IN ('STORED','DISPLAY')` and `current_hold_id IS NULL` (DISPLAY = front glass + binders, distinguished by `bin_id` / `storage_bins.location_type`)
 - 24 cards per page, server-side pagination
 - Guest holds: 2 hours to READY, Champion holds: 30 minutes to pay
 - Champion state persisted in localStorage (`pf_champion`); device cookie `pf_kiosk_device` is HttpOnly and lives 10y

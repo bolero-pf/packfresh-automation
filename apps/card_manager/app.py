@@ -802,7 +802,8 @@ def item_decision(hold_id, hold_item_id):
         SELECT hi.id AS hold_item_id, hi.status AS hi_status,
                rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
                rc.condition, rc.current_price, rc.image_url,
-               rc.tcgplayer_id, rc.barcode
+               rc.tcgplayer_id, rc.barcode,
+               COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS shopify_product_id
         FROM hold_items hi
         JOIN raw_cards rc ON hi.raw_card_id = rc.id
         WHERE hi.id = %s AND hi.hold_id = %s
@@ -1036,6 +1037,7 @@ def reverse_decision(hold_id, hold_item_id):
                hi.shopify_product_id AS hi_product_id,
                rc.id AS card_id, rc.state AS card_state,
                rc.shopify_product_id AS rc_product_id,
+               COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS shopify_product_id,
                rc.card_name, rc.set_name, rc.card_number,
                rc.condition, rc.current_price, rc.image_url,
                rc.tcgplayer_id, rc.barcode
@@ -1143,7 +1145,8 @@ def finish_hold(hold_id):
                rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
                rc.condition, rc.current_price, rc.image_url, rc.tcgplayer_id,
                rc.state AS card_state,
-               rc.shopify_product_id AS rc_product_id
+               rc.shopify_product_id AS rc_product_id,
+               COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS shopify_product_id
         FROM hold_items hi
         JOIN raw_cards rc ON hi.raw_card_id = rc.id
         WHERE hi.hold_id = %s AND hi.status = 'ACCEPTED'
@@ -1275,7 +1278,32 @@ def finish_hold(hold_id):
 
 
 def _create_raw_listing(item: dict) -> dict:
-    """Create a Shopify DRAFT product for a raw card at POS."""
+    """Create a Shopify DRAFT product for a raw card at POS.
+
+    Idempotent on item['shopify_product_id']: if that product is still in
+    Shopify (active or archived), reuse it instead of creating a new one.
+    Prevents duplicate listings on the same SKU when accept/return/accept
+    is toggled — Shopify doesn't enforce SKU uniqueness, and stamping a
+    fresh product_id over the old one used to leave orphans behind.
+    """
+    existing_pid = item.get("shopify_product_id")
+    if existing_pid:
+        try:
+            prod = _shopify("GET", f"/products/{existing_pid}.json").get("product")
+            if prod and prod.get("variants"):
+                variant_id = prod["variants"][0]["id"]
+                if prod.get("status") == "archived":
+                    # Un-archive so POS can find it again on the next sync.
+                    _shopify("PUT", f"/products/{existing_pid}.json",
+                             json={"product": {"id": existing_pid, "status": "active"}})
+                return {
+                    "product_id": existing_pid,
+                    "variant_id": variant_id,
+                    "title":      prod.get("title", ""),
+                }
+        except Exception as e:
+            logger.info(f"Existing product {existing_pid} unreachable ({e}); creating new")
+
     condition_labels = {"NM": "Near Mint", "LP": "Lightly Played",
                         "MP": "Moderately Played", "HP": "Heavily Played", "DMG": "Damaged"}
     cond_label = condition_labels.get(item["condition"], item["condition"])
@@ -1290,6 +1318,10 @@ def _create_raw_listing(item: dict) -> dict:
     # be raw market until the nightly raw_card_updater rounds it.
     price      = charm_ceil_raw(item.get("current_price") or 0)
 
+    # No image: POS matches by SKU/barcode and the cashier never looks at the
+    # product card art at the register. `images: [{src: url}]` blocks while
+    # Shopify fetches the URL server-side, which was the bulk of the per-card
+    # latency on multi-card holds.
     payload = {
         "product": {
             "title":       title,
@@ -1298,7 +1330,6 @@ def _create_raw_listing(item: dict) -> dict:
             "published":   False,
             "product_type": "Pokemon",
             "vendor":      "Pack Fresh",
-            "images":      [{"src": item["image_url"]}] if item.get("image_url") else [],
             "variants": [{
                 "price":                str(price),
                 "sku":                  item["barcode"],
@@ -2286,7 +2317,8 @@ def sell_finalize():
 
     cards = db.query("""
         SELECT id, barcode, card_name, set_name, card_number, condition,
-               current_price, image_url, tcgplayer_id, state, current_hold_id
+               current_price, image_url, tcgplayer_id, state, current_hold_id,
+               shopify_product_id
         FROM raw_cards
         WHERE barcode = ANY(%s)
     """, (barcodes,))
@@ -2300,7 +2332,11 @@ def sell_finalize():
         if not card:
             skipped.append({"barcode": bc, "reason": "not found"})
             continue
-        if card.get("current_hold_id") or card["state"] not in ("STORED", "DISPLAY"):
+        # Scan-to-sell only accepts DISPLAY cards (front glass / binders) —
+        # walk-up "I want this" applies to things customers can see. STORED
+        # cards belong to the hold pipeline; if a customer wants a STORED
+        # card, the right path is a hold-pull or moving it onto display first.
+        if card.get("current_hold_id") or card["state"] != "DISPLAY":
             skipped.append({"barcode": bc, "reason": f"state={card['state']}"})
             continue
 
@@ -2458,7 +2494,8 @@ def sell_relist():
 
     card = db.query_one("""
         SELECT id, barcode, card_name, set_name, card_number, condition,
-               current_price, image_url, tcgplayer_id, state
+               current_price, image_url, tcgplayer_id, state,
+               shopify_product_id
         FROM raw_cards WHERE barcode = %s
     """, (barcode,))
     if not card:
