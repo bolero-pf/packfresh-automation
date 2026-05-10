@@ -2405,12 +2405,12 @@ def _shopify_gql(query, variables=None):
 def _delete_all_products_for_sku(sku: str) -> list[str]:
     """Delete every Shopify product carrying this SKU (any status).
 
-    Defense-in-depth against orphan listings: if accept→return→accept
-    toggling left duplicate products sharing one SKU, the webhook only
-    deletes the one stamped on raw_cards. This sweeps the rest so the
-    admin product list and POS don't keep tripping over ghosts.
+    Raw-card-only by SKU prefix: raw card listings always use PF-* barcodes.
+    Sealed/slab UPCs (820*, 196*, etc.) and Shopify-native SKUs share their
+    SKU with the live store listing, so sweeping by SKU would nuke real
+    inventory. Hard guard: anything that isn't a PF-* barcode returns [].
     """
-    if not sku:
+    if not sku or not sku.startswith("PF-"):
         return []
     try:
         result = _shopify_gql("""
