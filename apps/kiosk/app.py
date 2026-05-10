@@ -2405,12 +2405,20 @@ def _shopify_gql(query, variables=None):
 def _delete_all_products_for_sku(sku: str) -> list[str]:
     """Delete every Shopify product carrying this SKU (any status).
 
-    Raw-card-only by SKU prefix: raw card listings always use PF-* barcodes.
-    Sealed/slab UPCs (820*, 196*, etc.) and Shopify-native SKUs share their
-    SKU with the live store listing, so sweeping by SKU would nuke real
-    inventory. Hard guard: anything that isn't a PF-* barcode returns [].
+    Raw-card-only by DB lookup: only sweeps when the SKU matches a known
+    raw_cards.barcode. Sealed/slab UPCs and Shopify-native SKUs share their
+    SKU with the live store listing — sweeping by SKU would nuke real
+    inventory (#9906–#9922 carnage on 2026-05-09/10 was exactly this).
+
+    Format-agnostic guard, since raw card barcodes have used multiple formats
+    over time. If raw_cards has no row with this barcode, bail.
     """
-    if not sku or not sku.startswith("PF-"):
+    if not sku:
+        return []
+    is_card = db.query_one(
+        "SELECT 1 AS x FROM raw_cards WHERE barcode = %s LIMIT 1", (sku,)
+    )
+    if not is_card:
         return []
     try:
         result = _shopify_gql("""
