@@ -2984,13 +2984,15 @@ async function refreshBadges() {
     set('badge-missing',  d.missing);
     set('badge-sell',     d.active_listings);
 
-    // Detect a brand-new hold arriving and ping the notify sound. The old
-    // guard (`_lastLatestHoldAt !== null`) trapped us when the queue was
-    // empty — _lastLatestHoldAt would *stay* null, and the first hold ever
-    // to arrive would slip in silent. Tracking _pollSeq instead lets the
-    // first refresh seed state without ringing, and every following poll
-    // ring on any change (including null → real timestamp).
-    if (_pollSeq > 0 && d.latest_hold_at !== _lastLatestHoldAt) {
+    // Detect a brand-new hold arriving and ping the notify sound.
+    // Only ring on a *forward* transition: null → real, or real → strictly
+    // newer real. ISO timestamps sort correctly as strings, so a string
+    // compare is enough. Without the directional check, closing the last
+    // hold (real → null) or any other backwards step would false-ring.
+    // _pollSeq guards the first refresh, which is just seeding state.
+    const forward = d.latest_hold_at
+      && (!_lastLatestHoldAt || d.latest_hold_at > _lastLatestHoldAt);
+    if (_pollSeq > 0 && forward) {
       try { pfSound.notify(); } catch(e) {}
     }
     _lastLatestHoldAt = d.latest_hold_at;
