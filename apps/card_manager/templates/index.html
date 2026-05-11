@@ -1061,9 +1061,14 @@ async function loadShipping() {
   try {
     const d = await get('/api/ship');
     const holds = d.holds || [];
+    // Badge only exists when Shipping is in the card_manager sidebar.
+    // On the standalone /shipping page (linked from the admin tile),
+    // there is no sidebar — guard the lookup.
     const badge = document.getElementById('badge-shipping');
-    badge.textContent = holds.length;
-    badge.classList.toggle('visible', holds.length > 0);
+    if (badge) {
+      badge.textContent = holds.length;
+      badge.classList.toggle('visible', holds.length > 0);
+    }
     const el = document.getElementById('shipping-list');
     if (!holds.length) {
       el.innerHTML = '<div class="empty"><div class="empty-icon">📦</div><p>No outbound orders waiting</p></div>';
