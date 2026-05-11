@@ -972,13 +972,22 @@ def reverse_decision(hold_id, hold_item_id):
                COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS shopify_product_id,
                rc.card_name, rc.set_name, rc.card_number,
                rc.condition, rc.current_price, rc.image_url,
-               rc.tcgplayer_id, rc.barcode
+               rc.tcgplayer_id, rc.barcode,
+               h.cohort AS hold_cohort, h.checkout_status AS hold_checkout_status
         FROM hold_items hi
         JOIN raw_cards rc ON hi.raw_card_id = rc.id
+        JOIN holds h ON hi.hold_id = h.id
         WHERE hi.id = %s AND hi.hold_id = %s
     """, (hold_item_id, hold_id))
     if not item:
         return jsonify({"error": "Hold item not found"}), 404
+
+    # Paid Champion holds are fulfilled from the Shipping Queue — staff
+    # can't unwind individual items here without breaking the outbound ship.
+    if item.get("hold_cohort") == "champion" and item.get("hold_checkout_status") == "completed":
+        return jsonify({
+            "error": "Paid Champion hold — manage this from the Shipping Queue, not the hold detail."
+        }), 409
 
     action = (request.get_json() or {}).get("action", "").lower()
 
@@ -2438,6 +2447,9 @@ def sell_active_listings():
     Surfaced in the Sell tab so the front-of-house person can see what's
     waiting on the register and pull a listing if a customer changes
     their mind — no need to dig back into a closed hold."""
+    # Paid Champion cards belong to the Shipping Queue, not the register —
+    # exclude them so a barcode scan on the Sell tab can't yank a listing
+    # that's already committed to an online order.
     rows = db.query("""
         SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
                rc.condition, rc.current_price, rc.image_url, rc.variant,
@@ -2448,6 +2460,14 @@ def sell_active_listings():
         LEFT JOIN hold_items hi ON hi.raw_card_id = rc.id AND hi.status = 'ACCEPTED'
         LEFT JOIN holds h ON hi.hold_id = h.id
         WHERE rc.state = 'PENDING_SALE'
+          AND NOT EXISTS (
+            SELECT 1 FROM hold_items hi2
+            JOIN holds h2 ON hi2.hold_id = h2.id
+            WHERE hi2.raw_card_id = rc.id
+              AND h2.cohort = 'champion'
+              AND h2.checkout_status = 'completed'
+              AND h2.status NOT IN ('ACCEPTED','RETURNED','CANCELLED','AUTO_EXPIRED')
+          )
         ORDER BY rc.updated_at DESC NULLS LAST
     """)
 
@@ -2504,6 +2524,21 @@ def sell_pull_listing():
         return jsonify({"error": "Barcode not found"}), 404
     if card["state"] != "PENDING_SALE":
         return jsonify({"error": f"Card is {card['state']}, not PENDING_SALE"}), 409
+
+    # Paid Champion cards live in the Shipping Queue — never pull at the register.
+    champ = db.query_one("""
+        SELECT h.id FROM hold_items hi
+        JOIN holds h ON hi.hold_id = h.id
+        WHERE hi.raw_card_id = %s
+          AND h.cohort = 'champion'
+          AND h.checkout_status = 'completed'
+          AND h.status NOT IN ('ACCEPTED','RETURNED','CANCELLED','AUTO_EXPIRED')
+        LIMIT 1
+    """, (str(card["id"]),))
+    if champ:
+        return jsonify({
+            "error": "This card belongs to a paid Champion order — handle it from the Shipping Queue, not the register."
+        }), 409
 
     product_id = card.get("shopify_product_id")
     if not product_id:
