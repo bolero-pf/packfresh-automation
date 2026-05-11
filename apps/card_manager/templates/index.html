@@ -14,6 +14,21 @@
 body { display: flex; flex-direction: column; overflow: hidden; }
 .shell { display: grid; grid-template-columns: 220px 1fr; flex: 1; min-height: 0; }
 
+/* Standalone mode — page lands directly on one view (e.g. /shipping from
+   the admin portal tile). Hide the sidebar and add a slim header strip
+   with a back-to-admin link so staff don't get marooned. */
+body.standalone .sidebar { display: none; }
+body.standalone .shell { grid-template-columns: 1fr; }
+body.standalone .main { padding-top: 0; }
+.standalone-bar {
+  display: none; background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 10px 22px; align-items: center; gap: 14px;
+}
+body.standalone .standalone-bar { display: flex; }
+.standalone-bar .back-link { color: var(--text-dim); font-size: 0.85rem; text-decoration: none; }
+.standalone-bar .back-link:hover { color: var(--text); }
+.standalone-bar .title { font-weight: 700; font-size: 1rem; }
+
 /* Sidebar */
 .sidebar {
   background: var(--surface); border-right: 1px solid var(--border);
@@ -380,7 +395,17 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .missing-picker-actions { display: flex; gap: 10px; justify-content: flex-end; }
 </style>
 </head>
-<body>
+<body class="{% if standalone %}standalone standalone-{{ standalone }}{% endif %}">
+
+{% if standalone %}
+<div class="standalone-bar">
+  <a class="back-link" href="https://admin.pack-fresh.com">← Admin</a>
+  <div class="title">
+    {% if standalone == "shipping" %}📦 Shipping Queue{% else %}{{ standalone|title }}{% endif %}
+  </div>
+</div>
+{% endif %}
+
 
 <div class="scan-flash" id="scan-flash"></div>
 
@@ -391,32 +416,27 @@ body { display: flex; flex-direction: column; overflow: hidden; }
       <div class="logo-name">Pack Fresh</div>
       <div class="logo-sub">Card Manager</div>
     </div>
-    <div class="nav-section">Customer Flow</div>
+    <div class="nav-section">At the Counter</div>
     <a class="nav-item" href="/price-check/" target="_blank" style="text-decoration:none;">
       🔍 Price Check
     </a>
     <a class="nav-item" href="https://offers.pack-fresh.com/quick-offer" target="_blank" style="text-decoration:none;">
       💰 Quick Offer
     </a>
+
+    <div class="nav-divider"></div>
+    <div class="nav-section">Today's Queues</div>
     <div class="nav-item active" onclick="showView('holds')" id="nav-holds">
       📋 Hold Queue
       <span class="nav-badge" id="badge-holds"></span>
     </div>
-    <div class="nav-item" onclick="showView('shipping')" id="nav-shipping">
-      📦 Shipping Queue
-      <span class="nav-badge" id="badge-shipping"></span>
-    </div>
     <div class="nav-item" onclick="showView('sell')" id="nav-sell">
-      💵 Sell
+      💵 Sell Queue
       <span class="nav-badge" id="badge-sell"></span>
     </div>
     <div class="nav-item" onclick="showView('returns')" id="nav-returns">
       ↩ Return Queue
       <span class="nav-badge" id="badge-returns"></span>
-    </div>
-    <div class="nav-item" onclick="showView('missing')" id="nav-missing">
-      ⚠ Missing Cards
-      <span class="nav-badge" id="badge-missing"></span>
     </div>
 
     <div class="nav-divider"></div>
@@ -426,6 +446,10 @@ body { display: flex; flex-direction: column; overflow: hidden; }
     </div>
     <div class="nav-item" onclick="showView('binders')" id="nav-binders">
       📒 Binders
+    </div>
+    <div class="nav-item" onclick="showView('missing')" id="nav-missing">
+      ⚠ Missing Cards
+      <span class="nav-badge" id="badge-missing"></span>
     </div>
     <div class="nav-item" onclick="showView('editor')" id="nav-editor">
       ✎ Card Editor
@@ -529,7 +553,7 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 
     <!-- Sell (POS) -->
     <div class="view" id="view-sell">
-      <div class="page-title">Sell at Register</div>
+      <div class="page-title">Sell Queue</div>
       <div class="page-sub">Scan cards from the binders or display case. We create a Shopify draft listing per card with the barcode as the SKU — the POS device then scans the same SKU to ring it up.</div>
       <div id="sell-content"></div>
     </div>
@@ -2955,8 +2979,19 @@ function _binCompare(a, b) {
   return an - bn;
 }
 
-loadHolds();
-loadReturns();
+// Standalone mode: skip the default Hold-Queue bootstrap and go straight
+// to the view the URL named (set by Flask's `standalone` template var).
+const _bodyStandalone = document.body.classList.contains('standalone');
+const _standaloneView = _bodyStandalone
+  ? [...document.body.classList].find(c => c.startsWith('standalone-'))?.replace('standalone-', '')
+  : null;
+
+if (_bodyStandalone && _standaloneView) {
+  showView(_standaloneView);
+} else {
+  loadHolds();
+  loadReturns();
+}
 startPolling();
 </script>
 </body>

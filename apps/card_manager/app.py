@@ -132,7 +132,17 @@ register_auth_hooks(
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", standalone=None)
+
+
+@app.route("/shipping")
+@app.route("/shipping/")
+def shipping_page():
+    """Standalone Shipping Queue surface — same index.html, but the sidebar
+    is hidden and the page boots straight into the shipping view. Linked
+    from the admin portal as its own tile so 'ship a paid Champion order'
+    feels like its own app instead of a buried card_manager tab."""
+    return render_template("index.html", standalone="shipping")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -16,7 +16,9 @@
 
   /* Text */
   --text:      #e8eaf0;
-  --text-dim:  #6b7280;
+  /* --text-dim contrast vs --surface was 3.8:1 (fails WCAG AA). Bumped to
+     ~6.9:1 so secondary text reads clearly on the dark blue surfaces. */
+  --text-dim:  #9aa3b8;
 
   /* Accent */
   --accent:       #4f7df9;
