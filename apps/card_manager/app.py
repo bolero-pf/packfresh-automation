@@ -918,9 +918,15 @@ def mark_item_missing(hold_id, hold_item_id):
         """, (*id_params, item["condition"], str(item["raw_card_id"])))
 
     if substitute:
+        # Update BOTH raw_card_id and barcode on the hold_item. The UI shows
+        # hi.barcode in the slip and the scan-row — if we only flip
+        # raw_card_id, the row displays the new bin (via joined rc.*) next
+        # to the OLD barcode, leaving the puller no idea which copy to grab.
         db.execute("""
-            UPDATE hold_items SET raw_card_id = %s WHERE id = %s
-        """, (str(substitute["id"]), hold_item_id))
+            UPDATE hold_items
+               SET raw_card_id = %s, barcode = %s
+             WHERE id = %s
+        """, (str(substitute["id"]), substitute["barcode"], hold_item_id))
         db.execute("""
             UPDATE raw_cards
                SET current_hold_id = %s, updated_at = CURRENT_TIMESTAMP
