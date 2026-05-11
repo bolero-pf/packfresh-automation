@@ -1015,6 +1015,7 @@ def reverse_decision(hold_id, hold_item_id):
 
 
 @app.route("/api/holds/<hold_id>/send-to-pos", methods=["POST"])
+@app.route("/api/holds/<hold_id>/finish",      methods=["POST"])  # legacy alias for stale tabs
 def send_to_pos(hold_id):
     """Commit a guest hold to the register.
 
@@ -1241,6 +1242,41 @@ def _create_raw_listing(item: dict) -> dict:
         "variant_id": product["variants"][0]["id"],
         "title":      title,
     }
+
+
+# ─── Legacy stubs (stale-tab compat) ─────────────────────────────────────────
+# Old card_manager UI tabs that haven't been refreshed since the redesign call
+# these. Return JSON (not Flask's HTML 404) so the frontend's r.json() doesn't
+# explode with a SyntaxError that surfaces as a useless "Unexpected token <"
+# toast. The error messages tell the user the page is stale — refresh.
+
+@app.route("/api/holds/<hold_id>/status",                          methods=["POST"])
+def _legacy_status(hold_id):
+    return jsonify({
+        "success": True,
+        "status": (request.get_json() or {}).get("status", "PENDING"),
+    })
+
+
+@app.route("/api/holds/<hold_id>/scan",                            methods=["POST"])
+def _legacy_scan(hold_id):
+    return jsonify({
+        "error": "Holds no longer scan from the back. Refresh this page (Ctrl+F5) and use the packing slip.",
+    }), 410
+
+
+@app.route("/api/holds/<hold_id>/items/<hold_item_id>/tap-pull",   methods=["POST"])
+def _legacy_tap_pull(hold_id, hold_item_id):
+    return jsonify({
+        "error": "Tap-to-pull is gone. Refresh this page (Ctrl+F5) and follow the packing slip.",
+    }), 410
+
+
+@app.route("/api/holds/<hold_id>/items/<hold_item_id>/missing-candidates")
+def _legacy_missing_candidates(hold_id, hold_item_id):
+    # Empty list so the old UI falls through to its single-candidate path,
+    # which calls /missing with no body — the new endpoint accepts that.
+    return jsonify({"candidates": [], "assigned_card_id": None})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
