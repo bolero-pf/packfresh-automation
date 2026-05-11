@@ -725,9 +725,11 @@ function renderHoldDetail(d) {
   const isOpen = ['PENDING','PULLING','READY'].includes(hold.status);
   const isClosed = !isOpen;
 
-  // Counts for the bottom action bar.
+  // Counts for the bottom action bar. Rejection happens at the Sell Queue
+  // now, not here — the hold flow is "pull what's on the slip and ring it
+  // up". REJECTED won't appear on open holds anymore, but keep the filter
+  // tolerant in case legacy data slips through.
   const rawToList = rawItems.filter(i => i.item_status === 'REQUESTED').length;
-  const rawRejected = rawItems.filter(i => i.item_status === 'REJECTED').length;
   const sealedToAccept = products.filter(i => !['REJECTED','CANCELLED'].includes(i.item_status)).length;
   const hasAnythingToSell = rawToList > 0 || sealedToAccept > 0;
   const sealedOnly = rawItems.length === 0 && products.length > 0;
@@ -789,20 +791,14 @@ function renderHoldDetail(d) {
               </div>
               <div class="scan-items" style="margin-top:8px;">
                 ${groupItems.map(item => {
-                  const rejected = item.item_status === 'REJECTED';
-                  const missing  = item.item_status === 'MISSING';
+                  const missing = item.item_status === 'MISSING';
                   return `
                   <div class="scan-item ${item.item_status.toLowerCase()}" id="scan-item-${item.hold_item_id}">
                     <span style="font-family:var(--mono);font-size:0.78rem;flex:1;font-weight:600;">${esc(item.barcode || '—')}</span>
                     <span style="font-size:0.72rem;color:var(--dim);">${esc(item.bin_label||'')}</span>
-                    ${missing ? '<span style="font-size:0.72rem;color:var(--red);font-weight:700;">⚠ MISSING</span>' :
-                      rejected ? `
-                      <span style="font-size:0.72rem;color:var(--red);font-weight:700;">✕ REJECTED</span>
-                      <button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;border:1px solid var(--border);background:none;color:var(--green);" onclick="toggleReject('${item.hold_item_id}','REQUESTED')">↶ Undo</button>
-                    ` : `
+                    ${missing ? '<span style="font-size:0.72rem;color:var(--red);font-weight:700;">⚠ MISSING</span>' : `
                       <button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;" title="Print a fresh label with the same barcode" onclick="regenerateAndPrint('${item.card_id}','${esc(item.card_name||'')}')">🖨 Reprint label</button>
                       <button class="btn btn-sm" style="background:var(--amber);color:#000;font-size:0.68rem;padding:2px 8px;" onclick="markMissing('${item.hold_item_id}')">⚠ Missing</button>
-                      <button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:0.68rem;padding:2px 8px;" onclick="toggleReject('${item.hold_item_id}','REJECTED')">Customer rejected</button>
                     `}
                   </div>
                 `;}).join('')}
@@ -886,13 +882,6 @@ async function cancelHold() {
     await post(`/api/holds/${_currentHoldId}/cancel`, {});
     toast('Hold cancelled — cards routed to Return Queue.', 'green');
     setTimeout(() => showView('holds'), 800);
-  } catch(e) { toast(e.message, 'red'); }
-}
-
-async function toggleReject(holdItemId, decision) {
-  try {
-    await post(`/api/holds/${_currentHoldId}/items/${holdItemId}/decision`, { decision });
-    await refreshHoldDetail();
   } catch(e) { toast(e.message, 'red'); }
 }
 
