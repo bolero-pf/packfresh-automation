@@ -2731,8 +2731,6 @@ async function handleSellScan(barcode) {
     toast(`✕ ${e.message}`, 'red');
   }
 }
-  renderSell();
-}
 
 async function finalizeBinderPull() {
   if (!_binderPullScanned.length) return;
