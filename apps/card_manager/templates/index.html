@@ -948,21 +948,70 @@ const _slipStyle = '<style>body{font-family:-apple-system,sans-serif;padding:24p
   + 'h1{margin:0 0 4px;font-size:26px;} .sub{color:#666;font-size:14px;margin-bottom:18px;}'
   + '.bin-hdr{font-size:13px;color:#444;text-transform:uppercase;letter-spacing:.08em;margin:14px 0 6px;border-bottom:1px solid #ccc;padding-bottom:2px;}'
   + '.item-row{display:flex;align-items:center;gap:14px;margin-bottom:10px;page-break-inside:avoid;}'
-  + '.item-row img{width:72px;height:72px;object-fit:cover;border-radius:6px;border:1px solid #ddd;}'
+  + '.item-row img{width:72px;height:72px;object-fit:cover;border-radius:6px;border:1px solid #ddd;background:#f4f4f4;}'
+  + '.item-row .placeholder{width:72px;height:72px;display:flex;align-items:center;justify-content:center;font-size:36px;color:#bbb;border:1px dashed #ddd;border-radius:6px;}'
+  + '.item-qty{font-size:22px;font-weight:700;min-width:48px;text-align:right;color:#222;}'
   + '.item-name{font-size:18px;font-weight:600;}'
   + '.item-meta{font-size:14px;color:#555;}'
   + '.item-barcode{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:15px;font-weight:600;}'
   + '@media print{body{padding:12px;}}</style>';
 
+function _slipDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  });
+}
+
+function _slipImgSrc(it) {
+  // Raw cards keep their image on raw_cards. Sealed/slab hold_items don't
+  // carry image_url, so the backend now joins inventory_product_cache and
+  // surfaces it as ipc_image_url.
+  return it.rc_image_url || it.ipc_image_url || it.hi_image_url || '';
+}
+
+function _slipItemKey(it) {
+  // Aggregation key. Raw cards have unique barcodes (each physical copy is
+  // its own line). Sealed/slab share a SKU across multiple hold_items, so
+  // collapse those into "Nx" rows.
+  if ((it.item_kind || 'raw') === 'raw') {
+    return 'raw:' + (it.barcode || it.id);
+  }
+  return 'prod:' + (it.hi_sku || it.shopify_variant_id || it.hi_title || it.id);
+}
+
+function _slipAggregate(items) {
+  // Map-preserving aggregation: walk items in original order so bin grouping
+  // stays intact, but collapse repeated sealed/slab rows into qty bumps.
+  const seen = new Map();
+  const out  = [];
+  items.forEach(it => {
+    const k = _slipItemKey(it);
+    if (seen.has(k)) {
+      seen.get(k).qty += 1;
+    } else {
+      const row = Object.assign({ qty: 1 }, it);
+      seen.set(k, row);
+      out.push(row);
+    }
+  });
+  return out;
+}
+
 function _renderSlipItem(it, includeBin) {
   const name = it.card_name || it.hi_title || '';
   const num  = it.card_number ? ` #${it.card_number}` : '';
   const cond = it.condition ? ` · ${it.condition}` : '';
-  const img  = it.rc_image_url || it.hi_image_url || '';
-  const bc   = it.barcode || '';
+  const img  = _slipImgSrc(it);
+  const bc   = it.barcode || it.hi_sku || '';
   const bin  = (it.bin_label || '').toString();
+  const qty  = it.qty || 1;
   return `<div class="item-row">
-    ${img ? `<img src="${img}">` : ''}
+    <div class="item-qty">${qty}×</div>
+    ${img ? `<img src="${img}">` : `<div class="placeholder">📦</div>`}
     <div style="flex:1;min-width:0;">
       <div class="item-name">${name}${num}${cond}</div>
       <div class="item-meta">${bc ? `<span class="item-barcode">${bc}</span>` : ''}${includeBin && bin ? ` · ${bin}` : ''}</div>
@@ -972,9 +1021,20 @@ function _renderSlipItem(it, includeBin) {
 
 function _printSlipWindow(title, bodyHtml) {
   const win = window.open('', '_blank', 'width=520,height=720');
-  win.document.write('<html><head><title>' + title + '</title>' + _slipStyle + '</head><body>' + bodyHtml + '</body></html>');
+  // window.print() sometimes fires before images finish loading. Wait for
+  // load (or a small timeout cap) before printing so the slip never goes
+  // out with broken image boxes.
+  win.document.write(
+    '<html><head><title>' + title + '</title>' + _slipStyle + '</head>'
+    + '<body>' + bodyHtml + '</body></html>'
+  );
   win.document.close();
-  win.print();
+  const trigger = () => { try { win.focus(); win.print(); } catch(e) {} };
+  if (win.document.readyState === 'complete') {
+    setTimeout(trigger, 250);
+  } else {
+    win.addEventListener('load', () => setTimeout(trigger, 250));
+  }
 }
 
 async function printHoldSlip() {
@@ -982,7 +1042,6 @@ async function printHoldSlip() {
     const d = await get(`/api/holds/${_currentHoldId}/packing-slip`);
     const h = d.hold;
     const items = d.items || [];
-    // Group by bin so the slip walks in physical order.
     const byBin = new Map();
     items.forEach(i => {
       const b = i.bin_label || '— No bin';
@@ -990,11 +1049,16 @@ async function printHoldSlip() {
       byBin.get(b).push(i);
     });
     const sortedBins = Array.from(byBin.keys()).sort(_binCompare);
+    const subLine = [
+      h.customer_phone || '',
+      'Hold #' + String(h.id).slice(0, 8),
+      _slipDate(h.created_at),
+    ].filter(Boolean).join(' · ');
     let body = `<h1>${h.customer_name}</h1>`
-             + `<div class="sub">${h.customer_phone||''} · ${_age(h.created_at)}</div>`;
+             + `<div class="sub">${subLine}</div>`;
     sortedBins.forEach(bin => {
       body += `<div class="bin-hdr">${bin}</div>`;
-      byBin.get(bin).forEach(it => { body += _renderSlipItem(it, false); });
+      _slipAggregate(byBin.get(bin)).forEach(it => { body += _renderSlipItem(it, false); });
     });
     _printSlipWindow('Packing Slip · ' + h.customer_name, body);
   } catch(e) { toast(e.message, 'red'); }
@@ -1109,10 +1173,22 @@ async function printShipSlip() {
     const d = await get(`/api/ship/${_currentShipId}/packing-slip`);
     const h = d.hold;
     const items = d.items || [];
-    let body = `<h1>${h.shopify_order_number||'Order'}</h1>`
-             + `<div class="sub">${esc(h.shipping_name||'')}${h.shipping_address?' · ' + esc(h.shipping_address):''}</div>`;
-    // Bin-grouped for the puller. No bin shown in the printed slip - the customer doesn't care.
-    items.forEach(it => { body += _renderSlipItem(it, false); });
+    const subLine = [
+      h.customer_email || '',
+      _slipDate(h.created_at),
+    ].filter(Boolean).join(' · ');
+    let body = `<h1>${h.shopify_order_number||'Order'}</h1>`;
+    if (h.shipping_name) {
+      body += `<div class="sub" style="font-size:16px;color:#222;">${h.shipping_name}</div>`;
+    }
+    if (h.shipping_address) {
+      body += `<div class="sub">${h.shipping_address}</div>`;
+    }
+    if (subLine) {
+      body += `<div class="sub">${subLine}</div>`;
+    }
+    // Aggregate sealed/slab into Nx rows; raw cards stay as individual lines.
+    _slipAggregate(items).forEach(it => { body += _renderSlipItem(it, false); });
     _printSlipWindow('Shipping Slip · ' + (h.shopify_order_number||''), body);
   } catch(e) { toast(e.message, 'red'); }
 }

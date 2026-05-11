@@ -1163,13 +1163,18 @@ def hold_packing_slip(hold_id):
     items = db.query("""
         SELECT hi.id, hi.item_kind, hi.title AS hi_title, hi.image_url AS hi_image_url,
                hi.unit_price AS hi_unit_price, hi.sku AS hi_sku,
+               hi.shopify_variant_id,
                rc.card_name, rc.set_name, rc.card_number, rc.condition,
                rc.current_price, rc.image_url AS rc_image_url, rc.barcode,
-               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
+               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type,
+               ipc.image_url AS ipc_image_url
         FROM hold_items hi
         LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
         LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
         LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+        LEFT JOIN inventory_product_cache ipc
+          ON ipc.shopify_variant_id = hi.shopify_variant_id
+         AND hi.item_kind IN ('sealed','slab')
         WHERE hi.hold_id = %s
           AND hi.status IN ('REQUESTED','REJECTED')
         ORDER BY sl.bin_label NULLS LAST, COALESCE(rc.card_name, hi.title)
@@ -1391,15 +1396,22 @@ def shipping_packing_slip(hold_id):
     if not hold:
         return jsonify({"error": "Not found"}), 404
     items = db.query("""
-        SELECT hi.id, hi.barcode,
+        SELECT hi.id, hi.barcode, hi.item_kind,
+               hi.title AS hi_title, hi.sku AS hi_sku,
+               hi.shopify_variant_id,
                rc.card_name, rc.set_name, rc.card_number, rc.condition,
                rc.current_price, rc.image_url AS rc_image_url,
-               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
+               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type,
+               ipc.image_url AS ipc_image_url
         FROM hold_items hi
         LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
         LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
         LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+        LEFT JOIN inventory_product_cache ipc
+          ON ipc.shopify_variant_id = hi.shopify_variant_id
+         AND hi.item_kind IN ('sealed','slab')
         WHERE hi.hold_id = %s
+          AND hi.status NOT IN ('CANCELLED','RETURNED')
         ORDER BY sl.bin_label NULLS LAST
     """, (hold_id,))
     return jsonify({
