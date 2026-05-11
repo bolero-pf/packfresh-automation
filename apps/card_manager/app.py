@@ -13,7 +13,7 @@ Env vars needed:
 import os
 import logging
 import requests as _requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template, request, jsonify, g
 
 import db
@@ -105,7 +105,16 @@ def _resolve_hold_lock(card: dict) -> bool:
 def _ser(d: dict) -> dict:
     out = {}
     for k, v in d.items():
-        if hasattr(v, "isoformat"):
+        if isinstance(v, datetime):
+            # Postgres TIMESTAMP (without time zone) columns come back as
+            # naive datetimes even though the values are UTC. Bare isoformat
+            # then drops the zone marker, and the JS frontend parses naive
+            # ISO as *local* time — turning a 10:14 AM hold into a 3:14 PM
+            # display. Tag naive as UTC so clients render in their own zone.
+            if v.tzinfo is None:
+                v = v.replace(tzinfo=timezone.utc)
+            out[k] = v.isoformat()
+        elif hasattr(v, "isoformat"):
             out[k] = v.isoformat()
         elif hasattr(v, "__float__") and not isinstance(v, (int, float, bool)):
             out[k] = float(v)
