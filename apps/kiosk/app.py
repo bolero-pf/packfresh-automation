@@ -147,8 +147,11 @@ KIOSK_DEVICE_COOKIE_MAX_AGE = 10 * 365 * 24 * 3600  # 10 years
 ACTIVATION_TOKEN_TTL_HOURS = 24
 
 # Idle / pull-request thresholds
-INSTORE_HOLD_REQUEST_EXPIRY_MIN = 15      # REQUESTED hold_items unclaimed → expire
-PULLED_UNRESOLVED_AFTER_HOURS   = 4       # PULLED but no return / no order → flag
+# 4-hour expiry: customers chat, get distracted, take their time. Anything
+# shorter and we lose holds while customers are mid-conversation. 4 hours
+# in the kiosk also matches the cutoff Sean wants for "customer is gone."
+INSTORE_HOLD_REQUEST_EXPIRY_MIN = 240
+PULLED_UNRESOLVED_AFTER_HOURS   = 4       # legacy: sealed/slab loss-detection
 
 # Tags that identify sealed and slab products in inventory_product_cache.tags (CSV)
 SEALED_TAG = "sealed"

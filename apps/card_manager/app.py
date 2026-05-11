@@ -396,23 +396,28 @@ def price_check_search():
 
 @app.route("/api/holds")
 def list_holds():
-    """All active holds ordered by created_at."""
+    """Active in-store guest holds ordered by created_at.
+
+    Champion holds live in the Shipping Queue (paid, awaiting ship) and never
+    appear here — they're a fundamentally different workflow (shipped, not
+    handed across a counter)."""
     status_filter = request.args.get("status", "active")
     if status_filter == "active":
-        # Sealed/slab items aren't tracked through PULLED — they're notification-
-        # only. Treat them as effectively "done" so the queue progress bar
-        # reflects the raw work that actually requires action. A sealed-only
-        # hold shows 0/0 and renders as no progress bar (handled in the JS).
         rows = db.query("""
             SELECT h.*,
                    COUNT(hi.id) FILTER (WHERE hi.item_kind = 'raw') AS total_items,
-                   COUNT(hi.id) FILTER (WHERE hi.item_kind = 'raw' AND hi.status = 'PULLED') AS pulled_items,
-                   COUNT(hi.id) FILTER (WHERE hi.item_kind = 'raw' AND hi.status = 'REQUESTED') AS pending_items,
+                   COUNT(hi.id) FILTER (
+                       WHERE hi.item_kind = 'raw'
+                         AND hi.status IN ('REJECTED','MISSING')
+                   ) AS resolved_items,
+                   COUNT(hi.id) FILTER (
+                       WHERE hi.item_kind = 'raw' AND hi.status = 'REQUESTED'
+                   ) AS pending_items,
                    COUNT(hi.id) FILTER (WHERE hi.item_kind IN ('sealed','slab')) AS sealed_items
             FROM holds h
             LEFT JOIN hold_items hi ON hi.hold_id = h.id
             WHERE h.status IN ('PENDING','PULLING','READY')
-              AND NOT (h.cohort = 'champion' AND h.checkout_status = 'pending')
+              AND h.cohort IS DISTINCT FROM 'champion'
             GROUP BY h.id
             ORDER BY h.created_at DESC
         """)
@@ -439,20 +444,26 @@ def sidebar_badges():
     row = db.query_one("""
         SELECT
           (SELECT COUNT(*) FROM holds
-             WHERE status = 'PENDING'
-               AND NOT (cohort = 'champion' AND checkout_status = 'pending')
+             WHERE status IN ('PENDING','PULLING','READY')
+               AND cohort IS DISTINCT FROM 'champion'
           ) AS holds,
+          (SELECT COUNT(*) FROM holds
+             WHERE cohort = 'champion'
+               AND checkout_status = 'completed'
+               AND status NOT IN ('ACCEPTED','RETURNED','CANCELLED','AUTO_EXPIRED')
+          ) AS shipping,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_RETURN') AS returns,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'MISSING')        AS missing,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_SALE')   AS active_listings,
           (SELECT MAX(created_at) FROM holds
              WHERE status IN ('PENDING','PULLING','READY')
-               AND NOT (cohort = 'champion' AND checkout_status = 'pending')
+               AND cohort IS DISTINCT FROM 'champion'
           ) AS latest_hold_at
     """)
     latest = row.get("latest_hold_at") if row else None
     return jsonify({
         "holds":           int(row["holds"] or 0),
+        "shipping":        int(row["shipping"] or 0),
         "returns":         int(row["returns"] or 0),
         "missing":         int(row["missing"] or 0),
         "active_listings": int(row["active_listings"] or 0),
@@ -460,12 +471,117 @@ def sidebar_badges():
     })
 
 
+def _zone_center_hold(hold_id):
+    """Re-allocate hold_items so the puller visits the fewest physical zones.
+
+    Rule: for each REQUESTED raw hold_item, if a same-identity sibling lives in
+    the hold's dominant zone but the currently-allocated copy doesn't, swap
+    raw_card_id (and current_hold_id) to the sibling. Preferences inside ties:
+    STORED over DISPLAY, then oldest created_at first (so old stock cycles out
+    before CardTrader picks it up).
+
+    Idempotent — running twice is a no-op."""
+    items = db.query("""
+        SELECT hi.id AS hold_item_id, hi.raw_card_id,
+               rc.tcgplayer_id, rc.scrydex_id, rc.condition,
+               COALESCE(sr.location_type, 'bin') AS bin_type
+        FROM hold_items hi
+        JOIN raw_cards rc ON rc.id = hi.raw_card_id
+        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+        LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+        WHERE hi.hold_id = %s AND hi.item_kind = 'raw' AND hi.status = 'REQUESTED'
+    """, (hold_id,))
+    if not items:
+        return
+
+    # Bucket each storage location into a coarse "zone" — bins vs display
+    # surfaces (binders + display cases). Pullers walk these as one trip.
+    def zone_of(bin_type):
+        return 'display' if bin_type in ('binder', 'display_case') else 'bin'
+
+    zone_counts = {}
+    for it in items:
+        z = zone_of(it["bin_type"])
+        zone_counts[z] = zone_counts.get(z, 0) + 1
+    if not zone_counts:
+        return
+    # Dominant zone — most items. Tie breaks toward 'bin' (storage).
+    dominant = max(zone_counts.items(), key=lambda kv: (kv[1], kv[0] == 'bin'))[0]
+
+    for it in items:
+        if zone_of(it["bin_type"]) == dominant:
+            continue  # already in the right zone
+        # Look for an unlocked sibling in the dominant zone.
+        id_clauses, id_params = [], []
+        if it.get("tcgplayer_id"):
+            id_clauses.append("rc.tcgplayer_id = %s")
+            id_params.append(it["tcgplayer_id"])
+        if it.get("scrydex_id"):
+            id_clauses.append("rc.scrydex_id = %s")
+            id_params.append(it["scrydex_id"])
+        if not id_clauses:
+            continue
+        id_where = "(" + " OR ".join(id_clauses) + ")"
+
+        zone_filter = (
+            "COALESCE(sr.location_type,'bin') NOT IN ('binder','display_case')"
+            if dominant == 'bin'
+            else "COALESCE(sr.location_type,'bin') IN ('binder','display_case')"
+        )
+        sub = db.query_one(f"""
+            SELECT rc.id
+            FROM raw_cards rc
+            LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+            LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+            LEFT JOIN holds h ON h.id = rc.current_hold_id
+            WHERE {id_where}
+              AND rc.condition = %s
+              AND rc.state IN ('STORED','DISPLAY')
+              AND rc.id <> %s
+              AND {zone_filter}
+              AND (
+                rc.current_hold_id IS NULL
+                OR rc.current_hold_id = %s
+                OR h.status NOT IN ('PENDING','PULLING','READY')
+              )
+            ORDER BY (rc.state = 'STORED') DESC, rc.created_at ASC
+            LIMIT 1
+        """, (*id_params, it["condition"], str(it["raw_card_id"]), hold_id))
+        if not sub:
+            continue
+        # Transfer the lock + the hold_item allocation atomically enough.
+        db.execute("""
+            UPDATE raw_cards
+               SET current_hold_id = NULL, updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s AND current_hold_id = %s
+        """, (str(it["raw_card_id"]), hold_id))
+        db.execute("""
+            UPDATE raw_cards
+               SET current_hold_id = %s, updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+        """, (hold_id, str(sub["id"])))
+        db.execute("""
+            UPDATE hold_items SET raw_card_id = %s WHERE id = %s
+        """, (str(sub["id"]), str(it["hold_item_id"])))
+
+
 @app.route("/api/holds/<hold_id>")
 def get_hold(hold_id):
-    """Hold detail with optimized pull list."""
+    """Hold detail with optimized pull list.
+
+    Runs the zone-centering allocator on every open. Idempotent — if the
+    allocation is already optimal nothing changes."""
     hold = db.query_one("SELECT * FROM holds WHERE id = %s", (hold_id,))
     if not hold:
         return jsonify({"error": "Not found"}), 404
+
+    # Only re-allocate while the hold is still open. Closed holds are
+    # historical and shouldn't have their lineup rewritten.
+    if hold["status"] in ('PENDING', 'PULLING', 'READY'):
+        try:
+            _zone_center_hold(hold_id)
+        except Exception as e:
+            logger.warning(f"Zone-center failed for hold {hold_id}: {e}")
 
     # LEFT JOIN raw_cards so sealed/slab items (raw_card_id IS NULL) survive.
     # Sealed/slab items carry their own title/image/sku/unit_price on hold_items;
@@ -609,17 +725,11 @@ def get_hold(hold_id):
 @app.route("/api/holds/<hold_id>/cancel", methods=["POST"])
 def cancel_hold(hold_id):
     """
-    Cancel a hold outright — "leave the cards there, just close this out".
-
-    Releases any raw_cards lock held by REQUESTED/PULLED items (state goes
-    back to STORED so they're immediately available again) and marks those
-    items + the hold as CANCELLED.
-
-    Refuses if any item is ACCEPTED — those have Shopify draft listings,
-    so the user must reverse-decision each one first to delete the listing.
-    Items already in terminal states (REJECTED, MISSING, EXPIRED_UNCLAIMED,
-    SOLD, RETURNED, UNRESOLVED, CANCELLED) are left untouched; only the hold
-    itself flips to CANCELLED so it drops off the active queue.
+    Cancel a hold outright. The puller is assumed to be physically holding
+    every requested/rejected card (no scan-to-PULLED in the new flow, so we
+    can't tell whether they actually walked the bins yet — and the cost of
+    asking is high). All raw items route to the Return Queue, where the
+    goback scan flow will re-shelve them.
 
     Idempotent on already-cancelled holds.
     """
@@ -629,75 +739,12 @@ def cancel_hold(hold_id):
     if hold["status"] == "CANCELLED":
         return jsonify({"success": True, "status": "CANCELLED", "noop": True})
 
-    accepted = db.query_one("""
-        SELECT COUNT(*)::int AS n FROM hold_items
-        WHERE hold_id = %s AND status = 'ACCEPTED'
-    """, (hold_id,))
-    if (accepted or {}).get("n"):
-        return jsonify({
-            "error": "Hold has accepted items with active listings. "
-                     "Use 'Return' on each accepted card before cancelling."
-        }), 409
-
-    # Delete any pre-created Shopify listings before releasing the lock.
-    # scan_card and tap_pull both pre-create on PULL so the register flow
-    # is fast; without this step, a cancelled hold would leave those
-    # listings live in Shopify forever (showing as "active · 1 in stock"
-    # in the admin product list). DELETE rather than archive so the admin
-    # product list stays clean — re-pulling the same physical card on a
-    # future hold creates a fresh listing (the stamped product_id 404s
-    # and _create_raw_listing falls through to the create path).
-    pids_to_delete = db.query("""
-        SELECT DISTINCT COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS pid
-        FROM hold_items hi
-        LEFT JOIN raw_cards rc ON hi.raw_card_id = rc.id
-        WHERE hi.hold_id = %s
-          AND hi.status IN ('REQUESTED','PULLED','REJECTED')
-          AND COALESCE(hi.shopify_product_id, rc.shopify_product_id) IS NOT NULL
-    """, (hold_id,))
-    for row in pids_to_delete:
-        pid = row.get("pid")
-        if not pid:
-            continue
-        try:
-            _shopify("DELETE", f"/products/{pid}.json")
-        except Exception as e:
-            logger.warning(f"Failed to delete listing {pid} on cancel "
-                           f"of hold {hold_id}: {e}")
-    # Clear the now-stale stamps so a future re-pull doesn't try to
-    # un-archive a deleted product (the idempotency GET will 404 either
-    # way, but cleaner to nil out). REJECTED-but-deferred items live in
-    # PULLED state with stamped product_ids until finish_hold or cancel
-    # commits — so they're caught here too.
-    db.execute("""
-        UPDATE hold_items
-           SET shopify_product_id = NULL, shopify_variant_id = NULL
-         WHERE hold_id = %s AND status IN ('REQUESTED','PULLED','REJECTED')
-    """, (hold_id,))
+    # Route every raw item to the Return Queue regardless of original state.
+    # No Shopify listings exist at this point (Send-to-POS is the only path
+    # that creates them) so there's nothing to delete.
     db.execute("""
         UPDATE raw_cards
-           SET shopify_product_id = NULL, shopify_variant_id = NULL
-         WHERE id IN (
-             SELECT raw_card_id FROM hold_items
-              WHERE hold_id = %s
-                AND raw_card_id IS NOT NULL
-                AND status IN ('REQUESTED','PULLED','REJECTED')
-         )
-    """, (hold_id,))
-
-    # State routing — REQUESTED items that never left their bin (state still
-    # STORED or DISPLAY) just need their lock released; the card is right
-    # where it always was, no need to drag it through Return Queue. Items
-    # the puller was physically holding (PULLED, deferred-REJECTED in
-    # PULLED state, or any edge case where state has already moved past
-    # STORED/DISPLAY) route to PENDING_RETURN so the Return Queue can put
-    # them back. CASE keeps it one round-trip.
-    db.execute("""
-        UPDATE raw_cards
-           SET state = CASE
-                         WHEN state IN ('STORED','DISPLAY') THEN state
-                         ELSE 'PENDING_RETURN'
-                       END,
+           SET state = 'PENDING_RETURN',
                current_hold_id = NULL,
                updated_at = CURRENT_TIMESTAMP
          WHERE id IN (
@@ -708,7 +755,6 @@ def cancel_hold(hold_id):
          )
     """, (hold_id,))
 
-    # Mark the cancellable items as CANCELLED — both raw and sealed/slab.
     db.execute("""
         UPDATE hold_items
            SET status = 'CANCELLED', resolved_at = CURRENT_TIMESTAMP
@@ -716,440 +762,68 @@ def cancel_hold(hold_id):
            AND status IN ('REQUESTED','PULLED','REJECTED')
     """, (hold_id,))
 
-    # Mark the hold itself
     db.execute("UPDATE holds SET status = 'CANCELLED' WHERE id = %s", (hold_id,))
 
     return jsonify({"success": True, "status": "CANCELLED"})
 
 
-@app.route("/api/holds/<hold_id>/status", methods=["POST"])
-def update_hold_status(hold_id):
-    """Transition hold status: PENDING→PULLING, PULLING→READY."""
-    new_status = (request.get_json() or {}).get("status", "").upper()
-    valid = {"PULLING", "READY", "RETURNED", "ACCEPTED"}
-    if new_status not in valid:
-        return jsonify({"error": f"Invalid status. Must be one of: {valid}"}), 400
-
-    extra = {}
-    if new_status == "READY":
-        extra["ready_at"] = datetime.utcnow()
-        extra["expires_at"] = datetime.utcnow() + timedelta(hours=2)
-
-    db.execute("""
-        UPDATE holds SET status = %s,
-            ready_at   = COALESCE(%s, ready_at),
-            expires_at = COALESCE(%s, expires_at)
-        WHERE id = %s
-    """, (new_status,
-          extra.get("ready_at"), extra.get("expires_at"),
-          hold_id))
-
-    return jsonify({"success": True, "status": new_status})
-
-
-@app.route("/api/holds/<hold_id>/scan", methods=["POST"])
-def scan_card(hold_id):
-    """
-    Staff scans a barcode during PULLING phase.
-    Accepts the scan if the barcode matches any card sharing
-    tcgplayer_id + condition with an item on this hold.
-
-    Returns which hold_item was fulfilled (may differ from exact barcode
-    if a sibling copy was scanned).
-    """
-    barcode = (request.get_json() or {}).get("barcode", "").strip()
-    if not barcode:
-        return jsonify({"error": "No barcode provided"}), 400
-
-    # Find the scanned card
-    scanned = db.query_one("""
-        SELECT rc.*, sl.bin_label
-        FROM raw_cards rc
-        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
-        WHERE rc.barcode = %s
-    """, (barcode,))
-
-    if not scanned:
-        # Not a raw card. Try sealed/slab. Two acceptable scans:
-        #   1) The Shopify SKU we stored on the hold_item (legacy path —
-        #      raw cards have SKU == barcode, but sealed/slab don't).
-        #   2) The Shopify variant.barcode mirrored into
-        #      inventory_product_cache by shared/cache_manager.py. This is
-        #      what staff actually labels their sealed/slab inventory with
-        #      via the inventory bind tool.
-        # Status flips REQUESTED **or EXPIRED_UNCLAIMED** → PULLED. Including
-        # expired recovers the case where the customer came back after the
-        # 15-min cleanup cron flipped a sitting REQUESTED item to
-        # EXPIRED_UNCLAIMED; sealed/slab inventory was never decremented
-        # anyway, so it's safe to re-pull.
-        prod_match = db.query_one("""
-            SELECT hi.id, hi.title, hi.item_kind, hi.shopify_variant_id, hi.status
-            FROM hold_items hi
-            LEFT JOIN inventory_product_cache ipc
-              ON ipc.shopify_variant_id = hi.shopify_variant_id
-            WHERE hi.hold_id = %s
-              AND hi.status IN ('REQUESTED','EXPIRED_UNCLAIMED')
-              AND hi.item_kind IN ('sealed','slab')
-              AND (hi.sku = %s OR ipc.barcode = %s)
-            LIMIT 1
-        """, (hold_id, barcode, barcode))
-        if prod_match:
-            db.execute("""
-                UPDATE hold_items
-                SET status = 'PULLED',
-                    pulled_at = CURRENT_TIMESTAMP,
-                    barcode = %s
-                WHERE id = %s
-            """, (barcode, str(prod_match["id"])))
-            return jsonify({
-                "success":      True,
-                "kind":         prod_match["item_kind"],
-                "card_name":    prod_match["title"],
-                "hold_item_id": str(prod_match["id"]),
-            })
-        return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
-
-    # Find a REQUESTED hold_item on this hold matching the scanned card's
-    # identity (tcgplayer_id OR scrydex_id) + condition. JP cards typically
-    # have no tcgplayer_id and must match by scrydex_id; US cards usually
-    # have both.
-    # `hi_product_id` lets pre-create reuse the listing kiosk Champion
-    # checkout already stamped — without it, scan_card would create a
-    # duplicate Shopify product alongside the existing kiosk-created one.
-    id_clauses = []
-    id_params: list = []
-    if scanned.get("tcgplayer_id"):
-        id_clauses.append("rc.tcgplayer_id = %s")
-        id_params.append(scanned["tcgplayer_id"])
-    if scanned.get("scrydex_id"):
-        id_clauses.append("rc.scrydex_id = %s")
-        id_params.append(scanned["scrydex_id"])
-    if not id_clauses:
-        return jsonify({
-            "error": "Scanned card has no identity (no tcgplayer_id or scrydex_id)",
-            "barcode": barcode,
-        }), 409
-    id_where = "(" + " OR ".join(id_clauses) + ")"
-
-    match = db.query_one(f"""
-        SELECT hi.id, hi.barcode, hi.raw_card_id AS original_raw_id,
-               hi.shopify_product_id AS hi_product_id,
-               rc.card_name, rc.condition
-        FROM hold_items hi
-        JOIN raw_cards rc ON hi.raw_card_id = rc.id
-        WHERE hi.hold_id = %s
-          AND hi.status = 'REQUESTED'
-          AND {id_where}
-          AND rc.condition = %s
-        LIMIT 1
-    """, (hold_id, *id_params, scanned["condition"]))
-
-    if not match:
-        return jsonify({
-            "error": "This card doesn't match any outstanding item on this hold",
-            "card_name": scanned["card_name"],
-            "barcode": barcode,
-        }), 409
-
-    # Sibling substitution: kiosk allocates a specific raw_card row when a hold
-    # is created (sets current_hold_id). Staff often scan a *different* physical
-    # copy with the same identity. Without releasing the original lock, that
-    # row keeps current_hold_id forever — every later "Pull to Display" /
-    # set-out scan on that sibling rejects with "already on hold" even though
-    # the hold is long gone.
-    if str(match["original_raw_id"]) != str(scanned["id"]):
-        db.execute("""
-            UPDATE raw_cards
-            SET current_hold_id = NULL
-            WHERE id = %s AND current_hold_id = %s
-        """, (str(match["original_raw_id"]), hold_id))
-
-    # Mark this hold_item as PULLED, lock in the EXACT physical copy that was
-    # scanned. We update both `barcode` (display) AND `raw_card_id` (FK) so
-    # every downstream action — accept, reject, return, finish — operates on
-    # the specific copy the user pulled, not the original allocation. Without
-    # this, a hold for 4× NM Pikachu would always resolve actions back through
-    # the originally-allocated raw_card_ids, even after staff scanned 4
-    # different physical copies — causing "Return on row 2" to delete the
-    # Shopify listing for a different copy than the one shown in the UI.
-    db.execute("""
-        UPDATE hold_items
-        SET status = 'PULLED',
-            pulled_at = CURRENT_TIMESTAMP,
-            barcode = %s,
-            raw_card_id = %s
-        WHERE id = %s
-    """, (barcode, str(scanned["id"]), str(match["id"])))
-
-    # Move the lock to the actually-scanned copy so any concurrent set-out /
-    # display scan on this sibling correctly reports it as held until pulled.
-    db.execute("""
-        UPDATE raw_cards SET state = 'PULLED', current_hold_id = %s
-        WHERE id = %s
-    """, (hold_id, str(scanned["id"])))
-
-    # Pre-create the Shopify listing now (status=active, draft i.e. not on a
-    # sales channel — POS still finds it by SKU). Doing this at scan time
-    # rather than at finish_hold/decision lets the listing propagate to the
-    # POS register over the seconds the customer spends reviewing their
-    # picks, so the final "Finish" press is instant. _create_raw_listing is
-    # idempotent: if `scanned.shopify_product_id` already points at a live
-    # product (or an archived one from a prior reject), reuse / un-archive
-    # rather than creating a duplicate. Pre-create failures don't block the
-    # scan — the decision/finish paths still call _create_raw_listing and
-    # will retry there.
-    try:
-        # Idempotency: prefer hi_product_id (kiosk Champion checkout) over
-        # raw_cards.shopify_product_id; without this, Champion holds would
-        # double-up listings since raw_cards isn't stamped at checkout time.
-        item_for_listing = dict(scanned)
-        if match.get("hi_product_id"):
-            item_for_listing["shopify_product_id"] = match["hi_product_id"]
-        listing = _create_raw_listing(item_for_listing)
-        db.execute("""
-            UPDATE raw_cards
-            SET shopify_product_id = %s, shopify_variant_id = %s,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-        """, (listing["product_id"], listing["variant_id"], str(scanned["id"])))
-        db.execute("""
-            UPDATE hold_items
-            SET shopify_product_id = %s, shopify_variant_id = %s
-            WHERE id = %s
-        """, (listing["product_id"], listing["variant_id"], str(match["id"])))
-    except Exception as e:
-        logger.warning(f"scan_card pre-create listing failed for {barcode}: {e} "
-                       f"(retry on decision)")
-
-    return jsonify({
-        "success":   True,
-        "card_name": scanned["card_name"],
-        "condition": scanned["condition"],
-        "bin_label": scanned.get("bin_label"),
-        "hold_item_id": str(match["id"]),
-    })
-
-
-@app.route("/api/holds/<hold_id>/items/<hold_item_id>/tap-pull", methods=["POST"])
-def tap_pull_display(hold_id, hold_item_id):
-    """Confirm-pull for a hold item whose card lives in a display-family
-    location (front glass or a binder). The puller is holding the only card
-    with that barcode in their hand — re-scanning is theater. One tap flips
-    the hold item to PULLED, the raw_card to PULLED, and pre-creates the
-    Shopify listing so the register flow stays fast.
-
-    Gated to display-family rows only: STORED-state items still require a
-    real scan (the bin search is the validation)."""
-    item = db.query_one("""
-        SELECT hi.id AS hold_item_id, hi.status AS hi_status,
-               hi.raw_card_id,
-               hi.shopify_product_id AS hi_product_id,
-               rc.id AS card_id, rc.barcode, rc.card_name, rc.set_name,
-               rc.card_number, rc.condition, rc.current_price, rc.image_url,
-               rc.tcgplayer_id, rc.state AS card_state,
-               rc.shopify_product_id,
-               COALESCE(sr.location_type, 'bin') AS bin_type,
-               sl.bin_label
-        FROM hold_items hi
-        JOIN raw_cards rc ON hi.raw_card_id = rc.id
-        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
-        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
-        WHERE hi.id = %s AND hi.hold_id = %s
-    """, (hold_item_id, hold_id))
-
-    if not item:
-        return jsonify({"error": "Hold item not found"}), 404
-    if item["hi_status"] != "REQUESTED":
-        return jsonify({"error": f"Item is {item['hi_status']}, not REQUESTED"}), 409
-    if item["bin_type"] not in ("display_case", "binder"):
-        return jsonify({
-            "error": "Tap-pull is only allowed for display-case / binder items; "
-                     "STORED items must be scanned from the bin.",
-        }), 409
-    # bin_type already proved this is a display-family row, so the physical
-    # location is known. card_state can lag the bin_id (legacy migration miss
-    # or a re-bin that didn't flip state) — don't reject the puller on a
-    # data-shape technicality. Block only states where pull genuinely doesn't
-    # make sense (already-pulled, sold, missing, return-pending).
-    if item["card_state"] not in ("STORED", "DISPLAY", "PENDING_SALE"):
-        return jsonify({
-            "error": f"Card is in state {item['card_state']}, can't tap-pull",
-        }), 409
-
-    db.execute("""
-        UPDATE hold_items
-        SET status = 'PULLED',
-            pulled_at = CURRENT_TIMESTAMP,
-            barcode = %s
-        WHERE id = %s
-    """, (item["barcode"], hold_item_id))
-    db.execute("""
-        UPDATE raw_cards SET state = 'PULLED', current_hold_id = %s
-        WHERE id = %s
-    """, (hold_id, str(item["card_id"])))
-
-    # Pre-create the listing — same rationale as scan_card. Prefer
-    # hi_product_id (kiosk Champion checkout) so Champion holds reuse the
-    # listing kiosk already created instead of stamping a duplicate.
-    try:
-        item_for_listing = dict(item)
-        if item.get("hi_product_id"):
-            item_for_listing["shopify_product_id"] = item["hi_product_id"]
-        listing = _create_raw_listing(item_for_listing)
-        db.execute("""
-            UPDATE raw_cards
-            SET shopify_product_id = %s, shopify_variant_id = %s,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-        """, (listing["product_id"], listing["variant_id"], str(item["card_id"])))
-        db.execute("""
-            UPDATE hold_items
-            SET shopify_product_id = %s, shopify_variant_id = %s
-            WHERE id = %s
-        """, (listing["product_id"], listing["variant_id"], hold_item_id))
-    except Exception as e:
-        logger.warning(f"tap_pull pre-create listing failed for {item['barcode']}: {e} "
-                       f"(retry on decision)")
-
-    return jsonify({
-        "success":      True,
-        "card_name":    item["card_name"],
-        "condition":    item["condition"],
-        "bin_label":    item["bin_label"],
-        "hold_item_id": hold_item_id,
-    })
-
-
 @app.route("/api/holds/<hold_id>/items/<hold_item_id>/decision", methods=["POST"])
 def item_decision(hold_id, hold_item_id):
-    """Accept or reject a single hold item."""
-    data       = request.get_json() or {}
-    decision   = data.get("decision", "").upper()  # ACCEPTED or REJECTED
-    if decision not in ("ACCEPTED", "REJECTED"):
-        return jsonify({"error": "decision must be ACCEPTED or REJECTED"}), 400
+    """Mark or unmark a hold item as customer-rejected.
+
+    Acceptance is implicit in the new flow — nothing here creates listings or
+    flips raw_cards state. Send to POS commits the final ACCEPTED/REJECTED
+    routing. Until then, REJECTED is fully reversible to REQUESTED with no
+    Shopify side effects.
+
+    Body: {"decision": "REJECTED" | "REQUESTED"}
+    """
+    decision = (request.get_json() or {}).get("decision", "").upper()
+    if decision not in ("REJECTED", "REQUESTED"):
+        return jsonify({"error": "decision must be REJECTED or REQUESTED"}), 400
 
     item = db.query_one("""
-        SELECT hi.id AS hold_item_id, hi.status AS hi_status,
-               rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
-               rc.condition, rc.current_price, rc.image_url,
-               rc.tcgplayer_id, rc.barcode,
-               COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS shopify_product_id
-        FROM hold_items hi
-        JOIN raw_cards rc ON hi.raw_card_id = rc.id
-        WHERE hi.id = %s AND hi.hold_id = %s
+        SELECT id, status, item_kind FROM hold_items
+        WHERE id = %s AND hold_id = %s
     """, (hold_item_id, hold_id))
-
     if not item:
         return jsonify({"error": "Hold item not found"}), 404
+    if (item.get("item_kind") or "raw") != "raw":
+        return jsonify({"error": "Only raw items can be rejected"}), 409
+    if item["status"] not in ("REQUESTED", "REJECTED"):
+        return jsonify({"error": f"Item is {item['status']}, can't toggle reject"}), 409
 
     if decision == "REJECTED":
-        # Decision tracked on hold_items only — raw_cards.state stays PULLED
-        # so the card doesn't enter Return Queue until finish_hold commits.
-        # Until then, the customer can reverse via 'Re-accept' and the
-        # listing (pre-created on scan) stays alive — no churn, no race
-        # against another staff member processing the Return Queue while
-        # the customer is still mid-review.
         db.execute("""
             UPDATE hold_items
                SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP
              WHERE id = %s
         """, (hold_item_id,))
     else:
-        # ACCEPTED — create Shopify listing immediately
-        try:
-            listing = _create_raw_listing(item)
-        except Exception as e:
-            return jsonify({"error": f"Failed to create listing: {e}"}), 500
         db.execute("""
             UPDATE hold_items
-            SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP,
-                shopify_product_id = %s, shopify_variant_id = %s
-            WHERE id = %s
-        """, (listing["product_id"], listing["variant_id"], hold_item_id))
-        db.execute("""
-            UPDATE raw_cards
-            SET state = 'PENDING_SALE',
-                shopify_product_id = %s,
-                shopify_variant_id = %s,
-                current_hold_id = NULL
-            WHERE id = %s
-        """, (listing["product_id"], listing["variant_id"], str(item["card_id"])))
+               SET status = 'REQUESTED', resolved_at = NULL
+             WHERE id = %s
+        """, (hold_item_id,))
 
-    return jsonify({"success": True, "decision": decision})
-
-
-# Active hold statuses — a raw_card lock against any of these means another
-# customer is already in line for that physical copy and we must NOT touch it.
-_ACTIVE_HOLD_STATUSES = ('PENDING', 'PULLING', 'READY')
-
-
-@app.route("/api/holds/<hold_id>/items/<hold_item_id>/missing-candidates")
-def missing_candidates(hold_id, hold_item_id):
-    """Sibling raw_cards a staffer might actually have in front of them when
-    they hit "Can't Find". Same identity (tcgplayer_id + condition) as the
-    hold_item's allocated copy, in STORED/DISPLAY, and either unlocked or
-    locked by a non-active hold or this hold itself. The originally
-    allocated copy is always included so the picker can show "← assigned".
-    """
-    orig = db.query_one("""
-        SELECT hi.id, hi.raw_card_id, rc.tcgplayer_id, rc.condition
-        FROM hold_items hi
-        JOIN raw_cards rc ON rc.id = hi.raw_card_id
-        WHERE hi.id = %s AND hi.hold_id = %s
-    """, (hold_item_id, hold_id))
-    if not orig:
-        return jsonify({"error": "Hold item not found"}), 404
-
-    rows = db.query(f"""
-        SELECT rc.id, rc.barcode, rc.state, rc.current_hold_id,
-               sl.bin_label,
-               (rc.id = %s) AS is_assigned
-        FROM raw_cards rc
-        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
-        LEFT JOIN holds h ON h.id = rc.current_hold_id
-        WHERE rc.tcgplayer_id = %s AND rc.condition = %s
-          AND (
-            rc.id = %s
-            OR (
-              rc.state IN ('STORED', 'DISPLAY')
-              AND (
-                rc.current_hold_id IS NULL
-                OR rc.current_hold_id = %s
-                OR h.status NOT IN {_ACTIVE_HOLD_STATUSES}
-              )
-            )
-          )
-        ORDER BY (rc.id = %s) DESC, sl.bin_label NULLS LAST, rc.barcode
-    """, (
-        str(orig["raw_card_id"]),
-        orig["tcgplayer_id"], orig["condition"],
-        str(orig["raw_card_id"]),
-        hold_id,
-        str(orig["raw_card_id"]),
-    ))
-
-    return jsonify({
-        "candidates": [_ser(dict(r)) for r in rows],
-        "assigned_card_id": str(orig["raw_card_id"]),
-    })
+    return jsonify({"success": True, "status": decision})
 
 
 @app.route("/api/holds/<hold_id>/items/<hold_item_id>/missing", methods=["POST"])
 def mark_item_missing(hold_id, hold_item_id):
-    """Mark a hold item as MISSING — card can't be found during pulling.
+    """Mark the originally-allocated copy MISSING and auto-substitute.
 
-    Body (optional): {"barcodes": ["BC1", "BC2", ...]} — the specific physical
-    copies the staffer couldn't find. If omitted, marks the originally-
-    allocated copy missing (legacy behavior).
+    No picker: the system chooses the best sibling using:
+      1) zone-of-bulk-pull (whichever zone has most other items on this hold)
+      2) STORED before DISPLAY
+      3) oldest created_at first (so old stock cycles out)
 
-    Substitution: if the hold's currently-allocated copy is among the
-    barcodes the staffer flagged, we try to swap the hold_item to another
-    available sibling so the customer still gets their card. If no
-    substitute exists, the hold_item itself flips to MISSING.
+    Returns the new physical location so the puller can keep walking without
+    another round-trip to the UI.
     """
     item = db.query_one("""
-        SELECT hi.id, hi.raw_card_id, hi.status,
-               rc.tcgplayer_id, rc.condition, rc.card_name
+        SELECT hi.id, hi.raw_card_id,
+               rc.tcgplayer_id, rc.scrydex_id, rc.condition, rc.card_name
         FROM hold_items hi
         JOIN raw_cards rc ON rc.id = hi.raw_card_id
         WHERE hi.id = %s AND hi.hold_id = %s
@@ -1157,102 +831,102 @@ def mark_item_missing(hold_id, hold_item_id):
     if not item:
         return jsonify({"error": "Hold item not found"}), 404
 
-    body = request.get_json(silent=True) or {}
-    barcodes = [b.strip() for b in (body.get("barcodes") or []) if b and b.strip()]
-
-    # Resolve barcodes → raw_card rows. Each must be a sibling
-    # (same tcgplayer_id + condition) — refuse anything else.
-    picked = []
-    if barcodes:
-        picked = db.query(f"""
-            SELECT rc.id, rc.barcode, rc.state, rc.current_hold_id
-            FROM raw_cards rc
-            LEFT JOIN holds h ON h.id = rc.current_hold_id
-            WHERE rc.barcode = ANY(%s)
-              AND rc.tcgplayer_id = %s
-              AND rc.condition = %s
-        """, (barcodes, item["tcgplayer_id"], item["condition"]))
-        if len(picked) != len(barcodes):
-            found = {p["barcode"] for p in picked}
-            bad = [b for b in barcodes if b not in found]
-            return jsonify({"error": f"Not a sibling of this card: {', '.join(bad)}"}), 400
-        # Refuse states where flipping to MISSING would corrupt other state
-        # (PENDING_SALE has a Shopify draft attached, PENDING_RETURN/SOLD/GONE
-        # are managed elsewhere). STORED/DISPLAY/PULLED/MISSING are fair game.
-        for p in picked:
-            if p["state"] not in ("STORED", "DISPLAY", "PULLED", "MISSING"):
-                return jsonify({"error": f"Barcode {p['barcode']} is in {p['state']} — can't mark missing from here"}), 409
-        # Refuse to overwrite a copy currently locked by a different active
-        # hold — that physical card is already promised to another customer.
-        for p in picked:
-            if (p.get("current_hold_id") and str(p["current_hold_id"]) != hold_id):
-                other = db.query_one("SELECT status FROM holds WHERE id = %s", (str(p["current_hold_id"]),))
-                if other and other["status"] in _ACTIVE_HOLD_STATUSES:
-                    return jsonify({"error": f"Barcode {p['barcode']} is locked to another active hold"}), 409
-
-    # Default to the originally-allocated copy if no barcodes given.
-    if not picked:
-        picked = [{"id": item["raw_card_id"], "barcode": None}]
-
-    picked_ids = {str(p["id"]) for p in picked}
-
-    # Flip every picked copy to MISSING and clear locks.
+    # 1. Flip the originally-allocated copy to MISSING and clear its lock.
     db.execute("""
         UPDATE raw_cards
-        SET state = 'MISSING',
-            current_hold_id = NULL,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id::text = ANY(%s)
-    """, (list(picked_ids),))
+           SET state = 'MISSING',
+               current_hold_id = NULL,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+    """, (str(item["raw_card_id"]),))
 
-    # If the assigned copy is among the missing, attempt substitution so the
-    # customer still gets their card. Otherwise the hold_item is unaffected
-    # (staff just flagged extra missing inventory — keep pulling normally).
-    assigned_was_picked = str(item["raw_card_id"]) in picked_ids
-    swapped = False
-    new_card_id = None
+    # 2. Determine dominant zone of the rest of the hold.
+    zones = db.query("""
+        SELECT COALESCE(sr.location_type, 'bin') AS bin_type,
+               COUNT(*)::int AS n
+        FROM hold_items hi
+        JOIN raw_cards rc ON rc.id = hi.raw_card_id
+        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+        LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+        WHERE hi.hold_id = %s
+          AND hi.id <> %s
+          AND hi.item_kind = 'raw'
+          AND hi.status = 'REQUESTED'
+        GROUP BY 1
+    """, (hold_id, hold_item_id))
+    bin_count = sum(z["n"] for z in zones if z["bin_type"] not in ("binder","display_case"))
+    disp_count = sum(z["n"] for z in zones if z["bin_type"] in ("binder","display_case"))
+    prefer_bin = bin_count >= disp_count  # tie breaks toward storage
 
-    if assigned_was_picked:
+    # 3. Find the best substitute.
+    id_clauses, id_params = [], []
+    if item.get("tcgplayer_id"):
+        id_clauses.append("rc.tcgplayer_id = %s")
+        id_params.append(item["tcgplayer_id"])
+    if item.get("scrydex_id"):
+        id_clauses.append("rc.scrydex_id = %s")
+        id_params.append(item["scrydex_id"])
+
+    substitute = None
+    if id_clauses:
+        id_where = "(" + " OR ".join(id_clauses) + ")"
+        zone_pref = (
+            "CASE WHEN COALESCE(sr.location_type,'bin') NOT IN ('binder','display_case') THEN 0 ELSE 1 END ASC"
+            if prefer_bin
+            else "CASE WHEN COALESCE(sr.location_type,'bin') IN ('binder','display_case') THEN 0 ELSE 1 END ASC"
+        )
         substitute = db.query_one(f"""
-            SELECT rc.id, rc.barcode
+            SELECT rc.id, rc.barcode, rc.state,
+                   sl.bin_label,
+                   COALESCE(sr.location_type, 'bin') AS bin_type
             FROM raw_cards rc
+            LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+            LEFT JOIN storage_rows sr ON sr.id = sl.row_id
             LEFT JOIN holds h ON h.id = rc.current_hold_id
-            WHERE rc.tcgplayer_id = %s AND rc.condition = %s
-              AND rc.state IN ('STORED', 'DISPLAY')
-              AND NOT (rc.id::text = ANY(%s))
+            WHERE {id_where}
+              AND rc.condition = %s
+              AND rc.state IN ('STORED','DISPLAY')
+              AND rc.id <> %s
               AND (
                 rc.current_hold_id IS NULL
-                OR h.status NOT IN {_ACTIVE_HOLD_STATUSES}
+                OR h.status NOT IN ('PENDING','PULLING','READY')
               )
-            ORDER BY rc.state DESC, rc.id
+            ORDER BY
+              {zone_pref},
+              (rc.state = 'STORED') DESC,
+              rc.created_at ASC
             LIMIT 1
-        """, (item["tcgplayer_id"], item["condition"], list(picked_ids)))
+        """, (*id_params, item["condition"], str(item["raw_card_id"])))
 
-        if substitute:
-            db.execute("""
-                UPDATE hold_items
-                SET raw_card_id = %s
-                WHERE id = %s
-            """, (str(substitute["id"]), hold_item_id))
-            db.execute("""
-                UPDATE raw_cards SET current_hold_id = %s
-                WHERE id = %s
-            """, (hold_id, str(substitute["id"])))
-            swapped = True
-            new_card_id = str(substitute["id"])
-        else:
-            db.execute("""
-                UPDATE hold_items
-                SET status = 'MISSING', resolved_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """, (hold_item_id,))
+    if substitute:
+        db.execute("""
+            UPDATE hold_items SET raw_card_id = %s WHERE id = %s
+        """, (str(substitute["id"]), hold_item_id))
+        db.execute("""
+            UPDATE raw_cards
+               SET current_hold_id = %s, updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+        """, (hold_id, str(substitute["id"])))
+        return jsonify({
+            "success":   True,
+            "swapped":   True,
+            "new_card_id": str(substitute["id"]),
+            "new_barcode": substitute["barcode"],
+            "new_bin":     substitute["bin_label"],
+            "new_bin_type": substitute["bin_type"],
+            "card_name": item["card_name"],
+        })
 
+    # No substitute — flip the hold_item itself to MISSING.
+    db.execute("""
+        UPDATE hold_items
+           SET status = 'MISSING', resolved_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+    """, (hold_item_id,))
     return jsonify({
-        "success":           True,
-        "missing_count":     len(picked_ids),
-        "hold_item_status":  "MISSING" if (assigned_was_picked and not swapped) else item["status"],
-        "swapped":           swapped,
-        "new_card_id":       new_card_id,
+        "success":   True,
+        "swapped":   False,
+        "card_name": item["card_name"],
     })
 
 
@@ -1340,201 +1014,159 @@ def reverse_decision(hold_id, hold_item_id):
     return jsonify({"error": f"Unknown action '{action}' (expected 're-accept' or 'return')"}), 400
 
 
-@app.route("/api/holds/<hold_id>/finish", methods=["POST"])
-def finish_hold(hold_id):
+@app.route("/api/holds/<hold_id>/send-to-pos", methods=["POST"])
+def send_to_pos(hold_id):
+    """Commit a guest hold to the register.
+
+    For every REQUESTED raw item: create a Shopify draft listing, flip raw_card
+    state to PENDING_SALE, mark hold_item ACCEPTED. For every REJECTED raw
+    item: route to PENDING_RETURN. For every REQUESTED sealed/slab item:
+    mark ACCEPTED (no listing — already on Shopify). MISSING items are left
+    alone (already terminal).
+
+    Closes the hold ACCEPTED if anything goes to the register, RETURNED if
+    everything was rejected (functionally identical to Cancel Hold).
+
+    Champion holds are handled by /api/ship/<id>/mark-shipped — they don't
+    use this path.
     """
-    Finish a hold:
-    - For guest holds: Create Shopify draft listings for ACCEPTED items, reject undecided
-    - For sealed-only holds: Mark sealed items DELIVERED and close (no listings, no
-      bin tracking — sealed lives on the shelf and Shopify decrements on POS sale)
-    - For champion holds: Skip product creation (already exists), auto-accept all pulled items
-    """
-    # Check if this is a Champion (kiosk checkout) hold
-    hold = db.query_one("SELECT cohort, checkout_status FROM holds WHERE id = %s", (hold_id,))
-    is_champion = hold and hold.get("cohort") == "champion"
+    hold = db.query_one(
+        "SELECT cohort, status FROM holds WHERE id = %s", (hold_id,))
+    if not hold:
+        return jsonify({"error": "Not found"}), 404
+    if hold.get("cohort") == "champion":
+        return jsonify({
+            "error": "Champion holds ship from the Shipping Queue, not Send to POS",
+        }), 409
+    if hold["status"] in ('ACCEPTED', 'RETURNED', 'CANCELLED', 'AUTO_EXPIRED'):
+        return jsonify({"error": f"Hold is already {hold['status']}"}), 409
 
-    if is_champion:
-        return _finish_champion_hold(hold_id)
-
-    # If the hold has zero raw items, this is a sealed-only "brought it up to
-    # the customer" close — no Shopify listings to create, no bin locks to
-    # release. Just mark sealed items ACCEPTED so the detail view doesn't show
-    # stale REQUESTED/PULLED rows, and close the hold.
-    has_raw = db.query_one("""
-        SELECT 1 FROM hold_items
-        WHERE hold_id = %s AND item_kind = 'raw'
-        LIMIT 1
-    """, (hold_id,))
-    if not has_raw:
-        return _finish_sealed_only_hold(hold_id)
-
-    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
-        return jsonify({"error": "Shopify not configured"}), 503
-
-    accepted = db.query("""
-        SELECT hi.id AS hold_item_id, hi.barcode,
-               hi.shopify_product_id AS hi_product_id,
-               hi.shopify_variant_id AS hi_variant_id,
-               rc.id AS card_id, rc.card_name, rc.set_name, rc.card_number,
-               rc.condition, rc.current_price, rc.image_url, rc.tcgplayer_id,
-               rc.state AS card_state,
-               rc.shopify_product_id AS rc_product_id,
-               COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS shopify_product_id
+    raw_to_list = db.query("""
+        SELECT hi.id AS hold_item_id, hi.barcode AS hi_barcode,
+               rc.id AS card_id, rc.barcode, rc.card_name, rc.set_name,
+               rc.card_number, rc.condition, rc.current_price, rc.image_url,
+               rc.tcgplayer_id
         FROM hold_items hi
-        JOIN raw_cards rc ON hi.raw_card_id = rc.id
-        WHERE hi.hold_id = %s AND hi.status = 'ACCEPTED'
+        JOIN raw_cards rc ON rc.id = hi.raw_card_id
+        WHERE hi.hold_id = %s
+          AND hi.item_kind = 'raw'
+          AND hi.status = 'REQUESTED'
     """, (hold_id,))
 
-    results  = []
-    errors   = []
-    skipped_already_listed = []
-
-    # Defense-in-depth dedupe by barcode within this push: if the same physical
-    # copy somehow appears on two hold_items rows (e.g. legacy pre-fix data),
-    # only push it once.
-    seen_barcodes = set()
-
-    for item in accepted:
-        bc = item["barcode"]
-
-        # Skip if this hold_item already has a Shopify listing — happens when
-        # the customer toggled accept→return→accept; reverseDecision created
-        # the listing during the toggle, so finish_hold must not create a
-        # second one. Just confirm raw_card state is PENDING_SALE and move on.
-        existing_pid = item.get("hi_product_id") or item.get("rc_product_id")
-        if existing_pid and item.get("card_state") == "PENDING_SALE":
-            skipped_already_listed.append({
-                "barcode": bc,
-                "product_id": existing_pid,
-                "card_name": item["card_name"],
-            })
+    results, errors = [], []
+    if raw_to_list:
+        if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+            return jsonify({"error": "Shopify not configured"}), 503
+        seen_barcodes = set()
+        for item in raw_to_list:
+            bc = item["barcode"]
+            if bc in seen_barcodes:
+                errors.append({"barcode": bc, "error": "duplicate within this hold"})
+                continue
             seen_barcodes.add(bc)
-            continue
-
-        # Defense-in-depth: skip duplicate barcodes within this push pass.
-        if bc in seen_barcodes:
-            logger.warning(
-                f"finish_hold {hold_id}: duplicate barcode {bc} "
-                f"({item['card_name']}) appeared on multiple ACCEPTED hold_items — "
-                f"skipping second listing. Manual cleanup may be needed."
-            )
-            errors.append({
-                "barcode": bc,
-                "error": "duplicate barcode in this hold — only listed once (manual cleanup may be needed)",
-            })
-            continue
-        seen_barcodes.add(bc)
-
-        try:
-            listing = _create_raw_listing(item)
+            try:
+                listing = _create_raw_listing(dict(item))
+            except Exception as e:
+                logger.exception(f"Send-to-POS listing failed for {bc}: {e}")
+                errors.append({"barcode": bc, "error": str(e)})
+                continue
             db.execute("""
                 UPDATE hold_items
-                SET shopify_product_id = %s, shopify_variant_id = %s
-                WHERE id = %s
+                   SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP,
+                       shopify_product_id = %s, shopify_variant_id = %s
+                 WHERE id = %s
             """, (listing["product_id"], listing["variant_id"], str(item["hold_item_id"])))
             db.execute("""
                 UPDATE raw_cards
-                SET state = 'PENDING_SALE',
-                    shopify_product_id = %s,
-                    shopify_variant_id = %s,
-                    current_hold_id = NULL
-                WHERE id = %s
+                   SET state = 'PENDING_SALE',
+                       shopify_product_id = %s,
+                       shopify_variant_id = %s,
+                       current_hold_id = NULL,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE id = %s
             """, (listing["product_id"], listing["variant_id"], str(item["card_id"])))
             results.append({
-                "barcode":     item["barcode"],
-                "card_name":   item["card_name"],
-                "product_id":  listing["product_id"],
-                "action":      "listing_created",
+                "barcode":   bc,
+                "card_name": item["card_name"],
+                "product_id": listing["product_id"],
             })
-        except Exception as e:
-            logger.exception(f"Failed to create listing for {item['barcode']}: {e}")
-            errors.append({"barcode": item["barcode"], "error": str(e)})
 
-    if skipped_already_listed:
-        logger.info(
-            f"finish_hold {hold_id}: skipped {len(skipped_already_listed)} item(s) "
-            f"that already had Shopify listings (created via reverseDecision toggle): "
-            f"{[s['barcode'] for s in skipped_already_listed]}"
-        )
-
-    # Commit all rejections at finish time. Three populations get folded in:
-    #   - REJECTED  : customer explicitly rejected during review (item_decision
-    #                 deferred the state change so a reverse stayed cheap)
-    #   - REQUESTED/PULLED : never decided → auto-reject
-    # For each, delete the pre-created Shopify listing (so the admin product
-    # list stays clean) and route the raw_card to PENDING_RETURN. Pre-create
-    # may have stamped product_ids on either hold_items or raw_cards; the
-    # COALESCE picks whichever side has it.
-    to_reject = db.query("""
-        SELECT hi.id AS hold_item_id, hi.raw_card_id,
-               COALESCE(hi.shopify_product_id, rc.shopify_product_id) AS pid
-        FROM hold_items hi
-        JOIN raw_cards rc ON hi.raw_card_id = rc.id
-        WHERE hi.hold_id = %s
-          AND hi.item_kind = 'raw'
-          AND hi.status IN ('REQUESTED','PULLED','REJECTED')
-    """, (hold_id,))
-    for r in to_reject:
-        pid = r.get("pid")
-        if pid:
-            try:
-                _shopify("DELETE", f"/products/{pid}.json")
-            except Exception as e:
-                logger.warning(f"finish_hold {hold_id}: failed to delete "
-                               f"rejected listing {pid}: {e}")
+    # REJECTED raw items → Return Queue (puller is holding them).
     db.execute("""
         UPDATE raw_cards
-        SET state = 'PENDING_RETURN', current_hold_id = NULL,
-            shopify_product_id = NULL, shopify_variant_id = NULL,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id IN (
-            SELECT raw_card_id FROM hold_items
-            WHERE hold_id = %s
-              AND item_kind = 'raw'
-              AND status IN ('REQUESTED','PULLED','REJECTED')
-        )
-    """, (hold_id,))
-    db.execute("""
-        UPDATE hold_items
-        SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP,
-            shopify_product_id = NULL, shopify_variant_id = NULL
-        WHERE hold_id = %s
-          AND item_kind = 'raw'
-          AND status IN ('REQUESTED','PULLED','REJECTED')
-    """, (hold_id,))
-    # SEALED/SLAB items are NEVER auto-rejected — they aren't tracked the way
-    # raw is (no bin lock, no Shopify listing to create), they just live on
-    # the shelf. Mark them ACCEPTED so the closed hold doesn't show stale
-    # REQUESTED/PULLED rows; if the customer doesn't buy them at POS, Shopify
-    # inventory stays unchanged and the items go back on the shelf.
-    db.execute("""
-        UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
-        WHERE hold_id = %s
-          AND item_kind IN ('sealed','slab')
-          AND status IN ('REQUESTED','PULLED')
+           SET state = 'PENDING_RETURN', current_hold_id = NULL,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id IN (
+             SELECT raw_card_id FROM hold_items
+              WHERE hold_id = %s
+                AND item_kind = 'raw'
+                AND status = 'REJECTED'
+                AND raw_card_id IS NOT NULL
+         )
     """, (hold_id,))
 
-    # Close the hold. ACCEPTED if anything was listed (newly OR via toggle)
-    # OR any sealed/slab item was delivered (customer is taking it). Only
-    # RETURNED if every raw was rejected and there were no sealed items.
-    has_any_listing = bool(results) or bool(skipped_already_listed)
-    has_sealed = db.query_one("""
+    # Sealed/slab REQUESTED → ACCEPTED. They live on Shopify, customer pays
+    # at POS, Shopify decrements its own inventory.
+    db.execute("""
+        UPDATE hold_items
+           SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
+         WHERE hold_id = %s
+           AND item_kind IN ('sealed','slab')
+           AND status = 'REQUESTED'
+    """, (hold_id,))
+
+    # Close the hold. ACCEPTED if anything's going to the register; RETURNED
+    # if every line was rejected (functionally identical to Cancel Hold).
+    has_sealed_accepted = db.query_one("""
         SELECT 1 FROM hold_items
-        WHERE hold_id = %s AND item_kind IN ('sealed','slab')
+        WHERE hold_id = %s AND item_kind IN ('sealed','slab') AND status = 'ACCEPTED'
         LIMIT 1
     """, (hold_id,))
-    final_status = "ACCEPTED" if (has_any_listing or has_sealed) else "RETURNED"
+    final_status = "ACCEPTED" if (results or has_sealed_accepted) else "RETURNED"
     db.execute("""
         UPDATE holds SET status = %s, resolved_at = CURRENT_TIMESTAMP WHERE id = %s
     """, (final_status, hold_id))
 
     return jsonify({
-        "success":               True,
-        "created":               len(results),
-        "already_listed":        len(skipped_already_listed),
-        "errors":                errors,
-        "results":               results,
-        "skipped_already_listed": skipped_already_listed,
+        "success":    True,
+        "status":     final_status,
+        "created":    len(results),
+        "results":    results,
+        "errors":     errors,
+    })
+
+
+@app.route("/api/holds/<hold_id>/packing-slip")
+def hold_packing_slip(hold_id):
+    """Returns the slip data + HTML so the frontend can window.print() it.
+
+    Big images, big letters, bin location per line — same style as
+    screening's combined-shipping packing slip."""
+    hold = db.query_one("""
+        SELECT id, customer_name, customer_phone, created_at
+        FROM holds WHERE id = %s
+    """, (hold_id,))
+    if not hold:
+        return jsonify({"error": "Not found"}), 404
+
+    items = db.query("""
+        SELECT hi.id, hi.item_kind, hi.title AS hi_title, hi.image_url AS hi_image_url,
+               hi.unit_price AS hi_unit_price, hi.sku AS hi_sku,
+               rc.card_name, rc.set_name, rc.card_number, rc.condition,
+               rc.current_price, rc.image_url AS rc_image_url, rc.barcode,
+               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
+        FROM hold_items hi
+        LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
+        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+        LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+        WHERE hi.hold_id = %s
+          AND hi.status IN ('REQUESTED','REJECTED')
+        ORDER BY sl.bin_label NULLS LAST, COALESCE(rc.card_name, hi.title)
+    """, (hold_id,))
+
+    return jsonify({
+        "hold":  _ser(dict(hold)),
+        "items": [_ser(dict(i)) for i in items],
     })
 
 
@@ -1611,85 +1243,122 @@ def _create_raw_listing(item: dict) -> dict:
     }
 
 
-def _finish_sealed_only_hold(hold_id):
-    """Close a sealed-only hold ("brought it up to the customer at the
-    register"). Sealed items aren't tracked the way raw is — they live on the
-    shelf, Shopify decrements inventory automatically when sold at POS, and
-    if the customer doesn't buy, nothing changes. So this just bulk-marks
-    every REQUESTED/PULLED sealed item ACCEPTED so the closed hold doesn't
-    show stale rows, and flips the hold itself to ACCEPTED."""
-    n = db.execute("""
-        UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
-        WHERE hold_id = %s
-          AND item_kind IN ('sealed','slab')
-          AND status IN ('REQUESTED','PULLED')
-    """, (hold_id,))
+# ═══════════════════════════════════════════════════════════════════════════════
+# Shipping Queue — Champion holds (paid online, awaiting outbound ship)
+# ═══════════════════════════════════════════════════════════════════════════════
 
+@app.route("/api/ship")
+def list_shipping():
+    """Paid Champion holds awaiting shipment. Excluded from /api/holds."""
+    rows = db.query("""
+        SELECT h.*, COUNT(hi.id) AS item_count
+        FROM holds h
+        LEFT JOIN hold_items hi ON hi.hold_id = h.id
+        WHERE h.cohort = 'champion'
+          AND h.checkout_status = 'completed'
+          AND h.status NOT IN ('ACCEPTED','RETURNED','CANCELLED','AUTO_EXPIRED')
+        GROUP BY h.id
+        ORDER BY h.created_at ASC
+    """)
+    return jsonify({"holds": [_ser(dict(r)) for r in rows]})
+
+
+@app.route("/api/ship/<hold_id>")
+def get_shipping(hold_id):
+    """Detail for a paid Champion hold."""
+    hold = db.query_one("""
+        SELECT * FROM holds WHERE id = %s AND cohort = 'champion'
+    """, (hold_id,))
+    if not hold:
+        return jsonify({"error": "Not found"}), 404
+    items = db.query("""
+        SELECT hi.id, hi.status, hi.barcode,
+               rc.card_name, rc.set_name, rc.card_number, rc.condition,
+               rc.current_price, rc.image_url AS rc_image_url,
+               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
+        FROM hold_items hi
+        LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
+        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+        LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+        WHERE hi.hold_id = %s
+        ORDER BY sl.bin_label NULLS LAST
+    """, (hold_id,))
+    return jsonify({
+        "hold":  _ser(dict(hold)),
+        "items": [_ser(dict(i)) for i in items],
+    })
+
+
+@app.route("/api/ship/<hold_id>/mark-shipped", methods=["POST"])
+def mark_shipped(hold_id):
+    """Champion has been packed and is going out the door. Mark all items
+    SOLD, close the hold ACCEPTED. Products already exist on Shopify (created
+    by the kiosk checkout)."""
+    hold = db.query_one("""
+        SELECT cohort, status FROM holds WHERE id = %s
+    """, (hold_id,))
+    if not hold or hold.get("cohort") != "champion":
+        return jsonify({"error": "Not a champion hold"}), 404
+
+    items = db.query("""
+        SELECT id, raw_card_id, shopify_product_id, shopify_variant_id, status
+        FROM hold_items WHERE hold_id = %s
+    """, (hold_id,))
+    for item in items:
+        if item["status"] in ("MISSING",):
+            db.execute("""
+                UPDATE raw_cards SET current_hold_id = NULL
+                WHERE id = %s
+            """, (str(item["raw_card_id"]),))
+            continue
+        db.execute("""
+            UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (str(item["id"]),))
+        if item.get("raw_card_id"):
+            db.execute("""
+                UPDATE raw_cards
+                   SET state = 'SOLD',
+                       shopify_product_id = COALESCE(%s, shopify_product_id),
+                       shopify_variant_id = COALESCE(%s, shopify_variant_id),
+                       current_hold_id = NULL,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE id = %s
+            """, (item.get("shopify_product_id"), item.get("shopify_variant_id"),
+                  str(item["raw_card_id"])))
     db.execute("""
         UPDATE holds SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
         WHERE id = %s
     """, (hold_id,))
-
-    logger.info(f"Closed sealed-only hold {hold_id}: {n} item(s) marked ACCEPTED")
-    return jsonify({"success": True, "sealed_only": True, "closed": n})
+    return jsonify({"success": True, "shipped": len(items)})
 
 
-def _finish_champion_hold(hold_id):
-    """
-    Finish a Champion (kiosk checkout) hold.
-    Products already exist on Shopify (created by kiosk at checkout).
-    Auto-accept all PULLED items, mark MISSING items, close the hold.
-    """
-    # Auto-accept all PULLED/REQUESTED items (customer already paid)
+@app.route("/api/ship/<hold_id>/packing-slip")
+def shipping_packing_slip(hold_id):
+    """Shipping slip — same payload shape as the hold packing slip but
+    includes shipping_name/address for the box."""
+    hold = db.query_one("""
+        SELECT id, customer_name, customer_email, shopify_order_number,
+               shipping_name, shipping_address, created_at
+        FROM holds WHERE id = %s AND cohort = 'champion'
+    """, (hold_id,))
+    if not hold:
+        return jsonify({"error": "Not found"}), 404
     items = db.query("""
-        SELECT hi.id AS hold_item_id, hi.status, hi.raw_card_id,
-               hi.shopify_product_id, hi.shopify_variant_id
+        SELECT hi.id, hi.barcode,
+               rc.card_name, rc.set_name, rc.card_number, rc.condition,
+               rc.current_price, rc.image_url AS rc_image_url,
+               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
         FROM hold_items hi
-        WHERE hi.hold_id = %s AND hi.status IN ('PULLED', 'REQUESTED')
+        LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
+        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+        LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+        WHERE hi.hold_id = %s
+        ORDER BY sl.bin_label NULLS LAST
     """, (hold_id,))
-
-    for item in items:
-        db.execute("""
-            UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-        """, (str(item["hold_item_id"]),))
-        # PULLED items were physically confirmed by scan/tap, so they're
-        # being shipped right now → SOLD. REQUESTED items at finish time
-        # weren't confirmed; they stay at PENDING_SALE (set by the order-paid
-        # webhook) so Sean can see them in the dashboard and chase them
-        # down rather than auto-marking them as shipped.
-        new_state = 'SOLD' if item["status"] == 'PULLED' else 'PENDING_SALE'
-        db.execute("""
-            UPDATE raw_cards
-            SET state = %s,
-                shopify_product_id = COALESCE(%s, shopify_product_id),
-                shopify_variant_id = COALESCE(%s, shopify_variant_id),
-                current_hold_id = NULL
-            WHERE id = %s
-        """, (new_state, item.get("shopify_product_id"), item.get("shopify_variant_id"),
-              str(item["raw_card_id"])))
-
-    # Handle MISSING items — release them
-    db.execute("""
-        UPDATE raw_cards SET current_hold_id = NULL
-        WHERE id IN (
-            SELECT raw_card_id FROM hold_items
-            WHERE hold_id = %s AND status = 'MISSING'
-        )
-    """, (hold_id,))
-
-    # Close the hold
-    db.execute("""
-        UPDATE holds SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP WHERE id = %s
-    """, (hold_id,))
-
-    accepted_count = len(items)
-    logger.info(f"Finished Champion hold {hold_id}: {accepted_count} items accepted (pre-paid)")
-
     return jsonify({
-        "success": True,
-        "champion": True,
-        "accepted": accepted_count,
+        "hold":  _ser(dict(hold)),
+        "items": [_ser(dict(i)) for i in items],
     })
 
 
@@ -2637,9 +2306,11 @@ def sell_scan():
         return jsonify({"error": "Barcode not found", "barcode": barcode}), 404
     if _resolve_hold_lock(card):
         return jsonify({"error": "Card is on hold for a customer", "barcode": barcode, "card_name": card["card_name"]}), 409
-    # Sellable from anywhere physically in the store. PENDING_SALE means
-    # someone else already started ringing it up; PENDING_RETURN/MISSING/GONE
-    # are not currently holdable.
+    # Sellable from anywhere physically in the store — bin, binder, glass.
+    # Walk-up customer says "got Charizard 196?" → puller grabs it from the
+    # bin and rings it up. No synthetic hold required.
+    # PENDING_SALE = already on Sell screen; MISSING/GONE/PENDING_RETURN are
+    # mid-recovery and shouldn't be re-sold without going through their flow.
     if card["state"] not in ("STORED", "DISPLAY"):
         return jsonify({"error": f"Card is {card['state']}, can't ring up", "barcode": barcode, "card_name": card["card_name"]}), 409
 
@@ -2676,11 +2347,12 @@ def sell_finalize():
         if not card:
             skipped.append({"barcode": bc, "reason": "not found"})
             continue
-        # Scan-to-sell only accepts DISPLAY cards (front glass / binders) —
-        # walk-up "I want this" applies to things customers can see. STORED
-        # cards belong to the hold pipeline; if a customer wants a STORED
-        # card, the right path is a hold-pull or moving it onto display first.
-        if card.get("current_hold_id") or card["state"] != "DISPLAY":
+        # Scan-to-sell accepts anything not locked to an active hold. Walk-up
+        # customers ask "got X?", staff finds it in bin/binder/glass, scans
+        # at the laptop. The hold-lock check (current_hold_id IS NULL) is
+        # the only thing that protects against double-allocation; zone is
+        # not security, it was theater.
+        if card.get("current_hold_id") or card["state"] not in ("STORED", "DISPLAY"):
             skipped.append({"barcode": bc, "reason": f"state={card['state']}"})
             continue
 
