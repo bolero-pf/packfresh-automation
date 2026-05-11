@@ -5743,12 +5743,15 @@ async function _loadSessionBarcodes(sessionId) {
     } catch(e) { /* silent — barcodes are bonus UI */ }
 }
 
-// Sort bin labels (e.g. "A-3", "A-10", "B-1") by row letter, then numeric partition
+// Sort bin labels by alphabetic prefix, then trailing number. Handles
+// "A-3"/"A-10"/"B-1" as well as "Pokemon Binder 1" / "Magic Binder 2".
 function _binSortKey(label) {
-    if (!label) return [999, 999];
-    const m = String(label).match(/^([A-Za-z]+)-?(\d+)?/);
-    if (!m) return [999, 999, label];
-    return [m[1].toUpperCase(), parseInt(m[2] || 0, 10)];
+    if (!label) return ['ZZZ', 999];
+    const m = String(label).match(/^(.*?)\s*-?\s*(\d+)?\s*$/);
+    if (!m) return ['ZZZ', 999, label];
+    const letters = (m[1] || '').toUpperCase().trim().replace(/\s+/g, ' ');
+    const digit = parseInt(m[2] || 0, 10);
+    return [letters || 'ZZZ', digit];
 }
 function _binCompare(a, b) {
     const [ar, an] = _binSortKey(a);

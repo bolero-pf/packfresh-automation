@@ -2931,9 +2931,14 @@ function _age(iso) {
 // walk bins in the same order. Unassigned ("— No bin" etc.) sorts last.
 function _binSortKey(label) {
   if (!label) return ['ZZZ', 999];
-  const m = String(label).match(/^([A-Za-z]+)-?(\d+)?/);
+  // Pulls a trailing number off any label and uses the rest as the
+  // alphabetic key. Handles "A-3", "FG-1", "Pokemon Binder 1",
+  // "Magic Binder 2", and "— No bin" all in one pass.
+  const m = String(label).match(/^(.*?)\s*-?\s*(\d+)?\s*$/);
   if (!m) return ['ZZZ', 999, label];
-  return [m[1].toUpperCase(), parseInt(m[2] || 0, 10)];
+  const letters = (m[1] || '').toUpperCase().trim().replace(/\s+/g, ' ');
+  const digit = parseInt(m[2] || 0, 10);
+  return [letters || 'ZZZ', digit];
 }
 function _binCompare(a, b) {
   const [ar, an] = _binSortKey(a);

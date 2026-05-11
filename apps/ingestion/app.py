@@ -1746,12 +1746,14 @@ def _place_pre_barcoded(item: dict, destination: str) -> dict | None:
         return None
 
     if destination == "display":
-        assignments = assign_display(len(rows), db)
+        card_type = _canonical_card_type(rows[0].get("game") or "pokemon")
+        # Game-aware binder pick — Magic cards only land in Magic binders,
+        # Pokemon only in Pokemon binders.
+        assignments = assign_display(len(rows), db, card_type=card_type)
         if not assignments:
             # Binders are full — fall back to storage for the entire item.
             # The pre-push rows (BARCODED / BARCODED_DISPLAY / ROUTED_BINDER)
             # get rewritten to STORED.
-            card_type = _canonical_card_type(rows[0].get("game") or "pokemon")
             assignments = assign_bins(card_type, len(rows), db)
             new_state = "STORED"
             actual_dest = "storage"
@@ -1759,7 +1761,6 @@ def _place_pre_barcoded(item: dict, destination: str) -> dict | None:
             assigned_qty = sum(a["count"] for a in assignments)
             if assigned_qty < len(rows):
                 # Partial binder fit — overflow goes to storage bins.
-                card_type = _canonical_card_type(rows[0].get("game") or "pokemon")
                 overflow = assign_bins(card_type, len(rows) - assigned_qty, db)
                 # Mark which slice of `rows` becomes which state. We'll handle
                 # the binder slice as DISPLAY and the storage slice as STORED.
@@ -2042,10 +2043,12 @@ def _push_raw_to_display(item: dict) -> dict:
 
     card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
 
-    assignments = assign_display(qty, db)
+    # Game-aware: Magic cards only land in Magic binders, etc.
+    card_type = _canonical_card_type(item.get("game") or "pokemon")
+    assignments = assign_display(qty, db, card_type=card_type)
     if not assignments:
-        # No binder capacity — fall back to storage
-        logger.info(f"No binder capacity for {card_name} — falling back to storage")
+        # No binder capacity for this game — fall back to storage
+        logger.info(f"No {card_type} binder capacity for {card_name} — falling back to storage")
         return _push_raw_item(item)
 
     assigned_qty = sum(a["count"] for a in assignments)
@@ -3388,22 +3391,35 @@ def push_plan(session_id):
     """, (session_id,))
 
     if display_cards:
-        try:
-            assignments = assign_display(len(display_cards), db)
-        except Exception as e:
-            return jsonify({"error": f"Cannot plan binder: {e}"}), 400
+        # Group by game so Magic cards only get assigned to Magic binders,
+        # Pokemon only to Pokemon binders. Mixed-game push sessions still
+        # plan correctly because each group runs through its own
+        # assign_display pass.
+        by_game: dict[str, list] = {}
+        for c in display_cards:
+            g = _canonical_card_type(c.get("game") or "pokemon")
+            by_game.setdefault(g, []).append(c)
 
-        binder_ids = [a["bin_id"] for a in assignments]
-        binder_caps = {str(r["id"]): (r["capacity"] or 0) - (r["current_count"] or 0)
+        per_assignment: list[tuple] = []
+        for game, cards in by_game.items():
+            try:
+                assignments = assign_display(len(cards), db, card_type=game)
+            except Exception as e:
+                return jsonify({"error": f"Cannot plan {game} binder: {e}"}), 400
+            idx = 0
+            for a in assignments:
+                slice_cards = cards[idx:idx + a["count"]]
+                idx += a["count"]
+                per_assignment.append((a, slice_cards))
+
+        binder_ids = [a["bin_id"] for a, _ in per_assignment]
+        binder_caps = ({str(r["id"]): (r["capacity"] or 0) - (r["current_count"] or 0)
                        for r in db.query("""
                            SELECT id, capacity, current_count
                              FROM storage_locations WHERE id = ANY(%s::uuid[])
-                       """, (binder_ids,))}
+                       """, (binder_ids,))} if binder_ids else {})
 
-        idx = 0
-        for a in assignments:
-            slice_cards = display_cards[idx:idx + a["count"]]
-            idx += a["count"]
+        for a, slice_cards in per_assignment:
             plan.append({
                 "destination": "display",
                 "bin_id": a["bin_id"],
@@ -3875,8 +3891,8 @@ def rebin_session(session_id):
     for (state, ctype), card_ids in groups.items():
         try:
             if state == 'DISPLAY':
-                assignments = assign_display(len(card_ids), db)
-                # If binders are full, fall back to storage for the rest.
+                assignments = assign_display(len(card_ids), db, card_type=ctype)
+                # If binders are full for this game, fall back to storage.
                 placed = sum(a["count"] for a in assignments)
                 if placed < len(card_ids):
                     overflow = assign_bins(ctype, len(card_ids) - placed, db)

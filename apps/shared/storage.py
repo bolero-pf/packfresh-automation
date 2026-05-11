@@ -142,10 +142,14 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
     return assignments
 
 
-def assign_display(count: int, db) -> list[dict]:
+def assign_display(count: int, db, card_type: str | None = None) -> list[dict]:
     """
     Assign cards to binder display locations (location_type='binder').
     Same best-fit-then-most-free algorithm as assign_bins().
+
+    When `card_type` is supplied (e.g. 'pokemon', 'magic'), only binders
+    tagged for that game type — or untagged / 'mixed' — are eligible.
+    This stops Magic singles from drifting into Pokemon binders.
 
     Returns [] if no binder capacity available (caller should fall back to
     storage). Returns a partial assignment if combined binder capacity is
@@ -154,21 +158,28 @@ def assign_display(count: int, db) -> list[dict]:
     if count <= 0:
         return []
 
-    binders = db.query("""
+    where_extra = ""
+    params: tuple = ()
+    if card_type:
+        where_extra = "AND (sl.card_type = %s OR sl.card_type IS NULL OR sl.card_type = 'mixed')"
+        params = (card_type,)
+
+    binders = db.query(f"""
         SELECT sl.id, sl.bin_label, sl.capacity, sl.current_count,
                (sl.capacity - sl.current_count) AS available
         FROM storage_locations sl
         JOIN storage_rows sr ON sl.row_id = sr.id
         WHERE sr.location_type = 'binder'
           AND sl.current_count < sl.capacity
-    """)
+          {where_extra}
+    """, params)
 
     if not binders:
         return []
 
     assignments = _best_fit_assign(binders, count)
     placed = sum(a["count"] for a in assignments)
-    logger.info(f"Assigned {placed} cards to binder(s): "
+    logger.info(f"Assigned {placed} cards to {card_type or 'any'} binder(s): "
                 f"{[a['bin_label'] for a in assignments]}")
     return assignments
 
