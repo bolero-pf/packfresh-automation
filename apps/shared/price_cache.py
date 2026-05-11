@@ -60,6 +60,10 @@ VARIANT_DISPLAY = {
     "firstEditionShadowlessHolofoil": "1st Edition Shadowless Holofoil",
     "unlimitedShadowlessHolofoil": "Shadowless Holofoil",
     "pokemonCenter": "Pokemon Center",
+    "firstEdition": "1st Edition",
+    "shadowless": "Shadowless",
+    "unlimited": "Unlimited",
+    "greenWing": "Green Wing",
     # One Piece
     "altArt": "Alt Art",
     "specialAltArt": "Special Alt Art",
@@ -921,12 +925,18 @@ class PriceCache:
         """Search sealed products by name in the local cache.
         Results are sorted so base products appear before bundles/art sets.
 
-        Tokenized search across product_name, expansion_id, expansion_name.
+        Tokenized search across product_name, variant, expansion_id, expansion_name.
+        Scrydex stores TCGplayer SKU splits (regular vs Pokemon Center ETB, Base
+        Set 1st Edition vs Unlimited, etc.) as separate variant rows under the
+        same scrydex_id. Distincting on (scrydex_id, variant) surfaces each as
+        its own pickable result with its own tcgplayer_id and price — otherwise
+        the operator can't tell them apart and gets bound to whichever variant
+        Postgres happens to return first.
         all_games=True drops the game filter (multi-TCG manual entry).
         """
         params: list = []
         sql = """
-            SELECT DISTINCT ON (scrydex_id) *
+            SELECT DISTINCT ON (scrydex_id, variant) *
             FROM scrydex_price_cache
             WHERE product_type = 'sealed'
         """
@@ -937,17 +947,17 @@ class PriceCache:
         for forms in self._tokenize(query):
             ors = []
             for f in forms:
-                ors.append("(product_name ILIKE %s OR expansion_id ILIKE %s "
-                           "OR expansion_name ILIKE %s)")
+                ors.append("(product_name ILIKE %s OR variant ILIKE %s "
+                           "OR expansion_id ILIKE %s OR expansion_name ILIKE %s)")
                 p = f"%{f}%"
-                params.extend([p, p, p])
+                params.extend([p, p, p, p])
             sql += " AND (" + " OR ".join(ors) + ")"
 
         if set_name:
             sql += " AND expansion_name ILIKE %s"
             params.append(f"%{set_name}%")
         # Fetch extra to allow re-sorting after bundle deprioritization
-        sql += " ORDER BY scrydex_id, condition LIMIT %s"
+        sql += " ORDER BY scrydex_id, variant, condition LIMIT %s"
         params.append(limit * 3)
 
         hits = self.db.query(sql, tuple(params))
@@ -955,8 +965,9 @@ class PriceCache:
         for row in hits:
             card_rows = self.db.query("""
                 SELECT * FROM scrydex_price_cache
-                WHERE scrydex_id = %s ORDER BY variant, condition
-            """, (row["scrydex_id"],))
+                WHERE scrydex_id = %s AND variant = %s
+                ORDER BY condition
+            """, (row["scrydex_id"], row["variant"]))
             if card_rows:
                 results.append(self._build_sealed_dict(card_rows, row.get("tcgplayer_id")))
 
@@ -1109,7 +1120,12 @@ class PriceCache:
         }
 
     def _build_sealed_dict(self, rows: list[dict], tcg_id: int = None) -> dict:
-        """Assemble a PPT-shaped sealed product dict from cache rows."""
+        """Assemble a PPT-shaped sealed product dict from cache rows.
+
+        Caller is expected to scope `rows` to a single variant. Non-'normal'
+        variants get the display variant appended to the name so the picker
+        shows the SKU split (e.g. '... — Pokemon Center', '... — 1st Edition').
+        """
         first = rows[0]
 
         # Find the unopened/NM market price (USD — convert from JPY if needed)
@@ -1120,13 +1136,21 @@ class PriceCache:
                 market_price = float(usd) if usd is not None else None
                 break
 
+        base_name = first.get("product_name") or ""
+        variant_raw = first.get("variant")
+        if variant_raw and variant_raw != "normal":
+            display_name = f"{base_name} — {self._display_variant(variant_raw)}"
+        else:
+            display_name = base_name
+
         return {
-            "name": first.get("product_name"),
+            "name": display_name,
             "setName": first.get("expansion_name", ""),
             "expansionId": first.get("expansion_id", ""),
             "game": first.get("game", ""),
             "tcgPlayerId": tcg_id,
             "scrydexId": first.get("scrydex_id"),
+            "variant": variant_raw,
             "unopenedPrice": market_price,
             "marketPrice": market_price,
             "imageCdnUrl800": first.get("image_large", ""),
