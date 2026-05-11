@@ -2890,7 +2890,8 @@ async function removeFeatured(id) {
 // queue manually. Use the ↻ refresh button on each view for an explicit
 // full reload.
 let _lastLatestHoldAt = null;
-let _badgeCounts = { holds: 0, returns: 0, missing: 0, active_listings: 0 };
+let _pollSeq = 0;  // 0 = haven't done first poll yet; suppresses boot-time notify
+let _badgeCounts = { holds: 0, shipping: 0, returns: 0, missing: 0, active_listings: 0 };
 
 async function refreshBadges() {
   try {
@@ -2907,14 +2908,32 @@ async function refreshBadges() {
     set('badge-missing',  d.missing);
     set('badge-sell',     d.active_listings);
 
-    // Detect a brand-new hold arriving (latest_hold_at moved forward) and
-    // ping the notify sound. First poll just remembers the timestamp.
-    if (_lastLatestHoldAt !== null && d.latest_hold_at && d.latest_hold_at !== _lastLatestHoldAt) {
+    // Detect a brand-new hold arriving and ping the notify sound. The old
+    // guard (`_lastLatestHoldAt !== null`) trapped us when the queue was
+    // empty — _lastLatestHoldAt would *stay* null, and the first hold ever
+    // to arrive would slip in silent. Tracking _pollSeq instead lets the
+    // first refresh seed state without ringing, and every following poll
+    // ring on any change (including null → real timestamp).
+    if (_pollSeq > 0 && d.latest_hold_at !== _lastLatestHoldAt) {
       try { pfSound.notify(); } catch(e) {}
     }
     _lastLatestHoldAt = d.latest_hold_at;
+    _pollSeq++;
+
+    // Auto-refresh the active list view if its underlying count moved.
+    // We're not on a scan flow at this level — these are passive list
+    // views, so refreshing on change costs nothing but stale data costs a
+    // missed customer. Detail views handle their own refresh elsewhere.
+    const activeView = document.querySelector('.view.active')?.id;
+    const prev = _badgeCounts;
+    if (activeView === 'view-holds'    && d.holds            !== prev.holds)            loadHolds();
+    if (activeView === 'view-shipping' && d.shipping         !== prev.shipping)         loadShipping();
+    if (activeView === 'view-returns'  && d.returns          !== prev.returns)          loadReturns();
+    if (activeView === 'view-missing'  && d.missing          !== prev.missing)          loadMissing();
+    if (activeView === 'view-sell'     && d.active_listings  !== prev.active_listings)  refreshActiveListings();
+
     _badgeCounts = {
-      holds: d.holds, returns: d.returns,
+      holds: d.holds, shipping: d.shipping, returns: d.returns,
       missing: d.missing, active_listings: d.active_listings,
     };
   } catch(e) { /* silent — sidebar nav stays stale rather than flashing errors */ }
