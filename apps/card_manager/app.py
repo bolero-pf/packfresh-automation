@@ -1455,40 +1455,11 @@ def list_returns():
 
 @app.route("/api/returns/<card_id>/tap-restore", methods=["POST"])
 def tap_restore_display(card_id):
-    """One-tap restore for a PENDING_RETURN card whose origin bin is a
-    front-glass / binder slot. The puller is physically placing the card
-    back where it came from — no scan needed. Storage-bound cards still
-    go through /api/returns/store to get a fresh bin assignment."""
-    card = db.query_one("""
-        SELECT rc.id, rc.barcode, rc.card_name, rc.state,
-               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
-        FROM raw_cards rc
-        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
-        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
-        WHERE rc.id::text = %s
-    """, (card_id,))
-    if not card:
-        return jsonify({"error": "Card not found"}), 404
-    if card["state"] != "PENDING_RETURN":
-        return jsonify({"error": f"Card is {card['state']}, not PENDING_RETURN"}), 409
-    if card["bin_type"] not in ("display_case", "binder"):
-        return jsonify({
-            "error": "Tap-restore is only for display-case / binder cards. "
-                     "Storage-bound cards must go through Return Queue's "
-                     "scan + Store flow."
-        }), 409
-
-    db.execute("""
-        UPDATE raw_cards
-        SET state = 'DISPLAY', current_hold_id = NULL,
-            stored_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-        WHERE id::text = %s
-    """, (card_id,))
+    """Removed — every Return Queue card must be scanned. Stub kept so
+    stale tabs get a JSON error instead of Flask's HTML 404."""
     return jsonify({
-        "success":   True,
-        "card_name": card["card_name"],
-        "bin_label": card["bin_label"],
-    })
+        "error": "Tap-restore is gone — scan every return through the queue.",
+    }), 410
 
 
 @app.route("/api/missing")

@@ -1348,27 +1348,17 @@ function renderReturns(cards, recentBatches) {
     </div>
     <div id="return-cards-list">
       ${cards.map(c => {
-        const isBinder  = c.bin_type === 'binder';
-        const isDisplay = c.bin_type === 'display_case' || isBinder;
-        const placeLabel = isBinder ? 'Put back in binder' : 'Put back on display';
-        const binNote = isDisplay
-          ? `Goes back to ${esc(c.last_bin||'?')}`
-          : `${esc(c.condition)} · last bin: ${esc(c.last_bin||'no bin')}`;
+        const binNote = `${esc(c.condition)} · last bin: ${esc(c.last_bin||'no bin')}`;
         return `
-        <div class="return-card${isDisplay ? ' return-card-display' : ''}" id="rc-${esc(c.barcode)}">
+        <div class="return-card" id="rc-${esc(c.barcode)}">
           ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:36px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">` : ''}
           <div style="flex:1;">
             <div style="font-weight:600;">${esc(c.card_name)}</div>
             <div style="font-size:0.75rem;color:var(--dim);">${binNote}</div>
           </div>
           <div class="return-barcode">${esc(c.barcode)}</div>
-          ${isDisplay ? `
-            <button class="btn btn-sm" style="background:var(--green);color:#000;font-size:0.72rem;font-weight:700;padding:4px 10px;"
-                    onclick="event.stopPropagation();tapRestore('${c.id}','${esc(c.card_name)}')">✓ ${placeLabel}</button>
-          ` : `
-            <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 8px;" title="Reprint with a new barcode if the current label won't scan"
-                    onclick="event.stopPropagation();regenerateAndPrint('${c.id}','${esc(c.card_name)}')">🆕 New BC</button>
-          `}
+          <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 8px;" title="Reprint with a new barcode if the current label won't scan"
+                  onclick="event.stopPropagation();regenerateAndPrint('${c.id}','${esc(c.card_name)}')">🖨 Reprint label</button>
           <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--green);color:var(--green);"
                   onclick="event.stopPropagation();sellInstead('${esc(c.barcode)}')">💵 Sell instead</button>
         </div>
@@ -1393,23 +1383,6 @@ function renderReturnScanned() {
     const el = document.getElementById(`rc-${bc}`);
     if (el) el.classList.add('scanned');
   });
-}
-
-async function tapRestore(cardId, cardName) {
-  // Display-case / binder cards in Return Queue go back to their original
-  // bin without a scan — the puller is physically placing the card on the
-  // case/binder shelf. One tap flips state PENDING_RETURN → DISPLAY at
-  // the same bin_id.
-  try {
-    const d = await post(`/api/returns/${cardId}/tap-restore`, {});
-    if (d && d.success) {
-      toast(`✓ ${d.card_name} back in ${d.bin_label || 'display'}`, 'green');
-      loadReturns();
-      refreshBadges();
-    }
-  } catch(e) {
-    toast(e.message, 'red');
-  }
 }
 
 async function sellInstead(barcode) {
@@ -2684,15 +2657,13 @@ function undoBinderPullScan(idx) {
 }
 
 // ── Sell (POS) ────────────────────────────────────────────────────────────────
-let _sellCart = [];           // array of card objects (most recent first)
-let _sellLastResult = null;   // remembered after finalize so the success view sticks
 let _sellActive = [];         // PENDING_SALE cards (active Shopify listings)
 
 async function refreshActiveListings() {
   try {
     const d = await get('/api/sell/active');
     _sellActive = d.cards || [];
-    if (document.querySelector('.view.active')?.id === 'view-sell' && !_sellLastResult) {
+    if (document.querySelector('.view.active')?.id === 'view-sell') {
       renderSell();
     }
   } catch(e) { /* leave panel stale rather than flashing errors */ }
@@ -2700,22 +2671,11 @@ async function refreshActiveListings() {
 
 function renderSell() {
   const el = document.getElementById('sell-content');
-  if (_sellLastResult) {
-    renderSellResult(_sellLastResult);
-    return;
-  }
+  const total = _sellActive.reduce((s, c) => s + parseFloat(c.current_price || 0), 0);
 
-  const total = _sellCart.reduce((s, c) => s + parseFloat(c.current_price || 0), 0);
-
-  const activeHtml = _sellActive.length === 0 ? '' : `
-    <div style="margin-bottom:18px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-        <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;">
-          Active Listings — Ready at POS (${_sellActive.length})
-        </div>
-        <button class="btn btn-sm" style="font-size:0.7rem;padding:3px 10px;background:none;border:1px solid var(--border);color:var(--dim);" onclick="refreshActiveListings()">↻</button>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:6px;">
+  const listingsHtml = _sellActive.length === 0
+    ? '<div class="empty"><div class="empty-icon">💵</div><p>No cards at the register yet. Scan to start ringing up.</p></div>'
+    : `<div style="display:flex;flex-direction:column;gap:6px;">
         ${_sellActive.map(c => `
           <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:rgba(74,222,128,0.05);border:1px solid var(--green);border-radius:10px;">
             ${c.image_url?`<img src="${esc(c.image_url)}" style="width:36px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">`:''}
@@ -2728,141 +2688,60 @@ function renderSell() {
             </div>
             <div class="ec-price" style="font-size:1.05rem;">$${parseFloat(c.current_price||0).toFixed(2)}</div>
             <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--red);color:var(--red);"
-                    onclick="pullListing('${esc(c.barcode)}')">↩ Pull</button>
+                    onclick="customerRejected('${esc(c.barcode)}')">✕ Customer rejected</button>
           </div>
         `).join('')}
-      </div>
-    </div>
-  `;
+      </div>`;
 
   el.innerHTML = `
-    ${activeHtml}
-    <div class="stats-bar" style="margin-bottom:14px;">
-      <div class="stat-box"><div class="stat-label">In Cart</div><div class="stat-val" style="color:var(--green);">${_sellCart.length}</div></div>
-      <div class="stat-box"><div class="stat-label">Subtotal</div><div class="stat-val" style="font-family:var(--mono);">$${total.toFixed(2)}</div></div>
-    </div>
-
     <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:var(--surface);border:1.5px dashed var(--accent);border-radius:10px;margin-bottom:14px;">
       <span style="font-size:1.4rem;">🔍</span>
-      <div style="font-size:0.88rem;color:var(--dim);">Scanner is armed. Scan a card to add it to the cart.</div>
+      <div style="font-size:0.88rem;color:var(--dim);">Scanner is armed. Scan a card to ring it up — listing is created instantly.</div>
     </div>
 
-    ${_sellCart.length === 0
-      ? '<div class="empty"><div class="empty-icon">💵</div><p>No cards in cart yet.</p></div>'
-      : `<div style="display:flex;flex-direction:column;gap:6px;">
-          ${_sellCart.map((c, i) => `
-            <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--surface);border:1.5px solid var(--border);border-radius:10px;">
-              ${c.image_url?`<img src="${esc(c.image_url)}" style="width:36px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">`:''}
-              <div style="flex:1;min-width:0;">
-                <div style="font-weight:600;">${esc(c.card_name)}</div>
-                <div style="font-size:0.75rem;color:var(--dim);">${esc(c.condition||'')} · ${esc(c.set_name||'')}${c.bin_label?` · from ${esc(c.bin_label)}`:''}</div>
-                <div style="font-family:var(--mono);font-size:0.7rem;color:var(--dim);">${esc(c.barcode)}</div>
-              </div>
-              <div class="ec-price" style="font-size:1.05rem;">$${parseFloat(c.current_price||0).toFixed(2)}</div>
-              <button class="btn btn-sm" style="color:var(--red);background:none;border:none;" onclick="removeFromSellCart(${i})">×</button>
-            </div>
-          `).join('')}
-        </div>
-        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
-          <button class="btn" onclick="clearSellCart()">Clear Cart</button>
-          <button class="btn btn-green" onclick="finalizeSell()">Send to POS · $${total.toFixed(2)}</button>
-        </div>`
-    }
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;">
+        Ready at POS · ${_sellActive.length} listing${_sellActive.length===1?'':'s'} · $${total.toFixed(2)}
+      </div>
+      <button class="btn btn-sm" style="font-size:0.7rem;padding:3px 10px;background:none;border:1px solid var(--border);color:var(--dim);" onclick="refreshActiveListings()">↻ Refresh</button>
+    </div>
+    ${listingsHtml}
   `;
 }
 
-async function pullListing(barcode) {
+async function customerRejected(barcode) {
   const card = _sellActive.find(c => c.barcode === barcode);
   const name = card ? card.card_name : barcode;
-  if (!await themedConfirm('Pull listing',
-      `Customer changed their mind on ${name}? This deletes the Shopify draft and sends the card to the Return Queue to be re-shelved.`)) return;
+  if (!await themedConfirm('Customer rejected',
+      `Customer rejected ${name}? This deletes the Shopify draft and sends the card to the Return Queue to be re-shelved.`)) return;
   try {
     const d = await post('/api/sell/pull-listing', { barcode });
-    toast(`✓ ${d.card_name || name} pulled — re-shelve from Return Queue`, 'green');
+    toast(`✓ ${d.card_name || name} → Return Queue`, 'green');
     await refreshActiveListings();
     refreshBadges();
   } catch(e) { toast(e.message, 'red'); }
 }
 
 async function handleSellScan(barcode) {
-  if (_sellLastResult) {
-    // After finalizing, fresh scan starts a new cart.
-    _sellLastResult = null;
-    _sellCart = [];
-  }
-  if (_sellCart.some(c => c.barcode === barcode)) {
-    flash('green');
-    toast('Already in cart', 'amber');
-    return;
-  }
+  // No cart, no batched Send-to-POS. Each scan creates a listing immediately
+  // so the cashier can ring it up the moment the card hits the laptop.
   try {
-    const d = await post('/api/sell/scan', { barcode });
-    _sellCart.unshift(d.card);
-    flash('green');
-    toast(`+ ${d.card.card_name} · $${parseFloat(d.card.current_price||0).toFixed(2)}`, 'green');
-    renderSell();
+    const d = await post('/api/sell/finalize', { barcodes: [barcode] });
+    if ((d.listings || []).length) {
+      const l = d.listings[0];
+      flash('green');
+      toast(`+ ${l.title} · $${parseFloat(l.price||0).toFixed(2)}`, 'green');
+    } else if ((d.skipped || []).length) {
+      const s = d.skipped[0];
+      flash('amber');
+      toast(`⚠ ${s.reason}`, 'amber');
+    }
+    await refreshActiveListings();
   } catch(e) {
     flash('red');
     toast(`✕ ${e.message}`, 'red');
   }
 }
-
-function removeFromSellCart(idx) {
-  _sellCart.splice(idx, 1);
-  renderSell();
-}
-
-async function clearSellCart() {
-  if (!_sellCart.length) return;
-  if (!await themedConfirm('Clear cart', 'Remove all cards from the register cart? They stay in inventory — nothing is sold.')) return;
-  _sellCart = [];
-  renderSell();
-}
-
-async function finalizeSell() {
-  if (!_sellCart.length) return;
-  if (!await themedConfirm('Send to POS', `Create ${_sellCart.length} Shopify draft listing${_sellCart.length===1?'':'s'} so the register can ring them up?`)) return;
-  try {
-    const d = await post('/api/sell/finalize', {
-      barcodes: _sellCart.map(c => c.barcode),
-    });
-    _sellLastResult = d;
-    _sellCart = [];
-    renderSell();
-  } catch(e) { toast(e.message, 'red'); }
-}
-
-function renderSellResult(d) {
-  const el = document.getElementById('sell-content');
-  el.innerHTML = `
-    <div style="font-size:1.1rem;font-weight:700;color:var(--green);margin-bottom:6px;">
-      ✓ ${d.listings.length} listing${d.listings.length===1?'':'s'} sent to POS
-    </div>
-    <div style="font-size:0.85rem;color:var(--dim);margin-bottom:18px;">
-      Ring up at the register by scanning each barcode. Total: <strong style="color:var(--text);font-family:var(--mono);">$${parseFloat(d.total||0).toFixed(2)}</strong>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;">
-      ${(d.listings||[]).map(l => `
-        <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:rgba(74,222,128,0.06);border:1px solid var(--green);border-radius:10px;">
-          <div style="flex:1;">
-            <div style="font-weight:600;">${esc(l.title)}</div>
-            <div style="font-family:var(--mono);font-size:0.72rem;color:var(--dim);">${esc(l.barcode)}</div>
-          </div>
-          <div class="ec-price" style="font-size:1.05rem;">$${parseFloat(l.price||0).toFixed(2)}</div>
-        </div>
-      `).join('')}
-    </div>
-    ${(d.skipped||[]).length ? `
-      <div style="background:rgba(248,113,113,0.08);border:1px solid var(--red);border-radius:8px;padding:10px;margin-bottom:14px;font-size:0.82rem;">
-        ⚠ Skipped ${d.skipped.length}: ${d.skipped.map(s => `${esc(s.barcode)} (${esc(s.reason)})`).join(', ')}
-      </div>` : ''}
-    <button class="btn btn-ghost" style="width:100%;padding:12px;" onclick="newSale()">+ New Sale</button>
-  `;
-}
-
-function newSale() {
-  _sellLastResult = null;
-  _sellCart = [];
   renderSell();
 }
 
