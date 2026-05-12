@@ -2962,6 +2962,24 @@ def split_route(session_id):
         item_id,
     ))
 
+    # Reassign split_qty unplaced raw_cards onto the new split row so Push's
+    # destination check matches the right side. Physical labels for the same
+    # card are interchangeable, so which N we peel off doesn't matter — newest
+    # first keeps the original's earlier barcodes stable. Pre-Barcode splits
+    # find zero rows here, which is fine: raw_cards get created later already
+    # pointing at the right intake_item.
+    db.execute("""
+        UPDATE raw_cards
+           SET intake_item_id = %s
+         WHERE id IN (
+             SELECT id FROM raw_cards
+              WHERE intake_item_id = %s
+                AND bin_id IS NULL
+              ORDER BY created_at DESC
+              LIMIT %s
+         )
+    """, (split_id, str(item_id), split_qty))
+
     return jsonify({
         "success": True,
         "original": {"id": item_id, "quantity": remaining_qty},
@@ -3035,6 +3053,21 @@ def split_singles(session_id):
             dest, item.get("verified_at"), item.get("listing_condition"),
             i + 1, item_id,
         ))
+
+    # Distribute unplaced raw_cards one-per-row so each qty=1 intake_item owns
+    # exactly one barcode. Original keeps the oldest barcode; the rest go to
+    # new_ids in created_at order. Pre-Barcode singles touch zero rows.
+    raw_rows = db.query("""
+        SELECT id FROM raw_cards
+         WHERE intake_item_id = %s
+           AND bin_id IS NULL
+         ORDER BY created_at ASC
+    """, (str(item_id),))
+    for rc, new_id in zip(raw_rows[1:], new_ids):
+        db.execute(
+            "UPDATE raw_cards SET intake_item_id = %s WHERE id = %s",
+            (new_id, rc["id"]),
+        )
 
     return jsonify({
         "success": True,
