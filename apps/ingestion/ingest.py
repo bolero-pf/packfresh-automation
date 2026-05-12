@@ -261,13 +261,21 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
         # by card number patterns (e.g. "- 073", "- 153/214", "SWSH136").
         comp_type = comp.get("component_type")  # None if not set in recipe
         comp_name = comp.get("product_name", "")
+        looks_like_card = _looks_like_single_card(comp_name)
         if comp_type in ("promo", "raw"):
+            child_product_type = "raw"
+        elif comp_type == "sealed" and looks_like_card:
+            # Recipe says sealed but the name has no sealed keywords — the
+            # migrate_breakdown_promo migration defaulted every pre-existing
+            # row to 'sealed', so any card component built before that flip
+            # carries the wrong type. Trust the name evidence over the tag
+            # so the child lands as 'raw' and pushes through the card path.
             child_product_type = "raw"
         elif comp_type == "sealed":
             child_product_type = "sealed"
         else:
             # component_type not set — detect from name
-            child_product_type = "raw" if _looks_like_single_card(comp_name) else "sealed"
+            child_product_type = "raw" if looks_like_card else "sealed"
         # Inherit parent's verified state — opening a verified sealed product
         # doesn't require re-verifying its known contents. Without this, children
         # land at verified_at=NULL and the push filter excludes them.
