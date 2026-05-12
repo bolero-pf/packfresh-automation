@@ -107,8 +107,10 @@ _ASSOCIATE_ALLOWED_PATHS = {
     "/api/held-orders",           # combine cards + verification empty for associate
     "/api/uncombine-order",       # combine action
     "/api/release-and-fulfill",   # combine "Release & Ship" with tracking
+    "/api/raw-card-pulls",        # paid Champion holds awaiting pull
     "/health", "/ping", "/favicon.ico",
 }
+_ASSOCIATE_ALLOWED_PREFIX_PATHS = ("/api/raw-card-pulls/",)  # /<hold_id>/mark-shipped etc.
 _ASSOCIATE_ALLOWED_PREFIXES = ("/screening/", "/static", "/pf-static")
 
 
@@ -121,6 +123,9 @@ def _gate_associate_routes():
     if path in _ASSOCIATE_ALLOWED_PATHS:
         return None
     for prefix in _ASSOCIATE_ALLOWED_PREFIXES:
+        if path.startswith(prefix):
+            return None
+    for prefix in _ASSOCIATE_ALLOWED_PREFIX_PATHS:
         if path.startswith(prefix):
             return None
     return jsonify({"error": "Not authorized"}), 403
@@ -221,7 +226,7 @@ def api_held_orders():
                 }
                 shippingAddress { firstName lastName address1 city province zip }
                 lineItems(first:20) {
-                  edges { node { title quantity image { url } } }
+                  edges { node { title quantity sku image { url } } }
                 }
               }
             }
@@ -232,6 +237,42 @@ def api_held_orders():
     verification = []
     combine = []
 
+    def _bin_lookup(orders_list):
+        """Annotate each line item with bin_label/is_raw if its SKU matches a
+        raw_cards.barcode. The Shopify product is deleted on Champion sale,
+        but the line item's SKU is preserved on the order itself — so this
+        join works even after deletion."""
+        all_skus = set()
+        for o in orders_list:
+            for item in o.get("items", []):
+                sku = (item.get("sku") or "").strip()
+                if sku:
+                    all_skus.add(sku)
+        if not all_skus:
+            return
+        placeholders = ",".join(["%s"] * len(all_skus))
+        rows = db.query(
+            f"""
+            SELECT rc.barcode, rc.condition, rc.variant,
+                   sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
+              FROM raw_cards rc
+              LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+              LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+             WHERE rc.barcode IN ({placeholders})
+            """,
+            tuple(all_skus),
+        )
+        by_sku = {r["barcode"]: r for r in rows}
+        for o in orders_list:
+            for item in o.get("items", []):
+                m = by_sku.get((item.get("sku") or "").strip())
+                if m:
+                    item["is_raw"] = True
+                    item["bin_label"] = m.get("bin_label")
+                    item["bin_type"] = m.get("bin_type")
+                    item["condition"] = m.get("condition")
+                    item["variant"] = m.get("variant")
+
     for edge in data.get("data", {}).get("orders", {}).get("edges", []):
         o = edge["node"]
         # Skip fulfilled orders — they've already been shipped
@@ -241,6 +282,7 @@ def api_held_orders():
         customer = o.get("customer") or {}
         addr = o.get("shippingAddress") or {}
         items = [{"title": e["node"]["title"], "qty": e["node"]["quantity"],
+                  "sku": (e["node"].get("sku") or "").strip(),
                   "image": (e["node"].get("image") or {}).get("url", "")}
                  for e in o.get("lineItems", {}).get("edges", [])]
         note = o.get("note") or ""
@@ -326,6 +368,11 @@ def api_held_orders():
         else:
             standalone_verification.extend(group["orders"])
 
+    # Enrich every order's items with bin labels for any SKU matching a
+    # raw card barcode. Lets the combined packing list show bin locations
+    # next to raw items (Champion or otherwise).
+    _bin_lookup(verification + combine)
+
     # Group combine orders by customer
     combine_groups = {}
     for o in combine:
@@ -341,10 +388,14 @@ def api_held_orders():
             }
         combine_groups[key]["orders"].append(o)
         combine_groups[key]["total_value"] += o["total"]
-        # Consolidate duplicate SKUs in combined packing list
+        # Consolidate duplicate SKUs in combined packing list. Raw cards are
+        # each a unique physical copy with their own bin — never merge.
         for item in o["items"]:
+            if item.get("is_raw"):
+                combine_groups[key]["all_items"].append({**item})
+                continue
             existing = next((a for a in combine_groups[key]["all_items"]
-                           if a["title"] == item["title"]), None)
+                           if not a.get("is_raw") and a["title"] == item["title"]), None)
             if existing:
                 existing["qty"] += item["qty"]
             else:
@@ -365,6 +416,118 @@ def api_held_orders():
         "verification_groups": final_verification_groups,
         "combine_groups": list(combine_groups.values()),
     })
+
+
+@app.route("/api/raw-card-pulls")
+def api_raw_card_pulls():
+    """Paid Champion holds awaiting outbound shipment — surfaced here so
+    associates can do raw-card pulls without owning card_manager access.
+
+    Cards are already state='SOLD' by the time they hit this view (kiosk
+    webhook flips them at payment) and the Shopify listing is deleted in
+    the same handler. The only handle we have is hold_items.raw_card_id,
+    which the webhook leaves intact. Bin labels survive because raw_cards
+    keeps its bin_id after the sale (puller needs to know where to look).
+    """
+    rows = db.query("""
+        SELECT h.id::text AS hold_id,
+               h.shopify_order_number,
+               h.customer_name, h.customer_email,
+               h.shipping_name, h.shipping_address,
+               h.created_at,
+               hi.id AS hold_item_id, hi.item_kind, hi.status AS hi_status,
+               hi.title AS hi_title, hi.sku AS hi_sku, hi.unit_price AS hi_price,
+               hi.barcode AS hi_barcode,
+               rc.card_name, rc.set_name, rc.card_number,
+               rc.condition, rc.variant,
+               rc.current_price AS rc_price, rc.image_url AS rc_image,
+               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
+          FROM holds h
+          LEFT JOIN hold_items hi ON hi.hold_id = h.id
+          LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
+          LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+          LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+         WHERE h.cohort = 'champion'
+           AND h.checkout_status = 'completed'
+           AND h.status NOT IN ('ACCEPTED','RETURNED','CANCELLED','AUTO_EXPIRED')
+         ORDER BY h.created_at ASC, sl.bin_label NULLS LAST
+    """)
+
+    holds_by_id = {}
+    for r in rows:
+        hid = r["hold_id"]
+        if hid not in holds_by_id:
+            holds_by_id[hid] = {
+                "hold_id": hid,
+                "order_number": r.get("shopify_order_number"),
+                "customer_name": r.get("customer_name"),
+                "customer_email": r.get("customer_email"),
+                "shipping_name": r.get("shipping_name"),
+                "shipping_address": r.get("shipping_address"),
+                "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+                "items": [],
+                "raw_count": 0,
+                "sealed_count": 0,
+            }
+        if not r.get("hold_item_id"):
+            continue
+        kind = (r.get("item_kind") or "raw").lower()
+        if kind == "raw":
+            holds_by_id[hid]["items"].append({
+                "kind": "raw",
+                "barcode": r.get("hi_barcode"),
+                "title": r.get("card_name"),
+                "set_name": r.get("set_name"),
+                "card_number": r.get("card_number"),
+                "condition": r.get("condition"),
+                "variant": r.get("variant"),
+                "price": float(r["rc_price"]) if r.get("rc_price") is not None else None,
+                "image_url": r.get("rc_image"),
+                "bin_label": r.get("bin_label"),
+                "bin_type": r.get("bin_type"),
+            })
+            holds_by_id[hid]["raw_count"] += 1
+        else:
+            holds_by_id[hid]["items"].append({
+                "kind": kind,
+                "title": r.get("hi_title"),
+                "sku": r.get("hi_sku"),
+                "price": float(r["hi_price"]) if r.get("hi_price") is not None else None,
+                "bin_label": None,
+            })
+            holds_by_id[hid]["sealed_count"] += 1
+
+    return jsonify({"holds": list(holds_by_id.values())})
+
+
+@app.route("/api/raw-card-pulls/<hold_id>/mark-shipped", methods=["POST"])
+def api_raw_card_pulls_mark_shipped(hold_id):
+    """Close a paid Champion hold after the physical pull + ship. Cards are
+    already state='SOLD' (set by the kiosk webhook at payment), so this just
+    flips the hold itself to ACCEPTED so it drops off the pull queue.
+    Shopify-side fulfillment + tracking is done separately in Shopify admin."""
+    hold = db.query_one("""
+        SELECT id, cohort, status, checkout_status FROM holds WHERE id = %s
+    """, (hold_id,))
+    if not hold:
+        return jsonify({"error": "Hold not found"}), 404
+    if hold.get("cohort") != "champion":
+        return jsonify({"error": "Not a Champion hold"}), 400
+    if hold.get("checkout_status") != "completed":
+        return jsonify({"error": f"Hold not paid (checkout_status={hold.get('checkout_status')})"}), 409
+    if hold.get("status") in ("ACCEPTED","RETURNED","CANCELLED","AUTO_EXPIRED"):
+        return jsonify({"error": f"Hold already closed (status={hold.get('status')})"}), 409
+
+    db.execute("""
+        UPDATE holds SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+    """, (hold_id,))
+    db.execute("""
+        UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
+        WHERE hold_id = %s
+          AND status NOT IN ('ACCEPTED','REJECTED','SOLD','MISSING')
+    """, (hold_id,))
+    return jsonify({"success": True})
 
 
 @app.route("/api/release-hold", methods=["POST"])
@@ -1270,19 +1433,21 @@ CONSOLE_HTML = """
   <div id="screening-tabs" style="display:flex;gap:2px;margin-bottom:20px;border-bottom:1px solid var(--border);">
     <button class="tab active" id="tab-verify" onclick="switchTab('verify')">🔍 Verification Queue</button>
     <button class="tab" id="tab-combine" onclick="switchTab('combine')">📦 Combine Shipping</button>
+    <button class="tab" id="tab-pulls" onclick="switchTab('pulls')">🃏 Raw Card Pulls</button>
     <button class="tab" id="tab-notes" onclick="switchTab('notes')">👤 Customer Notes</button>
     <button class="tab" id="tab-egg" onclick="switchTab('egg')">🥚 Egg Hunt</button>
     <button class="tab" id="tab-history" onclick="switchTab('history')">📊 History</button>
   </div>
   <div id="pane-verify" class="pane active"><div class="spinner"></div></div>
   <div id="pane-combine" class="pane"><div class="spinner"></div></div>
+  <div id="pane-pulls" class="pane"><div class="spinner"></div></div>
   <div id="pane-notes" class="pane"></div>
   <div id="pane-egg" class="pane"></div>
   <div id="pane-history" class="pane"></div>
 </div>
 <script>
-// Associates only see the Combine tab. window._pfUser is set by the shared
-// admin bar (shared/auth.py::ADMIN_BAR_HTML).
+// Associates see Combine + Raw Card Pulls. window._pfUser is set by the
+// shared admin bar (shared/auth.py::ADMIN_BAR_HTML).
 (function () {
   const role = (window._pfUser || {}).role;
   if (role !== 'associate') return;
@@ -1313,6 +1478,7 @@ function switchTab(id) {
   if (id === 'notes') loadNotes();
   else if (id === 'egg') { loadEggHunt(); startEggPoll(); }
   else if (id === 'history') { stopEggPoll(); loadHistory(); }
+  else if (id === 'pulls') { stopEggPoll(); loadRawPulls(); }
   else { stopEggPoll(); if (_data) renderAll(); }
 }
 
@@ -1505,6 +1671,122 @@ function renderAll() {
   const vCount = (_data.verification||[]).length + (_data.verification_groups||[]).reduce((s,g)=>s+g.orders.length, 0);
   document.getElementById('tab-verify').textContent = '🔍 Verification (' + vCount + ')';
   document.getElementById('tab-combine').textContent = '📦 Combine (' + (_data.combine_groups||[]).length + ')';
+  // Eagerly load pull count so the badge reflects reality without a tab click.
+  if (_pullsData) {
+    document.getElementById('tab-pulls').textContent = '🃏 Raw Card Pulls (' + (_pullsData.holds||[]).length + ')';
+  } else {
+    loadRawPullsCount();
+  }
+}
+
+let _pullsData = null;
+
+async function loadRawPullsCount() {
+  try {
+    const r = await fetch('/api/raw-card-pulls');
+    _pullsData = await r.json();
+    document.getElementById('tab-pulls').textContent =
+      '🃏 Raw Card Pulls (' + (_pullsData.holds||[]).length + ')';
+  } catch (e) { /* leave default label */ }
+}
+
+async function loadRawPulls() {
+  document.getElementById('pane-pulls').innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/raw-card-pulls');
+    _pullsData = await r.json();
+    renderRawPulls(_pullsData.holds || []);
+    document.getElementById('tab-pulls').textContent =
+      '🃏 Raw Card Pulls (' + (_pullsData.holds||[]).length + ')';
+  } catch (e) {
+    document.getElementById('pane-pulls').innerHTML =
+      '<div class="empty">Failed to load: ' + e.message + '</div>';
+  }
+}
+
+function renderRawPulls(holds) {
+  const el = document.getElementById('pane-pulls');
+  if (!holds.length) { el.innerHTML = '<div class="empty">✅ No raw card pulls pending</div>'; return; }
+
+  // Cross-reference: does this customer also have orders in Combine?
+  const combineByEmail = {};
+  (_data && _data.combine_groups || []).forEach(g => {
+    const k = (g.customer_email || '').toLowerCase();
+    if (k) combineByEmail[k] = g;
+  });
+
+  el.innerHTML = holds.map(h => {
+    const ce = (h.customer_email || '').toLowerCase();
+    const comboMatch = combineByEmail[ce];
+    const comboBadge = comboMatch
+      ? '<button class="btn btn-secondary btn-sm" style="font-size:0.7rem;padding:2px 8px;margin-left:8px;" onclick="switchTab(\'combine\')">📦 ' + comboMatch.orders.length + ' combinable</button>'
+      : '';
+    const raws = h.items.filter(i => i.kind === 'raw');
+    const sealed = h.items.filter(i => i.kind !== 'raw');
+    const rawHtml = raws.map(i => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.04);">
+        ${i.image_url ? `<img src="${i.image_url}" style="width:42px;height:42px;object-fit:cover;border-radius:4px;">` : '<div style="width:42px;height:42px;background:var(--s2);border-radius:4px;"></div>'}
+        <div style="flex:1;font-size:0.85rem;">
+          <strong>${_esc(i.title || '—')}</strong>
+          <div style="font-size:0.72rem;color:var(--dim);">${_esc(i.set_name || '')} ${i.card_number ? '#' + _esc(i.card_number) : ''} · ${_esc(i.condition || '')}${i.variant ? ' · ' + _esc(i.variant) : ''}</div>
+        </div>
+        <div style="font-family:monospace;font-size:0.78rem;color:var(--dim);">${_esc(i.barcode || '')}</div>
+        <div style="min-width:90px;text-align:right;">
+          ${i.bin_label
+            ? '<span style="padding:3px 10px;background:rgba(0,180,255,0.12);color:#5cf;border-radius:10px;font-weight:600;font-size:0.78rem;">' + (i.bin_type === 'display' ? '📍 ' : (i.bin_type === 'binder' ? '📒 ' : '📦 ')) + _esc(i.bin_label) + '</span>'
+            : '<span style="color:var(--red);font-size:0.78rem;">⚠ no bin</span>'}
+        </div>
+      </div>
+    `).join('');
+    const sealedHtml = sealed.length ? `
+      <div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);">
+        <div style="font-size:0.72rem;font-weight:600;color:var(--dim);margin-bottom:4px;">Other items in this order:</div>
+        ${sealed.map(i => `<div style="font-size:0.82rem;padding:3px 0;">• ${_esc(i.title || '—')}${i.sku ? ' <span style="color:var(--dim);font-family:monospace;">[' + _esc(i.sku) + ']</span>' : ''}</div>`).join('')}
+      </div>
+    ` : '';
+
+    return `
+      <div class="combine-group" data-hold-id="${h.hold_id}">
+        <div class="combine-header" style="display:flex;align-items:center;">
+          ${_esc(h.customer_name || h.shipping_name || '—')}
+          ${h.order_number ? '<span style="margin-left:8px;font-size:0.78rem;color:var(--dim);font-weight:400;">' + _esc(h.order_number) + '</span>' : ''}
+          ${comboBadge}
+        </div>
+        <div style="font-size:0.78rem;color:var(--dim);">${_esc(h.customer_email || '')} · ${_esc(h.shipping_address || '')}</div>
+        <div style="margin-top:10px;background:var(--s2);border-radius:6px;overflow:hidden;">
+          ${rawHtml || '<div style="padding:8px;color:var(--dim);font-size:0.82rem;">No raw items</div>'}
+        </div>
+        ${sealedHtml}
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-secondary btn-sm" onclick="printPullSlip('${h.hold_id}')">🖨 Print Pull Slip</button>
+          <button class="btn btn-green btn-sm" onclick="markPullShipped('${h.hold_id}', this)">✓ Mark Pulled &amp; Shipped</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function printPullSlip(holdId) {
+  const card = document.querySelector('[data-hold-id="' + holdId + '"]');
+  if (!card) return;
+  const w = window.open('', '_blank');
+  w.document.write('<html><head><title>Pull Slip</title><style>body{font-family:sans-serif;padding:20px;}img{max-width:60px;}div{margin-bottom:6px;}.bin{background:#cef;padding:2px 8px;border-radius:8px;font-weight:600;}</style></head><body>');
+  w.document.write(card.innerHTML.replace(/<button[^>]*>.*?<\\/button>/g, ''));
+  w.document.write('</body></html>');
+  w.document.close();
+  w.print();
+}
+
+async function markPullShipped(holdId, btn) {
+  if (!confirm('Mark this hold as pulled and shipped? Cards are already marked SOLD; this just clears it from the queue.')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/raw-card-pulls/' + holdId + '/mark-shipped', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || 'Failed'); btn.disabled = false; return; }
+    toast('Hold closed', 'green');
+    loadRawPulls();
+  } catch (e) { alert(e.message); btn.disabled = false; }
 }
 
 function _fdBadgeHtml(email) {
@@ -1701,7 +1983,17 @@ function renderCombine(groups) {
         <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;padding:2px 8px;" onclick="printPackingList(this)">🖨 Print</button>
       </div>
       <div class="items-list packing-list-content">
-        ${g.all_items.map(i => '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' + (i.image ? '<img src="' + i.image + '" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">' : '') + '<span><strong>' + i.qty + '×</strong> ' + i.title + '</span></div>').join('')}
+        ${g.all_items.map(i => {
+          const isRaw = i.is_raw;
+          const qty = isRaw ? '1×' : (i.qty + '×');
+          const meta = isRaw && (i.condition || i.variant)
+            ? '<span style="font-size:0.72rem;color:var(--dim);margin-left:6px;">' + [i.condition, i.variant].filter(Boolean).join(' · ') + '</span>'
+            : '';
+          const binPill = isRaw && i.bin_label
+            ? '<span style="margin-left:auto;padding:2px 8px;background:rgba(0,180,255,0.12);color:#5cf;border-radius:10px;font-weight:600;font-size:0.72rem;">' + (i.bin_type === 'display' ? '📍 ' : (i.bin_type === 'binder' ? '📒 ' : '📦 ')) + i.bin_label + '</span>'
+            : (isRaw ? '<span style="margin-left:auto;color:var(--red);font-size:0.72rem;">⚠ no bin</span>' : '');
+          return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' + (i.image ? '<img src="' + i.image + '" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">' : '') + '<span><strong>' + qty + '</strong> ' + i.title + meta + '</span>' + binPill + '</div>';
+        }).join('')}
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
         <div style="flex:1;min-width:200px;">
