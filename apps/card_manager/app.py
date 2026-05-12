@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 db.init_pool()
 
+_ACTIVE_HOLD_STATUSES = ("PENDING", "PULLING", "READY")
+
 
 def _ensure_columns():
     """Defensive idempotent column add for inventory_product_cache.barcode.
