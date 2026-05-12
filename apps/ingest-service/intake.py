@@ -296,41 +296,33 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
     promos, prerelease stamps, Scrydex-only JP). In that case the row is
     marked is_mapped=FALSE so staff can relink later if a mapping shows up.
 
-    If quantity > 1, explode into N separate qty=1 rows with staggered
-    created_at timestamps. This preserves the physical stack order through
-    ingest → routing (where each copy needs its own routing decision) and
-    keeps siblings adjacent in the default 'entered order' sort.
+    Inserts one row with quantity=N — matches the CSV/Collectr/HTML import
+    paths. Identity (per-copy barcode) is minted at finalize in ingestion's
+    push-to-raw_cards loop. Verify/breakdown stages already split qty>1 rows
+    on demand (split_damaged, breakdown split), so a single row is sufficient.
 
     Calculates offer_price and unit_cost_basis from the given offer_percentage.
-    Returns the first created intake_item row.
+    Returns the created intake_item row.
     """
-    # Per-unit offer so each qty=1 split row is priced identically to the
-    # N=quantity parent would have been.
-    unit_offer, unit_cost = calc_offer_price(
-        market_price, 1, offer_percentage, product_type="raw")
+    qty = max(1, int(quantity))
+    offer_total, unit_cost = calc_offer_price(
+        market_price, qty, offer_percentage, product_type="raw")
 
     is_mapped = tcgplayer_id is not None
-    first_row = None
-    for i in range(max(1, quantity)):
-        row = execute_returning("""
-            INSERT INTO intake_items
-                (session_id, product_name, tcgplayer_id, product_type,
-                 set_name, card_number, condition, rarity, variance,
-                 quantity, market_price, offer_price, unit_cost_basis, is_mapped,
-                 is_graded, grade_company, grade_value,
-                 created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    CURRENT_TIMESTAMP + (%s * INTERVAL '1 microsecond'))
-            RETURNING *
-        """, (session_id, product_name, tcgplayer_id, "raw",
-              set_name, card_number, condition, rarity, variance or "",
-              1, market_price, unit_offer, unit_cost, is_mapped,
-              is_graded, grade_company or None, grade_value or None,
-              i))
-        if first_row is None:
-            first_row = row
+    row = execute_returning("""
+        INSERT INTO intake_items
+            (session_id, product_name, tcgplayer_id, product_type,
+             set_name, card_number, condition, rarity, variance,
+             quantity, market_price, offer_price, unit_cost_basis, is_mapped,
+             is_graded, grade_company, grade_value)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+    """, (session_id, product_name, tcgplayer_id, "raw",
+          set_name, card_number, condition, rarity, variance or "",
+          qty, market_price, offer_total, unit_cost, is_mapped,
+          is_graded, grade_company or None, grade_value or None))
     _backfill_scrydex_ids(session_id)
-    return first_row
+    return row
 
 
 # ==========================================
