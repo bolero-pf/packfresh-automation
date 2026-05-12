@@ -1,0 +1,46 @@
+query RunInput {
+  cart {
+    cost {
+      subtotalAmount {
+        amount
+      }
+    }
+    lines {
+      cost {
+        subtotalAmount {
+          amount
+        }
+      }
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          product {
+            hasAnyTag(tags: ["kiosk-raw"])
+          }
+        }
+      }
+    }
+    buyerIdentity {
+      customer {
+        hasTags(tags: ["VIP3"]) {
+          tag
+          hasTag
+        }
+      }
+    }
+  }
+  deliveryGroups {
+    deliveryOptions {
+      handle
+      title
+      cost {
+        amount
+      }
+    }
+  }
+  discountNode {
+    metafield(namespace: "$app:champion-freeship", key: "config") {
+      value
+    }
+  }
+}
