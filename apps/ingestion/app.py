@@ -2707,7 +2707,8 @@ def auto_route_session(session_id):
     # Only consider items NOT yet manually reviewed — auto-route should never
     # overwrite a user's decision.
     items = db.query("""
-        SELECT id, market_price, quantity, routing_destination
+        SELECT id, market_price, quantity, routing_destination,
+               scrydex_id, tcgplayer_id, condition, variant, variance
         FROM intake_items
         WHERE session_id = %s
           AND product_type = 'raw'
@@ -2744,6 +2745,32 @@ def auto_route_session(session_id):
     """, (session_id,))
     binder_remaining = max(0, binder_remaining - int(already_displayed["qty"] or 0))
 
+    # Per-SKU binder cap: at most 2 copies of the same card (scrydex/tcg id +
+    # condition + variant) go to the binder. Excess goes to storage even if
+    # price says display. Seed from already-reviewed display items so a
+    # second auto-route run respects manual binder picks.
+    def _sku_key(it):
+        sid = it.get("scrydex_id")
+        tid = it.get("tcgplayer_id")
+        return (
+            str(sid) if sid else None,
+            str(tid) if tid else None,
+            (it.get("condition") or "NM").upper(),
+            (it.get("variant") or it.get("variance") or "").lower(),
+        )
+
+    sku_display: dict = {}
+    for row in db.query("""
+        SELECT scrydex_id, tcgplayer_id, condition, variant, variance, quantity
+        FROM intake_items
+        WHERE session_id = %s
+          AND product_type = 'raw'
+          AND routing_destination = 'display'
+          AND routing_reviewed_at IS NOT NULL
+    """, (session_id,)):
+        k = _sku_key(row)
+        sku_display[k] = sku_display.get(k, 0) + int(row.get("quantity") or 1)
+
     # Assign destinations in Python (binder capacity is stateful across
     # items so we can't do it in one pure SQL CASE), then bulk-UPDATE in
     # a single round-trip via VALUES list. Previously this issued one
@@ -2754,12 +2781,17 @@ def auto_route_session(session_id):
     for item in items:
         price = float(item.get("market_price") or 0)
         qty = item.get("quantity", 1)
+        k = _sku_key(item)
+        sku_in_binder = sku_display.get(k, 0)
 
         if price < 1.00:
             dest = "bulk"
-        elif price < 5.00 and binder_remaining >= qty:
+        elif (price < 5.00
+              and binder_remaining >= qty
+              and sku_in_binder + qty <= 2):
             dest = "display"
             binder_remaining -= qty
+            sku_display[k] = sku_in_binder + qty
         else:
             dest = "storage"
 
@@ -2987,26 +3019,23 @@ def split_route(session_id):
     })
 
 
-@app.route("/api/ingest/session/<session_id>/split-singles", methods=["POST"])
-def split_singles(session_id):
-    """Explode an item with qty > 1 into individual qty=1 rows.
-    Body: { item_id }
+def _explode_intake_to_singles(item: dict, session_id: str) -> list[str]:
+    """Convert an intake_item with quantity > 1 into N qty=1 rows.
+
+    Original row drops to qty=1; (qty - 1) new rows are inserted with the same
+    card fields and routing_destination. Unplaced raw_cards on the original are
+    distributed one-per-row (oldest stays, rest move to the new rows in order).
+    Pre-Barcode explodes find zero raw_cards and just touch intake_items.
+
+    Returns the list of newly-created intake_item IDs (empty if qty <= 1).
     """
-    data = request.get_json(silent=True) or {}
-    item_id = data.get("item_id")
-    if not item_id:
-        return jsonify({"error": "item_id required"}), 400
-
-    item = db.query_one("SELECT * FROM intake_items WHERE id = %s AND session_id = %s", (item_id, session_id))
-    if not item:
-        return jsonify({"error": "Item not found"}), 404
-
+    item_id = item.get("id")
     total_qty = item.get("quantity", 1)
-    if total_qty <= 1:
-        return jsonify({"error": "Item already qty=1"}), 400
+    if not item_id or total_qty <= 1:
+        return []
 
-    session = db.query_one("SELECT offer_percentage FROM intake_sessions WHERE id = %s", (session_id,))
-    offer_pct = float(session.get("offer_percentage", 65)) / 100 if session else 0.65
+    sess = db.query_one("SELECT offer_percentage FROM intake_sessions WHERE id = %s", (session_id,))
+    offer_pct = float(sess.get("offer_percentage", 65)) / 100 if sess else 0.65
     market_price = float(item.get("market_price") or 0)
     unit_offer = round(market_price * offer_pct, 2)
     unit_cost = float(item.get("unit_cost_basis") or 0)
@@ -3014,13 +3043,9 @@ def split_singles(session_id):
 
     import uuid as _uuid
 
-    # Keep original as qty=1
     db.execute("UPDATE intake_items SET quantity = 1, offer_price = %s WHERE id = %s",
                (unit_offer, item_id))
 
-    # Create (total_qty - 1) new rows with staggered created_at timestamps
-    # relative to the parent so all siblings stay adjacent in entered-order
-    # sort (parent stays at its original created_at; clones are +i microseconds).
     new_ids = []
     for i in range(total_qty - 1):
         new_id = str(_uuid.uuid4())
@@ -3054,9 +3079,6 @@ def split_singles(session_id):
             i + 1, item_id,
         ))
 
-    # Distribute unplaced raw_cards one-per-row so each qty=1 intake_item owns
-    # exactly one barcode. Original keeps the oldest barcode; the rest go to
-    # new_ids in created_at order. Pre-Barcode singles touch zero rows.
     raw_rows = db.query("""
         SELECT id FROM raw_cards
          WHERE intake_item_id = %s
@@ -3068,6 +3090,29 @@ def split_singles(session_id):
             "UPDATE raw_cards SET intake_item_id = %s WHERE id = %s",
             (new_id, rc["id"]),
         )
+
+    return new_ids
+
+
+@app.route("/api/ingest/session/<session_id>/split-singles", methods=["POST"])
+def split_singles(session_id):
+    """Explode an item with qty > 1 into individual qty=1 rows.
+    Body: { item_id }
+    """
+    data = request.get_json(silent=True) or {}
+    item_id = data.get("item_id")
+    if not item_id:
+        return jsonify({"error": "item_id required"}), 400
+
+    item = db.query_one("SELECT * FROM intake_items WHERE id = %s AND session_id = %s", (item_id, session_id))
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+
+    if (item.get("quantity") or 1) <= 1:
+        return jsonify({"error": "Item already qty=1"}), 400
+
+    total_qty = item.get("quantity") or 1
+    new_ids = _explode_intake_to_singles(dict(item), session_id)
 
     return jsonify({
         "success": True,
@@ -3638,23 +3683,40 @@ def barcode_raw_items(session_id):
     if not items:
         return jsonify({"error": "No raw items waiting to be barcoded"}), 400
 
-    results = []
-    errors  = []
+    # Explode any qty>1 rows into qty=1 siblings before barcoding so every
+    # barcode owns exactly one intake_item. This is the new "one row per card"
+    # contract — Route + Push downstream both stop needing a Split/Singles UI
+    # because there's no multi-qty row to break apart.
+    expanded = []
     for item in items:
         item_dict = dict(item)
+        if (item_dict.get("quantity") or 1) > 1:
+            new_ids = _explode_intake_to_singles(item_dict, session_id)
+            item_dict["quantity"] = 1
+            expanded.append(item_dict)
+            for nid in new_ids:
+                clone = dict(item_dict)
+                clone["id"] = nid
+                expanded.append(clone)
+        else:
+            expanded.append(item_dict)
+
+    results = []
+    errors  = []
+    for item_dict in expanded:
         item_dict["session_id"] = session_id
-        dest = item.get("routing_destination") or "storage"
+        dest = item_dict.get("routing_destination") or "storage"
         try:
             r = _barcode_raw_item(item_dict, destination=dest)
             results.append(r)
             db.execute(
                 "UPDATE intake_items SET barcoded_at = CURRENT_TIMESTAMP WHERE id = %s",
-                (item["id"],)
+                (item_dict["id"],)
             )
         except Exception as e:
-            logger.exception(f"barcode_raw_item failed for {item['id']}: {e}")
-            errors.append({"item_id": str(item["id"]),
-                           "product_name": item.get("product_name"), "error": str(e)})
+            logger.exception(f"barcode_raw_item failed for {item_dict['id']}: {e}")
+            errors.append({"item_id": str(item_dict["id"]),
+                           "product_name": item_dict.get("product_name"), "error": str(e)})
 
     return jsonify({
         "success":  True,
