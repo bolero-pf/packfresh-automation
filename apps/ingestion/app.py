@@ -3726,6 +3726,55 @@ def barcode_raw_items(session_id):
     })
 
 
+@app.route("/api/ingest/session/<session_id>/barcode-missing", methods=["POST"])
+def barcode_mark_missing(session_id):
+    """Discard one barcoded card discovered as a miscount at Barcode time.
+
+    Verify is supposed to catch this, but counts sometimes slip — staff reach
+    for the 10th card while attaching labels and find only 9. The intake_item
+    is flipped to item_status='missing' (offer → 0, session totals recalc),
+    and the orphan raw_card row is deleted so the printed label is just paper
+    to throw away. Refuses if the card was already placed in a bin — by then
+    it's a Push-stage problem.
+
+    Body: { barcode }
+    """
+    data = request.get_json(silent=True) or {}
+    barcode = (data.get("barcode") or "").strip()
+    if not barcode:
+        return jsonify({"error": "barcode required"}), 400
+
+    row = db.query_one("""
+        SELECT rc.id AS raw_card_id, rc.bin_id, rc.intake_item_id,
+               ii.session_id, ii.product_name
+          FROM raw_cards rc
+          JOIN intake_items ii ON ii.id = rc.intake_item_id
+         WHERE rc.barcode = %s
+         LIMIT 1
+    """, (barcode,))
+    if not row:
+        return jsonify({"error": "Barcode not found"}), 404
+    if str(row["session_id"]) != session_id:
+        return jsonify({"error": "Barcode not in this session"}), 404
+    if row.get("bin_id"):
+        return jsonify({"error": "Card already placed in a bin — too late to mark missing"}), 400
+
+    try:
+        ingest.verify_item_missing(row["intake_item_id"])
+    except Exception as e:
+        logger.exception(f"verify_item_missing failed for {row['intake_item_id']}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    db.execute("DELETE FROM raw_cards WHERE id = %s", (row["raw_card_id"],))
+
+    return jsonify({
+        "success": True,
+        "barcode": barcode,
+        "product_name": row.get("product_name"),
+        "intake_item_id": str(row["intake_item_id"]),
+    })
+
+
 @app.route("/api/ingest/session/<session_id>/regenerate-barcodes", methods=["POST"])
 def regenerate_session_barcodes(session_id):
     """Reissue new barcode IDs for every raw_cards row in this session.

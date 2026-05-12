@@ -5796,7 +5796,10 @@ function _renderBarcodeSection(panel, sessionId) {
                     <strong style="color:var(--text);">${c.card_name||''}</strong><br>
                     ${c.set_name||''} · ${c.condition||''} · <span style="color:var(--accent); font-family:monospace;">${c.bin_label||'?'}</span>
                 </div>
-                <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" onclick="printOneBarcode('${c.barcode}')">🖨 Print</button>
+                <div style="display:flex; gap:6px;">
+                    <button class="btn btn-secondary btn-sm" style="flex:1; font-size:0.72rem;" onclick="printOneBarcode('${c.barcode}')">🖨 Print</button>
+                    <button class="btn btn-sm" style="font-size:0.72rem; padding:4px 8px; color:#f59e0b; border:1px solid #f59e0b55; background:transparent;" title="Mark this card as missing (miscounted at Verify). Drops the offer by one unit and discards the label." onclick="markBarcodedMissing('${c.barcode}','${sessionId}')">✕ Missing</button>
+                </div>
             </div>
         `).join('');
     }
@@ -5864,6 +5867,25 @@ function printSessionBin(binLabel) {
     ).join('');
     win.document.write(`<html><head><style>@media print { @page { margin:0; size: 89mm 28mm landscape; } body { margin:0; } img { width:89mm; height:28mm; display:block; page-break-after:always; } }</style></head><body style="margin:0">${imgs}<script>window.onload=function(){window.print();window.close()}<\/script></body></html>`);
     win.document.close();
+}
+
+async function markBarcodedMissing(barcode, sessionId) {
+    if (!confirm(`Mark this card as MISSING?\n\nBarcode: ${barcode}\n\nThis is for miscounts that slipped past Verify — the offer drops by one unit and the printed label gets discarded.`)) return;
+    try {
+        const r = await fetch(`/api/ingest/session/${sessionId}/barcode-missing`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ barcode }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Mark missing failed'); return; }
+        // Re-fetch the session so Push counts + session totals update, then
+        // refresh the per-card barcode grid so the discarded label disappears.
+        await viewSession(sessionId, true);
+        await _loadSessionBarcodes(sessionId);
+    } catch(e) {
+        alert('Mark missing failed: ' + e.message);
+    }
 }
 
 async function regenerateSessionBarcodes(sessionId) {
