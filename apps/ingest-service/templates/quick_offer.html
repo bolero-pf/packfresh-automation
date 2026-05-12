@@ -334,30 +334,41 @@
     const QO_CASH_PCT = 65;
     const QO_CREDIT_PCT = 75;
 
-    async function qoStartSession() {
-        document.getElementById('qo-session-info').textContent = 'Starting session…';
-        try {
-            const r = await fetch('/api/intake/create-session', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    customer_name: 'Quick Offer',
-                    session_type: 'mixed',
-                    cash_percentage: QO_CASH_PCT,
-                    credit_percentage: QO_CREDIT_PCT,
-                    is_walk_in: true,
-                }),
-            });
-            const d = await r.json();
-            if (!r.ok) throw new Error(d.error || 'Failed to start session');
-            // Match the global the upstream search/add functions read.
-            intakeSessionId = d.session.id;
-            document.getElementById('qo-session-info').textContent = 'Session ' + d.session.id.slice(0, 8) + '…';
-            return d.session.id;
-        } catch (err) {
-            document.getElementById('qo-session-info').textContent = 'Error starting session: ' + err.message;
-            throw err;
-        }
+    // Lazy session create. The old behavior — kicking this off on page load
+    // and after every reset — was littering the Active Offers tab with empty
+    // "Quick Offer" sessions every time staff so much as opened the page.
+    // Now we wait until the user actually adds the first item.
+    let _qoSessionStarting = null;
+    async function qoEnsureSession() {
+        if (intakeSessionId) return intakeSessionId;
+        if (_qoSessionStarting) return _qoSessionStarting;
+        _qoSessionStarting = (async () => {
+            document.getElementById('qo-session-info').textContent = 'Starting session…';
+            try {
+                const r = await fetch('/api/intake/create-session', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        customer_name: 'Quick Offer',
+                        session_type: 'mixed',
+                        cash_percentage: QO_CASH_PCT,
+                        credit_percentage: QO_CREDIT_PCT,
+                        is_walk_in: true,
+                    }),
+                });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.error || 'Failed to start session');
+                intakeSessionId = d.session.id;
+                document.getElementById('qo-session-info').textContent = 'Session ' + d.session.id.slice(0, 8) + '…';
+                return d.session.id;
+            } catch (err) {
+                document.getElementById('qo-session-info').textContent = 'Error starting session: ' + err.message;
+                throw err;
+            } finally {
+                _qoSessionStarting = null;
+            }
+        })();
+        return _qoSessionStarting;
     }
 
     // Override the upstream loader. The dashboard table layout doesn't fit the
@@ -508,7 +519,7 @@
         const graded = document.getElementById('intake-is-graded');
         if (graded && graded.checked) { graded.checked = false; toggleIntakeGraded(); }
         switchIntakeType('sealed');
-        await qoStartSession();
+        document.getElementById('qo-session-info').textContent = 'Walk-in counter — search to start';
         document.getElementById('intake-sealed-search').focus();
     }
 
@@ -522,15 +533,49 @@
         });
     }
 
-    // Bootstrap on load
-    document.addEventListener('DOMContentLoaded', async () => {
-        try {
-            await qoStartSession();
-            switchIntakeType('sealed');
-            document.getElementById('intake-sealed-search').focus();
-        } catch (err) {
-            // qoStartSession already surfaced the error in the header
+    // Wrap every add entrypoint so the session is created lazily on the
+    // first item, not on page load. Each of these reads intakeSessionId
+    // globally, so all we need to do is make sure it's populated before
+    // the wrapped function runs. _finalizeCardAdd is special: it takes
+    // sessionId as its first arg (captured by the condition picker when
+    // the user clicked a search result, possibly before any session
+    // existed), so we replace the arg with the freshly created id.
+    (function wrapAddEntrypoints() {
+        const _addIntakeSealed = window.addIntakeSealed;
+        if (_addIntakeSealed) {
+            window.addIntakeSealed = async function(...args) {
+                try { await qoEnsureSession(); } catch (err) { return; }
+                return _addIntakeSealed.apply(this, args);
+            };
         }
+        const _submitIntakeManualDirect = window.submitIntakeManualDirect;
+        if (_submitIntakeManualDirect) {
+            window.submitIntakeManualDirect = async function(...args) {
+                try { await qoEnsureSession(); } catch (err) { return; }
+                return _submitIntakeManualDirect.apply(this, args);
+            };
+        }
+        const _submitIntakeCardManual = window.submitIntakeCardManual;
+        if (_submitIntakeCardManual) {
+            window.submitIntakeCardManual = async function(...args) {
+                try { await qoEnsureSession(); } catch (err) { return; }
+                return _submitIntakeCardManual.apply(this, args);
+            };
+        }
+        const _finalize = window._finalizeCardAdd;
+        if (_finalize) {
+            window._finalizeCardAdd = async function(sessionId, ...rest) {
+                try { await qoEnsureSession(); } catch (err) { return; }
+                return _finalize.call(this, intakeSessionId, ...rest);
+            };
+        }
+    })();
+
+    // Bootstrap on load — no session yet, just prep the UI.
+    document.addEventListener('DOMContentLoaded', () => {
+        document.getElementById('qo-session-info').textContent = 'Walk-in counter — search to start';
+        switchIntakeType('sealed');
+        document.getElementById('intake-sealed-search').focus();
     });
 
     // The upstream JS uses themedConfirm/themedPrompt for some flows
