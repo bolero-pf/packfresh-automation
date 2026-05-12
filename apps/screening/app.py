@@ -1719,7 +1719,7 @@ function renderRawPulls(holds) {
     const ce = (h.customer_email || '').toLowerCase();
     const comboMatch = combineByEmail[ce];
     const comboBadge = comboMatch
-      ? '<button class="btn btn-secondary btn-sm" style="font-size:0.7rem;padding:2px 8px;margin-left:8px;" onclick="switchTab(\'combine\')">📦 ' + comboMatch.orders.length + ' combinable</button>'
+      ? '<button class="btn btn-secondary btn-sm" style="font-size:0.7rem;padding:2px 8px;margin-left:8px;" onclick="switchTab(&apos;combine&apos;)">📦 ' + comboMatch.orders.length + ' combinable</button>'
       : '';
     const raws = h.items.filter(i => i.kind === 'raw');
     const sealed = h.items.filter(i => i.kind !== 'raw');
