@@ -795,24 +795,117 @@ def split_one_slab(item_id: str) -> dict:
     return query_one("SELECT * FROM intake_items WHERE id = %s", (child_id,))
 
 
-def mark_item_good(item_id: str) -> dict:
-    """Restore an item to good status and restore full offer price."""
+def mark_item_good(item_id: str, good_qty: int = None) -> dict:
+    """Restore some-or-all of an item to good status.
+
+    Default behavior (good_qty=None or >= item.quantity): flip the whole row to
+    'good' and recompute its offer at full rate.
+
+    Partial mode (1 <= good_qty < item.quantity): split the row. The current
+    row drops by good_qty (offer recomputed at its existing damage discount or
+    good rate, whichever matches its status); a sibling for the good portion is
+    either MERGED back into the parent (when this row is a damage-split child
+    of a same-product good parent — restores the pre-split state cleanly) or
+    created as a new good child of the same parent if no merge target.
+
+    Returns the resulting good row (parent when merged, new child otherwise,
+    or the row itself when good_qty was full).
+    """
     item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
         raise ValueError("Item not found")
+    if item.get("pushed_at"):
+        raise ValueError("Cannot mark a pushed item good")
 
     session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     market_price = Decimal(str(item.get("market_price", 0)))
-    qty = item.get("quantity", 1)
-    full_offer = (market_price * offer_pct * qty).quantize(Decimal("0.01"))
+    total_qty = item.get("quantity", 1)
 
+    if good_qty is not None and (good_qty < 1 or good_qty > total_qty):
+        raise ValueError(f"good_qty must be 1-{total_qty}")
+
+    is_partial = good_qty is not None and good_qty < total_qty
+
+    # Find a merge target — the original parent this row was split off from,
+    # but only if its identity still matches and it's still 'good' and unpushed.
+    # Merging into a damaged/missing/pushed parent would corrupt that row's
+    # accounting, so fall back to creating a sibling in that case.
+    parent_id = item.get("parent_item_id")
+    parent = None
+    if parent_id:
+        candidate = query_one("SELECT * FROM intake_items WHERE id = %s", (parent_id,))
+        if (candidate
+                and candidate.get("item_status") == "good"
+                and not candidate.get("pushed_at")
+                and (candidate.get("tcgplayer_id") or None) == (item.get("tcgplayer_id") or None)
+                and (candidate.get("scrydex_id") or None) == (item.get("scrydex_id") or None)
+                and (candidate.get("product_name") or "") == (item.get("product_name") or "")
+                and (candidate.get("variance") or "") == (item.get("variance") or "")):
+            parent = candidate
+
+    if not is_partial:
+        # Full mark-good. If we have a merge target, fold the row back into it
+        # and delete this row — restores the pre-split state. Otherwise just
+        # flip status to 'good' on this row.
+        if parent:
+            new_parent_qty = (parent.get("quantity") or 0) + total_qty
+            new_parent_offer = (market_price * offer_pct * new_parent_qty).quantize(Decimal("0.01"))
+            execute(
+                "UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s",
+                (new_parent_qty, new_parent_offer, parent["id"])
+            )
+            execute("DELETE FROM intake_items WHERE id = %s", (item_id,))
+            _recalculate_session_totals(item["session_id"])
+            return query_one("SELECT * FROM intake_items WHERE id = %s", (parent["id"],))
+
+        full_offer = (market_price * offer_pct * total_qty).quantize(Decimal("0.01"))
+        execute(
+            "UPDATE intake_items SET item_status = 'good', offer_price = %s WHERE id = %s",
+            (full_offer, item_id)
+        )
+        _recalculate_session_totals(item["session_id"])
+        return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+
+    # Partial path: split the row.
+    remaining_qty = total_qty - good_qty
+    # Existing row keeps its current status; recompute its offer for the
+    # smaller remaining qty using its existing discount profile.
+    is_damaged = item.get("item_status") == "damaged"
+    rate = DAMAGE_DISCOUNT if is_damaged else Decimal("1")
+    remaining_offer = (market_price * rate * offer_pct * remaining_qty).quantize(Decimal("0.01"))
     execute(
-        "UPDATE intake_items SET item_status = 'good', offer_price = %s WHERE id = %s",
-        (full_offer, item_id)
+        "UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s",
+        (remaining_qty, remaining_offer, item_id)
     )
+
+    # The good portion goes either into the parent (merge) or a new sibling.
+    if parent:
+        new_parent_qty = (parent.get("quantity") or 0) + good_qty
+        new_parent_offer = (market_price * offer_pct * new_parent_qty).quantize(Decimal("0.01"))
+        execute(
+            "UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s",
+            (new_parent_qty, new_parent_offer, parent["id"])
+        )
+        _recalculate_session_totals(item["session_id"])
+        return query_one("SELECT * FROM intake_items WHERE id = %s", (parent["id"],))
+
+    good_id = str(uuid4())
+    good_offer = (market_price * offer_pct * good_qty).quantize(Decimal("0.01"))
+    execute("""
+        INSERT INTO intake_items (
+            id, session_id, product_name, set_name, tcgplayer_id,
+            quantity, market_price, offer_price, product_type,
+            is_mapped, item_status, parent_item_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'good', %s)
+    """, (
+        good_id, item["session_id"], item.get("product_name"), item.get("set_name"),
+        item.get("tcgplayer_id"), good_qty, market_price,
+        good_offer, item.get("product_type", "sealed"),
+        item.get("is_mapped", False), item.get("parent_item_id"),
+    ))
     _recalculate_session_totals(item["session_id"])
-    return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    return query_one("SELECT * FROM intake_items WHERE id = %s", (good_id,))
 
 
 

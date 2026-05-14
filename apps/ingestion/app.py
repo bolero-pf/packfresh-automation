@@ -421,8 +421,18 @@ def damage_item(item_id):
 
 @app.route("/api/ingest/item/<item_id>/mark-good", methods=["POST"])
 def mark_good(item_id):
-    item = ingest.mark_item_good(item_id)
-    return jsonify({"success": True, "item": _serialize(item)})
+    """Mark some-or-all of an item as good. Body: { good_qty? } — when given
+    and < item.quantity, splits the row and merges the good portion back into
+    the damage-split parent (if any). See ingest.mark_item_good."""
+    data = request.get_json(silent=True) or {}
+    good_qty = data.get("good_qty")
+    try:
+        item = ingest.mark_item_good(
+            item_id, int(good_qty) if good_qty is not None else None
+        )
+        return jsonify({"success": True, "item": _serialize(item)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/ingest/search-cards", methods=["POST"])

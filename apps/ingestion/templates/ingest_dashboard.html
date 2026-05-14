@@ -1063,11 +1063,21 @@ function _renderVerifyContent(data) {
     const sessionId = s.id;
     // Show all items including missing for verify.
     // Children are normally hidden (they're breakdown components seen in the
-    // Breakdown tab), EXCEPT damage-split children — those are the damaged
-    // portion of a partial-damage split and need to stay visible here.
+    // Breakdown tab) — EXCEPT damage-split children. Those carry item_status
+    // 'damaged', or 'good' when the operator partial-undos damage and the
+    // backend couldn't merge back into the parent (e.g., parent already
+    // pushed). Filtering out good children was the original "they disappeared"
+    // bug; keep them visible. We still hide breakdown components, which are
+    // children whose parent is item_status='broken_down'.
+    const _itemById = {};
+    items.forEach(i => { _itemById[i.id] = i; });
+    const _isBreakdownChild = i => {
+        if (!i.parent_item_id) return false;
+        const p = _itemById[i.parent_item_id];
+        return p && p.item_status === 'broken_down';
+    };
     const allItems = items.filter(i =>
-        i.item_status !== 'rejected' &&
-        (!i.parent_item_id || i.item_status === 'damaged'));
+        i.item_status !== 'rejected' && !_isBreakdownChild(i));
     const sorted = _sortItems(allItems);
     const groups = _groupItems(sorted);
 
@@ -3822,7 +3832,7 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
         actionCell = '<span style="color:var(--text-dim);font-size:0.72rem;">—</span>';
     } else if (isReceived && !isBroken && !isChild) {
         const damageToggle = isDamaged
-            ? `<button onclick="markGood('${item.id}', '${sessionId}')">✅ Mark Good</button>`
+            ? `<button onclick="markGood('${item.id}', '${sessionId}', ${item.quantity||1})">✅ Mark Good</button>`
             : `<button onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠️ Mark Damaged</button>`;
         actionCell = `
             <div style="display:flex; align-items:center; gap:6px;">
@@ -3936,9 +3946,28 @@ async function markDamaged(itemId, sessionId, totalQty) {
     } catch(err) { alert(err.message); }
 }
 
-async function markGood(itemId, sessionId) {
+async function markGood(itemId, sessionId, totalQty) {
+    // When the damaged row has qty > 1, ask how many to restore so customer-
+    // changed-mind partial undos work without forcing a flip-all-then-re-split
+    // dance. Backend (mark_item_good) folds the good portion back into the
+    // damage-split parent row when one exists, so the original row's qty is
+    // restored cleanly instead of leaving an invisible orphan good child.
+    let goodQty = totalQty;
+    if (totalQty && totalQty > 1) {
+        const input = await themedPrompt('Mark as Good', `How many are good? (1–${totalQty})`, totalQty);
+        if (input === null) return;
+        goodQty = parseInt(input);
+        if (isNaN(goodQty) || goodQty < 1 || goodQty > totalQty) {
+            alert(`Must be between 1 and ${totalQty}`); return;
+        }
+    }
     try {
-        await fetch(`/api/ingest/item/${itemId}/mark-good`, { method: 'POST' });
+        const body = (goodQty && goodQty < (totalQty || 1)) ? { good_qty: goodQty } : {};
+        await fetch(`/api/ingest/item/${itemId}/mark-good`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
         viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
 }
