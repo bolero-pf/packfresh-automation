@@ -1011,7 +1011,21 @@ def push_dry_run(session_id):
     if requested_item_ids:
         active = [i for i in active if str(i["id"]) in requested_item_ids]
 
+    # Mirror push_session_live: storage/display raw must be barcoded first.
+    skipped_unbarcoded = [
+        i for i in active
+        if i.get("product_type") == "raw" and not i.get("is_graded")
+        and (i.get("routing_destination") or "storage") in ("storage", "display")
+        and not i.get("barcoded_at")
+    ]
+    if skipped_unbarcoded:
+        skipped_ids = {str(i["id"]) for i in skipped_unbarcoded}
+        active = [i for i in active if str(i["id"]) not in skipped_ids]
+
     if not active:
+        if skipped_unbarcoded:
+            return jsonify({"error": f"{len(skipped_unbarcoded)} raw card(s) need Barcode → Route → Push first.",
+                            "skipped_unbarcoded": len(skipped_unbarcoded)}), 400
         return jsonify({"error": "No active mapped items to preview"}), 400
 
     # Split by product_type
@@ -1130,6 +1144,7 @@ def push_dry_run(session_id):
         "would_create_listing": sum(1 for r in results if r.get("action") == "would_create_listing"),
         "would_ingest_raw":     sum(1 for r in results if r.get("action") == "would_ingest_raw"),
         "would_push_graded":    sum(1 for r in results if r.get("action") == "would_push_graded"),
+        "skipped_unbarcoded":   len(skipped_unbarcoded),
     })
 
 
@@ -1375,7 +1390,28 @@ def push_session_live(session_id):
     if requested_item_ids:
         active = [i for i in active if str(i["id"]) in requested_item_ids]
 
+    # Raw cards routed to storage/display MUST be barcoded first so they flow
+    # through the scan-into-bin Push step (see push-plan widget). Pushing them
+    # here would silently re-enter the legacy "create raw_cards + assign bin
+    # in one shot" path, which is exactly what the Barcode→Route→Push split
+    # was meant to retire. Grade/bulk-routed raw is fine — those never get
+    # pre-barcoded.
+    skipped_unbarcoded = [
+        i for i in active
+        if i.get("product_type") == "raw" and not i.get("is_graded")
+        and (i.get("routing_destination") or "storage") in ("storage", "display")
+        and not i.get("barcoded_at")
+    ]
+    if skipped_unbarcoded:
+        skipped_ids = {str(i["id"]) for i in skipped_unbarcoded}
+        active = [i for i in active if str(i["id"]) not in skipped_ids]
+
     if not active:
+        if skipped_unbarcoded:
+            return jsonify({
+                "error": f"{len(skipped_unbarcoded)} raw card(s) need to go through Barcode → Route → Push first. Storage/display raw cards can't be pushed inline anymore.",
+                "skipped_unbarcoded": len(skipped_unbarcoded),
+            }), 400
         already_pushed = [i for i in items if i.get("pushed_at")]
         if already_pushed:
             ingest.mark_session_ingested(session_id)
@@ -1404,7 +1440,12 @@ def push_session_live(session_id):
     )
     thread.start()
 
-    return jsonify({"job_id": job_id, "status": "running", "total": len(active_dicts)})
+    return jsonify({
+        "job_id": job_id,
+        "status": "running",
+        "total": len(active_dicts),
+        "skipped_unbarcoded": len(skipped_unbarcoded),
+    })
 
 
 def _push_session_worker(job_id, session_id, active):

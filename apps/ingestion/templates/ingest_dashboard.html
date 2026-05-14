@@ -5549,20 +5549,37 @@ async function pushLive(sessionId) {
     const items = _currentSessionData ? _currentSessionData.items : [];
     const unpushed = items.filter(i => ['good','damaged'].includes(i.item_status) && i.is_mapped && !i.pushed_at);
     const gradedItems = unpushed.filter(i => i.is_graded);
+    // Storage/display-routed raw must be barcoded first — backend now refuses
+    // to inline-create raw_cards + assign bins from this endpoint. Surface that
+    // in the confirm so staff don't think they're pushing 400+ items when the
+    // backend will only push the slabs/sealed/bulk/grade portion.
     const sealedRawItems = unpushed.filter(i => !i.is_graded);
+    const needsBarcodeFirst = sealedRawItems.filter(i =>
+        i.product_type === 'raw'
+        && ['storage','display'].includes(i.routing_destination || 'storage')
+        && !i.barcoded_at
+    );
+    const willPushNow = sealedRawItems.filter(i => !needsBarcodeFirst.includes(i));
     const gradedIds = new Set(gradedItems.map(i => i.id));
     const totalPending = unpushed.length;
+    const totalWillPush = gradedItems.length + willPushNow.length;
 
-    const confirmMsg = `Push ${totalPending} items (${gradedItems.length} graded slabs, ${sealedRawItems.length} sealed/raw). Cannot be easily undone.`;
+    let confirmMsg = `Push ${totalWillPush} items (${gradedItems.length} graded slabs, ${willPushNow.length} sealed/raw). Cannot be easily undone.`;
+    if (needsBarcodeFirst.length > 0) {
+        confirmMsg += `\n\n⚠ ${needsBarcodeFirst.length} raw card(s) routed to storage/binder will NOT push — they need Barcode → Route → Push first.`;
+    }
 
     const ok = await themedConfirm('🚀 Push Session', confirmMsg,
-        { confirmText: `Push ${totalPending} Items`, dangerous: true });
+        { confirmText: `Push ${totalWillPush} Items`, dangerous: true });
     if (!ok) return;
 
     const panel = document.getElementById('push-live-results');
 
     // ── Step 1: Push sealed + raw items (background job with polling) ────────
-    if (sealedRawItems.length > 0) {
+    // Use willPushNow, not sealedRawItems — the unbarcoded storage/display raw
+    // is filtered server-side too, but skipping the call entirely when nothing
+    // remains avoids a noisy "0 active items" error toast.
+    if (willPushNow.length > 0) {
         panel.innerHTML = '<div class="loading"><span class="spinner"></span> Starting push...</div>';
         try {
             // Send no item_ids — backend pushes all unpushed mapped items
@@ -5593,7 +5610,7 @@ async function pushLive(sessionId) {
 
     // ── Step 2: Graded slabs — cert-entry UI ──────────────────────────────────
     if (gradedItems.length > 0) {
-        await _showGradedCertPanel(sessionId, gradedItems.map(i => i.id), panel, sealedRawItems.length > 0);
+        await _showGradedCertPanel(sessionId, gradedItems.map(i => i.id), panel, willPushNow.length > 0);
     }
 }
 
