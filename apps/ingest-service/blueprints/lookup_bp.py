@@ -57,14 +57,17 @@ def _enrich_sealed_with_shopify_tcg(results: list):
 
 @bp.route("/api/lookup/card", methods=["POST"])
 def lookup_card():
-    """Look up a raw card by tcgplayer_id. Returns card data + variant/condition prices."""
+    """Look up a raw card by tcgplayer_id (preferred) or scrydex_id (for JP /
+    Scrydex-only cards with no TCGplayer mapping, e.g. PCGP_JA-*). Returns
+    card data + variant/condition prices."""
     if not pricing:
         return jsonify({"error": "PPT API not configured (set PPT_API_KEY env var)"}), 503
 
     data = request.json or {}
     tcgplayer_id = data.get("tcgplayer_id")
-    if not tcgplayer_id:
-        return jsonify({"error": "tcgplayer_id required"}), 400
+    scrydex_id = (data.get("scrydex_id") or "").strip() or None
+    if not tcgplayer_id and not scrydex_id:
+        return jsonify({"error": "tcgplayer_id or scrydex_id required"}), 400
 
     # Only fetch live eBay comps for the specific (company, grade) the caller
     # asks about. Enriching every grade is a 20+ paginated Scrydex calls and
@@ -73,11 +76,12 @@ def lookup_card():
     req_grade   = (data.get("grade_value")   or "").strip() or None
 
     try:
-        view = pricing.get_card_view(tcgplayer_id=int(tcgplayer_id))
+        tcg_int = int(tcgplayer_id) if tcgplayer_id else None
+        view = pricing.get_card_view(scrydex_id=scrydex_id, tcgplayer_id=tcg_int)
         if not view:
             return jsonify({"error": "Card not found"}), 404
 
-        logger.info(f"CARD LOOKUP {tcgplayer_id}: "
+        logger.info(f"CARD LOOKUP tcg={tcg_int} scrydex={scrydex_id}: "
                          f"variants={list((view.get('variants') or {}).keys())} "
                          f"primary={view.get('primary_variant')}")
 
@@ -85,11 +89,16 @@ def lookup_card():
         if req_company and req_grade:
             try:
                 from graded_pricing import get_live_graded_comps
-                live = get_live_graded_comps(int(tcgplayer_id), req_company, req_grade, db)
+                # scrydex_id wins inside get_live_graded_comps — JP cards
+                # have no tcgplayer_id but their comps still resolve.
+                live = get_live_graded_comps(
+                    tcg_int, req_company, req_grade, db,
+                    scrydex_id=scrydex_id,
+                )
                 if live:
                     live_graded[req_company] = {req_grade: live}
             except Exception as e:
-                logger.warning(f"Live graded enrichment failed for TCG#{tcgplayer_id} {req_company} {req_grade}: {e}")
+                logger.warning(f"Live graded enrichment failed for tcg={tcg_int} scrydex={scrydex_id} {req_company} {req_grade}: {e}")
 
         return jsonify({
             "card": view,

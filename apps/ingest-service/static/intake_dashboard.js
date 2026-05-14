@@ -3582,7 +3582,14 @@ function _relinkRenderResults(results, resultsDiv, append) {
                 qty: 1,
                 offerPct: null,
                 onPick: (pick) => {
-                    if (pick && pick.tcgId) _relinkFetchAndShowConditions(parseInt(pick.tcgId));
+                    if (!pick) return;
+                    // Scrydex-only cards (JP promos like PCGP_JA-*, sealed
+                    // that never got a TCGplayer mapping) have no tcgId — fall
+                    // back to scrydexId so the chip click still resolves.
+                    const tcg = pick.tcgId ? parseInt(pick.tcgId) : null;
+                    const sid = pick.scrydexId || null;
+                    if (!tcg && !sid) return;
+                    _relinkFetchAndShowConditions(tcg, sid);
                 },
                 onTryPpt: () => _relinkDoSearch('ppt'),
             });
@@ -3879,7 +3886,7 @@ async function _relinkSealedConfirm({ tcgId, scrydexId, price, name, setName }) 
     } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
 }
 
-async function _relinkFetchAndShowConditions(tcgId) {
+async function _relinkFetchAndShowConditions(tcgId, scrydexId) {
     const rs = window._relinkState;
     const resultsDiv = document.getElementById('relink-results');
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading pricing...</div>';
@@ -3887,7 +3894,10 @@ async function _relinkFetchAndShowConditions(tcgId) {
         // Fold grade params into the initial lookup when the source item has
         // any grade hint — the backend computes live eBay comps in the same
         // call, saving a round-trip vs firing _relinkFetchGraded() afterwards.
-        const lookupBody = { tcgplayer_id: tcgId };
+        // tcgplayer_id wins; scrydex_id is the JP / Scrydex-only fallback.
+        const lookupBody = {};
+        if (tcgId) lookupBody.tcgplayer_id = tcgId;
+        if (scrydexId) lookupBody.scrydex_id = scrydexId;
         const looksGradedHint = rs.isGraded || !!rs.gradeCompany || !!rs.gradeValue;
         if (looksGradedHint) {
             lookupBody.grade_company = rs.gradeCompany || 'PSA';
@@ -3904,7 +3914,8 @@ async function _relinkFetchAndShowConditions(tcgId) {
         const variants = d.variants || {};
         let primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
         if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
-        rs.tcgId = tcgId;
+        rs.tcgId = tcgId || (card.tcgplayer_id || null);
+        rs.scrydexId = scrydexId || card.scrydex_id || null;
         rs.card = card;
         rs.variants = variants;
         rs.primary = primary;
@@ -4124,14 +4135,18 @@ function _relinkRenderConditions(selectedCond) {
 
         body.innerHTML = '<div class="loading"><span class="spinner"></span> Relinking...</div>';
         try {
+            // tcgplayer_id is preferred; scrydex_id is the JP / Scrydex-only
+            // binding key (PCGP_JA-*, etc.). map-item requires one or the other.
             const mapPayload = {
-                item_id: rs.itemId, tcgplayer_id: rs.tcgId,
+                item_id: rs.itemId,
                 override_price: price,
                 product_name: rs.newName, set_name: rs.setName,
                 card_number: rs.cardNum, rarity: rs.rarity,
                 variance: rs.primary || '',
                 session_id: rs.sessionId,
             };
+            if (rs.tcgId) mapPayload.tcgplayer_id = rs.tcgId;
+            if (rs.scrydexId) mapPayload.scrydex_id = rs.scrydexId;
             const mapR = await fetch('/api/intake/map-item', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(mapPayload),
@@ -4183,19 +4198,18 @@ function _relinkGradeChanged() {
 // lands in the response when grade_company/grade_value are passed.
 async function _relinkFetchGraded() {
     const rs = window._relinkState;
-    if (!rs || !rs.tcgId) return;
+    if (!rs || (!rs.tcgId && !rs.scrydexId)) return;
     const company = rs._relinkGradeCompany || 'PSA';
     const grade   = rs._relinkGradeValue   || '9';
     rs._relinkGradedLoading = true;
     if (rs._relinkMode === 'graded') _relinkRenderConditions('NM');
     try {
+        const body = { grade_company: company, grade_value: grade };
+        if (rs.tcgId) body.tcgplayer_id = rs.tcgId;
+        if (rs.scrydexId) body.scrydex_id = rs.scrydexId;
         const r = await fetch('/api/lookup/card', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                tcgplayer_id: rs.tcgId,
-                grade_company: company,
-                grade_value: grade,
-            }),
+            body: JSON.stringify(body),
         });
         const d = await r.json();
         rs.gradedPrices = d.graded_prices || null;   // scalar cache
@@ -4897,6 +4911,7 @@ function _renderCardSearchResults(rawCards, container, opts) {
     // per printing, with variant chips inside each row.
     const cardRows = rawCards.map(c => {
         const cardTcg = c.tcgPlayerId || c.tcgplayer_id || c.id || '';
+        const cardScrydex = c.scrydexId || c.scrydex_id || '';
         const setName = c.setName || c.set_name || (c.set ? c.set.name : '') || '';
         const expCode = (c.expansionId || c.expansion_id || '').toUpperCase();
         const game = (c.game || '').toLowerCase();
@@ -4926,7 +4941,7 @@ function _renderCardSearchResults(rawCards, container, opts) {
         variants.sort((a, b) => (b.price || 0) - (a.price || 0));
         const maxPrice = variants.reduce((m, v) => Math.max(m, v.price || 0), 0);
         const displayImg = variants[0]?.img || cardImg;
-        return { c, setName, expCode, game, cardNum, rarity, img: displayImg, variants, maxPrice };
+        return { c, setName, expCode, game, cardNum, rarity, img: displayImg, variants, maxPrice, cardScrydex };
     });
     cardRows.sort((a, b) => b.maxPrice - a.maxPrice);
 
@@ -4936,13 +4951,14 @@ function _renderCardSearchResults(rawCards, container, opts) {
     const _esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
     container.innerHTML = cardRows.map((row, idx) => {
-        const { c, setName, expCode, game, cardNum, rarity, img, variants } = row;
+        const { c, setName, expCode, game, cardNum, rarity, img, variants, cardScrydex } = row;
         const rowId = `_csrow_${idx}`;
         const cardName = c.name || '';
 
         variants.forEach((v, vi) => {
             picks.set(`${rowId}_v${vi}`, {
-                tcgId: v.tcgId, cardName, setName, cardNum, rarity,
+                tcgId: v.tcgId, scrydexId: cardScrydex,
+                cardName, setName, cardNum, rarity,
                 condition, qty, price: v.price || 0, variant: v.name || '',
             });
         });
