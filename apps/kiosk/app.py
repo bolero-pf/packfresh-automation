@@ -2386,7 +2386,9 @@ def _ser(d: dict) -> dict:
 def _shopify_rest(method, path, **kwargs):
     """Shopify Admin REST API call with retry. Handles 5xx, transient
     network errors, and 429 rate-limit (honors Retry-After). 4xx other
-    than 429 raise immediately."""
+    than 429 raise immediately with Shopify's response body attached so
+    callers can see WHY the request was rejected (validation errors come
+    back in the body, not the status line)."""
     url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_VERSION}{path}"
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_TOKEN,
@@ -2398,15 +2400,20 @@ def _shopify_rest(method, path, **kwargs):
             r = _requests.request(method, url, headers=headers, timeout=30, **kwargs)
             if r.status_code == 429:
                 # Rate-limited. Wait Retry-After (Shopify usually returns
-                # a few seconds) then try again. Last attempt re-raises.
-                if attempt >= 5:
-                    r.raise_for_status()
-                wait = float(r.headers.get("Retry-After", "2"))
-                logger.warning(f"Shopify 429 on {method} {path} (attempt {attempt + 1}); "
-                               f"sleeping {wait:.1f}s")
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
+                # a few seconds) then try again. Last attempt falls through
+                # to raise_for_status / body-attach below.
+                if attempt < 5:
+                    wait = float(r.headers.get("Retry-After", "2"))
+                    logger.warning(f"Shopify 429 on {method} {path} (attempt {attempt + 1}); "
+                                   f"sleeping {wait:.1f}s")
+                    time.sleep(wait)
+                    continue
+            if not r.ok:
+                body = (r.text or "")[:1000]
+                raise _requests.HTTPError(
+                    f"{r.status_code} {r.reason} for {method} {path} — body: {body}",
+                    response=r,
+                )
             return r.json() if r.content else {}
         except (_requests.Timeout, _requests.ConnectionError, _requests.HTTPError) as e:
             if attempt >= 5:
