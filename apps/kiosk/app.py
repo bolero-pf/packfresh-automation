@@ -2560,9 +2560,17 @@ def _create_kiosk_product(card, hold_id):
             f"<p>Condition: {cond_label}</p>")
     price = float(card.get("current_price") or 0)
 
+    # Explicit handle pinned to the barcode — Shopify auto-derives the handle
+    # from the title and two same-name/condition cards collide ("Eevee #205
+    # [Near Mint]" twice → handle taken → 422). The barcode is unique per
+    # raw_card, lowercase + alphanumeric with hyphens, which is exactly the
+    # handle format Shopify accepts.
+    handle = f"kiosk-{card['barcode'].lower()}"
+
     payload = {
         "product": {
             "title": title,
+            "handle": handle,
             "body_html": body,
             "status": "active",
             "product_type": "Raw Card",
@@ -2969,12 +2977,14 @@ def _sweep_orphan_kiosk_products() -> int:
     etc.) — those leave hold_items deleted on our side but the product
     alive in Shopify, so we have to rediscover them via Shopify.
 
-    Cross-check is by SKU (= raw_cards.barcode). Skip anything <10 min old
-    so we don't race an in-flight checkout."""
+    Cross-check is by SKU (= raw_cards.barcode). Primary safety is the
+    current_hold_id check below; the age floor matches CHAMPION_HOLD_MINUTES
+    so even a stuck raw_cards lock can't outlive the hold window and get
+    a still-shoppable product swept out from under a customer."""
     if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
         return 0
 
-    cutoff = (datetime.utcnow() - timedelta(minutes=10)).isoformat() + "Z"
+    cutoff = (datetime.utcnow() - timedelta(minutes=CHAMPION_HOLD_MINUTES)).isoformat() + "Z"
     query = """
         query OrphanSweep($q: String!, $cursor: String) {
           products(first: 50, after: $cursor, query: $q) {
