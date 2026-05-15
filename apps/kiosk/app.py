@@ -2955,10 +2955,91 @@ def _cleanup_hold(hold_id):
     logger.info(f"Cleaned up abandoned Champion hold {hold_id}")
 
 
+def _sweep_orphan_kiosk_products() -> int:
+    """Delete Shopify kiosk-raw products whose underlying raw_card is no
+    longer locked to a hold. Catches products that survived _cleanup_hold
+    when the per-product DELETE failed (pre-429-retry, transient network,
+    etc.) — those leave hold_items deleted on our side but the product
+    alive in Shopify, so we have to rediscover them via Shopify.
+
+    Cross-check is by SKU (= raw_cards.barcode). Skip anything <10 min old
+    so we don't race an in-flight checkout."""
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return 0
+
+    cutoff = (datetime.utcnow() - timedelta(minutes=10)).isoformat() + "Z"
+    query = """
+        query OrphanSweep($q: String!, $cursor: String) {
+          products(first: 50, after: $cursor, query: $q) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
+                id
+                createdAt
+                variants(first: 1) { edges { node { sku } } }
+              }
+            }
+          }
+        }
+    """
+    q_str = f"tag:kiosk-raw AND created_at:<{cutoff}"
+    cursor = None
+    candidates: list[tuple[str, str]] = []  # (numeric_product_id, sku)
+    while True:
+        try:
+            resp = _shopify_gql(query, {"q": q_str, "cursor": cursor})
+        except Exception as e:
+            logger.warning(f"Orphan sweep: GraphQL page fetch failed: {e}")
+            break
+        products = resp.get("data", {}).get("products", {})
+        for edge in products.get("edges", []):
+            node = edge.get("node", {}) or {}
+            pid_gid = node.get("id", "")
+            pid = pid_gid.rsplit("/", 1)[-1] if pid_gid else ""
+            v_edges = (node.get("variants", {}) or {}).get("edges", []) or []
+            sku = ""
+            if v_edges:
+                sku = (v_edges[0].get("node", {}) or {}).get("sku", "") or ""
+            if pid and sku:
+                candidates.append((pid, sku))
+        page_info = products.get("pageInfo", {}) or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+
+    if not candidates:
+        return 0
+
+    skus = [c[1] for c in candidates]
+    placeholders = ",".join(["%s"] * len(skus))
+    held = db.query(
+        f"SELECT barcode FROM raw_cards WHERE barcode IN ({placeholders}) "
+        f"AND current_hold_id IS NOT NULL",
+        tuple(skus),
+    )
+    held_set = {r["barcode"] for r in held}
+
+    deleted = 0
+    for pid, sku in candidates:
+        if sku in held_set:
+            continue
+        try:
+            _shopify_rest("DELETE", f"/products/{pid}.json")
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"Orphan sweep: DELETE product {pid} (sku={sku}) failed: {e}")
+
+    if deleted:
+        logger.info(f"Orphan sweep: deleted {deleted} stale kiosk-raw product(s)")
+    return deleted
+
+
 @app.route("/api/cleanup/abandoned", methods=["POST"])
 def cleanup_abandoned():
     """
-    Expire Champion holds that haven't been paid within CHAMPION_HOLD_MINUTES.
+    Expire Champion holds that haven't been paid within CHAMPION_HOLD_MINUTES,
+    then sweep any orphaned kiosk-raw Shopify products left behind by failed
+    per-product deletes during _cleanup_hold.
     Called by Railway cron every 10 minutes.
     """
     auth = request.headers.get("Authorization", "")
@@ -2981,7 +3062,9 @@ def cleanup_abandoned():
     if cleaned:
         logger.info(f"Cleanup: expired {cleaned} abandoned Champion hold(s)")
 
-    return jsonify({"cleaned": cleaned})
+    swept = _sweep_orphan_kiosk_products()
+
+    return jsonify({"cleaned": cleaned, "orphans_swept": swept})
 
 
 @app.route("/health")
