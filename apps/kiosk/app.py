@@ -2890,6 +2890,64 @@ def webhook_order_paid():
             if extras:
                 logger.info(f"Deleted {len(extras)} extra listing(s) for sku={sku}: {extras}")
 
+    # ── 4. Release items the Champion REMOVED from their Shopify cart ────────
+    # Step 2 flips every locked raw_card to PENDING_SALE; step 3 then flips
+    # only the purchased SKUs to SOLD. Anything still PENDING_SALE in one of
+    # these holds is a cart-removal — the customer dropped it before paying,
+    # so we have to unlock the raw_card AND delete its dangling Shopify
+    # product (which was created at /api/checkout and would otherwise sit
+    # orphaned forever since the hold closes with checkout_status='completed'
+    # and the abandoned-hold cleanup only touches 'pending').
+    for hid in hold_ids:
+        try:
+            unpurchased = db.query("""
+                SELECT hi.raw_card_id, hi.shopify_product_id, hi.barcode
+                  FROM hold_items hi
+                  JOIN raw_cards rc ON rc.id = hi.raw_card_id
+                 WHERE hi.hold_id = %s
+                   AND rc.current_hold_id = %s
+                   AND rc.state = 'PENDING_SALE'
+            """, (hid, hid))
+            if not unpurchased:
+                continue
+
+            with db.get_cursor(commit=True) as cur:
+                cur.execute("""
+                    UPDATE raw_cards
+                       SET state = CASE
+                                     WHEN COALESCE(sl.location_type, 'bin')
+                                          IN ('binder','display_case')
+                                     THEN 'DISPLAY'
+                                     ELSE 'STORED'
+                                   END,
+                           current_hold_id = NULL,
+                           updated_at = CURRENT_TIMESTAMP
+                      FROM storage_locations sl
+                     WHERE raw_cards.bin_id = sl.id
+                       AND raw_cards.current_hold_id = %s
+                       AND raw_cards.state = 'PENDING_SALE'
+                """, (hid,))
+                cur.execute("""
+                    UPDATE raw_cards
+                       SET state = 'STORED',
+                           current_hold_id = NULL,
+                           updated_at = CURRENT_TIMESTAMP
+                     WHERE current_hold_id = %s
+                       AND state = 'PENDING_SALE'
+                """, (hid,))
+            for item in unpurchased:
+                pid = item.get("shopify_product_id")
+                if pid:
+                    try:
+                        _shopify_rest("DELETE", f"/products/{pid}.json")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete unpurchased product {pid} "
+                                       f"(barcode={item['barcode']}): {e}")
+                logger.info(f"Released Champion cart-removal: barcode={item['barcode']} "
+                            f"hold={hid}")
+        except Exception as e:
+            logger.warning(f"Failed to release unpurchased items for hold {hid}: {e}")
+
     if not hold_ids:
         return jsonify({"ok": True, "kiosk": "pos_match_attempted"}), 200
 
