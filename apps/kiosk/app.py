@@ -3256,8 +3256,14 @@ def _flag_unresolved_pulls():
 
 
 def _cleanup_loop():
+    # Warm-up delay so the DB pool / Shopify env are initialized before the
+    # first pass — but DON'T sleep the full 10-min interval up front like
+    # before. The old "sleep then run" ordering meant every redeploy reset
+    # the timer and the first cleanup didn't fire until 10 minutes of
+    # uninterrupted uptime, so during an active push session abandoned
+    # Champion holds piled up indefinitely.
+    time.sleep(30)
     while True:
-        time.sleep(600)
         try:
             # 1. Champion checkout abandonment (existing)
             cutoff = datetime.utcnow() - timedelta(minutes=CHAMPION_HOLD_MINUTES)
@@ -3282,8 +3288,13 @@ def _cleanup_loop():
             #    run after (2) and (3) so the just-flipped EXPIRED/UNRESOLVED
             #    items count as terminal in the same loop iteration.
             _auto_close_fully_resolved_holds()
+
+            # 5. Orphan Shopify products tagged kiosk-raw whose raw_card is
+            #    no longer locked (failed-cleanup leakage).
+            _sweep_orphan_kiosk_products()
         except Exception as e:
             logger.warning(f"Background cleanup error: {e}")
+        time.sleep(600)
 
 _cleanup_thread = threading.Thread(target=_cleanup_loop, daemon=True)
 _cleanup_thread.start()
