@@ -676,8 +676,9 @@ def api_raw_card_pull_restock(hold_item_id):
         bin to walk the card to.
 
     Shopify listing was deleted at sale, so we clear shopify_product_id/
-    variant_id either way — the nightly raw_card_updater + raw-rebind picker
-    will re-list. Operator refunds in Shopify Admin manually.
+    variant_id either way. Champion listings are created on the fly at
+    checkout, so the card just becomes browsable on the kiosk again as
+    soon as state flips back. Operator refunds in Shopify Admin manually.
     """
     row, err = _load_pull_item(hold_item_id)
     if err:
@@ -2063,7 +2064,7 @@ async function pullRestock(holdItemId, binLabel, binType, btn) {
   } else {
     where = 'No bin on file for this card — the system will auto-assign a storage bin and tell you where to put it after you confirm.';
   }
-  if (!confirm(where + '\\n\\nState flips back so the card becomes sellable again, the deleted Shopify listing gets rebuilt by the nightly raw-card updater, and the hold item closes. Refund the customer manually in Shopify Admin.')) return;
+  if (!confirm(where + '\\n\\nState flips back so the card becomes browsable in the kiosk again (Champion listings are created on the fly at checkout, so there is nothing to re-list). Refund the customer manually in Shopify Admin.')) return;
   btn.disabled = true;
   try {
     const r = await fetch('/api/raw-card-pulls/item/' + holdItemId + '/restock', { method: 'POST' });
