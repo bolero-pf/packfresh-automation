@@ -1047,7 +1047,12 @@ body.modal-open { overflow: hidden; touch-action: none; }
 </div>
 
 <script>
-const MAX = 20;
+// Cart cap depends on cohort: guest in-store holds top out at 20 (staff has
+// to pull the cards), Champions check out remotely so we let them basket up
+// to 50. Mirrors MAX_HOLD_ITEMS / MAX_CHAMPION_CART in kiosk/app.py.
+function cartMax() {
+  return (_champion && _champion.verified) ? 50 : 20;
+}
 const KIOSK_ACCESS_KEY = '{{ access_key }}';
 // Inline card-stack glyph reused across empty states / no-image fallbacks /
 // detail placeholders. Sized by the parent (.empty-icon, .no-img, etc) via
@@ -2758,7 +2763,7 @@ function openProductDetail(p) {
   // intentionally simpler than raw cards.
   const overlay = document.getElementById('detail-overlay');
   const panel = document.getElementById('detail-panel');
-  const max = Math.min(p.available_qty || 1, MAX);
+  const max = Math.min(p.available_qty || 1, cartMax());
   const img = p.image_url
     ? `<img src="${esc(p.image_url)}" alt="${esc(p.title)}"
             style="width:100%;max-height:260px;object-fit:contain;border-radius:10px;background:var(--surface2);margin-bottom:14px;">`
@@ -2812,8 +2817,8 @@ function confirmAddProduct(variantId) {
   if (!p) return;
   const valEl = document.getElementById('prod-qty-val');
   const qty = Math.max(1, Math.min(p.available_qty || 1, parseInt(valEl?.dataset.qty) || 1));
-  if (cartCount() + qty > MAX) {
-    showToast(`Cart limit is ${MAX} items.`);
+  if (cartCount() + qty > cartMax()) {
+    showToast(`Cart limit is ${cartMax()} items.`);
     return;
   }
   addProductToCart(_activeKind, p, qty);
@@ -2825,7 +2830,7 @@ function addProductToCart(kind, p, qty) {
   const probe = { kind, shopify_variant_id: p.shopify_variant_id };
   const existing = _cart.find(c => _sameCartItem(c, probe));
   if (existing) {
-    existing.qty = Math.min(existing.qty + qty, MAX);
+    existing.qty = Math.min(existing.qty + qty, cartMax());
     existing.avail = p.available_qty;
   } else {
     // SKU comes from inventory_product_cache (populated by the daily price-
@@ -3135,7 +3140,7 @@ function renderDetail(card, copies, meta) {
         <div class="copy-list" id="copy-list">${condRows}</div>
       </div>
     </div>
-    ${cartTotal >= MAX ? `<div class="warning">You've reached the maximum of ${MAX} items per request.</div>` : ''}
+    ${cartTotal >= cartMax() ? `<div class="warning">You've reached the maximum of ${cartMax()} items per request.</div>` : ''}
     <div class="btn-row" style="margin-top:8px;">
       <button class="btn btn-outline" onclick="closeDetailPanel()">Back to Browse</button>
       <button class="btn btn-gold" id="detail-picks-btn" onclick="closeDetailPanel(); openCart();">View My Picks (${cartTotal})</button>
@@ -3167,7 +3172,7 @@ document.addEventListener('click', function(e) {
   if (!btn) return;
   const row = btn.closest('.copy-row');
   if (!row || !row.dataset.cardName) return;
-  if (cartCount() >= MAX) return;
+  if (cartCount() >= cartMax()) return;
   addToCart(row.dataset.cardName, row.dataset.setName, row.dataset.cond, 1,
             parseFloat(row.dataset.price) || 0, row.dataset.imageUrl,
             parseInt(row.dataset.avail) || 1,
@@ -3211,7 +3216,7 @@ document.addEventListener('click', function(e) {
     return;
   }
   if (newQty > avail) { showToast(`Only ${avail} available in ${cond}`); return; }
-  if (delta > 0 && cartCount() >= MAX) return;
+  if (delta > 0 && cartCount() >= cartMax()) return;
   item.qty = newQty;
   updateCartBadge();
   _saveCart();
@@ -3253,7 +3258,7 @@ document.addEventListener('click', function(e) {
     return;
   }
   if (newQty > avail) { showToast(`Only ${avail} available in ${cond}`); return; }
-  if (delta > 0 && cartCount() >= MAX) return;
+  if (delta > 0 && cartCount() >= cartMax()) return;
   item.qty = newQty;
   updateCartBadge();
   _saveCart();
@@ -3274,7 +3279,7 @@ document.addEventListener('click', function(e) {
   }
   // Update count
   const limitEl = document.querySelector('.cart-limit');
-  if (limitEl) limitEl.textContent = `${cartCount()} of ${MAX} items selected`;
+  if (limitEl) limitEl.textContent = `${cartCount()} of ${cartMax()} items selected`;
 });
 
 
@@ -3300,7 +3305,7 @@ function addToCart(cardName, setName, cond, qty, price, imageUrl, avail, variant
                   variant_key: variantKey, tcg_id: tcgId || '', scrydex_id: scrydexId || '' };
   const existing = _cart.find(c => _sameCartItem(c, probe));
   if (existing) {
-    existing.qty = Math.min(existing.qty + qty, MAX);
+    existing.qty = Math.min(existing.qty + qty, cartMax());
     if (avail) existing.avail = avail;
   } else {
     _cart.push({ card_name: cardName, set_name: setName, condition: cond,
@@ -3428,7 +3433,7 @@ function renderCart(panel) {
         <button class="btn btn-outline" style="min-width:44px;padding:0 12px;" onclick="closeCartPanel()">✕</button>
       </div>
     </div>
-    <div class="cart-limit">${total} of ${MAX} items selected</div>
+    <div class="cart-limit">${total} of ${cartMax()} items selected</div>
     <div class="cart-items">${items}</div>
     <div class="cart-total-bar">
       <div class="cart-total-label">Estimated Total</div>
