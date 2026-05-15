@@ -828,9 +828,12 @@ def browse():
     # display when a card has multiple printings in Scrydex.
     #
     # conditions / available_qty count both STORED and DISPLAY (FG + binders),
-    # since both are cartable. Inner subquery groups by (state, condition)
-    # only — no bin_label — otherwise jsonb_object_agg sees duplicate keys
-    # when a card sits in multiple bins and only the last write is kept.
+    # since both are cartable. State is NOT in the inner GROUP BY — splitting
+    # by state produced two inner rows per condition (one STORED, one DISPLAY),
+    # and the outer jsonb_object_agg(condition, cond_qty) silently kept only
+    # one of them on duplicate keys. Arbok ex 151 sat in inventory at 5 STORED
+    # + 2 DISPLAY and the tile showed "NMx5". Inner now folds across states
+    # via FILTER on COUNT(*), so each condition appears exactly once.
     rows = db.query(f"""
         SELECT
             card_name,
@@ -840,15 +843,14 @@ def browse():
             MAX(variant_raw) AS variant_raw,
             variant_key,
             MAX(image_url) AS image_url,
-            SUM(cond_qty) FILTER (WHERE state IN ('STORED','DISPLAY')) AS available_qty,
-            SUM(cond_qty) AS total_qty,
+            SUM(cond_qty) AS available_qty,
+            SUM(total_cond_qty) AS total_qty,
             MIN(min_price) AS min_price,
             MAX(max_price) AS max_price,
             MAX(created_at) AS created_at,
-            jsonb_object_agg(condition, cond_qty) FILTER (WHERE state IN ('STORED','DISPLAY')) AS conditions
+            jsonb_object_agg(condition, cond_qty) FILTER (WHERE cond_qty > 0) AS conditions
         FROM (
             SELECT card_name, set_name, tcgplayer_id, scrydex_id,
-                   state,
                    variant AS variant_raw,
                    CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
                         THEN ''
@@ -856,14 +858,15 @@ def browse():
                    END AS variant_key,
                    image_url,
                    condition,
-                   COUNT(*) AS cond_qty,
+                   COUNT(*) FILTER (WHERE state IN ('STORED','DISPLAY')) AS cond_qty,
+                   COUNT(*) AS total_cond_qty,
                    MIN(current_price) AS min_price,
                    MAX(current_price) AS max_price,
                    MAX(created_at) AS created_at
             FROM raw_cards
             WHERE {where}
             GROUP BY card_name, set_name, tcgplayer_id, scrydex_id,
-                     state, variant_raw, variant_key, image_url, condition
+                     variant_raw, variant_key, image_url, condition
         ) sub
         GROUP BY card_name, set_name, tcgplayer_id, variant_key
         ORDER BY {order_by}
