@@ -2931,14 +2931,44 @@ def _cleanup_hold(hold_id):
         SELECT raw_card_id, shopify_product_id FROM hold_items WHERE hold_id = %s
     """, (hold_id,))
 
-    # Delete Shopify products
+    # Delete Shopify products by id (the ones we recorded successfully)
+    deleted_ids: set[str] = set()
     for item in items:
         pid = item.get("shopify_product_id")
         if pid:
             try:
                 _shopify_rest("DELETE", f"/products/{pid}.json")
+                deleted_ids.add(str(pid))
             except Exception as e:
                 logger.warning(f"Failed to delete Shopify product {pid}: {e}")
+
+    # Tag sweep — picks up products that exist on Shopify but never made it
+    # back into our hold_items (worker race during a failed parallel create,
+    # retry after a timeout where Shopify actually created the first one,
+    # the row's UPDATE for shopify_product_id missed for any reason).
+    # The kiosk-hold-{hold_id} tag is unique to THIS hold so there is no
+    # cross-customer blast radius.
+    if SHOPIFY_STORE and SHOPIFY_TOKEN:
+        try:
+            resp = _shopify_gql("""
+                query StragglerByHold($q: String!) {
+                  products(first: 100, query: $q) {
+                    edges { node { id } }
+                  }
+                }
+            """, {"q": f"tag:kiosk-hold-{hold_id}"})
+            edges = (resp.get("data", {}).get("products", {}) or {}).get("edges", []) or []
+            for edge in edges:
+                gid = (edge.get("node", {}) or {}).get("id", "")
+                pid = gid.rsplit("/", 1)[-1] if gid else ""
+                if pid and pid not in deleted_ids:
+                    try:
+                        _shopify_rest("DELETE", f"/products/{pid}.json")
+                        deleted_ids.add(pid)
+                    except Exception as e:
+                        logger.warning(f"Hold-tag sweep: DELETE product {pid} failed: {e}")
+        except Exception as e:
+            logger.warning(f"Hold-tag sweep query failed for hold {hold_id}: {e}")
 
     # Champion abandons: cards never left their bin during checkout (state
     # stayed STORED/DISPLAY), so the cleanup just releases the lock and
