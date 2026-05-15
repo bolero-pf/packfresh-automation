@@ -1679,6 +1679,21 @@ def _resolve_storage_card_type(item: dict, tcg_id, scrydex_id) -> tuple[str, dic
     return card_type, card_data
 
 
+def _unit_cost_basis(item: dict, qty: int) -> float:
+    """Per-unit cost basis for a raw_cards INSERT.
+
+    Prefer intake_items.unit_cost_basis (source of truth). Dividing
+    offer_price/qty silently corrupted cost_basis when an item was exploded
+    to qty=1 children — the in-memory item dict retained the original
+    lot-total offer_price while quantity was forced to 1, writing the lot
+    total into every child's cost_basis (2026-05 Lance's Charizard V).
+    """
+    ucb = item.get("unit_cost_basis")
+    if ucb is not None:
+        return float(ucb)
+    return float(item.get("offer_price", 0)) / max(qty, 1)
+
+
 def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
     """
     Generate barcodes + create raw_cards rows in the destination-agnostic
@@ -1701,7 +1716,7 @@ def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
     set_name  = item.get("set_name", "")
     condition = item.get("condition") or "NM"
     qty       = item.get("quantity", 1)
-    cost      = float(item.get("offer_price", 0)) / max(qty, 1)
+    cost      = _unit_cost_basis(item, qty)
     item_id   = item.get("id")
 
     card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(
@@ -1904,7 +1919,7 @@ def _push_raw_item(item: dict) -> dict:
     set_name  = item.get("set_name", "")
     condition = item.get("condition") or "NM"
     qty       = item.get("quantity", 1)
-    cost      = float(item.get("offer_price", 0)) / max(qty, 1)
+    cost      = _unit_cost_basis(item, qty)
     card_type = None  # will be derived from card_data.game (Scrydex) below
 
     # Fetch PPT data for image URL + clean name + real card number
@@ -2090,7 +2105,7 @@ def _push_raw_to_display(item: dict) -> dict:
     set_name  = item.get("set_name", "")
     condition = item.get("condition") or "NM"
     qty       = item.get("quantity", 1)
-    cost      = float(item.get("offer_price", 0)) / max(qty, 1)
+    cost      = _unit_cost_basis(item, qty)
 
     card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
 
@@ -2181,7 +2196,7 @@ def _push_raw_to_grade(item: dict) -> dict:
     set_name  = item.get("set_name", "")
     condition = item.get("condition") or "NM"
     qty       = item.get("quantity", 1)
-    cost      = float(item.get("offer_price", 0)) / max(qty, 1)
+    cost      = _unit_cost_basis(item, qty)
 
     card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
 
