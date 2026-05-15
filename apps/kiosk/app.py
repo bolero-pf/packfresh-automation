@@ -114,7 +114,8 @@ def _ensure_kiosk_tables():
 _ensure_kiosk_tables()
 
 
-MAX_HOLD_ITEMS = 20
+MAX_HOLD_ITEMS = 20         # guest in-store holds
+MAX_CHAMPION_CART = 50      # remote Champion checkouts
 HOLD_EXPIRY_HOURS = 2
 CHAMPION_HOLD_MINUTES = 30
 
@@ -2595,8 +2596,8 @@ def champion_checkout():
         return jsonify({"error": "Shopify not configured"}), 503
 
     total_qty = sum(int(i.get("qty", 1)) for i in items)
-    if total_qty > MAX_HOLD_ITEMS:
-        return jsonify({"error": f"Maximum {MAX_HOLD_ITEMS} cards per checkout"}), 400
+    if total_qty > MAX_CHAMPION_CART:
+        return jsonify({"error": f"Maximum {MAX_CHAMPION_CART} cards per checkout"}), 400
 
     # Estimate cart total for minimum check
 

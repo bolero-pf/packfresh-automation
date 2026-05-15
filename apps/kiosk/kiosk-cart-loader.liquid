@@ -1,0 +1,81 @@
+{% comment %}
+    Kiosk cart loader — accepts variant IDs via URL param, adds to cart via AJAX, redirects to /cart
+    Used by kiosk.pack-fresh.com for Champion checkout cart merge.
+
+    Items are added one-at-a-time with retry/backoff. Shopify's bulk /cart/add.js is
+    atomic — one unpropagated variant kills the whole batch — and freshly-created
+    products can take a few seconds to be visible to the storefront cache.
+  {% endcomment %}
+
+  <div id="kiosk-loading"
+  style="display:flex;align-items:center;justify-content:center;min-height:60vh;font-family:sans-serif;">
+    <div style="text-align:center;">
+      <p style="font-size:1.2rem;font-weight:600;">Adding cards to your cart...</p>
+      <p style="color:#666;font-size:0.9rem;" id="kiosk-status">Please wait</p>
+    </div>
+  </div>
+
+  <script>
+  (async function() {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('items') || '';
+    const ids = raw.split(',').map(s => s.trim()).filter(Boolean);
+    const statusEl = document.getElementById('kiosk-status');
+
+    if (!ids.length) {
+      statusEl.textContent = 'No items to add. Redirecting...';
+      setTimeout(() => window.location.href = '/cart', 1500);
+      return;
+    }
+
+    // Per-item retry. Freshly-created variants (just minted by the backend a
+    // beat ago) can take a few seconds to be visible to /cart/add.js — storefront
+    // cache propagation. Backoff: 0.5s, 1s, 2s, 3s, 5s, 8s = up to ~20s per item.
+    const DELAYS = [500, 1000, 2000, 3000, 5000, 8000];
+
+    async function addOne(variantId) {
+      let lastErr = null;
+      for (let i = 0; i <= DELAYS.length; i++) {
+        try {
+          const resp = await fetch('/cart/add.js', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: parseInt(variantId, 10), quantity: 1 })
+          });
+          if (resp.ok) return { ok: true };
+          lastErr = `HTTP ${resp.status}`;
+        } catch (e) {
+          lastErr = e && e.message ? e.message : String(e);
+        }
+        if (i < DELAYS.length) {
+          await new Promise(r => setTimeout(r, DELAYS[i]));
+        }
+      }
+      return { ok: false, error: lastErr };
+    }
+
+    let added = 0;
+    const failed = [];
+    for (const id of ids) {
+      statusEl.textContent = `Adding card ${added + failed.length + 1} of ${ids.length}...`;
+      const r = await addOne(id);
+      if (r.ok) {
+        added++;
+      } else {
+        failed.push(id);
+        console.error('Kiosk cart-add failed for variant', id, '—', r.error);
+      }
+    }
+
+    if (failed.length === 0) {
+      statusEl.textContent = 'Done! Redirecting to your cart...';
+      window.location.href = '/cart';
+    } else if (added > 0) {
+      statusEl.textContent =
+        `Added ${added} of ${ids.length} cards. Redirecting to your cart...`;
+      setTimeout(() => window.location.href = '/cart', 2000);
+    } else {
+      statusEl.textContent = 'Could not add any cards. Please try again in a moment.';
+    }
+  })();
+  </script>
