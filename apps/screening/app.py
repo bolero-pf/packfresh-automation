@@ -1815,7 +1815,7 @@ CONSOLE_HTML = """
 <div class="main">
   <div id="screening-tabs" style="display:flex;gap:2px;margin-bottom:20px;border-bottom:1px solid var(--border);">
     <button class="tab active" id="tab-verify" onclick="switchTab('verify')">🔍 Verification Queue</button>
-    <button class="tab" id="tab-combine" onclick="switchTab('combine')">📦 Combine Shipping</button>
+    <button class="tab" id="tab-combine" onclick="switchTab('combine')">📦 Shipping</button>
     <button class="tab" id="tab-pulls" onclick="switchTab('pulls')">🃏 Raw Card Pulls</button>
     <button class="tab" id="tab-notes" onclick="switchTab('notes')">👤 Customer Notes</button>
     <button class="tab" id="tab-egg" onclick="switchTab('egg')">🥚 Egg Hunt</button>
@@ -2053,7 +2053,7 @@ function renderAll() {
   renderCombine(_data.combine_groups || []);
   const vCount = (_data.verification||[]).length + (_data.verification_groups||[]).reduce((s,g)=>s+g.orders.length, 0);
   document.getElementById('tab-verify').textContent = '🔍 Verification (' + vCount + ')';
-  document.getElementById('tab-combine').textContent = '📦 Combine (' + (_data.combine_groups||[]).length + ')';
+  document.getElementById('tab-combine').textContent = '📦 Shipping (' + (_data.combine_groups||[]).length + ')';
   // Eagerly load pull count so the badge reflects reality without a tab click.
   if (_pullsData) {
     document.getElementById('tab-pulls').textContent = '🃏 Raw Card Pulls (' + (_pullsData.holds||[]).length + ')';

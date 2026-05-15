@@ -14,9 +14,9 @@
 body { display: flex; flex-direction: column; overflow: hidden; }
 .shell { display: grid; grid-template-columns: 220px 1fr; flex: 1; min-height: 0; }
 
-/* Standalone mode — page lands directly on one view (e.g. /shipping from
-   the admin portal tile). Hide the sidebar and add a slim header strip
-   with a back-to-admin link so staff don't get marooned. */
+/* Standalone mode is unused now that the Shipping Queue lives in screening.
+   Keep the CSS hooks so any future single-view embed (e.g. /missing as a
+   dedicated tile) still works without re-introducing the rules. */
 body.standalone .sidebar { display: none; }
 body.standalone .shell { grid-template-columns: 1fr; }
 body.standalone .main { padding-top: 0; }
@@ -400,9 +400,7 @@ body.standalone .standalone-bar { display: flex; }
 {% if standalone %}
 <div class="standalone-bar">
   <a class="back-link" href="https://admin.pack-fresh.com">← Admin</a>
-  <div class="title">
-    {% if standalone == "shipping" %}📦 Shipping Queue{% else %}{{ standalone|title }}{% endif %}
-  </div>
+  <div class="title">{{ standalone|title }}</div>
 </div>
 {% endif %}
 
@@ -487,26 +485,6 @@ body.standalone .standalone-bar { display: flex; }
     <div class="view" id="view-hold-detail">
       <div class="back-btn" onclick="showView('holds')">← Back to Queue</div>
       <div id="hold-detail-content"></div>
-    </div>
-
-    <!-- Shipping Queue (Champion orders awaiting outbound ship) -->
-    <div class="view" id="view-shipping">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-        <div>
-          <div class="page-title">Shipping Queue</div>
-          <div class="page-sub">Champion orders paid online · pull the cards, pack the box, print the slip, mark shipped</div>
-        </div>
-        <button class="btn btn-sm" onclick="manualRefreshActiveView()" title="Refresh queue" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">↻ Refresh</button>
-      </div>
-      <div id="shipping-list">
-        <div class="empty"><div class="spinner"></div></div>
-      </div>
-    </div>
-
-    <!-- Shipping Detail -->
-    <div class="view" id="view-shipping-detail">
-      <div class="back-btn" onclick="showView('shipping')">← Back to Shipping Queue</div>
-      <div id="shipping-detail-content"></div>
     </div>
 
     <!-- Missing Cards -->
@@ -639,15 +617,13 @@ function showView(name) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('view-' + name).classList.add('active');
-  // Sub-views (hold-detail, shipping-detail) leave the parent nav item lit.
+  // Sub-views (hold-detail) leave the parent nav item lit.
   const navMap = {
     'hold-detail':     'nav-holds',
-    'shipping-detail': 'nav-shipping',
   };
   const navId = navMap[name] || ('nav-' + name);
   document.getElementById(navId)?.classList.add('active');
   if (name === 'holds')     loadHolds();
-  if (name === 'shipping')  loadShipping();
   if (name === 'returns')   loadReturns();
   if (name === 'missing')   loadMissing();
   if (name === 'editor')    document.getElementById('editor-scan').focus();
@@ -1050,140 +1026,6 @@ async function printHoldSlip() {
       _slipAggregate(byBin.get(bin)).forEach(it => { body += _renderSlipItem(it, false); });
     });
     _printSlipWindow('Packing Slip · ' + h.customer_name, body);
-  } catch(e) { toast(e.message, 'red'); }
-}
-
-// ── Shipping Queue (Champion outbound) ────────────────────────────────────────
-let _currentShipId = null;
-let _shipData = null;
-
-async function loadShipping() {
-  try {
-    const d = await get('/api/ship');
-    const holds = d.holds || [];
-    // Badge only exists when Shipping is in the card_manager sidebar.
-    // On the standalone /shipping page (linked from the admin tile),
-    // there is no sidebar — guard the lookup.
-    const badge = document.getElementById('badge-shipping');
-    if (badge) {
-      badge.textContent = holds.length;
-      badge.classList.toggle('visible', holds.length > 0);
-    }
-    const el = document.getElementById('shipping-list');
-    if (!holds.length) {
-      el.innerHTML = '<div class="empty"><div class="empty-icon">📦</div><p>No outbound orders waiting</p></div>';
-      return;
-    }
-    el.innerHTML = holds.map(h => `
-      <div class="card" onclick="openShipping('${h.id}')">
-        <div class="hold-row">
-          <div>
-            <div class="hold-name">${esc(h.shopify_order_number||h.customer_name||'Order')} · <span style="color:#4ade80;font-size:0.78rem;font-weight:700;">★ PAID</span></div>
-            <div class="hold-phone">${esc(h.shipping_name||h.customer_email||'')}</div>
-          </div>
-          <div class="hold-meta">${h.item_count || 0} item${(h.item_count||0)===1?'':'s'} · ${_age(h.created_at)}</div>
-        </div>
-        ${h.shipping_address ? `<div style="font-size:0.78rem;color:var(--dim);margin-top:6px;">📦 ${esc(h.shipping_address)}</div>` : ''}
-      </div>
-    `).join('');
-  } catch(e) {
-    document.getElementById('shipping-list').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
-  }
-}
-
-async function openShipping(holdId) {
-  _currentShipId = holdId;
-  showView('shipping-detail');
-  document.getElementById('shipping-detail-content').innerHTML = '<div class="empty"><div class="spinner"></div></div>';
-  await refreshShippingDetail();
-}
-
-async function refreshShippingDetail() {
-  if (!_currentShipId) return;
-  try {
-    const d = await get(`/api/ship/${_currentShipId}`);
-    _shipData = d;
-    renderShippingDetail(d);
-  } catch(e) {
-    document.getElementById('shipping-detail-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
-  }
-}
-
-function renderShippingDetail(d) {
-  const h = d.hold;
-  const items = d.items || [];
-  const el = document.getElementById('shipping-detail-content');
-  // Group by bin for the puller.
-  const byBin = new Map();
-  items.forEach(i => {
-    const b = i.bin_label || '— No bin';
-    if (!byBin.has(b)) byBin.set(b, []);
-    byBin.get(b).push(i);
-  });
-  const sortedBins = Array.from(byBin.keys()).sort(_binCompare);
-
-  let html = `<div style="margin-bottom:14px;">
-    <div style="font-size:1.4rem;font-weight:700;">${esc(h.shopify_order_number||'Order')} · <span style="background:#4ade80;color:#000;padding:2px 10px;border-radius:12px;font-size:0.75rem;font-weight:700;">★ PAID</span></div>
-    <div style="font-size:0.85rem;color:var(--dim);">${esc(h.shipping_name||h.customer_email||'')} · ${_age(h.created_at)}</div>
-    ${h.shipping_address ? `<div style="font-size:0.85rem;color:var(--dim);margin-top:4px;">📦 ${esc(h.shipping_address)}</div>` : ''}
-  </div>`;
-
-  html += sortedBins.map(bin => `
-    <div class="bin-group">
-      <div class="bin-group-header"><div class="bin-group-label">${esc(bin)}</div></div>
-      ${byBin.get(bin).map(it => `
-        <div class="pull-card-row">
-          <div class="pull-card-thumb">${it.rc_image_url ? `<img src="${esc(it.rc_image_url)}">` : '<div class="no-img">🃏</div>'}</div>
-          <div class="pull-card-body">
-            <div class="pull-card-name">${esc(it.card_name||'')}</div>
-            <div class="pull-card-meta">${esc(it.set_name||'')} ${it.card_number?'· #'+esc(it.card_number):''} · ${esc(it.condition||'')}</div>
-            <div style="font-family:var(--mono);font-size:0.78rem;color:var(--dim);margin-top:4px;">${esc(it.barcode||'')}</div>
-          </div>
-        </div>
-      `).join('')}
-    </div>
-  `).join('');
-
-  html += `
-    <div style="position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--border);padding:14px 0;margin-top:24px;display:flex;gap:10px;flex-wrap:wrap;justify-content:space-between;align-items:center;">
-      <button class="btn btn-sm" style="background:none;border:1px solid var(--border);color:var(--text);font-size:0.85rem;padding:10px 16px;" onclick="printShipSlip()">🖨 Print Packing Slip</button>
-      <button class="btn btn-sm primary-cta" style="background:var(--green);color:#000;font-weight:700;font-size:1rem;padding:12px 22px;border-radius:10px;" onclick="markShipped()">✓ Mark Shipped</button>
-    </div>
-  `;
-  el.innerHTML = html;
-}
-
-async function markShipped() {
-  if (!await themedConfirm('Mark this order shipped?', 'Cards are flipped to SOLD, hold closes. Make sure you actually dropped it in the mailbox first.')) return;
-  try {
-    await post(`/api/ship/${_currentShipId}/mark-shipped`, {});
-    toast('Marked shipped.', 'green');
-    setTimeout(() => showView('shipping'), 800);
-  } catch(e) { toast(e.message, 'red'); }
-}
-
-async function printShipSlip() {
-  try {
-    const d = await get(`/api/ship/${_currentShipId}/packing-slip`);
-    const h = d.hold;
-    const items = d.items || [];
-    const subLine = [
-      h.customer_email || '',
-      _slipDate(h.created_at),
-    ].filter(Boolean).join(' · ');
-    let body = `<h1>${h.shopify_order_number||'Order'}</h1>`;
-    if (h.shipping_name) {
-      body += `<div class="sub" style="font-size:16px;color:#222;">${h.shipping_name}</div>`;
-    }
-    if (h.shipping_address) {
-      body += `<div class="sub">${h.shipping_address}</div>`;
-    }
-    if (subLine) {
-      body += `<div class="sub">${subLine}</div>`;
-    }
-    // Aggregate sealed/slab into Nx rows; raw cards stay as individual lines.
-    _slipAggregate(items).forEach(it => { body += _renderSlipItem(it, false); });
-    _printSlipWindow('Shipping Slip · ' + (h.shopify_order_number||''), body);
   } catch(e) { toast(e.message, 'red'); }
 }
 
@@ -2838,7 +2680,7 @@ async function removeFeatured(id) {
 // full reload.
 let _lastLatestHoldAt = null;
 let _pollSeq = 0;  // 0 = haven't done first poll yet; suppresses boot-time notify
-let _badgeCounts = { holds: 0, shipping: 0, returns: 0, missing: 0, active_listings: 0 };
+let _badgeCounts = { holds: 0, returns: 0, missing: 0, active_listings: 0 };
 
 async function refreshBadges() {
   try {
@@ -2850,7 +2692,6 @@ async function refreshBadges() {
       el.classList.toggle('visible', n > 0);
     };
     set('badge-holds',    d.holds);
-    set('badge-shipping', d.shipping);
     set('badge-returns',  d.returns);
     set('badge-missing',  d.missing);
     set('badge-sell',     d.active_listings);
@@ -2876,13 +2717,12 @@ async function refreshBadges() {
     const activeView = document.querySelector('.view.active')?.id;
     const prev = _badgeCounts;
     if (activeView === 'view-holds'    && d.holds            !== prev.holds)            loadHolds();
-    if (activeView === 'view-shipping' && d.shipping         !== prev.shipping)         loadShipping();
     if (activeView === 'view-returns'  && d.returns          !== prev.returns)          loadReturns();
     if (activeView === 'view-missing'  && d.missing          !== prev.missing)          loadMissing();
     if (activeView === 'view-sell'     && d.active_listings  !== prev.active_listings)  refreshActiveListings();
 
     _badgeCounts = {
-      holds: d.holds, shipping: d.shipping, returns: d.returns,
+      holds: d.holds, returns: d.returns,
       missing: d.missing, active_listings: d.active_listings,
     };
   } catch(e) { /* silent — sidebar nav stays stale rather than flashing errors */ }
@@ -2898,14 +2738,12 @@ function startPolling() {
 function manualRefreshActiveView() {
   const activeView = document.querySelector('.view.active')?.id;
   if (activeView === 'view-holds')        loadHolds();
-  else if (activeView === 'view-shipping') loadShipping();
   else if (activeView === 'view-returns') loadReturns();
   else if (activeView === 'view-missing') loadMissing();
   else if (activeView === 'view-sell')    { refreshActiveListings(); renderSell(); }
   else if (activeView === 'view-display') loadDisplay();
   else if (activeView === 'view-binders') loadBinders();
   else if (activeView === 'view-hold-detail') refreshHoldDetail();
-  else if (activeView === 'view-shipping-detail') refreshShippingDetail();
   refreshBadges();
 }
 

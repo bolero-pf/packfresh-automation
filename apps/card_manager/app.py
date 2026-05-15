@@ -146,16 +146,6 @@ def index():
     return render_template("index.html", standalone=None)
 
 
-@app.route("/shipping")
-@app.route("/shipping/")
-def shipping_page():
-    """Standalone Shipping Queue surface — same index.html, but the sidebar
-    is hidden and the page boots straight into the shipping view. Linked
-    from the admin portal as its own tile so 'ship a paid Champion order'
-    feels like its own app instead of a buried card_manager tab."""
-    return render_template("index.html", standalone="shipping")
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Public price-check kiosk (no auth, read-only)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -468,11 +458,6 @@ def sidebar_badges():
              WHERE status IN ('PENDING','PULLING','READY')
                AND cohort IS DISTINCT FROM 'champion'
           ) AS holds,
-          (SELECT COUNT(*) FROM holds
-             WHERE cohort = 'champion'
-               AND checkout_status = 'completed'
-               AND status NOT IN ('ACCEPTED','RETURNED','CANCELLED','AUTO_EXPIRED')
-          ) AS shipping,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_RETURN') AS returns,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'MISSING')        AS missing,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_SALE')   AS active_listings,
@@ -484,7 +469,6 @@ def sidebar_badges():
     latest = row.get("latest_hold_at") if row else None
     return jsonify({
         "holds":           int(row["holds"] or 0),
-        "shipping":        int(row["shipping"] or 0),
         "returns":         int(row["returns"] or 0),
         "missing":         int(row["missing"] or 0),
         "active_listings": int(row["active_listings"] or 0),
@@ -988,7 +972,7 @@ def reverse_decision(hold_id, hold_item_id):
     # can't unwind individual items here without breaking the outbound ship.
     if item.get("hold_cohort") == "champion" and item.get("hold_checkout_status") == "completed":
         return jsonify({
-            "error": "Paid Champion hold — manage this from the Shipping Queue, not the hold detail."
+            "error": "Paid Champion hold — manage this from the Shipping tab in Screening, not the hold detail."
         }), 409
 
     action = (request.get_json() or {}).get("action", "").lower()
@@ -1073,7 +1057,7 @@ def send_to_pos(hold_id):
         return jsonify({"error": "Not found"}), 404
     if hold.get("cohort") == "champion":
         return jsonify({
-            "error": "Champion holds ship from the Shipping Queue, not Send to POS",
+            "error": "Champion holds ship from the Shipping tab in Screening, not Send to POS",
         }), 409
     if hold["status"] in ('ACCEPTED', 'RETURNED', 'CANCELLED', 'AUTO_EXPIRED'):
         return jsonify({"error": f"Hold is already {hold['status']}"}), 409
@@ -1318,132 +1302,6 @@ def _legacy_missing_candidates(hold_id, hold_item_id):
     # Empty list so the old UI falls through to its single-candidate path,
     # which calls /missing with no body — the new endpoint accepts that.
     return jsonify({"candidates": [], "assigned_card_id": None})
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Shipping Queue — Champion holds (paid online, awaiting outbound ship)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@app.route("/api/ship")
-def list_shipping():
-    """Paid Champion holds awaiting shipment. Excluded from /api/holds."""
-    rows = db.query("""
-        SELECT h.*, COUNT(hi.id) AS item_count
-        FROM holds h
-        LEFT JOIN hold_items hi ON hi.hold_id = h.id
-        WHERE h.cohort = 'champion'
-          AND h.checkout_status = 'completed'
-          AND h.status NOT IN ('ACCEPTED','RETURNED','CANCELLED','AUTO_EXPIRED')
-        GROUP BY h.id
-        ORDER BY h.created_at ASC
-    """)
-    return jsonify({"holds": [_ser(dict(r)) for r in rows]})
-
-
-@app.route("/api/ship/<hold_id>")
-def get_shipping(hold_id):
-    """Detail for a paid Champion hold."""
-    hold = db.query_one("""
-        SELECT * FROM holds WHERE id = %s AND cohort = 'champion'
-    """, (hold_id,))
-    if not hold:
-        return jsonify({"error": "Not found"}), 404
-    items = db.query("""
-        SELECT hi.id, hi.status, hi.barcode,
-               rc.card_name, rc.set_name, rc.card_number, rc.condition,
-               rc.current_price, rc.image_url AS rc_image_url,
-               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type
-        FROM hold_items hi
-        LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
-        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
-        LEFT JOIN storage_rows sr ON sr.id = sl.row_id
-        WHERE hi.hold_id = %s
-        ORDER BY sl.bin_label NULLS LAST
-    """, (hold_id,))
-    return jsonify({
-        "hold":  _ser(dict(hold)),
-        "items": [_ser(dict(i)) for i in items],
-    })
-
-
-@app.route("/api/ship/<hold_id>/mark-shipped", methods=["POST"])
-def mark_shipped(hold_id):
-    """Champion has been packed and is going out the door. Mark all items
-    SOLD, close the hold ACCEPTED. Products already exist on Shopify (created
-    by the kiosk checkout)."""
-    hold = db.query_one("""
-        SELECT cohort, status FROM holds WHERE id = %s
-    """, (hold_id,))
-    if not hold or hold.get("cohort") != "champion":
-        return jsonify({"error": "Not a champion hold"}), 404
-
-    items = db.query("""
-        SELECT id, raw_card_id, shopify_product_id, shopify_variant_id, status
-        FROM hold_items WHERE hold_id = %s
-    """, (hold_id,))
-    for item in items:
-        if item["status"] in ("MISSING",):
-            db.execute("""
-                UPDATE raw_cards SET current_hold_id = NULL
-                WHERE id = %s
-            """, (str(item["raw_card_id"]),))
-            continue
-        db.execute("""
-            UPDATE hold_items SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-        """, (str(item["id"]),))
-        if item.get("raw_card_id"):
-            db.execute("""
-                UPDATE raw_cards
-                   SET state = 'SOLD',
-                       shopify_product_id = COALESCE(%s, shopify_product_id),
-                       shopify_variant_id = COALESCE(%s, shopify_variant_id),
-                       current_hold_id = NULL,
-                       updated_at = CURRENT_TIMESTAMP
-                 WHERE id = %s
-            """, (item.get("shopify_product_id"), item.get("shopify_variant_id"),
-                  str(item["raw_card_id"])))
-    db.execute("""
-        UPDATE holds SET status = 'ACCEPTED', resolved_at = CURRENT_TIMESTAMP
-        WHERE id = %s
-    """, (hold_id,))
-    return jsonify({"success": True, "shipped": len(items)})
-
-
-@app.route("/api/ship/<hold_id>/packing-slip")
-def shipping_packing_slip(hold_id):
-    """Shipping slip — same payload shape as the hold packing slip but
-    includes shipping_name/address for the box."""
-    hold = db.query_one("""
-        SELECT id, customer_name, customer_email, shopify_order_number,
-               shipping_name, shipping_address, created_at
-        FROM holds WHERE id = %s AND cohort = 'champion'
-    """, (hold_id,))
-    if not hold:
-        return jsonify({"error": "Not found"}), 404
-    items = db.query("""
-        SELECT hi.id, hi.barcode, hi.item_kind,
-               hi.title AS hi_title, hi.sku AS hi_sku,
-               hi.shopify_variant_id,
-               rc.card_name, rc.set_name, rc.card_number, rc.condition,
-               rc.current_price, rc.image_url AS rc_image_url,
-               sl.bin_label, COALESCE(sr.location_type, 'bin') AS bin_type,
-               ipc.image_url AS ipc_image_url
-        FROM hold_items hi
-        LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
-        LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
-        LEFT JOIN storage_rows sr ON sr.id = sl.row_id
-        LEFT JOIN inventory_product_cache ipc
-          ON ipc.shopify_variant_id = hi.shopify_variant_id
-         AND hi.item_kind IN ('sealed','slab')
-        WHERE hi.hold_id = %s
-          AND hi.status NOT IN ('CANCELLED','RETURNED')
-        ORDER BY sl.bin_label NULLS LAST
-    """, (hold_id,))
-    return jsonify({
-        "hold":  _ser(dict(hold)),
-        "items": [_ser(dict(i)) for i in items],
-    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2539,7 +2397,7 @@ def sell_pull_listing():
     """, (str(card["id"]),))
     if champ:
         return jsonify({
-            "error": "This card belongs to a paid Champion order — handle it from the Shipping Queue, not the register."
+            "error": "This card belongs to a paid Champion order — handle it from the Shipping tab in Screening, not the register."
         }), 409
 
     product_id = card.get("shopify_product_id")
