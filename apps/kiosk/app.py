@@ -2915,7 +2915,7 @@ def webhook_order_paid():
                 cur.execute("""
                     UPDATE raw_cards
                        SET state = CASE
-                                     WHEN COALESCE(sl.location_type, 'bin')
+                                     WHEN COALESCE(sr.location_type, 'bin')
                                           IN ('binder','display_case')
                                      THEN 'DISPLAY'
                                      ELSE 'STORED'
@@ -2923,6 +2923,7 @@ def webhook_order_paid():
                            current_hold_id = NULL,
                            updated_at = CURRENT_TIMESTAMP
                       FROM storage_locations sl
+                      JOIN storage_rows sr ON sr.id = sl.row_id
                      WHERE raw_cards.bin_id = sl.id
                        AND raw_cards.current_hold_id = %s
                        AND raw_cards.state = 'PENDING_SALE'

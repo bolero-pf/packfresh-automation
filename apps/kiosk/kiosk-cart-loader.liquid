@@ -2,9 +2,10 @@
     Kiosk cart loader — accepts variant IDs via URL param, adds to cart via AJAX, redirects to /cart
     Used by kiosk.pack-fresh.com for Champion checkout cart merge.
 
-    Items are added one-at-a-time with retry/backoff. Shopify's bulk /cart/add.js is
-    atomic — one unpropagated variant kills the whole batch — and freshly-created
-    products can take a few seconds to be visible to the storefront cache.
+    Strategy: bulk /cart/add.js with the whole batch, then on failure recurse
+    by splitting in half. Shopify's bulk add is atomic — one bad variant kills
+    the batch — so bisecting localizes the failure in O(log N) calls instead
+    of N sequential adds (44 sequential adds was taking 10+ minutes).
   {% endcomment %}
 
   <div id="kiosk-loading"
@@ -28,54 +29,60 @@
       return;
     }
 
-    // Per-item retry. Freshly-created variants (just minted by the backend a
-    // beat ago) can take a few seconds to be visible to /cart/add.js — storefront
-    // cache propagation. Backoff: 0.5s, 1s, 2s, 3s, 5s, 8s = up to ~20s per item.
-    const DELAYS = [500, 1000, 2000, 3000, 5000, 8000];
+    const added = new Set();
+    const failed = new Set();
+    let calls = 0;
 
-    async function addOne(variantId) {
-      let lastErr = null;
-      for (let i = 0; i <= DELAYS.length; i++) {
-        try {
-          const resp = await fetch('/cart/add.js', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: parseInt(variantId, 10), quantity: 1 })
-          });
-          if (resp.ok) return { ok: true };
-          lastErr = `HTTP ${resp.status}`;
-        } catch (e) {
-          lastErr = e && e.message ? e.message : String(e);
-        }
-        if (i < DELAYS.length) {
-          await new Promise(r => setTimeout(r, DELAYS[i]));
-        }
-      }
-      return { ok: false, error: lastErr };
+    function updateStatus() {
+      const done = added.size + failed.size;
+      statusEl.textContent =
+        `Adding cards... ${done} of ${ids.length} (${calls} request${calls === 1 ? '' : 's'})`;
     }
 
-    let added = 0;
-    const failed = [];
-    for (const id of ids) {
-      statusEl.textContent = `Adding card ${added + failed.length + 1} of ${ids.length}...`;
-      const r = await addOne(id);
-      if (r.ok) {
-        added++;
-      } else {
-        failed.push(id);
-        console.error('Kiosk cart-add failed for variant', id, '—', r.error);
+    // Bulk-add a slice. On atomic failure, bisect.
+    async function bulkAdd(slice) {
+      if (slice.length === 0) return;
+      calls++;
+      updateStatus();
+      try {
+        const items = slice.map(id => ({ id: parseInt(id, 10), quantity: 1 }));
+        const resp = await fetch('/cart/add.js', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items })
+        });
+        if (resp.ok) {
+          slice.forEach(id => added.add(id));
+          updateStatus();
+          return;
+        }
+      } catch (e) {
+        // Network error — treat as failure for this slice and bisect.
+        console.warn('Kiosk cart-add network error on slice', slice, e);
       }
+      if (slice.length === 1) {
+        failed.add(slice[0]);
+        updateStatus();
+        return;
+      }
+      const mid = Math.floor(slice.length / 2);
+      await bulkAdd(slice.slice(0, mid));
+      await bulkAdd(slice.slice(mid));
     }
 
-    if (failed.length === 0) {
+    await bulkAdd(ids);
+
+    if (failed.size === 0) {
       statusEl.textContent = 'Done! Redirecting to your cart...';
       window.location.href = '/cart';
-    } else if (added > 0) {
+    } else if (added.size > 0) {
       statusEl.textContent =
-        `Added ${added} of ${ids.length} cards. Redirecting to your cart...`;
+        `Added ${added.size} of ${ids.length} cards. Redirecting to your cart...`;
+      console.warn('Kiosk cart-add: failed variant IDs', Array.from(failed));
       setTimeout(() => window.location.href = '/cart', 2000);
     } else {
       statusEl.textContent = 'Could not add any cards. Please try again in a moment.';
+      console.error('Kiosk cart-add: ALL variants failed', Array.from(failed));
     }
   })();
   </script>
