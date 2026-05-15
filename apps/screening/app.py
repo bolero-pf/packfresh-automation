@@ -475,6 +475,8 @@ def api_raw_card_pulls():
         if kind == "raw":
             holds_by_id[hid]["items"].append({
                 "kind": "raw",
+                "hold_item_id": r.get("hold_item_id"),
+                "hi_status": r.get("hi_status"),
                 "barcode": r.get("hi_barcode"),
                 "title": r.get("card_name"),
                 "set_name": r.get("set_name"),
@@ -528,6 +530,233 @@ def api_raw_card_pulls_mark_shipped(hold_id):
           AND status NOT IN ('ACCEPTED','REJECTED','SOLD','MISSING')
     """, (hold_id,))
     return jsonify({"success": True})
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Per-item mutations on a paid Champion hold
+#
+#  After a Champion pays, raw_cards.state='SOLD' and the Shopify listing is
+#  deleted. We still need three operator escape-hatches before "Mark Shipped":
+#     • Mark Missing      — can't find the card; refund handled manually
+#     • Change Condition  — we mis-graded our own inventory; data fix only
+#     • Back to Storage   — won't ship this one; restore card to STORED
+#
+#  All three log to screening_log for the History tab.
+# ─────────────────────────────────────────────────────────────────────────
+
+_VALID_CONDITIONS = ("NM", "LP", "MP", "HP", "DMG")
+
+
+def _load_pull_item(hold_item_id):
+    """Resolve a hold_item from a paid Champion hold. Returns the row + hold,
+    or (None, error_jsonify_response, status) on failure."""
+    row = db.query_one("""
+        SELECT hi.id AS hold_item_id, hi.hold_id, hi.raw_card_id,
+               hi.status AS hi_status, hi.item_kind, hi.title AS hi_title,
+               hi.barcode AS hi_barcode,
+               h.cohort, h.checkout_status, h.status AS hold_status,
+               h.shopify_order_number, h.customer_email,
+               rc.state AS rc_state, rc.condition AS rc_condition,
+               rc.card_name
+          FROM hold_items hi
+          JOIN holds h ON h.id = hi.hold_id
+          LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
+         WHERE hi.id = %s
+    """, (hold_item_id,))
+    if not row:
+        return None, (jsonify({"error": "Hold item not found"}), 404)
+    if row.get("item_kind") != "raw" or not row.get("raw_card_id"):
+        return None, (jsonify({"error": "Only raw card items can be mutated here"}), 400)
+    if row.get("cohort") != "champion":
+        return None, (jsonify({"error": "Not a Champion hold"}), 400)
+    if row.get("checkout_status") != "completed":
+        return None, (jsonify({"error": "Hold not paid"}), 409)
+    if row.get("hi_status") in ("ACCEPTED", "REJECTED", "MISSING"):
+        return None, (jsonify({"error": f"Hold item already resolved ({row.get('hi_status')})"}), 409)
+    return row, None
+
+
+def _log_pull_event(check_type, item_row, details):
+    """Mirror screening_log writes for raw-card-pull mutations."""
+    try:
+        import json
+        db.execute("""
+            INSERT INTO screening_log (order_gid, order_name, customer_email, event_type, check_type, details)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (
+            item_row.get("shopify_order_number") or item_row.get("hold_id"),
+            item_row.get("shopify_order_number") or "",
+            item_row.get("customer_email") or "",
+            "raw_pull",
+            check_type,
+            json.dumps(details or {}),
+        ))
+    except Exception as e:
+        print(f"[screening] pull log write failed: {e}", flush=True)
+
+
+@app.route("/api/raw-card-pulls/item/<hold_item_id>/missing", methods=["POST"])
+def api_raw_card_pull_missing(hold_item_id):
+    """Flag a Champion-purchased raw card as MISSING because we can't find it
+    in the bin. The card stays SOLD on the Shopify side (refund is manual);
+    raw_cards flips to MISSING and the hold_item is closed out so the puller
+    can keep moving."""
+    row, err = _load_pull_item(hold_item_id)
+    if err:
+        return err
+    db.execute("""
+        UPDATE raw_cards
+           SET state = 'MISSING',
+               current_hold_id = NULL,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+    """, (row["raw_card_id"],))
+    db.execute("""
+        UPDATE hold_items
+           SET status = 'MISSING', resolved_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+    """, (hold_item_id,))
+    _log_pull_event("raw_pull_missing", row, {
+        "hold_item_id": hold_item_id,
+        "raw_card_id": str(row["raw_card_id"]),
+        "barcode": row.get("hi_barcode"),
+        "card_name": row.get("card_name") or row.get("hi_title"),
+        "prior_condition": row.get("rc_condition"),
+    })
+    return jsonify({"success": True})
+
+
+@app.route("/api/raw-card-pulls/item/<hold_item_id>/condition", methods=["POST"])
+def api_raw_card_pull_condition(hold_item_id):
+    """Correct the condition on a Champion-purchased raw card when our grading
+    was wrong. Pure data fix — the card still ships, the customer still gets
+    it; this just makes our records honest. Refund-or-not is the operator's
+    call in Shopify Admin."""
+    data = request.get_json(silent=True) or {}
+    new_condition = (data.get("condition") or "").strip().upper()
+    if new_condition not in _VALID_CONDITIONS:
+        return jsonify({"error": f"Condition must be one of {_VALID_CONDITIONS}"}), 400
+
+    row, err = _load_pull_item(hold_item_id)
+    if err:
+        return err
+
+    prior = row.get("rc_condition")
+    if prior == new_condition:
+        return jsonify({"success": True, "noop": True})
+
+    db.execute("""
+        UPDATE raw_cards
+           SET condition = %s,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+    """, (new_condition, row["raw_card_id"]))
+    _log_pull_event("raw_pull_condition", row, {
+        "hold_item_id": hold_item_id,
+        "raw_card_id": str(row["raw_card_id"]),
+        "barcode": row.get("hi_barcode"),
+        "card_name": row.get("card_name") or row.get("hi_title"),
+        "from": prior,
+        "to": new_condition,
+    })
+    return jsonify({"success": True, "condition": new_condition})
+
+
+@app.route("/api/raw-card-pulls/item/<hold_item_id>/restock", methods=["POST"])
+def api_raw_card_pull_restock(hold_item_id):
+    """Send a Champion-purchased raw card back to inventory (refund path).
+
+    Two paths:
+      • Has bin_id (the common case — bin survives the SOLD transition):
+        card stays physically where it is. State flips to match the bin's
+        location_type (DISPLAY for binder/display_case, STORED for bin).
+      • No bin_id (rare; should not happen for Champion-eligible cards but
+        we handle it anyway): auto-assign a storage bin via shared/storage
+        the same way the Return Queue does, and tell the operator which
+        bin to walk the card to.
+
+    Shopify listing was deleted at sale, so we clear shopify_product_id/
+    variant_id either way — the nightly raw_card_updater + raw-rebind picker
+    will re-list. Operator refunds in Shopify Admin manually.
+    """
+    row, err = _load_pull_item(hold_item_id)
+    if err:
+        return err
+
+    rc = db.query_one("""
+        SELECT rc.id, rc.bin_id, COALESCE(rc.game, 'pokemon') AS game,
+               sl.bin_label,
+               COALESCE(sr.location_type, 'bin') AS location_type
+          FROM raw_cards rc
+          LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+          LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+         WHERE rc.id = %s
+    """, (row["raw_card_id"],))
+
+    auto_assigned = False
+    if rc and rc.get("bin_id"):
+        location_type = rc["location_type"]
+        new_state = "DISPLAY" if location_type in ("binder", "display_case") else "STORED"
+        bin_label = rc.get("bin_label")
+        db.execute("""
+            UPDATE raw_cards
+               SET state = %s,
+                   current_hold_id = NULL,
+                   shopify_product_id = NULL,
+                   shopify_variant_id = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+        """, (new_state, row["raw_card_id"]))
+    else:
+        # Edge case: no bin recorded. Auto-assign one via the same path
+        # card_manager's Return Queue uses, so the operator gets a real
+        # destination instead of an error.
+        try:
+            from storage import assign_bins
+            assignments = assign_bins((rc or {}).get("game", "pokemon"), 1, db)
+        except Exception as e:
+            return jsonify({"error": f"No bin available to restock into: {e}"}), 409
+        if not assignments:
+            return jsonify({"error": "No bin available to restock into."}), 409
+        a = assignments[0]
+        new_state = "STORED"
+        location_type = "bin"
+        bin_label = a["bin_label"]
+        auto_assigned = True
+        db.execute("""
+            UPDATE raw_cards
+               SET state = 'STORED',
+                   bin_id = %s,
+                   current_hold_id = NULL,
+                   shopify_product_id = NULL,
+                   shopify_variant_id = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+        """, (a["bin_id"], row["raw_card_id"]))
+
+    db.execute("""
+        UPDATE hold_items
+           SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+    """, (hold_item_id,))
+    _log_pull_event("raw_pull_restock", row, {
+        "hold_item_id": hold_item_id,
+        "raw_card_id": str(row["raw_card_id"]),
+        "barcode": row.get("hi_barcode"),
+        "card_name": row.get("card_name") or row.get("hi_title"),
+        "prior_condition": row.get("rc_condition"),
+        "restored_state": new_state,
+        "bin_label": bin_label,
+        "location_type": location_type,
+        "auto_assigned": auto_assigned,
+    })
+    return jsonify({
+        "success": True,
+        "state": new_state,
+        "bin_label": bin_label,
+        "location_type": location_type,
+        "auto_assigned": auto_assigned,
+    })
 
 
 @app.route("/api/release-hold", methods=["POST"])
@@ -1723,12 +1952,30 @@ function renderRawPulls(holds) {
       : '';
     const raws = h.items.filter(i => i.kind === 'raw');
     const sealed = h.items.filter(i => i.kind !== 'raw');
-    const rawHtml = raws.map(i => `
-      <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.04);">
+    const rawHtml = raws.map(i => {
+      const resolved = (i.hi_status === 'MISSING' || i.hi_status === 'REJECTED' || i.hi_status === 'ACCEPTED');
+      const resolvedBadge = resolved
+        ? '<span style="margin-left:6px;padding:2px 6px;border-radius:4px;font-size:0.66rem;font-weight:700;background:'
+          + (i.hi_status === 'MISSING' ? 'rgba(255,80,80,0.18);color:#f88'
+             : i.hi_status === 'REJECTED' ? 'rgba(255,170,0,0.18);color:#fb6'
+             : 'rgba(80,200,120,0.18);color:#8e8') + ';">' + _esc(i.hi_status) + '</span>'
+        : '';
+      const actions = resolved
+        ? '<span style="font-size:0.72rem;color:var(--dim);">—</span>'
+        : (
+          '<button class="btn btn-secondary btn-sm" style="font-size:0.7rem;padding:2px 8px;" title="Wrong condition" '
+          + 'onclick="pullChangeCondition(&apos;' + i.hold_item_id + '&apos;, &apos;' + _esc(i.condition || '') + '&apos;, this)">✎ Cond</button>'
+          + ' <button class="btn btn-secondary btn-sm" style="font-size:0.7rem;padding:2px 8px;color:#fb6;" title="Send back to storage (refund)" '
+          + 'onclick="pullRestock(&apos;' + i.hold_item_id + '&apos;, &apos;' + _esc(i.bin_label || '') + '&apos;, &apos;' + _esc(i.bin_type || '') + '&apos;, this)">↩ Restock</button>'
+          + ' <button class="btn btn-secondary btn-sm" style="font-size:0.7rem;padding:2px 8px;color:#f88;" title="Mark missing (can&apos;t find)" '
+          + 'onclick="pullMarkMissing(&apos;' + i.hold_item_id + '&apos;, this)">⚠ Missing</button>'
+        );
+      return `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.04);${resolved ? 'opacity:0.55;' : ''}" data-hold-item-id="${i.hold_item_id}">
         ${i.image_url ? `<img src="${i.image_url}" style="width:42px;height:42px;object-fit:cover;border-radius:4px;">` : '<div style="width:42px;height:42px;background:var(--s2);border-radius:4px;"></div>'}
         <div style="flex:1;font-size:0.85rem;">
-          <strong>${_esc(i.title || '—')}</strong>
-          <div style="font-size:0.72rem;color:var(--dim);">${_esc(i.set_name || '')} ${i.card_number ? '#' + _esc(i.card_number) : ''} · ${_esc(i.condition || '')}${i.variant ? ' · ' + _esc(i.variant) : ''}</div>
+          <strong>${_esc(i.title || '—')}</strong>${resolvedBadge}
+          <div style="font-size:0.72rem;color:var(--dim);"><span class="pull-cond">${_esc(i.set_name || '')} ${i.card_number ? '#' + _esc(i.card_number) : ''} · ${_esc(i.condition || '')}${i.variant ? ' · ' + _esc(i.variant) : ''}</span></div>
         </div>
         <div style="font-family:monospace;font-size:0.78rem;color:var(--dim);">${_esc(i.barcode || '')}</div>
         <div style="min-width:90px;text-align:right;">
@@ -1736,8 +1983,10 @@ function renderRawPulls(holds) {
             ? '<span style="padding:3px 10px;background:rgba(0,180,255,0.12);color:#5cf;border-radius:10px;font-weight:600;font-size:0.78rem;">' + (i.bin_type === 'display' ? '📍 ' : (i.bin_type === 'binder' ? '📒 ' : '📦 ')) + _esc(i.bin_label) + '</span>'
             : '<span style="color:var(--red);font-size:0.78rem;">⚠ no bin</span>'}
         </div>
+        <div style="display:flex;gap:4px;align-items:center;white-space:nowrap;">${actions}</div>
       </div>
-    `).join('');
+    `;
+    }).join('');
     const sealedHtml = sealed.length ? `
       <div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);">
         <div style="font-size:0.72rem;font-weight:600;color:var(--dim);margin-bottom:4px;">Other items in this order:</div>
@@ -1787,6 +2036,89 @@ async function markPullShipped(holdId, btn) {
     toast('Hold closed', 'green');
     loadRawPulls();
   } catch (e) { alert(e.message); btn.disabled = false; }
+}
+
+// ── Per-item mutations (Mark Missing / Change Condition / Restock) ──────────
+
+async function pullMarkMissing(holdItemId, btn) {
+  if (!confirm('Mark this card MISSING? It stays SOLD on Shopify — refund the customer manually.')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/raw-card-pulls/item/' + holdItemId + '/missing', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || 'Failed'); btn.disabled = false; return; }
+    toast('Marked missing', 'red');
+    loadRawPulls();
+  } catch (e) { alert(e.message); btn.disabled = false; }
+}
+
+async function pullRestock(holdItemId, binLabel, binType, btn) {
+  let where;
+  if (binLabel) {
+    let kind;
+    if (binType === 'binder') kind = '📒 binder';
+    else if (binType === 'display_case' || binType === 'display') kind = '📍 display case';
+    else kind = '📦 storage bin';
+    where = 'LEAVE THE CARD WHERE IT IS — it is already in ' + kind + ' ' + binLabel + '.';
+  } else {
+    where = 'No bin on file for this card — the system will auto-assign a storage bin and tell you where to put it after you confirm.';
+  }
+  if (!confirm(where + '\\n\\nState flips back so the card becomes sellable again, the deleted Shopify listing gets rebuilt by the nightly raw-card updater, and the hold item closes. Refund the customer manually in Shopify Admin.')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/raw-card-pulls/item/' + holdItemId + '/restock', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || 'Failed'); btn.disabled = false; return; }
+    if (d.auto_assigned) {
+      alert('Card has no original bin — put it in ' + (d.bin_label || '?') + '.');
+    }
+    toast('Restocked → ' + d.state + ' @ ' + (d.bin_label || '?'), 'green');
+    loadRawPulls();
+  } catch (e) { alert(e.message); btn.disabled = false; }
+}
+
+const _PULL_CONDITIONS = ['NM', 'LP', 'MP', 'HP', 'DMG'];
+
+function pullChangeCondition(holdItemId, currentCondition, btn) {
+  // Lightweight inline picker — no modal library, just buttons in a popover.
+  document.querySelectorAll('.pull-cond-popover').forEach(el => el.remove());
+  const pop = document.createElement('div');
+  pop.className = 'pull-cond-popover';
+  pop.style.cssText = 'position:absolute;background:var(--s2);border:1px solid var(--border);border-radius:6px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,0.5);z-index:200;display:flex;gap:4px;';
+  pop.innerHTML = _PULL_CONDITIONS.map(c =>
+    '<button class="btn btn-secondary btn-sm" style="font-size:0.72rem;padding:3px 8px;' +
+    (c === currentCondition ? 'background:rgba(0,180,255,0.18);color:#5cf;' : '') +
+    '" data-cond="' + c + '">' + c + '</button>'
+  ).join('');
+  const rect = btn.getBoundingClientRect();
+  pop.style.top = (window.scrollY + rect.bottom + 4) + 'px';
+  pop.style.left = (window.scrollX + rect.left) + 'px';
+  document.body.appendChild(pop);
+
+  const cleanup = () => { pop.remove(); document.removeEventListener('click', onDocClick, true); };
+  const onDocClick = (ev) => { if (!pop.contains(ev.target) && ev.target !== btn) cleanup(); };
+  setTimeout(() => document.addEventListener('click', onDocClick, true), 0);
+
+  pop.querySelectorAll('button[data-cond]').forEach(b => {
+    b.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const cond = b.dataset.cond;
+      if (cond === currentCondition) { cleanup(); return; }
+      b.disabled = true;
+      try {
+        const r = await fetch('/api/raw-card-pulls/item/' + holdItemId + '/condition', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ condition: cond }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Failed'); cleanup(); return; }
+        toast('Condition → ' + cond, 'green');
+        cleanup();
+        loadRawPulls();
+      } catch (e) { alert(e.message); cleanup(); }
+    });
+  });
 }
 
 function _fdBadgeHtml(email) {
