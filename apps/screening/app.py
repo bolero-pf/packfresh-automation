@@ -428,6 +428,17 @@ def api_raw_card_pulls():
     the same handler. The only handle we have is hold_items.raw_card_id,
     which the webhook leaves intact. Bin labels survive because raw_cards
     keeps its bin_id after the sale (puller needs to know where to look).
+
+    Champion "checkout" merges raws into the customer's existing Shopify
+    cart (kiosk creates listings and redirects to /pages/kiosk-add), so
+    the paid order can also include sealed and any other storefront items
+    the customer had in their cart. Those don't live in hold_items, so we
+    pull the Shopify line items in a second batched GraphQL call and merge
+    everything that isn't already in the hold as "other" items.
+
+    Same call doubles as a cancellation probe: cancelledAt on the order
+    marks the hold as CANCELLED in the response so the UI can gate Mark
+    Pulled & Shipped and prompt the operator to restock instead of ship.
     """
     rows = db.query("""
         SELECT h.id::text AS hold_id,
@@ -468,6 +479,9 @@ def api_raw_card_pulls():
                 "items": [],
                 "raw_count": 0,
                 "sealed_count": 0,
+                "cancelled": False,
+                "cancelled_at": None,
+                "financial_status": None,
             }
         if not r.get("hold_item_id"):
             continue
@@ -499,7 +513,142 @@ def api_raw_card_pulls():
             })
             holds_by_id[hid]["sealed_count"] += 1
 
-    return jsonify({"holds": list(holds_by_id.values())})
+    holds = list(holds_by_id.values())
+    _merge_shopify_order_data(holds)
+    return jsonify({"holds": holds})
+
+
+def _merge_shopify_order_data(holds):
+    """Fetch Shopify order data (line items + cancellation status) for every
+    hold in `holds` in a single batched GraphQL call, then merge: (a) any
+    line items not already in hold_items append as 'shopify' kind items so
+    sealed and other storefront add-ons show up in the pull view, (b)
+    cancelledAt flips the hold's cancelled flag for UI gating. Failures are
+    swallowed and logged — the pull view still works without this enrichment,
+    it just won't show sealed."""
+    order_names = [h["order_number"] for h in holds if h.get("order_number")]
+    if not order_names:
+        return
+    try:
+        from shopify_graphql import shopify_gql
+        # Shopify's name: filter is exact-match; OR'd to batch.
+        q = " OR ".join(f'name:"{n}"' for n in order_names)
+        data = shopify_gql("""
+            query($first:Int!, $q:String!) {
+              orders(first:$first, query:$q) {
+                edges { node {
+                  name
+                  cancelledAt
+                  displayFinancialStatus
+                  displayFulfillmentStatus
+                  lineItems(first:50) {
+                    edges { node {
+                      title
+                      quantity
+                      sku
+                      image { url }
+                      originalUnitPriceSet { shopMoney { amount } }
+                    } }
+                  }
+                } }
+              }
+            }
+        """, {"first": min(max(len(order_names), 1) * 2, 50), "q": q})
+    except Exception as e:
+        app.logger.warning(f"raw-card-pulls Shopify fetch failed: {e}")
+        return
+
+    order_map = {}
+    for edge in (data.get("data", {}).get("orders", {}) or {}).get("edges", []):
+        node = edge["node"]
+        order_map[node.get("name")] = node
+
+    for h in holds:
+        node = order_map.get(h.get("order_number"))
+        if not node:
+            continue
+        h["cancelled_at"] = node.get("cancelledAt")
+        h["cancelled"] = bool(node.get("cancelledAt"))
+        h["financial_status"] = node.get("displayFinancialStatus")
+        h["fulfillment_status"] = node.get("displayFulfillmentStatus")
+
+        # SKUs already represented by hold_items (raw barcodes + any sealed
+        # tracked locally). Skip Shopify line items whose SKU matches one of
+        # these so we don't double-list the raw cards.
+        known_skus = set()
+        for it in h["items"]:
+            if it.get("barcode"):
+                known_skus.add(str(it["barcode"]).strip())
+            if it.get("sku"):
+                known_skus.add(str(it["sku"]).strip())
+
+        for li_edge in (node.get("lineItems", {}) or {}).get("edges", []):
+            li = li_edge["node"]
+            sku = (li.get("sku") or "").strip()
+            if sku and sku in known_skus:
+                continue
+            price = 0.0
+            try:
+                price = float((li.get("originalUnitPriceSet") or {})
+                              .get("shopMoney", {}).get("amount") or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+            h["items"].append({
+                "kind": "shopify",
+                "title": li.get("title"),
+                "sku": sku or None,
+                "qty": li.get("quantity", 1),
+                "image_url": (li.get("image") or {}).get("url"),
+                "price": price,
+                "bin_label": None,
+            })
+            h["sealed_count"] += 1
+
+
+@app.route("/api/raw-card-pulls/<hold_id>/close-cancelled", methods=["POST"])
+def api_raw_card_pulls_close_cancelled(hold_id):
+    """Close a paid Champion hold whose Shopify order was cancelled. Operator
+    is expected to have already restocked every raw card via the per-item
+    Restock action; this just flips the hold and any remaining unresolved
+    items so the row drops off the queue. We don't auto-restock cards here —
+    state changes for raw_cards must go through the per-item endpoint so the
+    operator confirms the bin destination."""
+    hold = db.query_one("""
+        SELECT id, cohort, status, checkout_status FROM holds WHERE id = %s
+    """, (hold_id,))
+    if not hold:
+        return jsonify({"error": "Hold not found"}), 404
+    if hold.get("cohort") != "champion":
+        return jsonify({"error": "Not a Champion hold"}), 400
+    if hold.get("status") in ("ACCEPTED", "RETURNED", "CANCELLED", "AUTO_EXPIRED"):
+        return jsonify({"error": f"Hold already closed (status={hold.get('status')})"}), 409
+
+    # Refuse to close if any raw card is still SOLD on this hold — that means
+    # the operator hasn't restocked it yet and would lose track.
+    unresolved = db.query_one("""
+        SELECT COUNT(*) AS n
+          FROM hold_items hi
+          JOIN raw_cards rc ON rc.id = hi.raw_card_id
+         WHERE hi.hold_id = %s
+           AND hi.item_kind = 'raw'
+           AND rc.state = 'SOLD'
+    """, (hold_id,))
+    if unresolved and unresolved.get("n", 0) > 0:
+        return jsonify({
+            "error": f"{unresolved['n']} raw card(s) on this hold are still SOLD. "
+                     "Restock each one first, then close."
+        }), 409
+
+    db.execute("""
+        UPDATE holds SET status = 'CANCELLED', resolved_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+    """, (hold_id,))
+    db.execute("""
+        UPDATE hold_items SET status = 'REJECTED', resolved_at = CURRENT_TIMESTAMP
+        WHERE hold_id = %s
+          AND status NOT IN ('ACCEPTED','REJECTED','SOLD','MISSING')
+    """, (hold_id,))
+    return jsonify({"success": True})
 
 
 @app.route("/api/raw-card-pulls/<hold_id>/mark-shipped", methods=["POST"])
@@ -1953,6 +2102,10 @@ function renderRawPulls(holds) {
       : '';
     const raws = h.items.filter(i => i.kind === 'raw');
     const sealed = h.items.filter(i => i.kind !== 'raw');
+    const cancelled = !!h.cancelled;
+    const cancelBanner = cancelled
+      ? '<div style="margin:8px 0;padding:10px 12px;background:rgba(255,80,80,0.18);border:1px solid rgba(255,80,80,0.45);color:#f88;border-radius:6px;font-weight:700;">⚠ ORDER CANCELLED IN SHOPIFY ' + (h.cancelled_at ? '— ' + new Date(h.cancelled_at).toLocaleString() : '') + '<div style="font-weight:400;font-size:0.78rem;margin-top:4px;color:#fcc;">Do not ship. Restock each raw card below; the cards are still marked SOLD until you do.</div></div>'
+      : '';
     const rawHtml = raws.map(i => {
       const resolved = (i.hi_status === 'MISSING' || i.hi_status === 'REJECTED' || i.hi_status === 'ACCEPTED');
       const resolvedBadge = resolved
@@ -1990,10 +2143,21 @@ function renderRawPulls(holds) {
     }).join('');
     const sealedHtml = sealed.length ? `
       <div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);">
-        <div style="font-size:0.72rem;font-weight:600;color:var(--dim);margin-bottom:4px;">Other items in this order:</div>
-        ${sealed.map(i => `<div style="font-size:0.82rem;padding:3px 0;">• ${_esc(i.title || '—')}${i.sku ? ' <span style="color:var(--dim);font-family:monospace;">[' + _esc(i.sku) + ']</span>' : ''}</div>`).join('')}
+        <div style="font-size:0.72rem;font-weight:600;color:var(--dim);margin-bottom:4px;">Other items in this order (sealed / storefront add-ons):</div>
+        ${sealed.map(i => {
+          const qty = (i.qty && i.qty > 1) ? ' ×' + i.qty : '';
+          return '<div style="font-size:0.82rem;padding:3px 0;display:flex;align-items:center;gap:6px;">'
+            + (i.image_url ? '<img src="' + _esc(i.image_url) + '" style="width:28px;height:28px;object-fit:cover;border-radius:3px;">' : '')
+            + '<span>• ' + _esc(i.title || '—') + qty
+            + (i.sku ? ' <span style="color:var(--dim);font-family:monospace;font-size:0.72rem;">[' + _esc(i.sku) + ']</span>' : '')
+            + '</span></div>';
+        }).join('')}
       </div>
     ` : '';
+
+    const shipBtn = cancelled
+      ? '<button class="btn btn-secondary btn-sm" style="color:#fb6;" onclick="closeCancelledHold(&apos;' + h.hold_id + '&apos;, this)">✕ Close Cancelled Hold</button>'
+      : '<button class="btn btn-green btn-sm" onclick="markPullShipped(&apos;' + h.hold_id + '&apos;, this)">✓ Mark Pulled &amp; Shipped</button>';
 
     return `
       <div class="combine-group" data-hold-id="${h.hold_id}">
@@ -2003,13 +2167,14 @@ function renderRawPulls(holds) {
           ${comboBadge}
         </div>
         <div style="font-size:0.78rem;color:var(--dim);">${_esc(h.customer_email || '')} · ${_esc(h.shipping_address || '')}</div>
+        ${cancelBanner}
         <div style="margin-top:10px;background:var(--s2);border-radius:6px;overflow:hidden;">
           ${rawHtml || '<div style="padding:8px;color:var(--dim);font-size:0.82rem;">No raw items</div>'}
         </div>
         ${sealedHtml}
         <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-secondary btn-sm" onclick="printPullSlip('${h.hold_id}')">🖨 Print Pull Slip</button>
-          <button class="btn btn-green btn-sm" onclick="markPullShipped('${h.hold_id}', this)">✓ Mark Pulled &amp; Shipped</button>
+          ${shipBtn}
         </div>
       </div>
     `;
@@ -2017,14 +2182,91 @@ function renderRawPulls(holds) {
 }
 
 function printPullSlip(holdId) {
-  const card = document.querySelector('[data-hold-id="' + holdId + '"]');
-  if (!card) return;
+  const hold = ((_pullsData && _pullsData.holds) || []).find(h => h.hold_id === holdId);
+  if (!hold) return;
+
+  const NO_BIN = '__NO_BIN__';
+  const raws = (hold.items || []).filter(i => i.kind === 'raw' && i.hi_status !== 'MISSING' && i.hi_status !== 'REJECTED');
+  const sealed = (hold.items || []).filter(i => i.kind !== 'raw');
+
+  // Bucket raws by bin so the puller walks one location at a time.
+  const buckets = {};
+  raws.forEach(i => {
+    const key = i.bin_label || NO_BIN;
+    if (!buckets[key]) buckets[key] = { bin_label: i.bin_label, bin_type: i.bin_type, items: [] };
+    buckets[key].items.push(i);
+  });
+  // Sort: real bins alphabetically, then no-bin last.
+  const bucketKeys = Object.keys(buckets).sort((a, b) => {
+    if (a === NO_BIN) return 1;
+    if (b === NO_BIN) return -1;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+
+  const binIcon = (t) => t === 'binder' ? '📒' : ((t === 'display_case' || t === 'display') ? '📍' : '📦');
+  const binKind = (t) => t === 'binder' ? 'binder' : ((t === 'display_case' || t === 'display') ? 'display case' : 'storage bin');
+
+  const routeSummary = bucketKeys.map((k, idx) => {
+    const b = buckets[k];
+    const label = b.bin_label ? (binIcon(b.bin_type) + ' ' + _esc(b.bin_label)) : '⚠ NO BIN';
+    return '<span style="display:inline-block;padding:3px 10px;margin:2px;border:1px solid #888;border-radius:4px;font-weight:600;">' + (idx + 1) + '. ' + label + ' <span style="font-weight:400;color:#666;">(' + b.items.length + ')</span></span>';
+  }).join(' ');
+
+  const cancelledNote = hold.cancelled
+    ? '<div style="margin:10px 0;padding:10px;background:#fee;border:2px solid #c00;color:#900;font-weight:700;border-radius:6px;">⚠ ORDER CANCELLED IN SHOPIFY — DO NOT SHIP</div>'
+    : '';
+
+  let body = '';
+  bucketKeys.forEach((k, idx) => {
+    const b = buckets[k];
+    const header = b.bin_label
+      ? '<h2 style="margin:18px 0 6px;padding:6px 10px;background:#eef6ff;border-left:4px solid #06c;font-size:1.05rem;">' + (idx + 1) + '. ' + binIcon(b.bin_type) + ' ' + _esc(b.bin_label) + ' <span style="font-weight:400;color:#666;font-size:0.85rem;">(' + binKind(b.bin_type) + ', ' + b.items.length + ' card' + (b.items.length === 1 ? '' : 's') + ')</span></h2>'
+      : '<h2 style="margin:18px 0 6px;padding:6px 10px;background:#fee;border-left:4px solid #c00;font-size:1.05rem;color:#900;">' + (idx + 1) + '. ⚠ NO BIN ASSIGNED <span style="font-weight:400;font-size:0.85rem;">(' + b.items.length + ')</span></h2>';
+    body += header;
+    body += '<table style="width:100%;border-collapse:collapse;margin-bottom:8px;">';
+    b.items.forEach(i => {
+      const meta = [i.set_name, i.card_number ? '#' + i.card_number : '', i.condition, i.variant].filter(Boolean).join(' · ');
+      body += '<tr style="border-bottom:1px solid #eee;">'
+        + '<td style="padding:6px 4px;width:60px;">' + (i.image_url ? '<img src="' + _esc(i.image_url) + '" style="width:50px;height:50px;object-fit:cover;border-radius:3px;">' : '') + '</td>'
+        + '<td style="padding:6px 4px;"><strong>' + _esc(i.title || '—') + '</strong><div style="font-size:0.8rem;color:#666;">' + _esc(meta) + '</div></td>'
+        + '<td style="padding:6px 4px;font-family:monospace;font-size:0.85rem;text-align:right;">' + _esc(i.barcode || '') + '</td>'
+        + '</tr>';
+    });
+    body += '</table>';
+  });
+
+  if (sealed.length) {
+    body += '<h2 style="margin:18px 0 6px;padding:6px 10px;background:#fffbe6;border-left:4px solid #c80;font-size:1.05rem;">📦 Other items (sealed / storefront)</h2>';
+    body += '<table style="width:100%;border-collapse:collapse;margin-bottom:8px;">';
+    sealed.forEach(i => {
+      const qty = i.qty && i.qty > 1 ? ' ×' + i.qty : '';
+      body += '<tr style="border-bottom:1px solid #eee;">'
+        + '<td style="padding:6px 4px;width:60px;">' + (i.image_url ? '<img src="' + _esc(i.image_url) + '" style="width:50px;height:50px;object-fit:cover;border-radius:3px;">' : '') + '</td>'
+        + '<td style="padding:6px 4px;"><strong>' + _esc(i.title || '—') + qty + '</strong></td>'
+        + '<td style="padding:6px 4px;font-family:monospace;font-size:0.85rem;text-align:right;">' + _esc(i.sku || '') + '</td>'
+        + '</tr>';
+    });
+    body += '</table>';
+  }
+
+  const headerHtml = '<div style="margin-bottom:14px;">'
+    + '<h1 style="margin:0 0 4px;font-size:1.4rem;">' + _esc(hold.customer_name || hold.shipping_name || '—') + (hold.order_number ? ' <span style="font-weight:400;color:#666;font-size:1rem;">' + _esc(hold.order_number) + '</span>' : '') + '</h1>'
+    + '<div style="font-size:0.9rem;color:#444;">' + _esc(hold.customer_email || '') + '</div>'
+    + '<div style="font-size:0.9rem;color:#444;">' + _esc(hold.shipping_address || '') + '</div>'
+    + '</div>';
+
+  const routeHtml = bucketKeys.length
+    ? '<div style="margin-bottom:14px;padding:8px 10px;background:#fafafa;border:1px solid #ddd;border-radius:6px;"><div style="font-size:0.85rem;font-weight:700;margin-bottom:4px;">PULL ROUTE</div>' + routeSummary + '</div>'
+    : '';
+
   const w = window.open('', '_blank');
-  w.document.write('<html><head><title>Pull Slip</title><style>body{font-family:sans-serif;padding:20px;}img{max-width:60px;}div{margin-bottom:6px;}.bin{background:#cef;padding:2px 8px;border-radius:8px;font-weight:600;}</style></head><body>');
-  w.document.write(card.innerHTML.replace(/<button[^>]*>.*?<\\/button>/g, ''));
+  w.document.write('<html><head><title>Pull Slip — ' + _esc(hold.order_number || hold.hold_id) + '</title>'
+    + '<style>body{font-family:sans-serif;padding:20px;max-width:800px;}h1{font-size:1.4rem;}h2{font-size:1.05rem;}table{font-size:0.95rem;}@media print { h2 { break-inside: avoid; } table { break-inside: avoid; } }</style>'
+    + '</head><body>');
+  w.document.write(headerHtml + cancelledNote + routeHtml + (body || '<p>No items.</p>'));
   w.document.write('</body></html>');
   w.document.close();
-  w.print();
+  setTimeout(() => w.print(), 100);
 }
 
 async function markPullShipped(holdId, btn) {
@@ -2035,6 +2277,18 @@ async function markPullShipped(holdId, btn) {
     const d = await r.json();
     if (!r.ok) { alert(d.error || 'Failed'); btn.disabled = false; return; }
     toast('Hold closed', 'green');
+    loadRawPulls();
+  } catch (e) { alert(e.message); btn.disabled = false; }
+}
+
+async function closeCancelledHold(holdId, btn) {
+  if (!confirm('Close this cancelled hold? Make sure every raw card has been Restocked first — this only closes the hold, it does NOT auto-restock any remaining cards.')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/raw-card-pulls/' + holdId + '/close-cancelled', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || 'Failed'); btn.disabled = false; return; }
+    toast('Cancelled hold closed', 'green');
     loadRawPulls();
   } catch (e) { alert(e.message); btn.disabled = false; }
 }
