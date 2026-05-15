@@ -514,7 +514,11 @@ def api_raw_card_pulls():
             holds_by_id[hid]["sealed_count"] += 1
 
     holds = list(holds_by_id.values())
-    _merge_shopify_order_data(holds)
+    # ?fast=1 skips the Shopify GraphQL roundtrip so the badge count + initial
+    # render are sub-second. The frontend does a second non-fast fetch to
+    # progressively enrich the rendered holds with sealed items + cancellation.
+    if request.args.get("fast") != "1":
+        _merge_shopify_order_data(holds)
     return jsonify({"holds": holds})
 
 
@@ -2061,8 +2065,10 @@ function renderAll() {
 let _pullsData = null;
 
 async function loadRawPullsCount() {
+  // Badge only — skip the Shopify enrichment so we don't pay a Shopify
+  // roundtrip on every page load.
   try {
-    const r = await fetch('/api/raw-card-pulls');
+    const r = await fetch('/api/raw-card-pulls?fast=1');
     _pullsData = await r.json();
     document.getElementById('tab-pulls').textContent =
       '🃏 Raw Card Pulls (' + (_pullsData.holds||[]).length + ')';
@@ -2071,16 +2077,29 @@ async function loadRawPullsCount() {
 
 async function loadRawPulls() {
   document.getElementById('pane-pulls').innerHTML = '<div class="spinner"></div>';
+
+  // Phase 1: render DB-only data immediately so the operator sees the queue.
   try {
-    const r = await fetch('/api/raw-card-pulls');
-    _pullsData = await r.json();
+    const fastR = await fetch('/api/raw-card-pulls?fast=1');
+    _pullsData = await fastR.json();
     renderRawPulls(_pullsData.holds || []);
     document.getElementById('tab-pulls').textContent =
       '🃏 Raw Card Pulls (' + (_pullsData.holds||[]).length + ')';
   } catch (e) {
     document.getElementById('pane-pulls').innerHTML =
       '<div class="empty">Failed to load: ' + e.message + '</div>';
+    return;
   }
+
+  // Phase 2: enrich with Shopify (sealed items, cancelled status) in the
+  // background. Slow ~1-3s; re-renders silently when done. If Shopify is
+  // unreachable the DB-only render stays put — no regression vs before.
+  try {
+    const r = await fetch('/api/raw-card-pulls');
+    const d = await r.json();
+    _pullsData = d;
+    renderRawPulls(_pullsData.holds || []);
+  } catch (e) { /* leave the fast render in place */ }
 }
 
 function renderRawPulls(holds) {
