@@ -803,8 +803,30 @@ def screen_every_order(order_gid: str) -> dict:
                     "upgraded_from_tier": active_verification_tier if active_verification_tier else None,
                 }
             else:
+                # A sibling order is already in verification at this tier (or higher).
+                # The new order must INHERIT the verification — otherwise it falls
+                # through to the combine check and shows up in the Combine queue
+                # with no verification tag, and a fulfillment agent ships it.
+                inherit_tag = "high-value-tier2" if active_verification_tier >= 2 else "high-value-tier1"
+                inherit_note = f"🪪 Waiting on ID Verification (${cumulative_total:.2f})"
+                try:
+                    shopify_gql(ORDER_TAGS_ADD, {"id": order_gid, "tags": [inherit_tag, "hold-for-review"]})
+                except Exception as e:
+                    print(f"[screening] Failed to inherit verification tag on {order_gid}: {e}", flush=True)
+                try:
+                    _hold_fulfillment(order_gid, f"Cumulative ${cumulative_total:.2f} — verification already active")
+                except Exception as e:
+                    print(f"[screening] Failed to inherit verification hold on {order_gid}: {e}", flush=True)
+                try:
+                    _add_order_note(order_gid, inherit_note)
+                except Exception as e:
+                    print(f"[screening] Failed to add verification note to {order_gid}: {e}", flush=True)
+                _log_screening(order_gid, order_name, customer_email, "hold", f"tier{active_verification_tier}_inherit", {
+                    "cumulative_total": cumulative_total, "active_tier": active_verification_tier,
+                })
                 results["verification"] = {
-                    "flagged": False, "reason": "active_verification_exists",
+                    "flagged": True, "reason": "inherited_active_verification",
+                    "tier": active_verification_tier,
                     "cumulative_total": cumulative_total,
                     "active_tier": active_verification_tier,
                 }
