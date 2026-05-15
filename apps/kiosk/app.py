@@ -20,6 +20,7 @@ import logging
 import secrets
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests as _requests
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, Response, render_template, redirect, g
@@ -2693,24 +2694,35 @@ def champion_checkout():
             raise
 
     # ── Step 4: Create Shopify products (Online Store, hidde template) ─────
-    variant_ids = []
-    cart_total = 0
-    try:
-        for card in lines_resolved:
-            listing = _create_kiosk_product(card, hold_id)
-            variant_ids.append(str(listing["variant_id"]))
-            cart_total += float(card.get("current_price") or 0)
+    # Parallelized: serial creation of 40+ products blew through gunicorn's
+    # 60s worker timeout (Shopify REST POST /products.json runs ~1-2s each).
+    # 8 concurrent workers stays under Shopify's REST burst budget (40) and
+    # under the DB pool's maxconn=10. Order is preserved via index so the
+    # cart-add URL keeps the user's selection order.
+    def _create_one(idx, card):
+        listing = _create_kiosk_product(card, hold_id)
+        db.execute("""
+            UPDATE hold_items
+            SET shopify_product_id = %s, shopify_variant_id = %s
+            WHERE hold_id = %s AND raw_card_id = %s
+        """, (str(listing["product_id"]), str(listing["variant_id"]),
+              hold_id, card["id"]))
+        return idx, listing
 
-            db.execute("""
-                UPDATE hold_items
-                SET shopify_product_id = %s, shopify_variant_id = %s
-                WHERE hold_id = %s AND raw_card_id = %s
-            """, (str(listing["product_id"]), str(listing["variant_id"]),
-                  hold_id, card["id"]))
+    results = [None] * len(lines_resolved)
+    try:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = [ex.submit(_create_one, i, c) for i, c in enumerate(lines_resolved)]
+            for fut in as_completed(futures):
+                idx, listing = fut.result()
+                results[idx] = listing
     except Exception as e:
         logger.error(f"Failed to create Shopify products for hold {hold_id}: {e}")
         _cleanup_hold(hold_id)
         return jsonify({"error": "Failed to create checkout products"}), 500
+
+    variant_ids = [str(r["variant_id"]) for r in results]
+    cart_total = sum(float(c.get("current_price") or 0) for c in lines_resolved)
 
     # ── Step 5: Build cart-merge URL ──────────────────────────────────────
     # Redirects customer to theme page that adds items to their existing Shopify cart

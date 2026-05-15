@@ -8,4 +8,4 @@ COPY apps/kiosk/static/ ./static/
 COPY apps/shared/ ./shared/
 ENV PYTHONPATH=/app/shared:/app
 EXPOSE 8080
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "60"]
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "180"]
