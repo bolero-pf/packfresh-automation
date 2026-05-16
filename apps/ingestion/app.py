@@ -3473,6 +3473,11 @@ def push_plan(session_id):
     plan = []
 
     # ── Storage destination ──
+    # Require routing_reviewed_at IS NOT NULL — auto-route assigns a default
+    # destination but unreviewed items are "not decided yet". Letting them
+    # leak into Push made staffers scan-into-bin cards they never physically
+    # routed (Juan De Jesus session 2026-05-15: 17 unreviewed cards quietly
+    # appeared in the storage push plan because Route step had silent skips).
     storage_cards = db.query("""
         SELECT rc.id, rc.barcode, rc.game,
                ii.routing_reviewed_at
@@ -3480,6 +3485,7 @@ def push_plan(session_id):
           JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE ii.session_id = %s
            AND ii.routing_destination = 'storage'
+           AND ii.routing_reviewed_at IS NOT NULL
            AND ii.item_status NOT IN ('missing', 'rejected')
            AND rc.bin_id IS NULL
            AND rc.state IN ('BARCODED', 'BARCODED_STORAGE', 'ROUTED_STORAGE')
@@ -3521,6 +3527,7 @@ def push_plan(session_id):
             })
 
     # ── Display destination (binders) ──
+    # Same routing_reviewed_at guard as storage — see comment above.
     display_cards = db.query("""
         SELECT rc.id, rc.barcode, rc.game,
                ii.routing_reviewed_at
@@ -3528,6 +3535,7 @@ def push_plan(session_id):
           JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE ii.session_id = %s
            AND ii.routing_destination = 'display'
+           AND ii.routing_reviewed_at IS NOT NULL
            AND ii.item_status NOT IN ('missing', 'rejected')
            AND rc.bin_id IS NULL
            AND rc.state IN ('BARCODED', 'BARCODED_DISPLAY', 'ROUTED_BINDER')

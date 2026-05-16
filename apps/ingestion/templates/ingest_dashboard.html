@@ -2690,6 +2690,12 @@ async function _rsSetDest(destination) {
         setTimeout(() => { if (btn) btn.style.transform = ''; }, 150);
     }
 
+    // Drift focus back to scan input IMMEDIATELY (before the await below).
+    // If a click landed focus on this button, the network call is async, and
+    // the staffer scans the next card while we're still waiting on the
+    // server, the scan would land on the button instead of the input.
+    _rsFocusScan();
+
     // Persist: commit=true if the item was already reviewed (we're
     // re-committing the route change), else commit=false (default override
     // for an uncommitted card — actual commit comes on the next scan / Done).
@@ -2999,15 +3005,24 @@ function _rsKeyHandler(e) {
     // Don't capture if user is in an input
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
+    // NEVER capture Enter/Space here. Scanners always send Enter as a
+    // terminator — if focus drifts off the scan input (modal close, button
+    // click, accidental click on page), the scanner's barcode chars go
+    // into the void but its terminating Enter would fire _rsAccept, which
+    // silently commits the displayed card and jumps to a "random" next
+    // unreviewed item. That's the "scan pulls up wrong card" bug. Done is
+    // an explicit click-only gesture, scan input owns its own Enter.
     const key = e.key.toLowerCase();
-    if (key === ' ' || key === 'enter') { e.preventDefault(); _rsAccept(); }
-    else if (key === 'b') { e.preventDefault(); _rsSetDest('display'); }
+    if (key === 'b') { e.preventDefault(); _rsSetDest('display'); }
     else if (key === 's') { e.preventDefault(); _rsSetDest('storage'); }
     else if (key === 'g') { e.preventDefault(); _rsSetDest('grade'); }
     else if (key === 'k') { e.preventDefault(); _rsSetDest('bulk'); }
     else if (key === 'arrowleft') { e.preventDefault(); _rsNav(-1); }
     else if (key === 'arrowright') { e.preventDefault(); _rsNav(1); }
     else if (key === 'escape') { e.preventDefault(); exitRouteSession(); }
+    // Whatever other key fired this — drift focus back to scan input so
+    // the next scan goes through the form path, not the global handler.
+    else if (e.target.tagName !== 'INPUT') { _rsFocusScan(); }
 }
 
 async function _rsCommitCurrent() {
@@ -3055,6 +3070,26 @@ async function _rsFinish() {
     if (_rsIndex >= 0 && _rsItems[_rsIndex] && !_rsItems[_rsIndex].routing_reviewed_at) {
         const ok = await _rsCommitCurrent();
         if (!ok) return;
+    }
+    // Guard: refuse to finish if any items are still unreviewed. Push step
+    // now also requires routing_reviewed_at IS NOT NULL, so an unreviewed
+    // item that slipped through here would otherwise sit invisibly in the
+    // session forever. Offer to jump to the first unreviewed instead.
+    const unreviewedIdx = _rsItems.findIndex(i => !i.routing_reviewed_at);
+    if (unreviewedIdx >= 0) {
+        const remaining = _rsItems.filter(i => !i.routing_reviewed_at).length;
+        const jump = await themedConfirm(
+            `${remaining} card${remaining === 1 ? '' : 's'} not routed`,
+            `${remaining} card${remaining === 1 ? ' is' : 's are'} still unreviewed. Push won't include them until they're routed. Jump to the first unreviewed card?`,
+            { confirmText: 'Jump to it', cancelText: 'Finish anyway' }
+        );
+        if (jump) {
+            _rsIndex = unreviewedIdx;
+            _renderSessionCard();
+            if (_rsItems[_rsIndex]?._enrichLoading) _rsEnrichCurrent();
+            _rsFocusScan();
+            return;
+        }
     }
     _showSessionComplete();
 }
@@ -3666,9 +3701,12 @@ function _renderPushScanWidget() {
         ${pendingHtml}
         <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
             ${sendBtn}
-            <button class="btn btn-secondary" onclick="_pushSkipBin()" style="font-size:0.85rem; padding:8px 14px;" title="Skip this bin (cards stay routed-but-unplaced, plan will recompute next time you open Push).">
-                Skip bin
+            <button class="btn btn-secondary" onclick="_pushSkipBin()" style="font-size:0.85rem; padding:8px 14px;" title="${_pushPending.length ? 'Send what you have, then move on to the next bin.' : 'Skip this bin entirely — plan will pick a new bin for these cards next time.'}">
+                ${_pushPending.length ? `Send ${_pushPending.length} & next bin` : 'Skip bin'}
             </button>
+            ${_pushPending.length ? `<button class="btn btn-ghost" onclick="_pushDiscardScans()" style="font-size:0.78rem; padding:8px 12px; color:var(--text-dim);" title="Throw away the pending scans without sending.">
+                Discard ${_pushPending.length} scan${_pushPending.length === 1 ? '' : 's'}
+            </button>` : ''}
         </div>
         ${otherSummary}
     </div>`;
@@ -3770,12 +3808,34 @@ async function _pushSendBatch() {
     await _loadPushPlan(_pushSessionId);
 }
 
-function _pushSkipBin() {
+async function _pushSkipBin() {
+    // If there are pending scans, COMMIT them before advancing — the old
+    // behavior silently discarded them, which is how a staffer scanning
+    // 53 of 54 cards then hitting "Skip bin" to get past one missing card
+    // ended up with all 53 scans thrown away (Juan De Jesus session
+    // 2026-05-15). Send-batch reloads the plan and resets to bin 0 of
+    // the recomputed plan, which is naturally "the next bin that still
+    // has unplaced cards" — same outcome the staffer expected.
     if (_pushPending.length > 0) {
-        if (!confirm('You have scanned cards in this batch. Skip the bin anyway? Pending scans will be discarded (cards stay routed but unplaced).')) return;
+        await _pushSendBatch();
+        return;
     }
-    _pushPending = [];
     _pushIndex++;
+    _renderPushScanWidget();
+}
+
+// Explicit "throw away pending scans" path — only triggered when the
+// staffer really wants to start the bin over. Separated from Skip so
+// the destructive option requires its own button click.
+async function _pushDiscardScans() {
+    if (_pushPending.length === 0) return;
+    const ok = await themedConfirm(
+        'Discard scans?',
+        `Throw away ${_pushPending.length} pending scan${_pushPending.length === 1 ? '' : 's'}? Cards stay routed but unplaced — you'll have to re-scan them into a bin later.`,
+        { confirmText: 'Discard', cancelText: 'Keep them', dangerous: true }
+    );
+    if (!ok) return;
+    _pushPending = [];
     _renderPushScanWidget();
 }
 
