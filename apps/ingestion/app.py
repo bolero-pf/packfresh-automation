@@ -2740,18 +2740,10 @@ def push_graded_item(item_id):
         WHERE id = %s
     """, (cert_number, item_id))
 
-    # Update session status
+    # Update session status — central helper also stamps ingested_at,
+    # which the prior inline UPDATE skipped.
     if session_id:
-        remaining = db.query_one("""
-            SELECT COUNT(*) AS cnt FROM intake_items
-            WHERE session_id = %s AND pushed_at IS NULL
-              AND item_status IN ('good','damaged') AND is_mapped = TRUE
-        """, (session_id,))
-        if remaining and remaining["cnt"] == 0:
-            db.execute(
-                "UPDATE intake_sessions SET status='ingested' WHERE id=%s",
-                (session_id,)
-            )
+        ingest.try_advance_to_ingested(session_id)
 
     return jsonify({"success": True, **result})
 
@@ -3701,6 +3693,8 @@ def push_batch(session_id):
                  WHERE id::text = %s
             """, (iid,))
 
+    ingest.try_advance_to_ingested(session_id)
+
     return jsonify({
         "success": True,
         "count": len(barcodes),
@@ -3959,6 +3953,8 @@ def push_raw_items(session_id):
             logger.exception(f"push_raw_item failed for {item['id']}: {e}")
             errors.append({"item_id": str(item["id"]),
                            "product_name": item.get("product_name"), "error": str(e)})
+
+    ingest.try_advance_to_ingested(session_id)
 
     return jsonify({
         "success":  True,

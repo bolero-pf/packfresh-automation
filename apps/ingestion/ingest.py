@@ -1352,6 +1352,35 @@ def mark_session_ingested(session_id: str):
     )
 
 
+def try_advance_to_ingested(session_id: str) -> bool:
+    """If every active mapped item in the session has pushed_at, flip the
+    session to 'ingested'. Idempotent — no-ops on already-ingested or
+    terminal sessions, and on sessions still missing pushes. Returns True
+    when this call actually advanced the session.
+
+    Why: the scan-driven raw push (push-batch) and several other paths
+    stamp pushed_at per item but historically did not check session-wide
+    completion, leaving sessions stuck in the Pending queue with every
+    item pushed. This is the central completion gate.
+    """
+    session = query_one("SELECT status FROM intake_sessions WHERE id = %s", (session_id,))
+    if not session:
+        return False
+    if session["status"] in ("ingested", "finalized", "cancelled", "rejected"):
+        return False
+    remaining = query_one("""
+        SELECT COUNT(*) AS cnt FROM intake_items
+        WHERE session_id = %s
+          AND item_status IN ('good', 'damaged')
+          AND is_mapped = TRUE
+          AND pushed_at IS NULL
+    """, (session_id,))
+    if not remaining or (remaining.get("cnt") or 0) > 0:
+        return False
+    mark_session_ingested(session_id)
+    return True
+
+
 # ==========================================
 # HELPERS
 # ==========================================
