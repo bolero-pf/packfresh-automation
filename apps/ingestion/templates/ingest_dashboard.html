@@ -1346,11 +1346,13 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
     try {
         // Simple confirm (here, qty=1, no split) → optimistic local update
         if (status === 'here' && totalQty <= 1) {
-            // Fire-and-forget API call
+            // Fire-and-forget API call — refresh the Offer Adjustment card
+            // once the server acks so it reflects any state flip (e.g. a
+            // damaged row being confirmed back to good clears its discount).
             fetch(`/api/ingest/item/${itemId}/verify`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ status: 'here' }),
-            });
+            }).then(() => _loadOfferAdjustment(sessionId));
             // Optimistic: mark verified locally and re-render in place
             _updateLocalItem(itemId, { verified_at: new Date().toISOString() });
             _rerenderStage();
@@ -1371,7 +1373,7 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
                 fetch(`/api/ingest/item/${itemId}/verify`, {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ status: 'here', qty_confirmed: confirmed }),
-                });
+                }).then(() => _loadOfferAdjustment(sessionId));
                 _updateLocalItem(itemId, { verified_at: new Date().toISOString() });
                 _rerenderStage();
                 return;
@@ -1402,12 +1404,14 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
             return;
         }
 
-        // Missing qty=1 — optimistic
+        // Missing qty=1 — optimistic. Refresh the Offer Adjustment card
+        // once the server acks; marking missing zeros the row's offer_price,
+        // and the operator is making the pay-out call off this delta.
         if (status === 'missing' && totalQty <= 1) {
             fetch(`/api/ingest/item/${itemId}/verify`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ status: 'missing' }),
-            });
+            }).then(() => _loadOfferAdjustment(sessionId));
             _updateLocalItem(itemId, { item_status: 'missing', verified_at: new Date().toISOString(), offer_price: 0 });
             _rerenderStage();
             return;
