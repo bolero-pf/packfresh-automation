@@ -96,7 +96,9 @@ def discord_link():
         "client_id": DISCORD_CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
-        "scope": "identify",
+        # `guilds.join` lets us auto-add the user to the guild on link, so the
+        # role assign in the same call doesn't 404 on first-time linkers.
+        "scope": "identify guilds.join",
         "state": token,
     })
     return redirect(f"https://discord.com/oauth2/authorize?{params}")
@@ -140,6 +142,21 @@ def discord_callback():
 
     access_token = token_data.get("access_token")
     if not access_token:
+        # `invalid_grant` = the auth code was already consumed (browser
+        # back/forward/refresh after a successful link is the usual cause).
+        # If we already have a link for this customer, treat it as a replay.
+        if token_data.get("error") == "invalid_grant":
+            existing = get_discord_link(customer_gid)
+            if existing:
+                from service import get_customer_state, normalize_tier
+                try:
+                    tier = normalize_tier(get_customer_state(customer_gid).get("tier", "VIP0"))
+                except Exception:
+                    tier = "VIP0"
+                display = existing.get("discord_username") or ""
+                return redirect(
+                    f"{STORE_DISCORD_PAGE}?status=linked&user={display}&tier={tier}"
+                )
         logger.error(f"Discord token exchange error: {token_data}")
         return redirect(f"{STORE_DISCORD_PAGE}?status=error&reason=auth_failed")
 
@@ -183,12 +200,19 @@ def discord_callback():
     """, (customer_gid, discord_user_id, discord_global_name or discord_username,
           datetime.now(timezone.utc)))
 
-    # Sync current VIP tier to Discord roles
+    # Sync current VIP tier to Discord roles. First try to atomically join the
+    # guild + set the initial role using the user's `guilds.join` token; that
+    # avoids the 404 on first-time linkers who haven't manually joined yet.
+    # If they're already a member, Discord ignores the body — fall back to the
+    # regular role diff in that case.
     from service import get_customer_state, normalize_tier
     state_data = get_customer_state(customer_gid)
     tier = normalize_tier(state_data.get("tier", "VIP0"))
 
-    sync_discord_role(customer_gid, tier, discord_user_id=discord_user_id)
+    desired_role_id = DISCORD_ROLE_MAP.get(tier) if tier in DISCORD_ROLE_MAP else None
+    joined_fresh = _join_guild_with_role(discord_user_id, access_token, desired_role_id)
+    if not joined_fresh:
+        sync_discord_role(customer_gid, tier, discord_user_id=discord_user_id)
 
     display = discord_global_name or discord_username
     return redirect(f"{STORE_DISCORD_PAGE}?status=linked&user={display}&tier={tier}")
@@ -196,7 +220,7 @@ def discord_callback():
 
 # ---- ROLE SYNC ----
 
-def _discord_request(method: str, url: str, *, max_retries: int = 3):
+def _discord_request(method: str, url: str, *, json: dict = None, max_retries: int = 3):
     """
     Discord API call with 429 backoff. Honors the JSON body's `retry_after`
     (seconds, float) first, then the `Retry-After` header. Returns the final
@@ -210,7 +234,7 @@ def _discord_request(method: str, url: str, *, max_retries: int = 3):
     r = None
     for attempt in range(max_retries):
         try:
-            r = http_requests.request(method, url, headers=headers, timeout=10)
+            r = http_requests.request(method, url, headers=headers, json=json, timeout=10)
         except Exception as e:
             print(f"[discord] {method} {url} transport error: {e}", flush=True)
             return None
@@ -232,6 +256,26 @@ def _discord_request(method: str, url: str, *, max_retries: int = 3):
         time.sleep(wait)
     print(f"[discord] giving up after {max_retries} 429s on {method} {url}", flush=True)
     return r
+
+
+def _join_guild_with_role(discord_user_id: str, access_token: str,
+                          role_id: str | None) -> bool:
+    """
+    Atomically add the user to the guild (using their `guilds.join` access
+    token) and set their initial role. Returns True iff Discord reports a
+    fresh add (HTTP 201) — in which case the role from the request body is
+    applied. For 204 (already a member) the body is ignored, so the caller
+    must fall back to a regular sync to ensure roles are correct.
+    """
+    url = f"{DISCORD_API}/guilds/{DISCORD_GUILD_ID}/members/{discord_user_id}"
+    body: dict = {"access_token": access_token}
+    if role_id:
+        body["roles"] = [role_id]
+    r = _discord_request("PUT", url, json=body)
+    status = r.status_code if r is not None else "no_resp"
+    print(f"[discord] JOIN guild user={discord_user_id} role={role_id or 'none'} "
+          f"→ {status}", flush=True)
+    return r is not None and r.status_code == 201
 
 
 def _get_member_roles(discord_user_id: str):
