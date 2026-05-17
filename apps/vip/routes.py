@@ -217,8 +217,11 @@ def seed_vip2_lock_2025():
 @bp.post("/order_paid")
 def order_paid():
     payload = request.get_json(force=True)
-    customer_id = payload["customer_id"]      # GID
-    order_id    = payload["order_id"]         # GID
+    customer_id = payload.get("customer_id") or ""
+    order_id    = payload.get("order_id") or ""
+    # Shopify Flow fires for every paid order, including POS/guest sales with no customer attached.
+    if not customer_id or not order_id:
+        return jsonify({"ok": True, "skipped": "no_customer"}), 200
 
     order_created_at = payload.get("order_created_at")
     eval_time = None
@@ -237,8 +240,10 @@ def order_paid():
 @bp.post("/refund_created")
 def refund_created():
     payload = request.get_json(force=True)
-    customer_id = payload["customer_id"]      # GID
-    order_id    = payload["order_id"]         # GID (the refunded order)
+    customer_id = payload.get("customer_id") or ""
+    order_id    = payload.get("order_id") or ""
+    if not customer_id or not order_id:
+        return jsonify({"ok": True, "skipped": "no_customer"}), 200
     result = _on_refund(customer_id, order_id)
     try:
         _push_vip_to_klaviyo(customer_id)
