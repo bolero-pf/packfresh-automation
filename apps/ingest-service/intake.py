@@ -473,6 +473,9 @@ def update_session_percentages(session_id: str,
     if effective_cash is None:
         effective_cash = session.get("offer_percentage")  # last-resort legacy fallback
     if effective_cash is not None:
+        # Mirror accept_offer's recalc: keep the damaged 0.88 multiplier and
+        # roll unit_cost_basis forward so the per-unit cost stays in sync
+        # with the new offer_price (it's used downstream as the COGS basis).
         execute("""
             UPDATE intake_items
             SET offer_price = market_price * quantity * (
@@ -480,9 +483,15 @@ def update_session_percentages(session_id: str,
                      THEN 25.0
                      ELSE %s
                 END / 100.0
-            )
+            ) * (CASE WHEN item_status = 'damaged' THEN 0.88 ELSE 1.0 END),
+                unit_cost_basis = market_price * (
+                CASE WHEN product_type = 'raw' AND market_price < 2.00
+                     THEN 25.0
+                     ELSE %s
+                END / 100.0
+            ) * (CASE WHEN item_status = 'damaged' THEN 0.88 ELSE 1.0 END)
             WHERE session_id = %s
-        """, (effective_cash, session_id))
+        """, (effective_cash, effective_cash, session_id))
 
     _recalculate_session_totals(session_id)
     return get_session(session_id)
@@ -582,7 +591,8 @@ def accept_offer(session_id: str, offer_type: str,
 
     # Re-price every active item at the accepted percentage so the rest of
     # the pipeline (received_items_snapshot, _finalize_*) sees the right
-    # numbers. Bulk raw rule still applies.
+    # numbers. Bulk raw rule still applies. unit_cost_basis tracks the
+    # per-unit cost the rest of the pipeline reads as COGS.
     execute("""
         UPDATE intake_items
         SET offer_price = market_price * quantity * (
@@ -590,9 +600,15 @@ def accept_offer(session_id: str, offer_type: str,
                  THEN 25.0
                  ELSE %s
             END / 100.0
+        ) * (CASE WHEN item_status = 'damaged' THEN 0.88 ELSE 1.0 END),
+            unit_cost_basis = market_price * (
+            CASE WHEN product_type = 'raw' AND market_price < 2.00
+                 THEN 25.0
+                 ELSE %s
+            END / 100.0
         ) * (CASE WHEN item_status = 'damaged' THEN 0.88 ELSE 1.0 END)
         WHERE session_id = %s
-    """, (chosen_pct, session_id))
+    """, (chosen_pct, chosen_pct, session_id))
 
     is_walk_in = bool(session.get("is_walk_in"))
     new_status = "received" if is_walk_in else "accepted"
