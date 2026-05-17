@@ -672,7 +672,7 @@ def write_state(customer_gid: str, *, rolling=None, tier=None, lock=None, prov=N
     upsert_customer_metafields(customer_gid, updates)
 
     # IMPORTANT: tag using the normalized tier
-    print(f"[vip] {customer_gid} tier_in={tier!r} -> tier_norm={norm_tier}")
+    print(f"[vip] {customer_gid} tier_in={tier!r} -> tier_norm={norm_tier}", flush=True)
     if norm_tier is not None:
         set_vip_tag(customer_gid, norm_tier)
 
