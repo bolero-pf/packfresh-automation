@@ -1164,6 +1164,7 @@ async function viewSession(sessionId, _preserveScroll) {
                           : Number(s.total_offer_amount || 0);
         const _creditTotal = (s.total_offer_credit != null) ? Number(s.total_offer_credit)
                             : (s.credit_percentage != null ? Number(s.total_market_value || 0) * _creditPct / 100 : 0);
+        const _marketValue = Number(s.total_market_value || 0);
         const _accepted = s.accepted_offer_type;
         const _isWalkIn = !!s.is_walk_in;
 
@@ -1188,13 +1189,15 @@ async function viewSession(sessionId, _preserveScroll) {
                     <div class="stat-value" style="display:flex; flex-direction:column; gap:4px;">
                         <div style="display:flex; align-items:center; gap:6px; font-size:0.95rem;">
                             <span style="color:var(--text-dim); width:60px;">Credit</span>
-                            ${editable && !_accepted ? `<input id="pct-credit-input" type="number" min="0" max="100" step="0.5" value="${_creditPct}" data-orig="${_creditPct}" style="width:70px; padding:4px 6px; font-size:0.9rem;" oninput="onPctEdit('${sessionId}')">` : `<span>${_creditPct}%</span>`}
-                            <span style="color:var(--text-dim); font-size:0.85rem;">→ <strong style="color:${_accepted==='credit'?'var(--green)':'var(--text)'};">$${_creditTotal.toFixed(2)}</strong></span>
+                            ${editable && !_accepted ? `<input id="pct-credit-input" type="number" min="0" max="100" step="0.01" value="${_creditPct}" data-orig="${_creditPct}" data-market="${_marketValue}" style="width:80px; padding:4px 6px; font-size:0.9rem;" oninput="onPctEdit('${sessionId}','credit')">` : `<span>${_creditPct}%</span>`}
+                            <span style="color:var(--text-dim); font-size:0.85rem;">→ <strong style="color:${_accepted==='credit'?'var(--green)':'var(--text)'};">$</strong></span>
+                            ${editable && !_accepted ? `<input id="amt-credit-input" type="number" min="0" step="0.01" value="${_creditTotal.toFixed(2)}" data-orig="${_creditTotal.toFixed(2)}" data-market="${_marketValue}" style="width:90px; padding:4px 6px; font-size:0.9rem; font-weight:700; color:${_accepted==='credit'?'var(--green)':'var(--text)'};" oninput="onAmountEdit('${sessionId}','credit')">` : `<strong style="color:${_accepted==='credit'?'var(--green)':'var(--text)'};">${_creditTotal.toFixed(2)}</strong>`}
                         </div>
                         <div style="display:flex; align-items:center; gap:6px; font-size:0.95rem;">
                             <span style="color:var(--text-dim); width:60px;">Cash</span>
-                            ${editable && !_accepted ? `<input id="pct-cash-input" type="number" min="0" max="100" step="0.5" value="${_cashPct}" data-orig="${_cashPct}" style="width:70px; padding:4px 6px; font-size:0.9rem;" oninput="onPctEdit('${sessionId}')">` : `<span>${_cashPct}%</span>`}
-                            <span style="color:var(--text-dim); font-size:0.85rem;">→ <strong style="color:${_accepted==='cash'?'var(--green)':'var(--text)'};">$${_cashTotal.toFixed(2)}</strong></span>
+                            ${editable && !_accepted ? `<input id="pct-cash-input" type="number" min="0" max="100" step="0.01" value="${_cashPct}" data-orig="${_cashPct}" data-market="${_marketValue}" style="width:80px; padding:4px 6px; font-size:0.9rem;" oninput="onPctEdit('${sessionId}','cash')">` : `<span>${_cashPct}%</span>`}
+                            <span style="color:var(--text-dim); font-size:0.85rem;">→ <strong style="color:${_accepted==='cash'?'var(--green)':'var(--text)'};">$</strong></span>
+                            ${editable && !_accepted ? `<input id="amt-cash-input" type="number" min="0" step="0.01" value="${_cashTotal.toFixed(2)}" data-orig="${_cashTotal.toFixed(2)}" data-market="${_marketValue}" style="width:90px; padding:4px 6px; font-size:0.9rem; font-weight:700; color:${_accepted==='cash'?'var(--green)':'var(--text)'};" oninput="onAmountEdit('${sessionId}','cash')">` : `<strong style="color:${_accepted==='cash'?'var(--green)':'var(--text)'};">${_cashTotal.toFixed(2)}</strong>`}
                         </div>
                         ${editable && !_accepted ? `<div id="pct-edit-controls" style="display:none; margin-top:4px; gap:6px; align-items:center; font-size:0.8rem;">
                             <button class="btn btn-sm btn-primary" style="font-size:0.75rem; padding:3px 8px;" onclick="savePcts('${sessionId}')">Save</button>
@@ -5444,11 +5447,9 @@ function _renderRoleLockBanner(sessionId, s) {
     </div>`;
 }
 
-// Triggered by either percentage <input> in the session modal. Reveals
-// the Save/Cancel controls when the user changes a value, and (for
-// associates / out-of-cap managers) requests an override token before
-// letting them save.
-function onPctEdit(sessionId) {
+// Refreshes Save/Cancel control visibility based on whether either
+// percentage input differs from its stored original.
+function _refreshPctControls() {
     const cashEl = document.getElementById('pct-cash-input');
     const credEl = document.getElementById('pct-credit-input');
     const ctrls = document.getElementById('pct-edit-controls');
@@ -5457,12 +5458,46 @@ function onPctEdit(sessionId) {
     ctrls.style.display = dirty ? 'inline-flex' : 'none';
 }
 
+// Triggered by either percentage <input> in the session modal. Forward-
+// syncs the matching dollar field, then refreshes Save/Cancel visibility.
+function onPctEdit(sessionId, kind) {
+    if (kind) {
+        const pctEl = document.getElementById(`pct-${kind}-input`);
+        const amtEl = document.getElementById(`amt-${kind}-input`);
+        if (pctEl && amtEl) {
+            const market = Number(pctEl.dataset.market || 0);
+            const pct = parseFloat(pctEl.value);
+            if (!isNaN(pct) && market > 0) {
+                amtEl.value = (market * pct / 100).toFixed(2);
+            }
+        }
+    }
+    _refreshPctControls();
+}
+
+// Triggered by either dollar-amount <input>. Back-calculates the matching
+// percentage to two decimals (closest XX.XX%) so the user can target a
+// specific payout dollar amount instead of guessing a percentage.
+function onAmountEdit(sessionId, kind) {
+    const amtEl = document.getElementById(`amt-${kind}-input`);
+    const pctEl = document.getElementById(`pct-${kind}-input`);
+    if (!amtEl || !pctEl) return;
+    const market = Number(amtEl.dataset.market || 0);
+    const amt = parseFloat(amtEl.value);
+    if (!isNaN(amt) && market > 0) {
+        const pct = Math.round((amt / market) * 10000) / 100;
+        const clamped = Math.max(0, Math.min(100, pct));
+        pctEl.value = clamped.toFixed(2);
+    }
+    _refreshPctControls();
+}
+
 function cancelPctEdit() {
-    const cashEl = document.getElementById('pct-cash-input');
-    const credEl = document.getElementById('pct-credit-input');
+    ['pct-cash', 'pct-credit', 'amt-cash', 'amt-credit'].forEach(id => {
+        const el = document.getElementById(id + '-input');
+        if (el && el.dataset.orig != null) el.value = el.dataset.orig;
+    });
     const ctrls = document.getElementById('pct-edit-controls');
-    if (cashEl) cashEl.value = cashEl.dataset.orig;
-    if (credEl) credEl.value = credEl.dataset.orig;
     if (ctrls) ctrls.style.display = 'none';
 }
 
