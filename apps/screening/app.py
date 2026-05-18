@@ -2543,7 +2543,7 @@ function showSubstitutePicker(holdItemId, original, substitutes) {
     +   subRows
     + '</div>'
     + '<div class="fd-modal-actions">'
-    +   '<button class="btn btn-secondary btn-sm" onclick="this.closest(\'.sub-picker-overlay\').remove()">Cancel</button>'
+    +   '<button class="btn btn-secondary btn-sm" onclick="this.closest(&apos;.sub-picker-overlay&apos;).remove()">Cancel</button>'
     +   '<button class="btn btn-sm" style="color:#f88;" onclick="confirmMissingNoSub(&apos;' + holdItemId + '&apos;)">⚠ Mark Missing (no substitute) — manual refund</button>'
     + '</div>'
     + '</div>';
