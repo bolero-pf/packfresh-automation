@@ -2936,6 +2936,21 @@ def webhook_order_paid():
                      WHERE current_hold_id = %s
                        AND state = 'PENDING_SALE'
                 """, (hid,))
+                # Mark the corresponding hold_items REJECTED so they don't
+                # keep showing up in the screening pull view as phantoms.
+                # Without this, the puller sees N cards on the slip when the
+                # customer only paid for M<N and over-pulls the difference.
+                unpurchased_ids = [str(item["raw_card_id"]) for item in unpurchased]
+                if unpurchased_ids:
+                    ph_ids = ",".join(["%s"] * len(unpurchased_ids))
+                    cur.execute(f"""
+                        UPDATE hold_items
+                           SET status = 'REJECTED',
+                               resolved_at = CURRENT_TIMESTAMP
+                         WHERE hold_id = %s
+                           AND raw_card_id::text IN ({ph_ids})
+                           AND status = 'REQUESTED'
+                    """, (hid, *unpurchased_ids))
             for item in unpurchased:
                 pid = item.get("shopify_product_id")
                 if pid:

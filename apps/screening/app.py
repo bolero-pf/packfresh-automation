@@ -461,6 +461,16 @@ def api_raw_card_pulls():
          WHERE h.cohort = 'champion'
            AND h.checkout_status = 'completed'
            AND h.status NOT IN ('ACCEPTED','RETURNED','CANCELLED','AUTO_EXPIRED')
+           -- Hide cart-removal phantoms: hold_items whose raw_card was
+           -- released back to inventory (kiosk webhook) but whose status
+           -- never flipped off REQUESTED. Real SOLD items and already-
+           -- resolved items (MISSING/REJECTED/ACCEPTED) still show through.
+           AND (
+             hi.id IS NULL
+             OR hi.item_kind <> 'raw'
+             OR hi.status <> 'REQUESTED'
+             OR rc.state = 'SOLD'
+           )
          ORDER BY h.created_at ASC, sl.bin_label NULLS LAST
     """)
 
