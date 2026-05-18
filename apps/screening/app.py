@@ -710,7 +710,7 @@ def _load_pull_item(hold_item_id):
                h.cohort, h.checkout_status, h.status AS hold_status,
                h.shopify_order_number, h.customer_email,
                rc.state AS rc_state, rc.condition AS rc_condition,
-               rc.card_name
+               rc.card_name, rc.tcgplayer_id, rc.scrydex_id
           FROM hold_items hi
           JOIN holds h ON h.id = hi.hold_id
           LEFT JOIN raw_cards rc ON rc.id = hi.raw_card_id
@@ -748,15 +748,188 @@ def _log_pull_event(check_type, item_row, details):
         print(f"[screening] pull log write failed: {e}", flush=True)
 
 
-@app.route("/api/raw-card-pulls/item/<hold_item_id>/missing", methods=["POST"])
-def api_raw_card_pull_missing(hold_item_id):
-    """Flag a Champion-purchased raw card as MISSING because we can't find it
-    in the bin. The card stays SOLD on the Shopify side (refund is manual);
-    raw_cards flips to MISSING and the hold_item is closed out so the puller
-    can keep moving."""
+def _find_substitute_candidates(item_row, limit=20):
+    """Return up to N available raw_cards that match the missing item's identity
+    (tcgplayer_id OR scrydex_id), are STORED/DISPLAY, and not locked by an
+    active hold. Sorted: same-condition first, then by condition severity, then
+    STORED before DISPLAY, then oldest first so old stock cycles out.
+    """
+    id_clauses, id_params = [], []
+    if item_row.get("tcgplayer_id"):
+        id_clauses.append("rc.tcgplayer_id = %s")
+        id_params.append(item_row["tcgplayer_id"])
+    if item_row.get("scrydex_id"):
+        id_clauses.append("rc.scrydex_id = %s")
+        id_params.append(item_row["scrydex_id"])
+    if not id_clauses:
+        return []
+    id_where = "(" + " OR ".join(id_clauses) + ")"
+    # NM < LP < MP < HP < DMG — order by closeness to the customer's promised
+    # condition. CASE on rc.condition gives same-condition rank 0, anything
+    # else higher; secondary sort by absolute severity keeps "near-misses"
+    # above "way worse" downgrades.
+    return db.query(f"""
+        SELECT rc.id, rc.barcode, rc.condition, rc.state, rc.created_at,
+               rc.image_url,
+               sl.bin_label,
+               COALESCE(sr.location_type, 'bin') AS bin_type
+          FROM raw_cards rc
+          LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+          LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+          LEFT JOIN holds h ON h.id = rc.current_hold_id
+         WHERE {id_where}
+           AND rc.state IN ('STORED','DISPLAY')
+           AND rc.id <> %s
+           AND (
+             rc.current_hold_id IS NULL
+             OR h.status NOT IN ('PENDING','PULLING','READY')
+           )
+         ORDER BY
+           CASE WHEN rc.condition = %s THEN 0 ELSE 1 END ASC,
+           CASE rc.condition
+             WHEN 'NM' THEN 0 WHEN 'LP' THEN 1 WHEN 'MP' THEN 2
+             WHEN 'HP' THEN 3 WHEN 'DMG' THEN 4 ELSE 9 END ASC,
+           (rc.state = 'STORED') DESC,
+           rc.created_at ASC
+         LIMIT %s
+    """, (*id_params, str(item_row["raw_card_id"]), item_row.get("rc_condition"), limit))
+
+
+@app.route("/api/raw-card-pulls/item/<hold_item_id>/substitutes", methods=["GET"])
+def api_raw_card_pull_substitutes(hold_item_id):
+    """List candidate substitute cards for a missing Champion-purchased raw
+    card. Same identity (tcg/scrydex), available state, not actively held.
+    Frontend uses this to power the picker that opens when 'Mark Missing' is
+    pressed — same-condition swaps are silent to the customer; downgrades
+    require operator outreach (see project_champion_fungibility memory)."""
     row, err = _load_pull_item(hold_item_id)
     if err:
         return err
+    candidates = _find_substitute_candidates(row)
+    return jsonify({
+        "success": True,
+        "original": {
+            "card_name": row.get("card_name") or row.get("hi_title"),
+            "condition": row.get("rc_condition"),
+            "barcode": row.get("hi_barcode"),
+        },
+        "substitutes": [
+            {
+                "raw_card_id": str(c["id"]),
+                "barcode": c["barcode"],
+                "condition": c["condition"],
+                "state": c["state"],
+                "bin_label": c.get("bin_label"),
+                "bin_type": c.get("bin_type"),
+                "image_url": c.get("image_url"),
+                "condition_match": c["condition"] == row.get("rc_condition"),
+            } for c in (candidates or [])
+        ],
+    })
+
+
+@app.route("/api/raw-card-pulls/item/<hold_item_id>/missing", methods=["POST"])
+def api_raw_card_pull_missing(hold_item_id):
+    """Flag a Champion-purchased raw card as MISSING because we can't find it
+    in the bin. Two modes:
+
+    1. **Substitute** (body: {"replacement_raw_card_id": "..."}) — original
+       flips to MISSING, substitute flips to SOLD, hold_item repoints to the
+       substitute. Customer sees no change (same SKU/condition unless operator
+       knowingly chose a downgrade). Original Shopify order is untouched.
+    2. **No substitute** (empty body) — original flips to MISSING and the
+       hold_item is closed out; refund is manual in Shopify Admin.
+    """
+    row, err = _load_pull_item(hold_item_id)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    replacement_id = (data.get("replacement_raw_card_id") or "").strip() or None
+
+    if replacement_id:
+        # Validate the substitute is still available + still matches identity.
+        # We re-check inside the transaction window even though the picker
+        # already filtered, because a different operator could have grabbed
+        # the same card between picker load and click.
+        id_clauses, id_params = [], []
+        if row.get("tcgplayer_id"):
+            id_clauses.append("rc.tcgplayer_id = %s")
+            id_params.append(row["tcgplayer_id"])
+        if row.get("scrydex_id"):
+            id_clauses.append("rc.scrydex_id = %s")
+            id_params.append(row["scrydex_id"])
+        if not id_clauses:
+            return jsonify({"error": "Original card has no identity to match a substitute against"}), 409
+        id_where = "(" + " OR ".join(id_clauses) + ")"
+        sub = db.query_one(f"""
+            SELECT rc.id, rc.barcode, rc.condition, rc.state,
+                   sl.bin_label,
+                   COALESCE(sr.location_type, 'bin') AS bin_type
+              FROM raw_cards rc
+              LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
+              LEFT JOIN storage_rows sr ON sr.id = sl.row_id
+              LEFT JOIN holds h ON h.id = rc.current_hold_id
+             WHERE rc.id = %s
+               AND {id_where}
+               AND rc.state IN ('STORED','DISPLAY')
+               AND (
+                 rc.current_hold_id IS NULL
+                 OR h.status NOT IN ('PENDING','PULLING','READY')
+               )
+        """, (replacement_id, *id_params))
+        if not sub:
+            return jsonify({"error": "Substitute is no longer available — refresh and try again"}), 409
+
+        db.execute("""
+            UPDATE raw_cards
+               SET state = 'MISSING',
+                   current_hold_id = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+        """, (row["raw_card_id"],))
+        # Substitute takes the SOLD slot. Clear any stale listing pointer
+        # (mirrors the restock/sale paths — listing creation is a kiosk-side
+        # concern, never resurrected here).
+        db.execute("""
+            UPDATE raw_cards
+               SET state = 'SOLD',
+                   current_hold_id = NULL,
+                   shopify_product_id = NULL,
+                   shopify_variant_id = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = %s
+        """, (str(sub["id"]),))
+        db.execute("""
+            UPDATE hold_items
+               SET raw_card_id = %s,
+                   barcode = %s
+             WHERE id = %s
+        """, (str(sub["id"]), sub["barcode"], hold_item_id))
+        _log_pull_event("raw_pull_substitute", row, {
+            "hold_item_id": hold_item_id,
+            "missing_raw_card_id": str(row["raw_card_id"]),
+            "missing_barcode": row.get("hi_barcode"),
+            "substitute_raw_card_id": str(sub["id"]),
+            "substitute_barcode": sub["barcode"],
+            "card_name": row.get("card_name") or row.get("hi_title"),
+            "promised_condition": row.get("rc_condition"),
+            "substitute_condition": sub["condition"],
+            "condition_downgrade": sub["condition"] != row.get("rc_condition"),
+            "substitute_bin": sub.get("bin_label"),
+            "substitute_bin_type": sub.get("bin_type"),
+        })
+        return jsonify({
+            "success": True,
+            "swapped": True,
+            "new_card_id": str(sub["id"]),
+            "new_barcode": sub["barcode"],
+            "new_condition": sub["condition"],
+            "new_bin": sub.get("bin_label"),
+            "new_bin_type": sub.get("bin_type"),
+            "condition_downgrade": sub["condition"] != row.get("rc_condition"),
+        })
+
     db.execute("""
         UPDATE raw_cards
            SET state = 'MISSING',
@@ -776,7 +949,7 @@ def api_raw_card_pull_missing(hold_item_id):
         "card_name": row.get("card_name") or row.get("hi_title"),
         "prior_condition": row.get("rc_condition"),
     })
-    return jsonify({"success": True})
+    return jsonify({"success": True, "swapped": False})
 
 
 @app.route("/api/raw-card-pulls/item/<hold_item_id>/condition", methods=["POST"])
@@ -2315,15 +2488,98 @@ async function closeCancelledHold(holdId, btn) {
 // ── Per-item mutations (Mark Missing / Change Condition / Restock) ──────────
 
 async function pullMarkMissing(holdItemId, btn) {
-  if (!confirm('Mark this card MISSING? It stays SOLD on Shopify — refund the customer manually.')) return;
+  // Open the substitute picker. Same-condition swap is silent to the
+  // customer; downgrade or no-substitute paths flag for outreach/refund.
   btn.disabled = true;
+  let data;
+  try {
+    const r = await fetch('/api/raw-card-pulls/item/' + holdItemId + '/substitutes');
+    data = await r.json();
+    if (!r.ok) { alert(data.error || 'Failed to load substitutes'); btn.disabled = false; return; }
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+  showSubstitutePicker(holdItemId, data.original || {}, data.substitutes || []);
+}
+
+function showSubstitutePicker(holdItemId, original, substitutes) {
+  document.querySelectorAll('.sub-picker-overlay').forEach(o => o.remove());
+
+  const binIcon = (t) => t === 'binder' ? '📒' : ((t === 'display_case' || t === 'display') ? '📍' : '📦');
+
+  const subRows = substitutes.length ? substitutes.map(s => {
+    const downgrade = !s.condition_match;
+    const condBadge = downgrade
+      ? '<span style="padding:2px 6px;border-radius:4px;font-size:0.7rem;font-weight:700;background:rgba(255,170,0,0.18);color:#fb6;">⚠ ' + _esc(s.condition) + ' — worse condition</span>'
+      : '<span style="padding:2px 6px;border-radius:4px;font-size:0.7rem;font-weight:700;background:rgba(80,200,120,0.18);color:#8e8;">✓ ' + _esc(s.condition) + ' — same condition</span>';
+    const binBadge = s.bin_label
+      ? '<span style="padding:2px 8px;background:rgba(0,180,255,0.12);color:#5cf;border-radius:10px;font-weight:600;font-size:0.72rem;">' + binIcon(s.bin_type) + ' ' + _esc(s.bin_label) + '</span>'
+      : '<span style="color:var(--red);font-size:0.72rem;">⚠ no bin</span>';
+    return '<div style="display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid var(--border);">'
+      + (s.image_url ? '<img src="' + _esc(s.image_url) + '" style="width:38px;height:38px;object-fit:cover;border-radius:4px;">' : '<div style="width:38px;height:38px;background:var(--s2);border-radius:4px;"></div>')
+      + '<div style="flex:1;font-size:0.82rem;">'
+      +   '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">' + condBadge + binBadge + '</div>'
+      +   '<div style="font-family:monospace;font-size:0.72rem;color:var(--dim);margin-top:3px;">' + _esc(s.barcode || '') + '</div>'
+      + '</div>'
+      + '<button class="btn btn-sm" style="background:' + (downgrade ? '#fb6' : '#5c5') + ';color:#000;font-weight:600;" '
+      +   'onclick="confirmSubstitute(&apos;' + holdItemId + '&apos;, &apos;' + s.raw_card_id + '&apos;, ' + (downgrade ? 'true' : 'false') + ')">Use this</button>'
+      + '</div>';
+  }).join('') : '<div style="padding:16px;color:var(--dim);font-size:0.82rem;text-align:center;">No substitutes available for this card.</div>';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'fd-modal-overlay sub-picker-overlay';
+  overlay.innerHTML =
+    '<div class="fd-modal" style="max-width:560px;">'
+    + '<h3>Missing card — pick a substitute</h3>'
+    + '<div style="background:var(--s2);border-radius:6px;padding:10px 12px;margin-bottom:12px;">'
+    +   '<div style="font-size:0.85rem;font-weight:600;">' + _esc(original.card_name || '—') + '</div>'
+    +   '<div style="font-size:0.75rem;color:var(--dim);margin-top:2px;">Promised condition: <strong>' + _esc(original.condition || '—') + '</strong> · barcode <span style="font-family:monospace;">' + _esc(original.barcode || '—') + '</span></div>'
+    + '</div>'
+    + '<div style="font-size:0.78rem;color:var(--dim);margin-bottom:6px;">✓ Same condition: customer won\'t notice — just swap.<br>⚠ Worse condition: contact the customer first (refund or partial credit).</div>'
+    + '<div style="border:1px solid var(--border);border-radius:6px;max-height:340px;overflow-y:auto;margin-bottom:14px;">'
+    +   subRows
+    + '</div>'
+    + '<div class="fd-modal-actions">'
+    +   '<button class="btn btn-secondary btn-sm" onclick="this.closest(\'.sub-picker-overlay\').remove()">Cancel</button>'
+    +   '<button class="btn btn-sm" style="color:#f88;" onclick="confirmMissingNoSub(&apos;' + holdItemId + '&apos;)">⚠ Mark Missing (no substitute) — manual refund</button>'
+    + '</div>'
+    + '</div>';
+  document.body.appendChild(overlay);
+}
+
+async function confirmSubstitute(holdItemId, replacementId, isDowngrade) {
+  const prompt = isDowngrade
+    ? 'This card is a WORSE CONDITION than what the customer ordered — you must contact them first (offer refund or partial credit). Continue?'
+    : 'Swap to this card? Customer won\'t be notified — it\'s the same condition.';
+  if (!confirm(prompt)) return;
+  try {
+    const r = await fetch('/api/raw-card-pulls/item/' + holdItemId + '/missing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replacement_raw_card_id: replacementId }),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || 'Failed'); return; }
+    document.querySelectorAll('.sub-picker-overlay').forEach(o => o.remove());
+    const where = d.new_bin ? (' → ' + d.new_bin) : '';
+    toast(isDowngrade ? ('Swapped (downgrade)' + where) : ('Swapped' + where), isDowngrade ? 'amber' : 'green');
+    loadRawPulls();
+  } catch (e) { alert(e.message); }
+}
+
+async function confirmMissingNoSub(holdItemId) {
+  if (!confirm('Mark this card MISSING without a substitute? It stays SOLD on Shopify — refund the customer manually.')) return;
   try {
     const r = await fetch('/api/raw-card-pulls/item/' + holdItemId + '/missing', { method: 'POST' });
     const d = await r.json();
-    if (!r.ok) { alert(d.error || 'Failed'); btn.disabled = false; return; }
+    if (!r.ok) { alert(d.error || 'Failed'); return; }
+    document.querySelectorAll('.sub-picker-overlay').forEach(o => o.remove());
     toast('Marked missing', 'red');
     loadRawPulls();
-  } catch (e) { alert(e.message); btn.disabled = false; }
+  } catch (e) { alert(e.message); }
 }
 
 async function pullRestock(holdItemId, binLabel, binType, btn) {
