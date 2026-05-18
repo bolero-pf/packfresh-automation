@@ -2296,7 +2296,28 @@ function renderRawPulls(holds) {
     if (k) combineByEmail[k] = g;
   });
 
-  el.innerHTML = holds.map(h => {
+  // Header bar with the all-orders pull slip — bucketed by bin across every
+  // hold, so the puller walks A-1 once for every card needed there instead
+  // of once per order. Order/customer is on each row so cards can be sorted
+  // into envelopes at the end.
+  const totalPending = holds.reduce((n, h) =>
+    n + (h.items || []).filter(i => i.kind === 'raw'
+      && i.hi_status !== 'MISSING' && i.hi_status !== 'REJECTED').length, 0);
+  const headerBar =
+    '<div style="display:flex;align-items:center;justify-content:space-between;'
+    + 'gap:10px;margin-bottom:14px;padding:10px 14px;background:var(--s2);'
+    + 'border-radius:8px;">'
+    + '<div style="font-size:0.92rem;font-weight:600;">'
+    +   '🃏 ' + holds.length + ' hold' + (holds.length === 1 ? '' : 's')
+    +   ' · ' + totalPending + ' card' + (totalPending === 1 ? '' : 's') + ' to pull'
+    + '</div>'
+    + '<button class="btn btn-sm" style="background:#5cf;color:#000;font-weight:700;" '
+    +   'onclick="printAllPullSlips()" title="Single walk: every bin, every card, every order">'
+    +   '🖨 Print Combined Pull List'
+    + '</button>'
+    + '</div>';
+
+  el.innerHTML = headerBar + holds.map(h => {
     const ce = (h.customer_email || '').toLowerCase();
     const comboMatch = combineByEmail[ce];
     const comboBadge = comboMatch
@@ -2466,6 +2487,130 @@ function printPullSlip(holdId) {
     + '<style>body{font-family:sans-serif;padding:20px;max-width:800px;}h1{font-size:1.4rem;}h2{font-size:1.05rem;}table{font-size:0.95rem;}@media print { h2 { break-inside: avoid; } table { break-inside: avoid; } }</style>'
     + '</head><body>');
   w.document.write(headerHtml + cancelledNote + routeHtml + (body || '<p>No items.</p>'));
+  w.document.write('</body></html>');
+  w.document.close();
+  setTimeout(() => w.print(), 100);
+}
+
+function printAllPullSlips() {
+  // Combined pull list across every pending hold. Bucketed by bin so the
+  // puller walks each bin exactly once; each card row shows which order it
+  // belongs to so they can be sorted into envelopes after pulling.
+  const holds = (_pullsData && _pullsData.holds) || [];
+  if (!holds.length) { alert('Nothing to pull.'); return; }
+
+  const NO_BIN = '__NO_BIN__';
+  const buckets = {};
+  let totalCards = 0;
+  let cancelledOrders = 0;
+
+  holds.forEach(h => {
+    if (h.cancelled) cancelledOrders++;
+    (h.items || []).forEach(i => {
+      if (i.kind !== 'raw') return;
+      if (i.hi_status === 'MISSING' || i.hi_status === 'REJECTED') return;
+      const key = i.bin_label || NO_BIN;
+      if (!buckets[key]) buckets[key] = { bin_label: i.bin_label, bin_type: i.bin_type, items: [] };
+      buckets[key].items.push({
+        item: i,
+        order_number: h.order_number,
+        customer_name: h.customer_name || h.shipping_name || '—',
+        cancelled: !!h.cancelled,
+      });
+      totalCards++;
+    });
+  });
+
+  if (totalCards === 0) { alert('Nothing to pull — every item is already resolved.'); return; }
+
+  const bucketKeys = Object.keys(buckets).sort((a, b) => {
+    if (a === NO_BIN) return 1;
+    if (b === NO_BIN) return -1;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+
+  const binIcon = (t) => t === 'binder' ? '📒' : ((t === 'display_case' || t === 'display') ? '📍' : '📦');
+  const binKind = (t) => t === 'binder' ? 'binder' : ((t === 'display_case' || t === 'display') ? 'display case' : 'storage bin');
+
+  const routeSummary = bucketKeys.map((k, idx) => {
+    const b = buckets[k];
+    const label = b.bin_label ? (binIcon(b.bin_type) + ' ' + _esc(b.bin_label)) : '⚠ NO BIN';
+    return '<span style="display:inline-block;padding:3px 10px;margin:2px;border:1px solid #888;border-radius:4px;font-weight:600;">'
+      + (idx + 1) + '. ' + label
+      + ' <span style="font-weight:400;color:#666;">(' + b.items.length + ')</span></span>';
+  }).join(' ');
+
+  let body = '';
+  bucketKeys.forEach((k, idx) => {
+    const b = buckets[k];
+    const header = b.bin_label
+      ? '<h2 style="margin:18px 0 6px;padding:6px 10px;background:#eef6ff;border-left:4px solid #06c;font-size:1.05rem;">'
+        + (idx + 1) + '. ' + binIcon(b.bin_type) + ' ' + _esc(b.bin_label)
+        + ' <span style="font-weight:400;color:#666;font-size:0.85rem;">('
+        + binKind(b.bin_type) + ', ' + b.items.length + ' card'
+        + (b.items.length === 1 ? '' : 's') + ')</span></h2>'
+      : '<h2 style="margin:18px 0 6px;padding:6px 10px;background:#fee;border-left:4px solid #c00;font-size:1.05rem;color:#900;">'
+        + (idx + 1) + '. ⚠ NO BIN ASSIGNED <span style="font-weight:400;font-size:0.85rem;">('
+        + b.items.length + ')</span></h2>';
+    body += header;
+    body += '<table style="width:100%;border-collapse:collapse;margin-bottom:8px;">';
+    body += '<thead><tr style="background:#f8f8f8;font-size:0.78rem;color:#555;text-align:left;">'
+      + '<th style="padding:4px;width:60px;"></th>'
+      + '<th style="padding:4px;">Card</th>'
+      + '<th style="padding:4px;width:180px;">Order</th>'
+      + '<th style="padding:4px;width:140px;text-align:right;">Barcode</th>'
+      + '</tr></thead>';
+    b.items.forEach(entry => {
+      const i = entry.item;
+      const meta = [i.set_name, i.card_number ? '#' + i.card_number : '', i.condition, i.variant].filter(Boolean).join(' · ');
+      const cancelMark = entry.cancelled
+        ? '<div style="color:#c00;font-weight:700;font-size:0.72rem;">⚠ CANCELLED — restock</div>'
+        : '';
+      body += '<tr style="border-bottom:1px solid #eee;">'
+        + '<td style="padding:6px 4px;">' + (i.image_url
+            ? '<img src="' + _esc(i.image_url) + '" style="width:50px;height:50px;object-fit:cover;border-radius:3px;">'
+            : '') + '</td>'
+        + '<td style="padding:6px 4px;"><strong>' + _esc(i.title || '—') + '</strong>'
+        +   '<div style="font-size:0.78rem;color:#666;">' + _esc(meta) + '</div></td>'
+        + '<td style="padding:6px 4px;font-size:0.85rem;">'
+        +   '<strong>' + _esc(entry.customer_name) + '</strong>'
+        +   (entry.order_number ? '<div style="font-size:0.75rem;color:#666;">' + _esc(entry.order_number) + '</div>' : '')
+        +   cancelMark
+        + '</td>'
+        + '<td style="padding:6px 4px;font-family:monospace;font-size:0.82rem;text-align:right;">'
+        +   _esc(i.barcode || '') + '</td>'
+        + '</tr>';
+    });
+    body += '</table>';
+  });
+
+  const stamp = new Date().toLocaleString();
+  const cancelledNote = cancelledOrders > 0
+    ? '<div style="margin:8px 0 14px;padding:8px 12px;background:#fee;border:1px solid #c00;color:#900;font-size:0.85rem;border-radius:4px;">'
+      + '⚠ ' + cancelledOrders + ' order' + (cancelledOrders === 1 ? '' : 's')
+      + ' on this list cancelled in Shopify — restock those cards instead of shipping. Rows are flagged in the Order column.</div>'
+    : '';
+  const headerHtml =
+    '<div style="margin-bottom:12px;">'
+    + '<h1 style="margin:0 0 4px;font-size:1.4rem;">Combined Pull List</h1>'
+    + '<div style="font-size:0.85rem;color:#444;">' + stamp
+    +   ' · ' + holds.length + ' hold' + (holds.length === 1 ? '' : 's')
+    +   ' · ' + totalCards + ' card' + (totalCards === 1 ? '' : 's')
+    +   ' · ' + bucketKeys.length + ' bin' + (bucketKeys.length === 1 ? '' : 's')
+    + '</div></div>';
+  const routeHtml = bucketKeys.length
+    ? '<div style="margin-bottom:14px;padding:8px 10px;background:#fafafa;border:1px solid #ddd;border-radius:6px;">'
+      + '<div style="font-size:0.85rem;font-weight:700;margin-bottom:4px;">PULL ROUTE</div>'
+      + routeSummary + '</div>'
+    : '';
+
+  const w = window.open('', '_blank');
+  w.document.write('<html><head><title>Combined Pull List — ' + _esc(stamp) + '</title>'
+    + '<style>body{font-family:sans-serif;padding:20px;max-width:900px;}'
+    + 'h1{font-size:1.4rem;}h2{font-size:1.05rem;}table{font-size:0.95rem;}'
+    + '@media print { h2 { break-inside: avoid; } table { break-inside: avoid; } }'
+    + '</style></head><body>');
+  w.document.write(headerHtml + cancelledNote + routeHtml + body);
   w.document.write('</body></html>');
   w.document.close();
   setTimeout(() => w.print(), 100);
