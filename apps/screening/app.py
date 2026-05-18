@@ -2538,7 +2538,7 @@ function showSubstitutePicker(holdItemId, original, substitutes) {
     +   '<div style="font-size:0.85rem;font-weight:600;">' + _esc(original.card_name || '—') + '</div>'
     +   '<div style="font-size:0.75rem;color:var(--dim);margin-top:2px;">Promised condition: <strong>' + _esc(original.condition || '—') + '</strong> · barcode <span style="font-family:monospace;">' + _esc(original.barcode || '—') + '</span></div>'
     + '</div>'
-    + '<div style="font-size:0.78rem;color:var(--dim);margin-bottom:6px;">✓ Same condition: customer won\'t notice — just swap.<br>⚠ Worse condition: contact the customer first (refund or partial credit).</div>'
+    + '<div style="font-size:0.78rem;color:var(--dim);margin-bottom:6px;">✓ Same condition: customer will not notice — just swap.<br>⚠ Worse condition: contact the customer first (refund or partial credit).</div>'
     + '<div style="border:1px solid var(--border);border-radius:6px;max-height:340px;overflow-y:auto;margin-bottom:14px;">'
     +   subRows
     + '</div>'
@@ -2553,7 +2553,7 @@ function showSubstitutePicker(holdItemId, original, substitutes) {
 async function confirmSubstitute(holdItemId, replacementId, isDowngrade) {
   const prompt = isDowngrade
     ? 'This card is a WORSE CONDITION than what the customer ordered — you must contact them first (offer refund or partial credit). Continue?'
-    : 'Swap to this card? Customer won\'t be notified — it\'s the same condition.';
+    : 'Swap to this card? Customer will not be notified — it is the same condition.';
   if (!confirm(prompt)) return;
   try {
     const r = await fetch('/api/raw-card-pulls/item/' + holdItemId + '/missing', {
