@@ -49,6 +49,34 @@ def configure(*, _pricing=None, _shopify=None, _cache_mgr=None,
 bp = Blueprint("pricing", __name__)
 
 
+def _maybe_backfill_english_name(session_id, tcgplayer_id, english_name):
+    """Rewrite intake_items.product_name from JP → EN when Scrydex gave us an
+    English form. Only updates rows whose current product_name contains
+    multibyte (CJK) characters, so operator-customized English labels are
+    left alone. Scoped to the session being refreshed.
+
+    octet_length > char_length is true exactly when the string contains any
+    multibyte UTF-8 codepoint — cleaner than a regex character class and
+    avoids embedded \\x00 issues."""
+    if not english_name or not tcgplayer_id or not session_id:
+        return
+    # If Scrydex itself only has a JP name (no English translation), skip.
+    if any(ord(c) > 127 for c in english_name):
+        return
+    try:
+        db.execute(
+            """UPDATE intake_items
+               SET product_name = %s
+               WHERE session_id = %s
+                 AND tcgplayer_id = %s
+                 AND octet_length(product_name) > char_length(product_name)
+                 AND product_name <> %s""",
+            (english_name, session_id, int(tcgplayer_id), english_name),
+        )
+    except Exception as e:
+        logger.warning(f"Name backfill failed for TCG#{tcgplayer_id}: {e}")
+
+
 
 @bp.route("/api/intake/session/<session_id>/offer-percentage", methods=["POST"])
 @enforce_offer_caps
@@ -155,7 +183,38 @@ def refresh_session_prices(session_id):
             else:
                 ppt_data = pricing.get_card_by_tcgplayer_id(tcg_id)
 
-            if ppt_data:
+            if is_graded and grade_co and grade_val:
+                # Graded pricing doesn't depend on card metadata — Scrydex has
+                # graded comps keyed off tcg_id even when the card itself isn't
+                # in the cache. Run this branch independently of ppt_data so
+                # slabs with no Scrydex card record still get prices.
+                # Per CLAUDE.md: live eBay comps → cache aggregate. Never PPT.
+                try:
+                    from graded_pricing import get_live_graded_comps
+                    live = get_live_graded_comps(tcg_id, grade_co, grade_val, db)
+                    if live:
+                        mkt = live.get("market") if live.get("market") is not None else live.get("mid")
+                        if mkt is not None:
+                            ppt_price = Decimal(str(mkt)).quantize(Decimal("0.01"))
+                            source = "scrydex_live"
+                except Exception as e:
+                    logger.warning(f"Live graded comps failed for {tcg_id} {grade_co} {grade_val}: {e}")
+                if ppt_price is None:
+                    try:
+                        cp = pricing.get_graded_price(
+                            tcgplayer_id=int(tcg_id), company=grade_co, grade=grade_val,
+                        )
+                        if cp is not None:
+                            ppt_price = cp
+                            source = "cache"
+                    except Exception as e:
+                        logger.warning(f"Cache graded lookup failed for {tcg_id} {grade_co} {grade_val}: {e}")
+                if ppt_data:
+                    ppt_name = ppt_data.get("nameEn") or ppt_data.get("name")
+                    if not source:
+                        source = ppt_data.get("_price_source", "ppt")
+                ppt_low = None  # no "low" concept for graded eBay data
+            elif ppt_data:
                 source = ppt_data.get("_price_source", "ppt")
                 if ptype == "sealed":
                     unopened = ppt_data.get("unopenedPrice")
@@ -166,26 +225,6 @@ def refresh_session_prices(session_id):
                         prices_low = None
                     ppt_price = unopened
                     ppt_low = prices_low
-                    ppt_name = ppt_data.get("name")
-                elif is_graded and grade_co and grade_val:
-                    # Scrydex-first per CLAUDE.md: live eBay comps → cache aggregate → PPT.
-                    # Never trust PPT graded data (often 3x off).
-                    ppt_price = None
-                    try:
-                        from graded_pricing import get_live_graded_comps
-                        live = get_live_graded_comps(tcg_id, grade_co, grade_val, db)
-                        if live:
-                            mkt = live.get("market") if live.get("market") is not None else live.get("mid")
-                            if mkt is not None:
-                                ppt_price = Decimal(str(mkt)).quantize(Decimal("0.01"))
-                                source = "scrydex_live"
-                    except Exception as e:
-                        logger.warning(f"Live graded comps failed for {tcg_id} {grade_co} {grade_val}: {e}")
-                    if ppt_price is None:
-                        ppt_price = pricing.get_graded_price(
-                            tcgplayer_id=int(tcg_id), company=grade_co, grade=grade_val,
-                        )
-                    ppt_low = None  # no "low" concept for graded eBay data
                     ppt_name = ppt_data.get("nameEn") or ppt_data.get("name")
                 else:
                     prices = ppt_data.get("prices", {})
@@ -198,8 +237,15 @@ def refresh_session_prices(session_id):
                         "ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name,
                         "error": None, "raw_prices": prices, "price_source": source,
                     }
+                    # Backfill JP product_name with English when available.
+                    _maybe_backfill_english_name(session_id, tcg_id, ppt_name)
                     fetched_count += 1
                     continue
+
+            # Auto-translate saved product_name from JP → EN when Scrydex
+            # gave us an English form. Items linked before the JP fix kept
+            # their JP product_name; rerunning refresh-prices heals them.
+            _maybe_backfill_english_name(session_id, tcg_id, ppt_name)
 
             fetched_count += 1
 
@@ -261,9 +307,19 @@ def refresh_session_prices(session_id):
         if ppt_price_f and collectr_price > 0:
             delta_pct = round((ppt_price_f - collectr_price) / collectr_price * 100, 1)
 
+        # Reflect the JP→EN backfill in this same response so the operator
+        # doesn't have to refresh twice. DB is updated in the loop above;
+        # mirror that choice here for the in-flight comparison row.
+        saved_name = item.get("product_name") or ""
+        display_name = saved_name
+        if (ppt_name and saved_name
+                and any(ord(c) > 127 for c in saved_name)
+                and not any(ord(c) > 127 for c in ppt_name)):
+            display_name = ppt_name
+
         comparisons.append({
             "item_id": item["id"],
-            "product_name": item.get("product_name"),
+            "product_name": display_name,
             "ppt_name": ppt_name,
             "tcgplayer_id": tcg_id,
             "quantity": item.get("quantity", 1),
