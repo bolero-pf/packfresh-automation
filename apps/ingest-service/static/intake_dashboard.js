@@ -1652,7 +1652,7 @@ async function linkAndCompare() {
                     || item.prices?.mid                // fallback
                     || item.market_price               // flat field
                     || null;
-            pptProductName = item.name || item.productName || '';
+            pptProductName = item.nameEn || item.name || item.productName || '';
             pptSourceLabel = {cache:'Cache',ppt:'PPT',scrydex:'Scrydex'}[item._price_source] || pptSourceLabel;
         } else {
             // PPT lookup failed — still allow linking, just no price comparison
@@ -1913,8 +1913,8 @@ async function fuzzySearch(prefer) {
             const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.tcgPlayerID || '';
             const sid = p.scrydexId || p.scrydex_id || '';
             const price = p.unopenedPrice || p.prices?.market || p.market_price || p.price || '';
-            const name = p.name || p.productName || '?';
-            const pSetName = p.setName || p.set || '';
+            const name = p.nameEn || p.name || p.productName || '?';
+            const pSetName = p.setNameEn || p.setName || p.set || '';
             const img = p.imageCdnUrl400 || p.imageCdnUrl || p.imageCdnUrl800 || p.image_url || '';
             const _esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
             const imgHtml = img
@@ -3617,8 +3617,8 @@ function _relinkRenderSealedResults(results, container) {
         const tcgId = p.tcgPlayerId || p.tcgplayer_id || p.tcgPlayerID || '';
         const sid = p.scrydexId || p.scrydex_id || '';
         const price = p.unopenedPrice || (p.prices && p.prices.market) || p.market_price || p.price || '';
-        const name = p.name || p.productName || '?';
-        const pSetName = p.setName || p.set || '';
+        const name = p.nameEn || p.name || p.productName || '?';
+        const pSetName = p.setNameEn || p.setName || p.set || '';
         const img = p.imageCdnUrl400 || p.imageCdnUrl || p.imageCdnUrl800 || p.image_url || '';
         const source = p._price_source || '';
         const sourceBadge = source
@@ -3675,8 +3675,8 @@ function _relinkRenderSealedResults(results, container) {
             _relinkSealedShowComparison({
                 tcgId: tcgId ? parseInt(tcgId) : null,
                 scrydexId: sid || null,
-                name: p.name || p.productName || '',
-                setName: p.setName || p.set || '',
+                name: p.nameEn || p.name || p.productName || '',
+                setName: p.setNameEn || p.setName || p.set || '',
                 marketPrice: price != null ? Number(price) : null,
                 sourceLabel: source,
             });
@@ -3922,8 +3922,10 @@ async function _relinkFetchAndShowConditions(tcgId, scrydexId) {
         rs.card = card;
         rs.variants = variants;
         rs.primary = primary;
-        rs.newName = card.name || rs.cardName;
-        rs.setName = card.setName || card.set_name || '';
+        // Prefer English name when Scrydex has one — JP cards otherwise bind
+        // with the JP product_name and operator can't read it.
+        rs.newName = card.nameEn || card.name || rs.cardName;
+        rs.setName = card.setNameEn || card.setName || card.set_name || '';
         rs.cardNum = card.cardNumber || '';
         rs.rarity = card.rarity || '';
         rs.gradedPrices = d.graded_prices || null;
@@ -4096,10 +4098,28 @@ function _relinkRenderConditions(selectedCond) {
             html += `<div style="background:var(--surface-2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:0.85rem;color:var(--text-dim);">No eBay data for ${selCompany} ${selGrade} — backend will retry on save.</div>`;
         }
 
+        // Slabs get the same Imported-vs-live toggle that raw + sealed have.
+        // Default to the cheaper of the two (conservative on intake spend).
+        const importedSlab = Number(rs.currentPrice || 0);
+        const liveSlab = (gradePrice != null) ? Number(gradePrice) : null;
+        let defaultSlab = liveSlab;
+        if (importedSlab > 0 && liveSlab != null && liveSlab > 0) {
+            defaultSlab = Math.min(importedSlab, liveSlab);
+        } else if (liveSlab == null && importedSlab > 0) {
+            defaultSlab = importedSlab;
+        }
+        const livePriceLabel = liveSlab != null ? `Market: $${liveSlab.toFixed(2)}` : 'Market: —';
+        const importLabel = importedSlab > 0 ? `Imported: $${importedSlab.toFixed(2)}` : '';
         html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
             <label style="font-size:0.8rem;color:var(--text-dim);white-space:nowrap;">Price $</label>
-            <input type="number" id="relink-price-override" value="${gradePrice ? gradePrice.toFixed(2) : ''}" min="0" step="0.01" style="flex:1;font-size:1rem;font-weight:700;" placeholder="Enter price">
+            <input type="number" id="relink-price-override" value="${defaultSlab != null ? defaultSlab.toFixed(2) : ''}" min="0" step="0.01" style="flex:1;font-size:1rem;font-weight:700;" placeholder="Enter price">
         </div>`;
+        if (importedSlab > 0 && liveSlab != null && Math.abs(importedSlab - liveSlab) > 0.01) {
+            html += `<div style="display:flex;gap:6px;margin-bottom:10px;font-size:0.82rem;">
+                <button class="btn btn-sm btn-secondary" id="relink-use-ppt" style="font-size:0.78rem;">${livePriceLabel}</button>
+                <button class="btn btn-sm btn-secondary" id="relink-use-imported" style="font-size:0.78rem;">${importLabel}</button>
+            </div>`;
+        }
         html += `<div style="display:flex;gap:8px;">`;
         html += `<button id="relink-ok" class="btn btn-primary" style="flex:1;">Relink ${selCompany} ${selGrade}</button>`;
         html += `<button id="relink-back" class="btn btn-secondary">← Back</button>`;
@@ -4119,8 +4139,20 @@ function _relinkRenderConditions(selectedCond) {
     const _rlImpBtn = document.getElementById('relink-use-imported');
     const _rlPriceInput = document.getElementById('relink-price-override');
     if (_rlPptBtn) _rlPptBtn.addEventListener('click', () => {
-        const vd = (rs.variants || {})[rs.primary] || {};
-        if (vd[selectedCond] != null) _rlPriceInput.value = vd[selectedCond].toFixed(2);
+        if (rs._relinkMode === 'raw') {
+            const vd = (rs.variants || {})[rs.primary] || {};
+            if (vd[selectedCond] != null) _rlPriceInput.value = vd[selectedCond].toFixed(2);
+        } else {
+            // Graded: pull from the same live/cache price we just rendered.
+            const sc = rs._relinkGradeCompany || 'PSA';
+            const sg = rs._relinkGradeValue || '9';
+            const lv = ((rs.gradedLive || {})[sc] || {})[sg] || null;
+            const cs = ((rs.gradedPrices || {})[sc] || {})[sg];
+            const lp = (lv && lv.market != null) ? Number(lv.market)
+                     : (lv && lv.mid != null) ? Number(lv.mid)
+                     : (cs != null ? Number(cs) : null);
+            if (lp != null) _rlPriceInput.value = lp.toFixed(2);
+        }
     });
     if (_rlImpBtn) _rlImpBtn.addEventListener('click', () => {
         _rlPriceInput.value = (rs.currentPrice || 0).toFixed(2);
@@ -4956,7 +4988,10 @@ function _renderCardSearchResults(rawCards, container, opts) {
     container.innerHTML = cardRows.map((row, idx) => {
         const { c, setName, expCode, game, cardNum, rarity, img, variants, cardScrydex } = row;
         const rowId = `_csrow_${idx}`;
-        const cardName = c.name || '';
+        // Prefer the English name when Scrydex has one — JP cards otherwise
+        // bind with their Japanese product_name and the operator can't read it.
+        const cardName = c.nameEn || c.name || '';
+        const jpSubtitle = (c.nameEn && c.name && c.name !== c.nameEn) ? c.name : '';
 
         variants.forEach((v, vi) => {
             picks.set(`${rowId}_v${vi}`, {
@@ -5004,6 +5039,7 @@ function _renderCardSearchResults(rawCards, container, opts) {
                         ${setCodeBadge}
                         ${printingBadges}
                     </div>
+                    ${jpSubtitle ? `<div style="font-size:0.72rem; color:var(--text-dim); margin-bottom:2px;">${_esc(jpSubtitle)}</div>` : ''}
                     <div style="font-size:0.78rem; color:var(--text-dim);">${_esc(setName)}${rarity ? ' · '+_esc(rarity) : ''} · TCG#${_esc(picks.get(rowId).tcgId)}</div>
                     ${inGraded ? `<div style="font-size:0.75rem; color:var(--accent); margin-top:3px;">${_esc(gradeCompany)} ${_esc(gradeValue)} — click variant for graded price</div>` : ''}
                 </div>

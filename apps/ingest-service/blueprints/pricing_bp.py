@@ -11,6 +11,7 @@ from flask import Blueprint, request, jsonify, render_template, send_file, Respo
 
 import db
 import intake
+from price_provider import PriceError
 from helpers import (
     _serialize,
     _decode_override,
@@ -167,16 +168,31 @@ def refresh_session_prices(session_id):
                     ppt_low = prices_low
                     ppt_name = ppt_data.get("name")
                 elif is_graded and grade_co and grade_val:
-                    # Use eBay smartMarketPrice for graded cards
-                    ppt_price = PriceProvider.get_graded_price(ppt_data, grade_co, grade_val)
+                    # Scrydex-first per CLAUDE.md: live eBay comps → cache aggregate → PPT.
+                    # Never trust PPT graded data (often 3x off).
+                    ppt_price = None
+                    try:
+                        from graded_pricing import get_live_graded_comps
+                        live = get_live_graded_comps(tcg_id, grade_co, grade_val, db)
+                        if live:
+                            mkt = live.get("market") if live.get("market") is not None else live.get("mid")
+                            if mkt is not None:
+                                ppt_price = Decimal(str(mkt)).quantize(Decimal("0.01"))
+                                source = "scrydex_live"
+                    except Exception as e:
+                        logger.warning(f"Live graded comps failed for {tcg_id} {grade_co} {grade_val}: {e}")
+                    if ppt_price is None:
+                        ppt_price = pricing.get_graded_price(
+                            tcgplayer_id=int(tcg_id), company=grade_co, grade=grade_val,
+                        )
                     ppt_low = None  # no "low" concept for graded eBay data
-                    ppt_name = ppt_data.get("name")
+                    ppt_name = ppt_data.get("nameEn") or ppt_data.get("name")
                 else:
                     prices = ppt_data.get("prices", {})
                     # Use market price as default; per-condition resolved per-item in comparisons below
                     ppt_price = prices.get("market")
                     ppt_low = prices.get("low")
-                    ppt_name = ppt_data.get("name")
+                    ppt_name = ppt_data.get("nameEn") or ppt_data.get("name")
                     # Store full prices dict for per-condition lookup in comparisons step
                     price_cache[(tcg_id, ptype, is_graded, grade_co, grade_val)] = {
                         "ppt_price": ppt_price, "ppt_low": ppt_low, "ppt_name": ppt_name,

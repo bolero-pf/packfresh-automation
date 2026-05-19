@@ -570,10 +570,24 @@ class ScrydexClient:
         if scrydex_id and tcg_id:
             self._save_tcg_mapping(scrydex_id, tcg_id)
 
+        # Surface the English translation for JP / non-English cards so
+        # operator-facing UIs can display a readable name. Mirror the price
+        # cache's nameEn/setNameEn shape so callers can use one fallback chain
+        # across cache hits and live Scrydex lookups.
+        language_code = raw.get("language_code")
+        translation_en = (raw.get("translation") or {}).get("en") or {}
+        name_en = translation_en.get("name") or (raw.get("name") if language_code == "EN" else None)
+        exp_translation_en = (expansion.get("translation") or {}).get("en") or {}
+        set_name_en = (exp_translation_en.get("name")
+                       or (expansion.get("name") if language_code == "EN" else None))
+
         return {
             # Identity
             "name": raw.get("name"),
+            "nameEn": name_en,
             "setName": expansion.get("name", ""),
+            "setNameEn": set_name_en,
+            "languageCode": language_code,
             "expansionId": expansion.get("id", ""),
             "game": self.game,
             "cardNumber": raw.get("number") or raw.get("printed_number"),
@@ -627,9 +641,19 @@ class ScrydexClient:
                 if market_price is not None:
                     break
 
+        language_code = raw.get("language_code")
+        translation_en = (raw.get("translation") or {}).get("en") or {}
+        name_en = translation_en.get("name") or (raw.get("name") if language_code == "EN" else None)
+        exp_translation_en = (expansion.get("translation") or {}).get("en") or {}
+        set_name_en = (exp_translation_en.get("name")
+                       or (expansion.get("name") if language_code == "EN" else None))
+
         return {
             "name": raw.get("name"),
+            "nameEn": name_en,
             "setName": expansion.get("name", ""),
+            "setNameEn": set_name_en,
+            "languageCode": language_code,
             "tcgPlayerId": tcg_id,
             "scrydexId": scrydex_id,
             "unopenedPrice": market_price,
