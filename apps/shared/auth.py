@@ -202,7 +202,8 @@ ADMIN_BAR_TEMPLATE = """
 
 
 def register_auth_hooks(app, roles=None, public_paths=('/health', '/ping', '/favicon.ico'),
-                        public_prefixes=('/static',), skip_jwt_prefixes=()):
+                        public_prefixes=('/static',), skip_jwt_prefixes=(),
+                        role_overrides=None):
     """
     Register standard JWT auth + admin bar hooks on a Flask app.
 
@@ -212,6 +213,9 @@ def register_auth_hooks(app, roles=None, public_paths=('/health', '/ping', '/fav
         public_paths: exact paths that skip auth
         public_prefixes: path prefixes that skip auth (e.g. ('/static',))
         skip_jwt_prefixes: prefixes where JWT is parsed but not required (webhooks, etc.)
+        role_overrides: optional dict mapping URL prefix → role list (or None for any
+                        authenticated user). Lets a service open a single sub-page to
+                        associates while the rest stays manager+owner.
     """
     @app.before_request
     def _check_auth():
@@ -232,6 +236,10 @@ def register_auth_hooks(app, roles=None, public_paths=('/health', '/ping', '/fav
                 except Exception:
                     pass
                 return
+        if role_overrides:
+            for prefix, override_roles in role_overrides.items():
+                if request.path.startswith(prefix):
+                    return require_auth(roles=override_roles)
         return require_auth(roles=roles)
 
     # Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/

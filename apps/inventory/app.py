@@ -42,7 +42,14 @@ ppt_client = None  # PriceProvider instance (Scrydex-first with PPT fallback)
 
 
 from auth import register_auth_hooks
-register_auth_hooks(app, roles=["manager", "owner"])
+register_auth_hooks(
+    app,
+    roles=["manager", "owner"],
+    # Barcode-bind is the one inventory tool associates need on the floor
+    # (scanning sealed UPCs onto Shopify variants). Everything else stays
+    # manager+owner.
+    role_overrides={"/inventory/barcode-bind": None},
+)
 
 @app.before_request
 def _lazy_init():
