@@ -486,6 +486,21 @@ def _zone_center_hold(hold_id):
     before CardTrader picks it up).
 
     Idempotent — running twice is a no-op."""
+    # Heal any pre-existing drift: an older revision of this function only
+    # updated raw_card_id on swap, leaving hi.barcode pointing at the original
+    # copy while the bin label came from the substituted copy. Realign before
+    # zone-centering so the puller (and send-to-pos) sees a consistent row.
+    db.execute("""
+        UPDATE hold_items hi
+           SET barcode = rc.barcode
+          FROM raw_cards rc
+         WHERE rc.id = hi.raw_card_id
+           AND hi.hold_id = %s
+           AND hi.item_kind = 'raw'
+           AND hi.raw_card_id IS NOT NULL
+           AND hi.barcode IS DISTINCT FROM rc.barcode
+    """, (hold_id,))
+
     items = db.query("""
         SELECT hi.id AS hold_item_id, hi.raw_card_id,
                rc.tcgplayer_id, rc.scrydex_id, rc.condition,
@@ -534,7 +549,7 @@ def _zone_center_hold(hold_id):
             else "COALESCE(sr.location_type,'bin') IN ('binder','display_case')"
         )
         sub = db.query_one(f"""
-            SELECT rc.id
+            SELECT rc.id, rc.barcode
             FROM raw_cards rc
             LEFT JOIN storage_locations sl ON sl.id = rc.bin_id
             LEFT JOIN storage_rows sr ON sr.id = sl.row_id
@@ -555,6 +570,10 @@ def _zone_center_hold(hold_id):
         if not sub:
             continue
         # Transfer the lock + the hold_item allocation atomically enough.
+        # hi.barcode MUST be updated alongside raw_card_id — the pull-list UI
+        # shows hi.barcode while the bin label comes from raw_card_id→bin_id,
+        # and send-to-pos lists rc.barcode (the substituted copy). Leaving
+        # hi.barcode stale makes the operator pull the wrong physical card.
         db.execute("""
             UPDATE raw_cards
                SET current_hold_id = NULL, updated_at = CURRENT_TIMESTAMP
@@ -566,8 +585,8 @@ def _zone_center_hold(hold_id):
              WHERE id = %s
         """, (hold_id, str(sub["id"])))
         db.execute("""
-            UPDATE hold_items SET raw_card_id = %s WHERE id = %s
-        """, (str(sub["id"]), str(it["hold_item_id"])))
+            UPDATE hold_items SET raw_card_id = %s, barcode = %s WHERE id = %s
+        """, (str(sub["id"]), sub["barcode"], str(it["hold_item_id"])))
 
 
 @app.route("/api/holds/<hold_id>")
