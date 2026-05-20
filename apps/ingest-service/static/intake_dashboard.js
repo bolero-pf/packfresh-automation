@@ -5118,7 +5118,7 @@ async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offer
             onPick: (pick) => {
                 addCardFromSearch(sessionId, pick.tcgId, pick.cardName, pick.setName,
                     pick.cardNum, pick.rarity, pick.condition, pick.qty, pick.price,
-                    context, pick.variant, offerPct);
+                    context, pick.variant, offerPct, pick.scrydexId);
             },
             onTryPpt: () => {
                 resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching PPT...</div>';
@@ -5130,7 +5130,7 @@ async function _doCardSearch(searchTerm, setFilter, resultsDiv, sessionId, offer
     }
 }
 
-async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, preselectedVariant, offerPctHint) {
+async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, preselectedVariant, offerPctHint, scrydexId) {
     const resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : context === 'intake' ? 'intake-search-results' : 'raw-search-results');
 
     // Graded fast-path: condition pickers don't apply to slabs. The variant
@@ -5158,10 +5158,15 @@ async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, r
     let variants = {};
     let primaryVariant = 'Default';
     try {
+        // scrydex_id makes the lookup query by scrydex_id (returns all variants for
+        // the card). tcgplayer_id alone may be variant-specific and return only one
+        // variant's rows — breaking the chip's preselectedVariant match.
+        const _lookupBody = { tcgplayer_id: parseInt(tcgId) };
+        if (scrydexId) _lookupBody.scrydex_id = scrydexId;
         const lr = await fetch('/api/lookup/card', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ tcgplayer_id: parseInt(tcgId) }),
+            body: JSON.stringify(_lookupBody),
         });
         if (lr.ok) {
             const ld = await lr.json();

@@ -560,10 +560,25 @@ class PriceProvider:
             return None
 
         meta = None
+        live_client = self.primary
+        live_source = self._primary_source
         try:
             meta = self.primary.get_card_metadata(tcgplayer_id)
         except (PPTError, ScrydexError):
             pass
+        # PPT-only cards (Pokemon Day promos like Ceruledge, Cosmos Holo Pikachu
+        # variants) are absent from Scrydex but present in PPT. When the
+        # operator picked one via the "Try PPT" escape hatch in search, the
+        # primary lookup misses — fall back to the shadow client so the chip
+        # click resolves instead of returning a "Card not found" 404.
+        if not meta and self.shadow:
+            try:
+                meta = self.shadow.get_card_metadata(tcgplayer_id)
+                if meta:
+                    live_client = self.shadow
+                    live_source = "scrydex" if "Scrydex" in type(self.shadow).__name__ else "ppt"
+            except (PPTError, ScrydexError):
+                pass
         if not meta:
             return None
 
@@ -573,7 +588,7 @@ class PriceProvider:
         variants_map: dict = {}
         for v in meta.get("variants") or []:
             try:
-                cond_prices = self.primary.get_condition_prices(tcgplayer_id, variant=v)
+                cond_prices = live_client.get_condition_prices(tcgplayer_id, variant=v)
             except (PPTError, ScrydexError):
                 cond_prices = {}
             if cond_prices:
@@ -598,7 +613,7 @@ class PriceProvider:
             "variants": variants_map,
             "primary_variant": primary,
             "graded": {},
-        }, self._primary_source)
+        }, live_source)
 
 
 def create_price_provider(db=None, game: str = "pokemon") -> PriceProvider:
