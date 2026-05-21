@@ -234,22 +234,32 @@ def _backfill_scrydex_ids(session_id: str) -> int:
 def add_items_to_session(session_id: str, items: list[dict]) -> int:
     """
     Batch-add items to an intake session.
-    
+
     Each item dict should have:
         product_name, product_type, quantity, market_price, offer_price, unit_cost_basis
         Optional: tcgplayer_id, set_name, card_number, condition, rarity,
                   is_graded, grade_company, grade_value
-    
+
     Returns number of items added.
+
+    Imports preserve input order: `execute_batch` runs in one transaction, so
+    PostgreSQL's CURRENT_TIMESTAMP default resolves to the same value for every
+    row and the `get_session_items` ORDER BY created_at falls back to storage
+    order (effectively random). Stagger created_at by index here so the
+    operator's spreadsheet order is what staff see in the dashboard / verify /
+    routing — exactly what the manual-entry path already gets for free.
     """
+    from datetime import datetime, timedelta, timezone
+    base_ts = datetime.now(timezone.utc)
+
     sql = """
         INSERT INTO intake_items
             (session_id, product_name, tcgplayer_id, product_type,
              set_name, card_number, condition, rarity, variance,
              quantity, market_price, offer_price, unit_cost_basis, is_mapped,
              is_graded, grade_company, grade_value, slab_uuid,
-             shopify_product_id, shopify_product_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             shopify_product_id, shopify_product_name, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params_list = [
         (
@@ -274,8 +284,9 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             item.get("slab_uuid") or None,
             item.get("shopify_product_id") or None,
             item.get("shopify_product_name") or None,
+            base_ts + timedelta(microseconds=idx),
         )
-        for item in items
+        for idx, item in enumerate(items)
     ]
     n = execute_many_batch(sql, params_list)
     _backfill_scrydex_ids(session_id)
