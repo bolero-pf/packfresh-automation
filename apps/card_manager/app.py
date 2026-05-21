@@ -3472,5 +3472,164 @@ def editor_barcode_image(copy_id):
     })
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Audit — per-bin/binder scanner-led inventory check
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/audit/locations")
+def audit_locations():
+    """List every bin + binder with the count of cards the DB thinks live there
+    (state STORED for bins, DISPLAY for binders). The Audit view uses this to
+    populate the location dropdown plus an at-a-glance expected count."""
+    rows = db.query("""
+        SELECT sl.id, sl.bin_label,
+               COALESCE(sr.location_type, 'bin') AS location_type,
+               COUNT(rc.id) FILTER (
+                 WHERE rc.bin_id = sl.id AND rc.state IN ('STORED', 'DISPLAY')
+               ) AS expected_count
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        LEFT JOIN raw_cards rc ON rc.bin_id = sl.id
+        WHERE COALESCE(sr.location_type, 'bin') IN ('bin', 'binder')
+          AND COALESCE(sr.active, TRUE) = TRUE
+        GROUP BY sl.id, sl.bin_label, sr.location_type
+        ORDER BY sr.location_type DESC, sl.bin_label
+    """)
+    return jsonify({"locations": [_ser(dict(r)) for r in rows]})
+
+
+@app.route("/api/audit/expected/<location_id>")
+def audit_expected(location_id):
+    """The set of cards the DB expects in this location — the audit's
+    'unscanned' list. Each card carries enough metadata to render a row
+    and submit it to /api/audit/mark-missing later."""
+    loc = db.query_one("""
+        SELECT sl.id, sl.bin_label,
+               COALESCE(sr.location_type, 'bin') AS location_type
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.id::text = %s
+    """, (str(location_id),))
+    if not loc:
+        return jsonify({"error": "Location not found"}), 404
+    cards = db.query("""
+        SELECT rc.id::text AS id, rc.barcode, rc.card_name, rc.condition,
+               rc.set_name, rc.card_number, rc.variant, rc.game, rc.state
+        FROM raw_cards rc
+        WHERE rc.bin_id::text = %s AND rc.state IN ('STORED', 'DISPLAY')
+        ORDER BY rc.card_name, rc.condition, rc.barcode
+    """, (str(location_id),))
+    return jsonify({
+        "location": _ser(dict(loc)),
+        "cards":    [_ser(dict(c)) for c in cards],
+    })
+
+
+@app.route("/api/audit/scan", methods=["POST"])
+def audit_scan():
+    """Resolve a scanned barcode against the currently-audited location.
+    Statuses:
+      EXPECTED          — at this location with a "should be here" state
+      MISSING_RECOVERED — was MISSING, auto-restored to this location (the
+                          'we might find them later' path Sean described)
+      WRONG_BIN         — should be at another bin/binder; UI says where
+      WRONG_STATE       — PULLED/PENDING_SALE/PENDING_RETURN/GONE — unexpected
+      NOT_FOUND         — barcode not in raw_cards
+    """
+    data        = request.get_json() or {}
+    barcode     = (data.get("barcode") or "").strip()
+    location_id = data.get("location_id")
+    if not barcode or not location_id:
+        return jsonify({"error": "barcode and location_id required"}), 400
+
+    loc = db.query_one("""
+        SELECT sl.id, sl.bin_label,
+               COALESCE(sr.location_type, 'bin') AS location_type
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.id::text = %s
+    """, (str(location_id),))
+    if not loc:
+        return jsonify({"error": "Location not found"}), 404
+
+    # Binders/display cases keep cards in DISPLAY state; storage bins use STORED.
+    target_state = "DISPLAY" if loc["location_type"] in ("binder", "display_case") else "STORED"
+
+    card = db.query_one("""
+        SELECT rc.id::text AS id, rc.barcode, rc.card_name, rc.condition,
+               rc.set_name, rc.card_number, rc.variant, rc.state,
+               rc.bin_id::text AS bin_id, rc.current_hold_id,
+               sl.bin_label AS current_bin_label,
+               COALESCE(sr.location_type, 'bin') AS current_bin_type
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        LEFT JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE rc.barcode = %s
+    """, (barcode,))
+
+    if not card:
+        return jsonify({"status": "NOT_FOUND", "barcode": barcode})
+
+    card_d = _ser(dict(card))
+
+    # EXPECTED — already here in a "should be here" state. Nothing to do.
+    if card["bin_id"] == str(loc["id"]) and card["state"] in ("STORED", "DISPLAY"):
+        return jsonify({"status": "EXPECTED", "card": card_d})
+
+    # MISSING_RECOVERED — card was reported missing earlier and just turned up
+    # in this bin. Sean's spec: "later on we might find them, and then we'd
+    # scan them into where they belong." Flip to the location's natural state
+    # and re-bind to this bin.
+    if card["state"] == "MISSING":
+        db.execute("""
+            UPDATE raw_cards
+            SET state = %s, bin_id = %s, current_hold_id = NULL,
+                stored_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id::text = %s
+        """, (target_state, loc["id"], card["id"]))
+        card_d["state"] = target_state
+        card_d["bin_id"] = str(loc["id"])
+        return jsonify({
+            "status":      "MISSING_RECOVERED",
+            "card":        card_d,
+            "restored_to": loc["bin_label"],
+        })
+
+    # WRONG_BIN — DB says it lives in another bin/binder. Don't move it; staff
+    # will get to that bin's audit and the card will resolve as EXPECTED there.
+    if card["state"] in ("STORED", "DISPLAY") and card["bin_id"]:
+        return jsonify({
+            "status":       "WRONG_BIN",
+            "card":         card_d,
+            "should_be_at": card["current_bin_label"] or "(unknown bin)",
+        })
+
+    # WRONG_STATE — PULLED with an active hold, PENDING_SALE, PENDING_RETURN,
+    # GONE, or STORED/DISPLAY with no bin. All unexpected to find here.
+    return jsonify({
+        "status":        "WRONG_STATE",
+        "card":          card_d,
+        "current_state": card["state"],
+    })
+
+
+@app.route("/api/audit/mark-missing", methods=["POST"])
+def audit_mark_missing():
+    """Bulk-flip the unscanned tail of an audit to MISSING. Only touches rows
+    still in STORED/DISPLAY so a concurrent change (e.g. a card got pulled
+    for a hold mid-audit) doesn't get clobbered."""
+    data     = request.get_json() or {}
+    card_ids = [str(i) for i in (data.get("card_ids") or []) if i]
+    if not card_ids:
+        return jsonify({"error": "No card_ids provided"}), 400
+    n = db.execute("""
+        UPDATE raw_cards
+        SET state = 'MISSING', current_hold_id = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = ANY(%s) AND state IN ('STORED', 'DISPLAY')
+    """, (card_ids,))
+    return jsonify({"success": True, "marked": n or 0})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5006)), debug=False)

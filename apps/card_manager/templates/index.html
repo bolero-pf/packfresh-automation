@@ -449,6 +449,9 @@ body.standalone .standalone-bar { display: flex; }
       ⚠ Missing Cards
       <span class="nav-badge" id="badge-missing"></span>
     </div>
+    <div class="nav-item" onclick="showView('audit')" id="nav-audit">
+      🔎 Audit
+    </div>
     <div class="nav-item" onclick="showView('editor')" id="nav-editor">
       ✎ Card Editor
     </div>
@@ -497,6 +500,25 @@ body.standalone .standalone-bar { display: flex; }
         <button class="btn btn-sm" onclick="manualRefreshActiveView()" title="Refresh list" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">↻ Refresh</button>
       </div>
       <div id="missing-content">
+        <div class="empty"><div class="spinner"></div></div>
+      </div>
+    </div>
+
+    <!-- Audit (per-bin / per-binder scanner-led inventory check) -->
+    <div class="view" id="view-audit">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div>
+          <div class="page-title">Audit</div>
+          <div class="page-sub">Pick a bin or binder, scan everything in it. Wrong-bin and unknown barcodes flag in real time. Anything left at the end can be marked Missing.</div>
+        </div>
+        <div id="audit-header-actions" style="display:none;gap:8px;">
+          <button class="btn btn-sm" onclick="resetAudit()"
+                  style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">← Change Location</button>
+          <button class="btn btn-sm" id="audit-finalize-btn" onclick="finalizeAudit()"
+                  style="font-size:0.82rem;padding:6px 14px;">Done</button>
+        </div>
+      </div>
+      <div id="audit-content">
         <div class="empty"><div class="spinner"></div></div>
       </div>
     </div>
@@ -626,6 +648,7 @@ function showView(name) {
   if (name === 'holds')     loadHolds();
   if (name === 'returns')   loadReturns();
   if (name === 'missing')   loadMissing();
+  if (name === 'audit')     loadAudit();
   if (name === 'editor')    document.getElementById('editor-scan').focus();
   if (name === 'display')   loadDisplay();
   if (name === 'binders')   loadBinders();
@@ -1114,6 +1137,8 @@ async function handleScan(barcode) {
       flash('red');
       toast(`✕ ${e.message}`, 'red');
     }
+  } else if (activeView === 'view-audit') {
+    await handleAuditScan(barcode);
   }
 }
 
@@ -1325,6 +1350,274 @@ async function markGone(cardId) {
     toast('Card marked as gone', 'red');
     loadMissing();
   } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── Audit ─────────────────────────────────────────────────────────────────────
+// Per-bin/binder scanner-led inventory check.
+// State machine:
+//   no location selected  →  picker view (location dropdown grouped by type)
+//   location selected     →  active view (expected list + scan stream + Done)
+let _auditLocation = null;        // { id, bin_label, location_type, expected_count }
+let _auditExpected = [];          // [{id, barcode, card_name, ...}]
+let _auditUnscanned = new Map();  // id -> card (drains as cards are scanned)
+let _auditScanLog = [];           // recent scans, newest first; renders as the live stream
+
+async function loadAudit() {
+  // Reset header actions; the picker view doesn't need them.
+  document.getElementById('audit-header-actions').style.display = 'none';
+  _auditLocation = null;
+  const el = document.getElementById('audit-content');
+  el.innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+  try {
+    const d = await get('/api/audit/locations');
+    renderAuditPicker(d.locations || []);
+  } catch(e) {
+    el.innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderAuditPicker(locations) {
+  const el = document.getElementById('audit-content');
+  if (!locations.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📦</div><p>No bins or binders configured</p></div>';
+    return;
+  }
+  // Group: binders first (smaller batches), then storage bins.
+  const binders = locations.filter(l => l.location_type === 'binder');
+  const bins    = locations.filter(l => l.location_type === 'bin');
+
+  const grpHtml = (title, group) => group.length ? `
+    <div style="margin-bottom:22px;">
+      <div class="nav-section" style="margin:0 0 10px;padding:0;">${esc(title)}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;">
+        ${group.map(l => `
+          <div class="card no-hover" onclick="selectAuditLocation('${l.id}')"
+               style="cursor:pointer;padding:14px;display:flex;flex-direction:column;gap:4px;align-items:flex-start;">
+            <div style="font-family:var(--mono);font-size:1.3rem;font-weight:700;color:var(--accent);">${esc(l.bin_label)}</div>
+            <div style="font-size:0.75rem;color:var(--dim);">${l.expected_count} expected</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  ` : '';
+
+  el.innerHTML = `
+    <div style="font-size:0.82rem;color:var(--dim);margin-bottom:18px;">
+      Pick a location — once you select one, the scanner is armed and every scan reports immediately. Wrong-bin scans flag without moving the card.
+    </div>
+    ${grpHtml('Binders', binders)}
+    ${grpHtml('Storage Bins', bins)}
+  `;
+}
+
+async function selectAuditLocation(locationId) {
+  const el = document.getElementById('audit-content');
+  el.innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+  try {
+    const d = await get('/api/audit/expected/' + encodeURIComponent(locationId));
+    _auditLocation  = d.location;
+    _auditExpected  = d.cards || [];
+    _auditUnscanned = new Map(_auditExpected.map(c => [c.id, c]));
+    _auditScanLog   = [];
+    document.getElementById('audit-header-actions').style.display = 'flex';
+    renderAuditActive();
+  } catch(e) {
+    el.innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function resetAudit() {
+  // Allow leaving mid-audit without saving — unscanned cards stay STORED/DISPLAY
+  // (nothing has been committed). Only finalizeAudit() flips state.
+  loadAudit();
+}
+
+function renderAuditActive() {
+  const el = document.getElementById('audit-content');
+  const loc = _auditLocation;
+  const total = _auditExpected.length;
+  const remaining = _auditUnscanned.size;
+  const scanned = total - remaining;
+  const pct = total > 0 ? Math.round((scanned / total) * 100) : 0;
+  const isBinder = loc.location_type === 'binder';
+  const locTypeLabel = isBinder ? 'Binder' : 'Storage Bin';
+
+  // Finalize button label adapts to what's left.
+  const finBtn = document.getElementById('audit-finalize-btn');
+  if (remaining === 0) {
+    finBtn.textContent = 'Done · Complete';
+    finBtn.style.background = 'var(--green)';
+    finBtn.style.color = '#fff';
+  } else {
+    finBtn.textContent = `Done · Mark ${remaining} Missing`;
+    finBtn.style.background = 'var(--amber)';
+    finBtn.style.color = '#000';
+  }
+
+  // Scan-log entries are rendered newest-first; status drives the styling.
+  const statusStyle = {
+    EXPECTED:          { color: 'var(--green)', icon: '✓', label: 'EXPECTED' },
+    MISSING_RECOVERED: { color: 'var(--accent)', icon: '↻', label: 'RECOVERED' },
+    WRONG_BIN:         { color: 'var(--amber)', icon: '⚠', label: 'WRONG BIN' },
+    WRONG_STATE:       { color: 'var(--amber)', icon: '⚠', label: 'WRONG STATE' },
+    NOT_FOUND:         { color: 'var(--red)',   icon: '✕', label: 'NOT IN SYSTEM' },
+  };
+
+  const logHtml = _auditScanLog.length ? _auditScanLog.map(s => {
+    const st = statusStyle[s.status] || { color: 'var(--dim)', icon: '?', label: s.status };
+    const c = s.card || {};
+    const name = c.card_name ? `${esc(c.condition || '')} ${esc(c.card_name)}`.trim() : `(${esc(s.barcode || '')})`;
+    let detail = '';
+    if (s.status === 'WRONG_BIN')         detail = `Should be in <strong>${esc(s.should_be_at)}</strong>`;
+    else if (s.status === 'WRONG_STATE')  detail = `Current state: ${esc(s.current_state)}`;
+    else if (s.status === 'MISSING_RECOVERED') detail = `Was MISSING — restored to ${esc(s.restored_to)}`;
+    else if (s.status === 'NOT_FOUND')    detail = `Barcode ${esc(s.barcode)} not in raw_cards`;
+    else if (c.barcode)                   detail = `<span style="font-family:var(--mono);">${esc(c.barcode)}</span>`;
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;
+                  background:var(--s2);border-left:3px solid ${st.color};
+                  border-radius:4px;margin-bottom:4px;">
+        <div style="font-size:1.1rem;color:${st.color};font-weight:700;min-width:18px;text-align:center;">${st.icon}</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:0.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${name}</div>
+          <div style="font-size:0.7rem;color:var(--dim);">${detail}</div>
+        </div>
+        <div style="font-size:0.65rem;color:${st.color};font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">${st.label}</div>
+      </div>
+    `;
+  }).join('') : `<div style="font-size:0.82rem;color:var(--dim);text-align:center;padding:24px;">Scan a card to start.</div>`;
+
+  const unscannedHtml = remaining ? `
+    <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">
+      Unscanned · ${remaining}
+    </div>
+    <div style="max-height:60vh;overflow-y:auto;">
+      ${[..._auditUnscanned.values()].slice(0, 200).map(c => `
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--s1);border:1px solid var(--border);border-radius:6px;margin-bottom:3px;font-size:0.78rem;">
+          <div style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+            <strong>${esc(c.condition || '')}</strong> ${esc(c.card_name || '(unnamed)')}
+            ${c.card_number ? `<span style="color:var(--dim);"> · #${esc(c.card_number)}</span>` : ''}
+          </div>
+          <div style="font-family:var(--mono);font-size:0.7rem;color:var(--dim);">${esc(c.barcode || '')}</div>
+        </div>
+      `).join('')}
+      ${_auditUnscanned.size > 200 ? `<div style="font-size:0.72rem;color:var(--dim);text-align:center;padding:10px;">+ ${_auditUnscanned.size - 200} more</div>` : ''}
+    </div>
+  ` : `
+    <div style="text-align:center;padding:40px 20px;">
+      <div style="font-size:2.4rem;margin-bottom:6px;">✅</div>
+      <div style="font-size:1rem;font-weight:700;color:var(--green);">All cards accounted for</div>
+      <div style="font-size:0.82rem;color:var(--dim);margin-top:4px;">Hit Done to close out the audit.</div>
+    </div>
+  `;
+
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 280px;gap:18px;align-items:start;">
+      <!-- Left column: progress + scan stream -->
+      <div>
+        <div style="background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:14px;">
+          <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;">
+            <div style="font-family:var(--mono);font-size:1.8rem;font-weight:700;color:var(--accent);">${esc(loc.bin_label)}</div>
+            <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:0.08em;">${locTypeLabel}</div>
+            <div style="margin-left:auto;font-family:var(--mono);font-size:1.1rem;font-weight:700;">
+              <span style="color:${remaining===0?'var(--green)':'var(--text)'};">${scanned}</span>
+              <span style="color:var(--dim);"> / ${total}</span>
+            </div>
+          </div>
+          <div style="margin-top:10px;height:6px;background:var(--s2);border-radius:3px;overflow:hidden;">
+            <div style="width:${pct}%;height:100%;background:${remaining===0?'var(--green)':'var(--accent)'};transition:width 0.2s;"></div>
+          </div>
+          <input id="audit-scan-input" type="text" placeholder="Scan card barcode…" autocomplete="off"
+                 style="width:100%;margin-top:12px;padding:10px 12px;background:var(--s2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:0.95rem;">
+        </div>
+        <div id="audit-log">${logHtml}</div>
+      </div>
+      <!-- Right column: unscanned drain -->
+      <div style="background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:14px;position:sticky;top:0;">
+        ${unscannedHtml}
+      </div>
+    </div>
+  `;
+
+  // Focus the scan input so manual typing also works alongside the HID scanner.
+  const inp = document.getElementById('audit-scan-input');
+  if (inp) {
+    inp.focus();
+    inp.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const bc = inp.value.trim();
+      if (!bc) return;
+      inp.value = '';
+      await handleAuditScan(bc);
+    });
+  }
+}
+
+async function handleAuditScan(barcode) {
+  if (!_auditLocation) {
+    flash('amber');
+    toast('Pick a bin or binder first.', 'amber');
+    return;
+  }
+  try {
+    const d = await post('/api/audit/scan', { barcode, location_id: _auditLocation.id });
+    // d: {status, card?, should_be_at?, current_state?, restored_to?, barcode?}
+    const entry = { ...d, barcode };
+    _auditScanLog.unshift(entry);
+    if (_auditScanLog.length > 60) _auditScanLog.length = 60;
+
+    // EXPECTED + MISSING_RECOVERED both account for "this card is here now" —
+    // drain from the unscanned set so the right column shrinks and the
+    // counter ticks. WRONG_BIN/WRONG_STATE/NOT_FOUND don't reduce remaining.
+    if ((d.status === 'EXPECTED' || d.status === 'MISSING_RECOVERED') && d.card && d.card.id) {
+      if (_auditUnscanned.has(d.card.id)) {
+        _auditUnscanned.delete(d.card.id);
+      } else if (d.status === 'MISSING_RECOVERED') {
+        // A recovered card wasn't on the expected list (it was MISSING, not
+        // STORED-here). Pulling it in inflates the total so the progress meter
+        // matches the new on-shelf count.
+        _auditExpected.push(d.card);
+      }
+    }
+
+    // Sound/flash cues so staff doesn't have to look up between scans.
+    if      (d.status === 'EXPECTED')          { flash('green'); }
+    else if (d.status === 'MISSING_RECOVERED') { flash('green'); toast(`↻ Recovered ${d.card?.card_name || ''}`, 'green'); }
+    else if (d.status === 'WRONG_BIN')         { flash('amber'); toast(`⚠ Should be in ${d.should_be_at}`, 'amber'); }
+    else if (d.status === 'WRONG_STATE')       { flash('amber'); toast(`⚠ ${d.card?.card_name || barcode} is ${d.current_state}`, 'amber'); }
+    else if (d.status === 'NOT_FOUND')         { flash('red');   toast(`✕ Barcode ${barcode} not in system`, 'red'); }
+
+    renderAuditActive();
+  } catch(e) {
+    flash('red');
+    toast(e.message, 'red');
+  }
+}
+
+async function finalizeAudit() {
+  if (!_auditLocation) return;
+  const ids = [..._auditUnscanned.keys()];
+  if (ids.length === 0) {
+    toast(`✓ ${_auditLocation.bin_label} audit complete.`, 'green');
+    resetAudit();
+    refreshBadges();
+    return;
+  }
+  const locLabel = _auditLocation.bin_label;
+  const ok = await themedConfirm(
+    `Mark ${ids.length} card${ids.length!==1?'s':''} Missing`,
+    `${ids.length} card${ids.length!==1?'s were':' was'} expected in ${locLabel} but didn't scan. Flag ${ids.length===1?'it':'them'} as MISSING?`
+  );
+  if (!ok) return;
+  try {
+    const d = await post('/api/audit/mark-missing', { card_ids: ids });
+    toast(`Marked ${d.marked} missing in ${locLabel}.`, 'amber');
+    resetAudit();
+    refreshBadges();
+  } catch(e) {
+    toast(e.message, 'red');
+  }
 }
 
 async function reverseDecision(holdItemId, action) {
