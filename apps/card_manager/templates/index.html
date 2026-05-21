@@ -796,7 +796,7 @@ function renderHoldDetail(d) {
                     <span style="font-family:var(--mono);font-size:0.78rem;flex:1;font-weight:600;">${esc(item.barcode || '—')}</span>
                     <span style="font-size:0.72rem;color:var(--dim);">${esc(item.bin_label||'')}</span>
                     ${missing ? '<span style="font-size:0.72rem;color:var(--red);font-weight:700;">⚠ MISSING</span>' : `
-                      <button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;" title="Print a fresh label with the same barcode" onclick="regenerateAndPrint('${item.card_id}','${esc(item.card_name||'')}')">🖨 Reprint label</button>
+                      <button class="btn btn-sm" style="font-size:0.68rem;padding:2px 8px;" title="Print a fresh label with the same barcode" onclick="regenerateAndPrint('${item.card_id}')">🖨 Reprint label</button>
                       <button class="btn btn-sm" style="background:var(--amber);color:#000;font-size:0.68rem;padding:2px 8px;" onclick="markMissing('${item.hold_item_id}')">⚠ Missing</button>
                     `}
                   </div>
@@ -1237,7 +1237,7 @@ function renderReturns(cards, recentBatches) {
           </div>
           <div class="return-barcode">${esc(c.barcode)}</div>
           <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 8px;" title="Reprint with a new barcode if the current label won't scan"
-                  onclick="event.stopPropagation();regenerateAndPrint('${c.id}','${esc(c.card_name)}')">🖨 Reprint label</button>
+                  onclick="event.stopPropagation();regenerateAndPrint('${c.id}')">🖨 Reprint label</button>
           <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--green);color:var(--green);"
                   onclick="event.stopPropagation();sellInstead('${esc(c.barcode)}')">💵 Sell instead</button>
         </div>
@@ -1868,7 +1868,7 @@ function renderEditorDetail(card, copies, availableVariants) {
         <button class="btn btn-sm" onclick="refreshCopyPrice('${esc(String(c.id))}')">↻ Refresh price</button>
         <button class="btn btn-sm" onclick="openRelink('${esc(String(c.id))}')">🔗 Relink</button>
         <button class="btn btn-sm" onclick="reprintCopy('${esc(String(c.id))}')">🖨 Reprint</button>
-        <button class="btn btn-sm" onclick="regenerateAndPrint('${esc(String(c.id))}','${esc(c.card_name||'')}')">🆕 New Barcode</button>
+        <button class="btn btn-sm" onclick="regenerateAndPrint('${esc(String(c.id))}')">🆕 New Barcode</button>
         ${(c.state === 'STORED' || c.state === 'DISPLAY') ? `
           <button class="btn btn-sm" style="border-color:var(--red);color:var(--red);"
                   onclick="markCopyMissing('${esc(String(c.id))}','${esc(c.barcode||'')}')">🚫 Mark Missing</button>
@@ -1972,12 +1972,18 @@ function reprintCopy(copyId) {
 // Centralized "this label won't scan" handler — generates a new barcode in
 // the DB, then opens the new label in a print tab. Same backend regardless
 // of which surface called it (editor, hold pull, returns, missing, set-out,
-// binder fill) so the UX is uniform. `name` is optional — Missing tab looks
-// it up from its cache to dodge the apostrophe-in-onclick parsing bug.
+// binder fill) so the UX is uniform.
+//
+// Callers MUST pass only the copy id — never the card name. `esc()` does not
+// escape apostrophes, so a name like "Farmer's Market" interpolated into an
+// inline onclick terminates the JS string and the button silently dies. The
+// name is resolved here from whatever cache is in scope, purely for the
+// confirm dialog text.
 async function regenerateAndPrint(copyId, name) {
   if (!name) {
     const m = _missingCardsCache.find(c => c.id === copyId);
     if (m) name = m.card_name;
+    else if (_editorCurrentCard) name = _editorCurrentCard.card_name;
   }
   if (!await themedConfirm('New Barcode',
       `Generate a new barcode for ${name || 'this card'} and open the label to print? Apply the new label to the physical card.`)) return;
@@ -2365,7 +2371,7 @@ function renderSetOutScanStep() {
                     <div style="font-size:0.68rem;color:var(--dim);">${esc(s.condition||'')} · ${esc(s.set_name||'')}</div>
                   </div>
                   <div style="font-family:var(--mono);font-size:0.72rem;color:var(--accent);">$${parseFloat(s.current_price||0).toFixed(2)}</div>
-                  <button class="btn btn-sm" style="font-size:0.62rem;padding:1px 6px;" title="Bad barcode? Print a new label" onclick="regenerateAndPrint('${s.id}','${esc(s.card_name)}')">🆕</button>
+                  <button class="btn btn-sm" style="font-size:0.62rem;padding:1px 6px;" title="Bad barcode? Print a new label" onclick="regenerateAndPrint('${s.id}')">🆕</button>
                 </div>`;
               }).join('')}
             </div>
@@ -2724,7 +2730,7 @@ function renderBinderFillScanStep() {
                     <div style="font-size:0.68rem;color:var(--dim);">${esc(s.condition||'')} · ${esc(s.set_name||'')}</div>
                   </div>
                   <div style="font-family:var(--mono);font-size:0.72rem;color:var(--accent);">$${parseFloat(s.current_price||0).toFixed(2)}</div>
-                  <button class="btn btn-sm" style="font-size:0.62rem;padding:1px 6px;" title="Bad barcode? Print a new label" onclick="regenerateAndPrint('${s.id}','${esc(s.card_name)}')">🆕</button>
+                  <button class="btn btn-sm" style="font-size:0.62rem;padding:1px 6px;" title="Bad barcode? Print a new label" onclick="regenerateAndPrint('${s.id}')">🆕</button>
                 </div>`;
               }).join('')}
             </div>
