@@ -842,14 +842,101 @@ async function submitIntakeManualDirect() {
         const d = await r.json();
         if (!r.ok) { alert(d.error || 'Failed to add'); return; }
 
+        // If a store product was picked, link the new item right away so
+        // ingest increments that listing instead of creating a stub.
+        if (intakeDirectStoreSel && d.item && d.item.id) {
+            try {
+                const lr = await fetch('/api/intake/item/' + d.item.id + '/accept-price', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        session_id: intakeSessionId,
+                        store_product_id: String(intakeDirectStoreSel.product_id),
+                        store_product_name: intakeDirectStoreSel.title,
+                        tcgplayer_id: intakeDirectStoreSel.tcgplayer_id || undefined,
+                    }),
+                });
+                const ld = await lr.json();
+                if (!lr.ok) { alert('Item added, but store link failed: ' + (ld.error || 'unknown error')); }
+            } catch(e) { alert('Item added, but store link failed: ' + e.message); }
+        }
+
         document.getElementById('intake-direct-name').value = '';
         document.getElementById('intake-direct-set').value = '';
         document.getElementById('intake-direct-tcgid').value = '';
         document.getElementById('intake-direct-price').value = '';
         document.getElementById('intake-direct-qty').value = '1';
+        clearIntakeDirectStore();
         document.getElementById('intake-manual-direct').style.display = 'none';
         loadIntakeItems();
     } catch(err) { alert(err.message); }
+}
+
+// ── Manual Add: optional store-product link (non-TCG: board games, puzzles) ──
+let intakeDirectStoreSel = null;
+
+async function intakeDirectStoreSearch() {
+    const q = document.getElementById('intake-direct-store-q').value.trim();
+    const box = document.getElementById('intake-direct-store-results');
+    if (q.length < 2) {
+        box.innerHTML = '<div style="font-size:0.78rem; color:var(--text-dim);">Type at least 2 characters</div>';
+        return;
+    }
+    box.innerHTML = '<div class="loading"><span class="spinner"></span> Searching store…</div>';
+    try {
+        const r = await fetch('/api/store/search?q=' + encodeURIComponent(q));
+        const d = await r.json();
+        const rows = d.results || [];
+        if (!rows.length) {
+            box.innerHTML = '<div style="font-size:0.78rem; color:var(--text-dim);">No store products match that name</div>';
+            return;
+        }
+        box.innerHTML = rows.map((row, ri) => `
+            <div class="ids-row" data-idx="${ri}" style="display:flex; gap:8px; align-items:center; padding:6px 8px; border:1px solid var(--border); border-radius:6px; margin-bottom:4px; cursor:pointer;"
+                 onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
+                <div style="flex:1; min-width:0;">
+                    <div style="font-size:0.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${row.title}</div>
+                    <div style="font-size:0.72rem; color:var(--text-dim);">$${parseFloat(row.shopify_price||0).toFixed(2)} · qty ${row.shopify_qty??'?'}${row.tcgplayer_id?' · TCG#'+row.tcgplayer_id:''}</div>
+                </div>
+                <span class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 8px;">Select</span>
+            </div>`).join('');
+        box.querySelectorAll('.ids-row').forEach(el => {
+            el.addEventListener('click', () => intakeDirectStorePick(rows[parseInt(el.dataset.idx)]));
+        });
+    } catch(e) {
+        box.innerHTML = '<div class="alert alert-error">' + e.message + '</div>';
+    }
+}
+
+function intakeDirectStorePick(row) {
+    intakeDirectStoreSel = {
+        product_id: row.shopify_product_id || row.id || '',
+        title: row.title || '',
+        tcgplayer_id: row.tcgplayer_id ? parseInt(row.tcgplayer_id) : null,
+    };
+    document.getElementById('intake-direct-store-results').innerHTML = '';
+    document.getElementById('intake-direct-store-q').value = '';
+    const sel = document.getElementById('intake-direct-store-selected');
+    sel.style.display = '';
+    sel.innerHTML = '';
+    const label = document.createElement('span');
+    label.textContent = '🔗 Will link to: ' + intakeDirectStoreSel.title;
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'btn btn-sm btn-secondary';
+    clearBtn.style.cssText = 'font-size:0.68rem; padding:1px 6px; margin-left:6px;';
+    clearBtn.textContent = 'clear';
+    clearBtn.onclick = clearIntakeDirectStore;
+    sel.appendChild(label);
+    sel.appendChild(clearBtn);
+}
+
+function clearIntakeDirectStore() {
+    intakeDirectStoreSel = null;
+    const sel = document.getElementById('intake-direct-store-selected');
+    if (sel) { sel.style.display = 'none'; sel.innerHTML = ''; }
+    const box = document.getElementById('intake-direct-store-results');
+    if (box) box.innerHTML = '';
 }
 
 function intakeCardSearch() {
@@ -2669,11 +2756,9 @@ function renderStoreCheck() {
                             ? '<a href="https://admin.shopify.com/store/' + (window.__shopifyStoreHandle||'') + '/products/' + i.shopify_product_id + '/variants/' + i.shopify_variant_id + '" target="_blank" class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" title="Edit this variant in Shopify admin">Admin &#x2197;</a>'
                             : ''}
                         ${!i.tcgplayer_id
-                            ? '<button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="openMapping(\'' + i.id + '\',\'' + (i.product_name||'').replace(/'/g,"\\\\'").replace(/"/g,'&quot;') + '\',\'' + (i.set_name||'').replace(/'/g,"\\\\'").replace(/"/g,'&quot;') + '\',\'' + (i.product_type||'sealed') + '\',' + (i.market_price||0) + ')" title="Link this item to a TCGPlayer product">&#x1F517; Link</button>'
+                            ? '<button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="openMapping(\'' + i.id + '\',\'' + (i.product_name||'').replace(/'/g,"\\'").replace(/"/g,'&quot;') + '\',\'' + (i.set_name||'').replace(/'/g,"\\'").replace(/"/g,'&quot;') + '\',\'' + (i.product_type||'sealed') + '\',' + (i.market_price||0) + ')" title="Link this item to a TCGPlayer product">&#x1F517; Link</button>'
                             : ''}
-                        ${i.tcgplayer_id
-                            ? '<button class="btn btn-sm btn-secondary find-in-store-btn" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" data-tcg="' + i.tcgplayer_id + '" data-name="' + (i.product_name||'').replace(/"/g,'&amp;quot;') + '" data-item="' + i.id + '" data-offer="' + (i.offer_price||0) + '" data-market="' + (i.market_price||0) + '" title="Search your store cache to find this listing">&#x1F50D; Find</button>'
-                            : ''}
+                        ${'<button class="btn btn-sm btn-secondary find-in-store-btn" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" data-tcg="' + (i.tcgplayer_id||'') + '" data-name="' + (i.product_name||'').replace(/"/g,'&quot;') + '" data-item="' + i.id + '" data-offer="' + (i.offer_price||0) + '" data-market="' + (i.market_price||0) + '" title="Search your store cache to find this listing">&#x1F50D; Find</button>'}
                         ${!found && i.tcgplayer_id
                             ? '<button class="btn btn-sm btn-primary" id="cl-btn-' + i.tcgplayer_id + '" style="font-size:0.7rem; padding:2px 6px; margin-top:2px;" onclick="createListingFromStore(' + i.tcgplayer_id + ', this, \'' + i.id + '\', ' + (i.offer_price||0) + ')">+ List</button>'
                             : ''}

@@ -1513,19 +1513,31 @@ def _push_session_worker(job_id, session_id, active):
                 errors.append({"product_name": item.get("product_name"), "action": "error", "error": str(e)})
             job["progress"] += 1
 
-        # Sealed items: consolidate. Key falls through tcg_id → scrydex_id →
-        # row id so Scrydex-only items (NULL tcg_id) don't all collide on the
-        # same (None, False) bucket and get dumped into a single listing.
+        # Sealed items: consolidate. Key falls through tcg_id → shopify
+        # product id → scrydex_id → row id. The shopify-product bucket catches
+        # manual / non-TCG items (board games, puzzles) the operator linked to
+        # an existing store listing in intake — they must increment that
+        # listing, not get dumped into the (None, False) bucket as a stub.
         tcg_ids = list(set(i["tcgplayer_id"] for i in sealed_items if i.get("tcgplayer_id")))
         normal_cache, damaged_cache = ingest.build_cache_maps(tcg_ids) if tcg_ids else ({}, {})
+
+        # Items linked to an existing store product but with no TCG ID.
+        linked_product_ids = list(set(
+            str(i["shopify_product_id"]) for i in sealed_items
+            if i.get("shopify_product_id") and not i.get("tcgplayer_id")
+        ))
+        linked_cache = ingest.build_linked_cache(linked_product_ids) if linked_product_ids else {}
 
         consolidated = {}
         for item in sealed_items:
             tcg_id = item.get("tcgplayer_id")
             sx_id = item.get("scrydex_id")
+            shop_pid = item.get("shopify_product_id")
             is_damaged = item.get("item_status") == "damaged"
             if tcg_id:
                 key = ("tcg", tcg_id, is_damaged)
+            elif shop_pid:
+                key = ("shop", str(shop_pid), is_damaged)
             elif sx_id:
                 key = ("sx", sx_id, is_damaged)
             else:
@@ -1558,10 +1570,16 @@ def _push_session_worker(job_id, session_id, active):
             }
 
             try:
-                if not is_damaged:
-                    entry = _push_normal_item(entry, tcg_id, qty, group["items"][0], normal_cache)
+                first = group["items"][0]
+                if first.get("shopify_product_id") and not tcg_id:
+                    # Linked to an existing store product in intake — increment
+                    # that listing's variant; never create a stub.
+                    entry = _push_linked_item(
+                        entry, str(first["shopify_product_id"]), qty, first, linked_cache)
+                elif not is_damaged:
+                    entry = _push_normal_item(entry, tcg_id, qty, first, normal_cache)
                 else:
-                    entry = _push_damaged_item(entry, tcg_id, qty, group["items"][0], normal_cache, damaged_cache)
+                    entry = _push_damaged_item(entry, tcg_id, qty, first, normal_cache, damaged_cache)
             except Exception as e:
                 entry.update(action="error", error=str(e))
                 errors.append(entry)
@@ -2255,6 +2273,57 @@ def _push_raw_to_bulk(item: dict) -> dict:
         "barcodes":    [],
         "bins":        [],
     }
+
+
+def _push_linked_item(entry: dict, shop_pid: str, qty: int, item: dict, linked_cache: dict) -> dict:
+    """Push an item the operator explicitly linked to an existing Shopify
+    product in intake (manual / non-TCG items: board games, puzzles).
+
+    Resolves the linked product's variant and increments its inventory + COGS.
+    Never creates a stub — the operator already chose the listing, so a cache
+    miss falls back to a live Shopify fetch rather than minting a duplicate.
+    Damaged linked items increment the same variant (board games/puzzles have
+    no separate damaged listing)."""
+    variant_id = None
+    cache_row = linked_cache.get(str(shop_pid))
+    if cache_row and cache_row.get("shopify_variant_id"):
+        variant_id = str(cache_row["shopify_variant_id"])
+
+    if not variant_id:
+        # Cache miss (product linked since the last cache refresh) — fetch the
+        # variant straight from Shopify so a linked item still never stubs.
+        try:
+            prod = shopify._rest("GET", f"/products/{shop_pid}.json")
+            variants = prod.get("product", {}).get("variants", [])
+            if variants:
+                variant_id = str(variants[0]["id"])
+        except Exception as e:
+            logger.warning(f"Live variant fetch failed for linked product {shop_pid}: {e}")
+
+    if not variant_id:
+        entry.update(action="error",
+                     error=f"Linked product {shop_pid} has no resolvable variant")
+        return entry
+
+    inv_item_id = shopify.get_inventory_item_id(variant_id)
+    if not inv_item_id:
+        entry.update(action="error",
+                     error="Could not find inventory item ID for linked variant")
+        return entry
+
+    our_unit_cost = float(item.get("offer_price") or 0) / max(int(item.get("quantity") or 1), 1)
+    try:
+        current_cost, current_qty = shopify.get_inventory_item_cost_and_qty(inv_item_id)
+        new_cost = _compute_weighted_cost(current_cost, current_qty, our_unit_cost, qty)
+        shopify.set_unit_cost(inv_item_id, new_cost)
+        entry["new_unit_cost"] = round(new_cost, 2)
+    except Exception as e:
+        logger.warning(f"Could not update COGS for linked {inv_item_id}: {e}")
+    shopify.adjust_inventory(inv_item_id, qty, reason="received")
+    entry["action"] = "inventory_incremented"
+    entry["shopify_variant_id"] = variant_id
+    entry["linked_product_id"] = str(shop_pid)
+    return entry
 
 
 def _push_normal_item(entry: dict, tcg_id: int, qty: int, item: dict, normal_cache: dict) -> dict:

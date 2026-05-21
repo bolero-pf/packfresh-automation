@@ -1344,6 +1344,34 @@ def build_cache_maps(tcg_ids: list[int]) -> tuple[dict, dict]:
     return normal_cache, damaged_cache
 
 
+def build_linked_cache(product_ids: list) -> dict:
+    """
+    Resolve inventory_product_cache rows by shopify_product_id, for items that
+    were explicitly linked to an existing store product in intake (manual /
+    non-TCG items: board games, puzzles) and carry no tcgplayer_id.
+    Returns a dict keyed by str(shopify_product_id). Prefers the non-damaged
+    variant row when a product has more than one.
+    """
+    ids = [str(p) for p in product_ids if p]
+    if not ids:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(ids))
+    rows = query(
+        f"SELECT * FROM inventory_product_cache "
+        f"WHERE shopify_product_id::text IN ({placeholders})",
+        tuple(ids)
+    )
+
+    cache = {}
+    for r in rows:
+        pid = str(r.get("shopify_product_id"))
+        existing = cache.get(pid)
+        if existing is None or (existing.get("is_damaged") and not r.get("is_damaged")):
+            cache[pid] = r
+    return cache
+
+
 def mark_session_ingested(session_id: str):
     """Transition session to ingested status."""
     execute(

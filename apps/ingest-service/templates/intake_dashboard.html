@@ -156,6 +156,16 @@
                                     </div>
                                     <button class="btn btn-success btn-sm" onclick="submitIntakeManualDirect()">Add</button>
                                 </div>
+                                <div style="margin-top:10px; border-top:1px solid var(--border); padding-top:10px;">
+                                    <label style="font-size:0.8rem; color:var(--text-dim);">Link to store product &mdash; board games, puzzles &amp; other non-TCG items (optional)</label>
+                                    <div style="display:flex; gap:8px; align-items:center; margin-top:4px;">
+                                        <input type="text" id="intake-direct-store-q" placeholder="Search your Shopify store by name&hellip;" style="flex:1; margin:0;"
+                                               onkeydown="if(event.key==='Enter'){event.preventDefault();intakeDirectStoreSearch();}">
+                                        <button type="button" class="btn btn-secondary btn-sm" onclick="intakeDirectStoreSearch()">Find</button>
+                                    </div>
+                                    <div id="intake-direct-store-results" style="margin-top:6px;"></div>
+                                    <div id="intake-direct-store-selected" style="display:none; margin-top:6px; font-size:0.82rem;"></div>
+                                </div>
                             </div>
                         </div>
 
