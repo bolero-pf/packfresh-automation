@@ -1458,6 +1458,7 @@ function renderAuditActive() {
   const statusStyle = {
     EXPECTED:          { color: 'var(--green)', icon: '✓', label: 'EXPECTED' },
     MISSING_RECOVERED: { color: 'var(--accent)', icon: '↻', label: 'RECOVERED' },
+    RESTORED:          { color: 'var(--green)', icon: '🔄', label: 'RESTORED' },
     WRONG_BIN:         { color: 'var(--amber)', icon: '⚠', label: 'WRONG BIN' },
     WRONG_STATE:       { color: 'var(--amber)', icon: '⚠', label: 'WRONG STATE' },
     NOT_FOUND:         { color: 'var(--red)',   icon: '✕', label: 'NOT IN SYSTEM' },
@@ -1471,8 +1472,16 @@ function renderAuditActive() {
     if (s.status === 'WRONG_BIN')         detail = `Should be in <strong>${esc(s.should_be_at)}</strong>`;
     else if (s.status === 'WRONG_STATE')  detail = `Current state: ${esc(s.current_state)}`;
     else if (s.status === 'MISSING_RECOVERED') detail = `Was MISSING — restored to ${esc(s.restored_to)}`;
+    else if (s.status === 'RESTORED')     detail = `New barcode <span style="font-family:var(--mono);">${esc(c.barcode || '')}</span> · old <span style="font-family:var(--mono);">${esc(s.old_barcode || '')}</span> still attached to original sale`;
     else if (s.status === 'NOT_FOUND')    detail = `Barcode ${esc(s.barcode)} not in raw_cards`;
     else if (c.barcode)                   detail = `<span style="font-family:var(--mono);">${esc(c.barcode)}</span>`;
+    // The barcode-swap recovery only makes sense on a PENDING_SALE WRONG_STATE.
+    // After a successful restore we mutate the entry to status=RESTORED, so the
+    // button disappears on re-render.
+    const restoreBtn = (s.status === 'WRONG_STATE' && s.current_state === 'PENDING_SALE')
+      ? `<button class="btn btn-sm" onclick="restoreSwap(${s.scanId})"
+                 style="font-size:0.65rem;padding:4px 10px;background:var(--accent);color:#fff;white-space:nowrap;">🔄 Restore</button>`
+      : '';
     return `
       <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;
                   background:var(--s2);border-left:3px solid ${st.color};
@@ -1482,6 +1491,7 @@ function renderAuditActive() {
           <div style="font-size:0.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${name}</div>
           <div style="font-size:0.7rem;color:var(--dim);">${detail}</div>
         </div>
+        ${restoreBtn}
         <div style="font-size:0.65rem;color:${st.color};font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">${st.label}</div>
       </div>
     `;
@@ -1563,7 +1573,9 @@ async function handleAuditScan(barcode) {
   try {
     const d = await post('/api/audit/scan', { barcode, location_id: _auditLocation.id });
     // d: {status, card?, should_be_at?, current_state?, restored_to?, barcode?}
-    const entry = { ...d, barcode };
+    // scanId is a stable handle the Restore button uses to find this entry
+    // after re-renders rotate the array's indices.
+    const entry = { ...d, barcode, scanId: Date.now() + Math.random() };
     _auditScanLog.unshift(entry);
     if (_auditScanLog.length > 60) _auditScanLog.length = 60;
 
@@ -1591,6 +1603,36 @@ async function handleAuditScan(barcode) {
     renderAuditActive();
   } catch(e) {
     flash('red');
+    toast(e.message, 'red');
+  }
+}
+
+async function restoreSwap(scanId) {
+  const entry = _auditScanLog.find(s => s.scanId === scanId);
+  if (!entry || entry.status !== 'WRONG_STATE' || entry.current_state !== 'PENDING_SALE') return;
+  const card = entry.card || {};
+  const ok = await themedConfirm(
+    'Barcode reused at sale',
+    `Restore ${card.card_name || 'this card'} to ${_auditLocation.bin_label}? A new label will print — apply it to the physical card. The original barcode stays attached to the sale that already happened (so Shopify stays consistent); the actually-sold copy will turn up as MISSING when you audit its home location.`
+  );
+  if (!ok) return;
+  try {
+    const d = await post('/api/audit/restore', {
+      original_card_id: card.id,
+      location_id:      _auditLocation.id,
+    });
+    toast(`Restored — new barcode ${d.card.barcode}`, 'green');
+    // Print the new label. Same image endpoint everything else uses; the
+    // copy id is the fresh row, not the PENDING_SALE original.
+    window.open(`/api/editor/copies/${d.card.id}/barcode-image?v=${encodeURIComponent(d.card.barcode)}`, '_blank');
+    // The restored row is "already scanned" — push to expected so totals tick
+    // up, but skip the unscanned map (no need to scan it again right now).
+    _auditExpected.push(d.card);
+    entry.status = 'RESTORED';
+    entry.card = d.card;
+    entry.old_barcode = d.old_barcode;
+    renderAuditActive();
+  } catch(e) {
     toast(e.message, 'red');
   }
 }

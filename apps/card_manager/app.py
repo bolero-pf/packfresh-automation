@@ -3613,6 +3613,100 @@ def audit_scan():
     })
 
 
+@app.route("/api/audit/restore", methods=["POST"])
+def audit_restore_swap():
+    """Barcode-swap recovery during an audit.
+
+    Scenario: at POS, staff scanned card A's barcode but the customer walked
+    out with card B (same identity, different physical copy). Card A's
+    raw_cards row is now PENDING_SALE attached to the Shopify draft — but card
+    A is still physically here in this bin. We don't touch the original row
+    (Shopify reconciliation depends on it). Instead, we clone the identity
+    into a fresh STORED/DISPLAY row at this audit's location with a new
+    barcode. The operator reprints the label and applies it to the physical
+    card. Card B (the one that actually left) shows up as MISSING whenever
+    its home location is audited next — that's correct.
+    """
+    data        = request.get_json() or {}
+    original_id = (data.get("original_card_id") or "").strip()
+    location_id = data.get("location_id")
+    if not original_id or not location_id:
+        return jsonify({"error": "original_card_id and location_id required"}), 400
+
+    loc = db.query_one("""
+        SELECT sl.id, sl.bin_label,
+               COALESCE(sr.location_type, 'bin') AS location_type
+        FROM storage_locations sl
+        JOIN storage_rows sr ON sl.row_id = sr.id
+        WHERE sl.id::text = %s
+    """, (str(location_id),))
+    if not loc:
+        return jsonify({"error": "Location not found"}), 404
+
+    original = db.query_one("""
+        SELECT id, barcode, card_name, state
+        FROM raw_cards WHERE id::text = %s
+    """, (original_id,))
+    if not original:
+        return jsonify({"error": "Original card not found"}), 404
+    if original["state"] != "PENDING_SALE":
+        return jsonify({
+            "error": f"Restore only works on PENDING_SALE cards (this one is {original['state']}).",
+        }), 409
+
+    target_state = "DISPLAY" if loc["location_type"] in ("binder", "display_case") else "STORED"
+
+    # Tight retry loop for the (vanishingly unlikely) barcode collision; matches
+    # the pattern in /api/cards/<id>/regenerate-barcode.
+    new_bc = None
+    for _ in range(5):
+        candidate = generate_barcode_id()
+        if not db.query_one("SELECT 1 FROM raw_cards WHERE barcode = %s", (candidate,)):
+            new_bc = candidate
+            break
+    if not new_bc:
+        return jsonify({"error": "Could not generate a unique barcode"}), 500
+
+    # Clone identity columns from the PENDING_SALE row. Anything not named here
+    # (current_hold_id, shopify_*, removal_*) defaults/NULLs out — exactly what
+    # we want for a fresh stored copy.
+    new_row = db.execute_returning("""
+        INSERT INTO raw_cards (
+            barcode, tcgplayer_id, scrydex_id, card_name, set_name,
+            card_number, condition, rarity,
+            state, cost_basis, current_price, last_price_update,
+            bin_id, image_url,
+            is_graded, grade_company, grade_value,
+            variant, language,
+            intake_session_id, intake_item_id,
+            stored_at, created_at, updated_at
+        )
+        SELECT
+            %s, tcgplayer_id, scrydex_id, card_name, set_name,
+            card_number, condition, rarity,
+            %s, cost_basis, current_price, last_price_update,
+            %s, image_url,
+            is_graded, grade_company, grade_value,
+            variant, language,
+            intake_session_id, intake_item_id,
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        FROM raw_cards
+        WHERE id = %s
+        RETURNING id::text AS id, barcode, card_name, set_name, card_number,
+                  condition, variant, state, bin_id::text AS bin_id
+    """, (new_bc, target_state, loc["id"], original["id"]))
+
+    if not new_row:
+        return jsonify({"error": "Failed to clone card"}), 500
+
+    return jsonify({
+        "success":        True,
+        "card":           _ser(dict(new_row)),
+        "old_barcode":    original["barcode"],
+        "location_label": loc["bin_label"],
+    })
+
+
 @app.route("/api/audit/mark-missing", methods=["POST"])
 def audit_mark_missing():
     """Bulk-flip the unscanned tail of an audit to MISSING. Only touches rows
