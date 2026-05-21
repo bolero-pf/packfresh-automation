@@ -1025,6 +1025,24 @@ function _printSlipWindow(title, bodyHtml) {
   }
 }
 
+// Barcode label print — opens a print window locked to the physical label
+// stock (89mm x 28mm landscape). Without the @page sizing the browser
+// scale-to-fits the raw PNG onto letter paper, which both looks wrong and
+// distorts the bars enough that the scanner can't read them. Mirrors
+// ingestion's printOneBarcode so reprints match intake-printed labels.
+function printBarcodeLabel(imageUrl) {
+  const win = window.open('', '_blank');
+  if (!win) { toast('Allow pop-ups to print the label', 'amber'); return; }
+  win.document.write(`<html><head><style>
+      @media print { @page { margin:0; size: 89mm 28mm landscape; } }
+      body { margin:0; }
+      img { width:89mm; height:28mm; display:block; }
+    </style></head><body>
+      <img src="${imageUrl}" onload="window.print();window.close()">
+    </body></html>`);
+  win.document.close();
+}
+
 async function printHoldSlip() {
   try {
     const d = await get(`/api/holds/${_currentHoldId}/packing-slip`);
@@ -1471,14 +1489,14 @@ function renderAuditActive() {
     let detail = '';
     if (s.status === 'WRONG_BIN')         detail = `Should be in <strong>${esc(s.should_be_at)}</strong>`;
     else if (s.status === 'WRONG_STATE')  detail = `Current state: ${esc(s.current_state)}`;
-    else if (s.status === 'MISSING_RECOVERED') detail = `Was MISSING — restored to ${esc(s.restored_to)}`;
+    else if (s.status === 'MISSING_RECOVERED') detail = `Was ${esc(s.was_state || 'MISSING')} — restored to ${esc(s.restored_to)}`;
     else if (s.status === 'RESTORED')     detail = `New barcode <span style="font-family:var(--mono);">${esc(c.barcode || '')}</span> · old <span style="font-family:var(--mono);">${esc(s.old_barcode || '')}</span> still attached to original sale`;
     else if (s.status === 'NOT_FOUND')    detail = `Barcode ${esc(s.barcode)} not in raw_cards`;
     else if (c.barcode)                   detail = `<span style="font-family:var(--mono);">${esc(c.barcode)}</span>`;
-    // The barcode-swap recovery only makes sense on a PENDING_SALE WRONG_STATE.
-    // After a successful restore we mutate the entry to status=RESTORED, so the
-    // button disappears on re-render.
-    const restoreBtn = (s.status === 'WRONG_STATE' && s.current_state === 'PENDING_SALE')
+    // The barcode-swap recovery applies to cards carrying a sale record
+    // (PENDING_SALE or SOLD). After a successful restore we mutate the entry
+    // to status=RESTORED, so the button disappears on re-render.
+    const restoreBtn = (s.status === 'WRONG_STATE' && (s.current_state === 'PENDING_SALE' || s.current_state === 'SOLD'))
       ? `<button class="btn btn-sm" onclick="restoreSwap(${s.scanId})"
                  style="font-size:0.65rem;padding:4px 10px;background:var(--accent);color:#fff;white-space:nowrap;">🔄 Restore</button>`
       : '';
@@ -1595,7 +1613,7 @@ async function handleAuditScan(barcode) {
 
     // Sound/flash cues so staff doesn't have to look up between scans.
     if      (d.status === 'EXPECTED')          { flash('green'); }
-    else if (d.status === 'MISSING_RECOVERED') { flash('green'); toast(`↻ Recovered ${d.card?.card_name || ''}`, 'green'); }
+    else if (d.status === 'MISSING_RECOVERED') { flash('green'); toast(`↻ Recovered ${d.card?.card_name || ''} (was ${d.was_state || 'MISSING'})`, 'green'); }
     else if (d.status === 'WRONG_BIN')         { flash('amber'); toast(`⚠ Should be in ${d.should_be_at}`, 'amber'); }
     else if (d.status === 'WRONG_STATE')       { flash('amber'); toast(`⚠ ${d.card?.card_name || barcode} is ${d.current_state}`, 'amber'); }
     else if (d.status === 'NOT_FOUND')         { flash('red');   toast(`✕ Barcode ${barcode} not in system`, 'red'); }
@@ -1609,7 +1627,8 @@ async function handleAuditScan(barcode) {
 
 async function restoreSwap(scanId) {
   const entry = _auditScanLog.find(s => s.scanId === scanId);
-  if (!entry || entry.status !== 'WRONG_STATE' || entry.current_state !== 'PENDING_SALE') return;
+  if (!entry || entry.status !== 'WRONG_STATE') return;
+  if (entry.current_state !== 'PENDING_SALE' && entry.current_state !== 'SOLD') return;
   const card = entry.card || {};
   const ok = await themedConfirm(
     'Barcode reused at sale',
@@ -1623,8 +1642,8 @@ async function restoreSwap(scanId) {
     });
     toast(`Restored — new barcode ${d.card.barcode}`, 'green');
     // Print the new label. Same image endpoint everything else uses; the
-    // copy id is the fresh row, not the PENDING_SALE original.
-    window.open(`/api/editor/copies/${d.card.id}/barcode-image?v=${encodeURIComponent(d.card.barcode)}`, '_blank');
+    // copy id is the fresh row, not the original sale record.
+    printBarcodeLabel(`/api/editor/copies/${d.card.id}/barcode-image?v=${encodeURIComponent(d.card.barcode)}`);
     // The restored row is "already scanned" — push to expected so totals tick
     // up, but skip the unscanned map (no need to scan it again right now).
     _auditExpected.push(d.card);
@@ -1947,9 +1966,7 @@ async function refreshCopyPrice(copyId) {
 }
 
 function reprintCopy(copyId) {
-  // GET endpoint returns the PNG directly — open in a new tab so the
-  // browser can render + print it without us round-tripping base64 over JSON.
-  window.open(`/api/editor/copies/${copyId}/barcode-image`, '_blank');
+  printBarcodeLabel(`/api/editor/copies/${copyId}/barcode-image`);
 }
 
 // Centralized "this label won't scan" handler — generates a new barcode in
@@ -1969,7 +1986,7 @@ async function regenerateAndPrint(copyId, name) {
     toast(`New barcode: ${d.new_barcode}`, 'green');
     // The image URL is keyed on copy id, not barcode — cache-bust so the
     // browser fetches the freshly-rendered PNG instead of the old label.
-    window.open(`/api/editor/copies/${copyId}/barcode-image?v=${encodeURIComponent(d.new_barcode)}`, '_blank');
+    printBarcodeLabel(`/api/editor/copies/${copyId}/barcode-image?v=${encodeURIComponent(d.new_barcode)}`);
     // Refresh whichever surface called us so the new barcode is visible.
     const v = document.querySelector('.view.active')?.id;
     if (v === 'view-missing')        loadMissing();

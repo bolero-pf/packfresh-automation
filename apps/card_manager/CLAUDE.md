@@ -18,11 +18,27 @@ PENDING → PULLING → READY → ACCEPTED or RETURNED
 
 ## Card States (raw_cards.state)
 - `STORED` — in a bin, available for holds
+- `DISPLAY` — in a binder / display case
 - `PULLED` — taken from bin for a hold
-- `PENDING_SALE` — accepted, Shopify listing created
+- `PENDING_SALE` — accepted, Shopify listing created (active draft)
+- `SOLD` — order paid / Shopify product archived (orders/create webhook + auto-heal flip PENDING_SALE → SOLD)
 - `PENDING_RETURN` — rejected or returned, needs re-shelving
 - `MISSING` — couldn't be found during pulling
 - `GONE` — permanently lost (flagged for audit)
+
+## Audit (per-bin / per-binder inventory check)
+- View `view-audit` (sidebar "🔎 Audit"); endpoints under `/api/audit/*`.
+- Pick a bin or binder → scanner armed → each scan resolves: EXPECTED / WRONG_BIN /
+  WRONG_STATE / NOT_FOUND, or auto-recovers MISSING+GONE cards to the audited location.
+- WRONG_STATE on a PENDING_SALE/SOLD card shows a Restore button → `/api/audit/restore`
+  clones the row into a fresh STORED/DISPLAY copy with a new barcode (barcode-swap
+  recovery); the original sale record is left intact.
+- "Done" flips the unscanned tail to MISSING via `/api/audit/mark-missing`.
+
+## Barcode Label Printing
+- `printBarcodeLabel(imageUrl)` opens a print window locked to 89mm×28mm landscape.
+  Required — printing the raw PNG directly lets the browser scale-to-fit, which
+  distorts the bars enough to be unscannable. Mirrors ingestion's `printOneBarcode`.
 
 ## Missing Cards Flow
 - During PULLING, "Can't Find" button marks hold_item as MISSING + raw_card state = MISSING

@@ -3576,23 +3576,26 @@ def audit_scan():
     if card["bin_id"] == str(loc["id"]) and card["state"] in ("STORED", "DISPLAY"):
         return jsonify({"status": "EXPECTED", "card": card_d})
 
-    # MISSING_RECOVERED — card was reported missing earlier and just turned up
-    # in this bin. Sean's spec: "later on we might find them, and then we'd
-    # scan them into where they belong." Flip to the location's natural state
-    # and re-bind to this bin.
-    if card["state"] == "MISSING":
+    # MISSING_RECOVERED — card was MISSING (lost during a pull) or GONE
+    # (written off as permanently lost) and just turned up in this bin.
+    # Sean's spec: "later on we might find them, and then we'd scan them into
+    # where they belong." No sale was ever attached to these states, so we
+    # just re-bind the same row to this location's natural state.
+    if card["state"] in ("MISSING", "GONE"):
         db.execute("""
             UPDATE raw_cards
             SET state = %s, bin_id = %s, current_hold_id = NULL,
                 stored_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
             WHERE id::text = %s
         """, (target_state, loc["id"], card["id"]))
+        was_state = card["state"]
         card_d["state"] = target_state
         card_d["bin_id"] = str(loc["id"])
         return jsonify({
             "status":      "MISSING_RECOVERED",
             "card":        card_d,
             "restored_to": loc["bin_label"],
+            "was_state":   was_state,
         })
 
     # WRONG_BIN — DB says it lives in another bin/binder. Don't move it; staff
@@ -3649,9 +3652,12 @@ def audit_restore_swap():
     """, (original_id,))
     if not original:
         return jsonify({"error": "Original card not found"}), 404
-    if original["state"] != "PENDING_SALE":
+    # PENDING_SALE (active Shopify draft) and SOLD (order paid / product
+    # archived) both carry a real sale transaction. Cloning preserves that
+    # record while putting the physically-present card back in inventory.
+    if original["state"] not in ("PENDING_SALE", "SOLD"):
         return jsonify({
-            "error": f"Restore only works on PENDING_SALE cards (this one is {original['state']}).",
+            "error": f"Restore only works on sold cards (this one is {original['state']}).",
         }), 409
 
     target_state = "DISPLAY" if loc["location_type"] in ("binder", "display_case") else "STORED"
