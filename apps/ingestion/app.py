@@ -865,9 +865,12 @@ def verify_item(item_id):
             price_override = data.get("price_override")  # manual price override
 
             if condition:
+                # Condition is chosen as part of verify — the offer is being
+                # finalized right now, so it must reflect the chosen condition.
                 result = ingest.update_item_condition(
                     item_id, condition, price_provider=pricing,
-                    price_override=float(price_override) if price_override is not None else None)
+                    price_override=float(price_override) if price_override is not None else None,
+                    cogs_locked=False)
             elif grade_company or grade_value:
                 result = ingest.update_item_grade(
                     item_id,

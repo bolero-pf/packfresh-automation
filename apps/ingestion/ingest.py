@@ -327,7 +327,8 @@ def undo_break_down(item_id: str) -> dict:
 DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
 
 # Condition multipliers for raw cards (applied to market price before offer %)
-def update_item_condition(item_id: str, condition: str, price_provider=None, price_override: float = None) -> dict:
+def update_item_condition(item_id: str, condition: str, price_provider=None, price_override: float = None,
+                          cogs_locked: bool = None) -> dict:
     """
     Update a raw card's condition and recalculate its offer price.
     Only adjusts price if condition actually changed or price_override is set.
@@ -335,6 +336,12 @@ def update_item_condition(item_id: str, condition: str, price_provider=None, pri
     Price hierarchy (per root CLAUDE.md — always prefer Scrydex):
         price_override > Scrydex cache per-condition > PPT per-condition
         > condition-multiplier fallback from the existing deal market price.
+
+    cogs_locked: whether the acquisition cost is already finalized.
+        None (default) → auto-detect from verified_at: a condition change in a
+        later stage (routing) shouldn't move the offer we already paid.
+        False → caller is finalizing the offer right now (the verify action
+        itself), so the chosen condition must feed offer_price.
     """
     from price_cache import PriceCache
     import db as db_module
@@ -419,7 +426,8 @@ def update_item_condition(item_id: str, condition: str, price_provider=None, pri
     # and market_price change; offer_price / unit_cost_basis stay put. The
     # per-item margin will look worse, and that's the correct signal — it
     # flags the missed damage without hiding the evidence.
-    cogs_locked = bool(item.get("verified_at"))
+    if cogs_locked is None:
+        cogs_locked = bool(item.get("verified_at"))
 
     if cogs_locked:
         execute("""
