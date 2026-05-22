@@ -657,7 +657,12 @@ def shopify_session_store_check(session_id):
 
 @bp.route("/api/store/search", methods=["GET"])
 def store_search():
-    """Search inventory_product_cache by title — fuzzy token matching so partial/reordered names hit."""
+    """Search inventory_product_cache by title. Matching is space- and
+    punctuation-insensitive so a query typed as one word ('dragonisles') still
+    hits a multi-word title ('Dragon Isles'). Results are ranked exact →
+    exact-ignoring-spaces → prefix → substring, shortest title first, so a
+    short query ('dragon', 'ink') surfaces the actual product instead of
+    burying it under long card titles that happen to contain the substring."""
     import re as _re
     try:
         q = request.args.get("q", "").strip()
@@ -665,47 +670,52 @@ def store_search():
             return jsonify({"results": []})
 
         # Strip parenthetical suffixes like (CN), (International Version), (Japanese) etc.
-        q_stripped = _re.sub(r'\s*\([^)]{1,30}\)\s*$', '', q).strip()
-        q_for_tokens = q_stripped if q_stripped else q
+        q_stripped = _re.sub(r'\s*\([^)]{1,30}\)\s*$', '', q).strip() or q
+        # Alnum-only form — ignores spaces, punctuation and case.
+        q_norm = _re.sub(r'[^a-z0-9]', '', q_stripped.lower())
 
         STOPWORDS = {"the", "a", "an", "of", "and", "or", "in", "for", "&", "-", "pokemon", "tcg", "card", "cards",
                      "collection", "set", "box", "pack"}
-        tokens = [t.lower() for t in q_for_tokens.replace("-", " ").replace(":", " ").split()
+        tokens = [t.lower() for t in q_stripped.replace("-", " ").replace(":", " ").split()
                   if t.lower() not in STOPWORDS and len(t) > 2]
         if not tokens:
-            tokens = [t.lower() for t in q_for_tokens.split() if len(t) > 1]
+            tokens = [t.lower() for t in q_stripped.split() if len(t) > 1]
 
-        def run_query(conditions_sql, params):
+        TITLE_NORM = "regexp_replace(lower(title), '[^a-z0-9]', '', 'g')"
+
+        def ranked(conditions_sql, where_params):
             return db.query(
                 f"""SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
                           title, handle, shopify_price, shopify_qty, is_damaged
                    FROM inventory_product_cache
                    WHERE ({conditions_sql}) AND (is_damaged = false OR is_damaged IS NULL)
-                   ORDER BY title ASC LIMIT 20""",
-                params
+                   ORDER BY (lower(title) = %s) DESC,
+                            ({TITLE_NORM} = %s) DESC,
+                            (title ILIKE %s) DESC,
+                            ({TITLE_NORM} LIKE %s) DESC,
+                            length(title) ASC, title ASC
+                   LIMIT 25""",
+                tuple(where_params) + (q_stripped.lower(), q_norm, f"{q_stripped}%", f"{q_norm}%")
             )
 
-        rows = run_query("title ILIKE %s", (f"%{q_stripped}%",))
+        # Primary: raw substring OR space-insensitive substring OR all tokens present.
+        conds = ["title ILIKE %s"]
+        params = [f"%{q_stripped}%"]
+        if len(q_norm) >= 2:
+            conds.append(f"{TITLE_NORM} LIKE %s")
+            params.append(f"%{q_norm}%")
+        if tokens:
+            conds.append("(" + " AND ".join(["title ILIKE %s"] * len(tokens)) + ")")
+            params.extend(f"%{t}%" for t in tokens)
 
-        if not rows and q_stripped != q:
-            rows = run_query("title ILIKE %s", (f"%{q}%",))
+        rows = ranked(" OR ".join(conds), params)
 
-        if not rows and tokens:
-            conds = " AND ".join(["title ILIKE %s"] * len(tokens))
-            rows = run_query(conds, tuple(f"%{t}%" for t in tokens))
-
+        # Fallback: an over-specified query ('Dragon Isles Deluxe Edition')
+        # still finds the base product via its most distinctive tokens.
         if not rows and len(tokens) > 2:
-            for drop_count in range(1, len(tokens) - 1):
-                reduced = tokens[:len(tokens) - drop_count]
-                conds = " AND ".join(["title ILIKE %s"] * len(reduced))
-                rows = run_query(conds, tuple(f"%{t}%" for t in reduced))
-                if rows:
-                    break
-
-        if not rows and len(tokens) > 2:
-            majority = sorted(tokens, key=len, reverse=True)[:-1]
-            conds = " AND ".join(["title ILIKE %s"] * len(majority))
-            rows = run_query(conds, tuple(f"%{t}%" for t in majority))
+            majority = sorted(tokens, key=len, reverse=True)[:max(2, len(tokens) - 1)]
+            mc = " AND ".join(["title ILIKE %s"] * len(majority))
+            rows = ranked(mc, [f"%{t}%" for t in majority])
 
         results = [_serialize(dict(r)) for r in rows]
         return jsonify({"results": results, "query": q, "tokens": tokens})
