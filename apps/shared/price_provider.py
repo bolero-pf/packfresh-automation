@@ -604,11 +604,13 @@ class PriceProvider:
 
         return self._stamp({
             **{k: meta.get(k) for k in (
-                "scrydex_id", "tcgplayer_id", "name",
+                "scrydex_id", "tcgplayer_id", "name", "nameEn",
                 "card_number", "printed_number", "rarity", "game",
                 "image_small", "image_medium", "image_large",
+                "languageCode",
             )},
             "set_name": meta.get("expansion_name"),
+            "setNameEn": meta.get("setNameEn"),
             "expansion_name": meta.get("expansion_name"),
             "variants": variants_map,
             "primary_variant": primary,
