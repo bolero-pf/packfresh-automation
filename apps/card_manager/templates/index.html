@@ -754,11 +754,28 @@ function renderHoldDetail(d) {
         && (i.scrydex_id || '') === (group.scrydex_id || '')
         && i.condition === group.condition
       );
-      const primaryBinObj = (group.best_bins && group.best_bins[0]) || null;
-      const primaryBin = primaryBinObj ? primaryBinObj.bin_label : '— No bin';
-      if (!binBuckets.has(primaryBin)) binBuckets.set(primaryBin, []);
-      binBuckets.get(primaryBin).push({ group, groupItems });
-      if (primaryBinObj) binTypes.set(primaryBin, primaryBinObj.bin_type || 'bin');
+      // Bucket each item by its OWN locked-copy bin_label. best_bins is an
+      // inventory-wide aggregate (the bin with the most matching copies
+      // anywhere in the store) and can point at a bin where THIS hold's
+      // locked card doesn't live — sending the puller to the wrong shelf.
+      const fallbackBinObj = (group.best_bins && group.best_bins[0]) || null;
+      const byBin = new Map();
+      groupItems.forEach(item => {
+        const bin = item.bin_label || (fallbackBinObj ? fallbackBinObj.bin_label : '— No bin');
+        const btype = item.bin_type || (fallbackBinObj ? (fallbackBinObj.bin_type || 'bin') : 'bin');
+        if (!byBin.has(bin)) byBin.set(bin, { items: [], bin_type: btype });
+        byBin.get(bin).items.push(item);
+      });
+      byBin.forEach((bucket, binLabel) => {
+        if (!binBuckets.has(binLabel)) binBuckets.set(binLabel, []);
+        // qty_needed reflects the count AT THIS BIN so the loud QTY badge
+        // doesn't lie when a group's items are split across bins.
+        binBuckets.get(binLabel).push({
+          group: { ...group, qty_needed: bucket.items.length },
+          groupItems: bucket.items,
+        });
+        binTypes.set(binLabel, bucket.bin_type);
+      });
     });
 
     const sortedBins = Array.from(binBuckets.keys()).sort(_binCompare);
