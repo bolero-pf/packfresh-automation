@@ -720,20 +720,33 @@ def split_damaged(item_id: str, damaged_qty: int) -> dict:
         UPDATE intake_items SET quantity = %s, offer_price = %s WHERE id = %s
     """, (good_qty, good_offer, item_id))
 
-    # Create damaged split
+    # Create damaged split — preserve scrydex_id / variant / language / rarity /
+    # card_number / product_name_en so the new row keeps its identity for
+    # pricing + push. Set condition='DMG' explicitly so the child renders
+    # correctly (legacy bug: condition was being left NULL and rendering as
+    # "Good"/NM in the UI).
     damaged_id = str(uuid4())
     damaged_offer = (market_price * DAMAGE_DISCOUNT * offer_pct * damaged_qty).quantize(Decimal("0.01"))
     execute("""
         INSERT INTO intake_items (
-            id, session_id, product_name, set_name, tcgplayer_id,
-            quantity, market_price, offer_price, product_type,
-            is_mapped, item_status, parent_item_id
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            id, session_id, product_name, product_name_en, set_name,
+            tcgplayer_id, scrydex_id, card_number, rarity, variant, language,
+            variance, quantity, market_price, offer_price, unit_cost_basis,
+            product_type, is_mapped, item_status, condition, parent_item_id,
+            verified_at, verified_by
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
     """, (
-        damaged_id, item["session_id"], item.get("product_name"), item.get("set_name"),
-        item.get("tcgplayer_id"), damaged_qty, market_price,
-        damaged_offer, item.get("product_type", "sealed"),
-        item.get("is_mapped", False), "damaged", item_id,
+        damaged_id, item["session_id"],
+        item.get("product_name"), item.get("product_name_en"), item.get("set_name"),
+        item.get("tcgplayer_id"), item.get("scrydex_id"), item.get("card_number"),
+        item.get("rarity"), item.get("variant"), item.get("language", "EN"),
+        item.get("variance"), damaged_qty, market_price, damaged_offer,
+        item.get("unit_cost_basis"), item.get("product_type", "sealed"),
+        item.get("is_mapped", False), "damaged", "DMG", item_id,
+        item.get("verified_at"), item.get("verified_by"),
     ))
 
     _recalculate_session_totals(item["session_id"])
@@ -742,6 +755,183 @@ def split_damaged(item_id: str, damaged_qty: int) -> dict:
         "good_item": query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,)),
         "damaged_item": query_one("SELECT * FROM intake_items WHERE id = %s", (damaged_id,)),
     }
+
+
+VALID_CONDITIONS = ("NM", "LP", "MP", "HP", "DMG")
+
+
+def split_by_conditions(item_id: str, condition_counts: dict,
+                        price_provider=None, finalize_verify: bool = False) -> list:
+    """
+    Split a raw card stack into N condition buckets in a single action.
+
+    condition_counts: e.g. {"NM": 3, "LP": 1, "DMG": 1}. Sum must equal current quantity.
+
+    Each non-zero bucket becomes its own intake_items row (the first reuses the
+    parent id; the rest become children with parent_item_id pointing at it).
+    Every resulting row gets an explicit condition column — fixes the legacy
+    damage-split bug where children landed with condition=NULL.
+
+    Pricing: per-condition market via Scrydex → PPT → retarget fallback.
+    DMG buckets get item_status='damaged' and DAMAGE_DISCOUNT applied to offer.
+
+    finalize_verify=True: stamps verified_at=CURRENT_TIMESTAMP on all resulting
+    rows AND lets offer_price move with the per-condition market (called from
+    the Verify stage). When False, COGS is locked if the row was already
+    verified — market_price still updates per condition but offer_price is
+    prorated from the original.
+    """
+    from price_cache import PriceCache
+    from price_synthesis import retarget_condition
+    import db as db_module
+
+    item = query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
+    if not item:
+        raise ValueError("Item not found")
+    if item.get("is_graded"):
+        raise ValueError("split_by_conditions is for raw cards only")
+
+    normalized: dict[str, int] = {}
+    for cond, count in (condition_counts or {}).items():
+        cu = (cond or "").upper().strip()
+        if cu not in VALID_CONDITIONS:
+            raise ValueError(f"Invalid condition: {cond}. Must be one of {VALID_CONDITIONS}")
+        c = int(count or 0)
+        if c < 0:
+            raise ValueError("Counts must be >= 0")
+        if c > 0:
+            normalized[cu] = normalized.get(cu, 0) + c
+    if not normalized:
+        raise ValueError("At least one condition must have count > 0")
+
+    total_qty = item.get("quantity", 1)
+    submitted_total = sum(normalized.values())
+    if submitted_total != total_qty:
+        raise ValueError(
+            f"Condition counts sum to {submitted_total}, must equal stack size {total_qty}")
+
+    session = query_one("SELECT * FROM intake_sessions WHERE id = %s", (item["session_id"],))
+    offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
+    sid = item.get("scrydex_id")
+    tcg_id = item.get("tcgplayer_id")
+    variant = item.get("variant")
+    old_condition = (item.get("condition") or "NM").upper().strip()
+    base_market = item.get("market_price")
+    cogs_locked = bool(item.get("verified_at")) and not finalize_verify
+    original_offer = Decimal(str(item.get("offer_price") or 0))
+
+    cache = PriceCache(db_module)
+
+    def lookup_market(condition: str) -> Decimal:
+        try:
+            p = cache.get_raw_condition_price(
+                scrydex_id=sid, tcgplayer_id=tcg_id,
+                condition=condition, variant=variant,
+            )
+            if p is not None:
+                return Decimal(str(p)).quantize(Decimal("0.01"))
+        except Exception as e:
+            logger.warning(f"split_by_conditions: Scrydex lookup failed sid={sid} tcg={tcg_id}: {e}")
+        if tcg_id and price_provider:
+            try:
+                p = price_provider.get_raw_condition_price(
+                    tcgplayer_id=int(tcg_id), condition=condition, variant=variant,
+                )
+                if p is not None:
+                    return Decimal(str(p)).quantize(Decimal("0.01"))
+            except Exception as e:
+                logger.warning(f"split_by_conditions: PPT lookup failed tcg={tcg_id}: {e}")
+        synth = retarget_condition(base_market, old_condition, condition)
+        return Decimal(str(synth)).quantize(Decimal("0.01")) if synth else Decimal("0.00")
+
+    bucket_markets = {c: lookup_market(c) for c in normalized}
+
+    # Parent row keeps the first bucket. Prefer the bucket matching the old
+    # condition (most common: re-classifying a few cards out of a uniform
+    # stack) so the row's identity stays stable.
+    ordered = sorted(normalized.keys(),
+                     key=lambda c: (0 if c == old_condition else 1,
+                                    VALID_CONDITIONS.index(c)))
+
+    results = []
+    verified_now = finalize_verify
+
+    for i, cond in enumerate(ordered):
+        count = normalized[cond]
+        market = bucket_markets[cond]
+        is_damaged = (cond == "DMG")
+        item_status = "damaged" if is_damaged else "good"
+        discount = DAMAGE_DISCOUNT if is_damaged else Decimal("1")
+
+        if cogs_locked:
+            bucket_offer = (original_offer * Decimal(count) / Decimal(total_qty)).quantize(Decimal("0.01"))
+        else:
+            bucket_offer = (market * discount * offer_pct * count).quantize(Decimal("0.01"))
+
+        if i == 0:
+            verified_clause = ", verified_at = CURRENT_TIMESTAMP" if verified_now else ""
+            execute(f"""
+                UPDATE intake_items
+                SET condition = %s, market_price = %s, quantity = %s,
+                    offer_price = %s, item_status = %s{verified_clause}
+                WHERE id = %s
+            """, (cond, market, count, bucket_offer, item_status, item_id))
+            results.append(query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,)))
+        else:
+            child_id = str(uuid4())
+            verified_at_value = item.get("verified_at")
+            if verified_now:
+                execute("""
+                    INSERT INTO intake_items (
+                        id, session_id, product_name, product_name_en, set_name,
+                        tcgplayer_id, scrydex_id, card_number, rarity, variant, language,
+                        variance, quantity, market_price, offer_price, unit_cost_basis,
+                        product_type, is_mapped, item_status, condition, parent_item_id,
+                        verified_at, verified_by
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        CURRENT_TIMESTAMP, %s
+                    )
+                """, (
+                    child_id, item["session_id"],
+                    item.get("product_name"), item.get("product_name_en"),
+                    item.get("set_name"), item.get("tcgplayer_id"), item.get("scrydex_id"),
+                    item.get("card_number"), item.get("rarity"), item.get("variant"),
+                    item.get("language", "EN"), item.get("variance"),
+                    count, market, bucket_offer, item.get("unit_cost_basis"),
+                    item.get("product_type", "card"), item.get("is_mapped", False),
+                    item_status, cond, item_id,
+                    item.get("verified_by"),
+                ))
+            else:
+                execute("""
+                    INSERT INTO intake_items (
+                        id, session_id, product_name, product_name_en, set_name,
+                        tcgplayer_id, scrydex_id, card_number, rarity, variant, language,
+                        variance, quantity, market_price, offer_price, unit_cost_basis,
+                        product_type, is_mapped, item_status, condition, parent_item_id,
+                        verified_at, verified_by
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s
+                    )
+                """, (
+                    child_id, item["session_id"],
+                    item.get("product_name"), item.get("product_name_en"),
+                    item.get("set_name"), item.get("tcgplayer_id"), item.get("scrydex_id"),
+                    item.get("card_number"), item.get("rarity"), item.get("variant"),
+                    item.get("language", "EN"), item.get("variance"),
+                    count, market, bucket_offer, item.get("unit_cost_basis"),
+                    item.get("product_type", "card"), item.get("is_mapped", False),
+                    item_status, cond, item_id,
+                    verified_at_value, item.get("verified_by"),
+                ))
+            results.append(query_one("SELECT * FROM intake_items WHERE id = %s", (child_id,)))
+
+    _recalculate_session_totals(item["session_id"])
+    return results
 
 
 def split_one_slab(item_id: str) -> dict:

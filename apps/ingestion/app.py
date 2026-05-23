@@ -968,6 +968,36 @@ def update_condition_route(item_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/ingest/item/<item_id>/split-conditions", methods=["POST"])
+def split_conditions_route(item_id):
+    """Split a raw card stack into N condition buckets in one action.
+
+    Body: { "condition_counts": {"NM": 3, "LP": 1, "DMG": 1},
+            "finalize_verify": true }
+
+    When finalize_verify=true (called from the Verify stage), every resulting
+    row gets verified_at stamped and offer_price moves with per-condition
+    market. When false (called from later stages), COGS stays locked and
+    offer_price is prorated by quantity.
+    """
+    data = request.get_json(silent=True) or {}
+    counts = data.get("condition_counts") or {}
+    finalize_verify = bool(data.get("finalize_verify", False))
+    if not isinstance(counts, dict) or not counts:
+        return jsonify({"error": "condition_counts dict required"}), 400
+    try:
+        items = ingest.split_by_conditions(
+            item_id, counts,
+            price_provider=pricing, finalize_verify=finalize_verify,
+        )
+        return jsonify({"success": True, "items": [_serialize(it) for it in items]})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"split-conditions failed for item {item_id}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ingest/item/<item_id>/undo-verify", methods=["POST"])
 def undo_verify(item_id):
     """Reset an item back to unverified good status."""

@@ -1449,41 +1449,36 @@ async function verifyItem(itemId, sessionId, status, totalQty) {
 }
 
 async function verifyRawCard(itemId, sessionId, totalQty) {
-    // For raw cards: pick condition + optional price override
-    const conditions = ['NM', 'LP', 'MP', 'HP', 'DMG'];
-    const overlay = document.getElementById('prompt-overlay');
-    document.getElementById('prompt-title').textContent = 'Card Condition';
-    document.getElementById('prompt-msg').textContent = totalQty > 1 ? `Condition for ${totalQty} cards:` : 'What condition? Price looked up from PPT — override if needed.';
-    const area = document.getElementById('prompt-input-area');
-    area.innerHTML = `
-        <div style="margin-bottom:8px;">
-            ${conditions.map(c =>
-                `<button class="btn btn-sm" style="margin:4px; min-width:60px; padding:8px 16px; font-size:0.9rem;" onclick="document.getElementById('prompt-input-area').dataset.val='${c}'; this.parentElement.querySelectorAll('button').forEach(b=>b.style.background=''); this.style.background='var(--accent)'; this.style.color='#fff';">${c}</button>`
-            ).join('')}
-        </div>
-        <div style="display:flex; gap:8px; align-items:center;">
-            <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
-            <input id="raw-price-override" type="number" step="0.01" min="0" placeholder="leave blank for PPT" style="flex:1; font-size:0.9rem; padding:6px;">
-        </div>`;
-    overlay.style.display = 'flex';
-
-    const result = await new Promise(resolve => {
-        document.getElementById('prompt-ok').onclick = () => {
-            overlay.style.display = 'none';
-            const priceVal = document.getElementById('raw-price-override')?.value?.trim();
-            resolve({
-                condition: area.dataset.val || 'NM',
-                price_override: priceVal ? parseFloat(priceVal) : null,
-            });
-        };
-        document.getElementById('prompt-cancel').onclick = () => {
-            overlay.style.display = 'none';
-            resolve(null);
-        };
+    // For raw cards: pick condition + optional price override.
+    // When totalQty > 1, the picker has a "Mixed..." mode that splits the
+    // stack across multiple conditions in one action (e.g. 3 NM, 1 LP, 1 DMG).
+    const result = await pickRawCondition({
+        title: 'Card Condition',
+        message: totalQty > 1
+            ? `Condition for ${totalQty} cards. Click a condition for the whole stack, or "Mixed…" to split.`
+            : 'What condition? Price looked up from Scrydex — override if needed.',
+        totalQty,
+        currentCondition: 'NM',
+        allowMixed: totalQty > 1,
     });
     if (result === null) return;
 
     try {
+        if (result.mode === 'mixed') {
+            // Server-side split + verify in one shot.
+            const r = await fetch(`/api/ingest/item/${itemId}/split-conditions`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    condition_counts: result.counts,
+                    finalize_verify: true,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Split failed'); return; }
+            viewSession(sessionId, true);
+            return;
+        }
+
         let qtyConfirmed = totalQty;
         if (totalQty > 1) {
             const input = await themedPrompt('Verify Quantity', `How many are here? (expected: ${totalQty})`, totalQty);
@@ -1502,6 +1497,168 @@ async function verifyRawCard(itemId, sessionId, totalQty) {
         });
         viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
+}
+
+// Shared condition picker for raw cards. Supports single-pick (uniform stack)
+// and Mixed mode (per-condition qty inputs that must sum to totalQty).
+//
+// Returns one of:
+//   null                                   — user cancelled
+//   { mode: 'single', condition, price_override }
+//   { mode: 'mixed', counts: {NM,LP,...} }
+async function pickRawCondition(opts) {
+    const {
+        title = 'Card Condition',
+        message = '',
+        totalQty = 1,
+        currentCondition = 'NM',
+        allowMixed = (totalQty > 1),
+    } = opts || {};
+    const conditions = ['NM', 'LP', 'MP', 'HP', 'DMG'];
+    const current = (currentCondition || 'NM').toUpperCase();
+
+    const overlay = document.getElementById('prompt-overlay');
+    document.getElementById('prompt-title').textContent = title;
+    document.getElementById('prompt-msg').textContent = message;
+    const area = document.getElementById('prompt-input-area');
+    area.dataset.val = current;
+    area.dataset.mode = 'single';
+
+    const singleHtml = `
+        <div id="pc-single" style="margin-bottom:8px;">
+            ${conditions.map(c => `
+                <button type="button" class="btn btn-sm pc-cond-btn" data-cond="${c}"
+                        style="margin:4px; min-width:60px; padding:8px 16px; font-size:0.9rem; ${c === current ? 'background:var(--accent); color:#fff;' : ''}">
+                    ${c}
+                </button>`).join('')}
+        </div>
+        <div id="pc-price-row" style="display:flex; gap:8px; align-items:center;">
+            <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
+            <input id="pc-price-override" type="number" step="0.01" min="0" placeholder="leave blank for auto lookup" style="flex:1; font-size:0.9rem; padding:6px;">
+        </div>
+        ${allowMixed ? `
+        <div style="margin-top:10px; text-align:right;">
+            <button type="button" id="pc-toggle-mixed" class="btn btn-sm" style="font-size:0.78rem; padding:4px 10px;">Mixed conditions…</button>
+        </div>` : ''}
+    `;
+
+    const mixedHtml = allowMixed ? `
+        <div id="pc-mixed" style="display:none;">
+            <div style="font-size:0.82rem; color:var(--text-dim); margin-bottom:6px;">
+                Distribute ${totalQty} cards across conditions:
+            </div>
+            ${conditions.map(c => `
+                <div style="display:flex; gap:8px; align-items:center; margin-bottom:4px;">
+                    <span style="display:inline-block; min-width:50px; font-weight:600;">${c}</span>
+                    <input type="number" min="0" max="${totalQty}" step="1" value="0"
+                           class="pc-mix-input" data-cond="${c}"
+                           style="width:80px; font-size:0.95rem; padding:6px;">
+                </div>`).join('')}
+            <div id="pc-mix-total" style="margin-top:8px; font-size:0.85rem; color:var(--text-dim);">
+                Total: <span id="pc-mix-sum">0</span> / ${totalQty}
+            </div>
+            <div style="margin-top:8px; text-align:right;">
+                <button type="button" id="pc-toggle-single" class="btn btn-sm" style="font-size:0.78rem; padding:4px 10px;">← Single condition</button>
+            </div>
+        </div>` : '';
+
+    area.innerHTML = singleHtml + mixedHtml;
+
+    const updateMixSum = () => {
+        const inputs = area.querySelectorAll('.pc-mix-input');
+        let sum = 0;
+        inputs.forEach(i => sum += (parseInt(i.value) || 0));
+        const sumEl = document.getElementById('pc-mix-sum');
+        if (sumEl) {
+            sumEl.textContent = sum;
+            sumEl.style.color = sum === totalQty ? 'var(--accent)' : (sum > totalQty ? 'var(--danger,#c33)' : '');
+        }
+    };
+
+    // Wire single-mode buttons
+    area.querySelectorAll('.pc-cond-btn').forEach(btn => {
+        btn.onclick = () => {
+            area.dataset.val = btn.dataset.cond;
+            area.querySelectorAll('.pc-cond-btn').forEach(b => {
+                b.style.background = '';
+                b.style.color = '';
+            });
+            btn.style.background = 'var(--accent)';
+            btn.style.color = '#fff';
+        };
+    });
+
+    // Wire mixed-mode inputs + toggles
+    if (allowMixed) {
+        area.querySelectorAll('.pc-mix-input').forEach(inp => {
+            inp.oninput = updateMixSum;
+        });
+        document.getElementById('pc-toggle-mixed').onclick = () => {
+            area.dataset.mode = 'mixed';
+            document.getElementById('pc-single').style.display = 'none';
+            document.getElementById('pc-price-row').style.display = 'none';
+            document.getElementById('pc-toggle-mixed').parentElement.style.display = 'none';
+            document.getElementById('pc-mixed').style.display = 'block';
+            // Seed: put the whole stack on the current condition as a starting point
+            const seed = area.querySelector(`.pc-mix-input[data-cond="${current}"]`);
+            if (seed && (parseInt(seed.value) || 0) === 0) {
+                seed.value = totalQty;
+                updateMixSum();
+            }
+        };
+        document.getElementById('pc-toggle-single').onclick = () => {
+            area.dataset.mode = 'single';
+            document.getElementById('pc-single').style.display = '';
+            document.getElementById('pc-price-row').style.display = '';
+            document.getElementById('pc-toggle-mixed').parentElement.style.display = '';
+            document.getElementById('pc-mixed').style.display = 'none';
+        };
+    }
+
+    overlay.style.display = 'flex';
+
+    return new Promise(resolve => {
+        document.getElementById('prompt-ok').onclick = () => {
+            if (area.dataset.mode === 'mixed') {
+                const counts = {};
+                let sum = 0;
+                area.querySelectorAll('.pc-mix-input').forEach(i => {
+                    const n = parseInt(i.value) || 0;
+                    if (n > 0) counts[i.dataset.cond] = n;
+                    sum += n;
+                });
+                if (sum !== totalQty) {
+                    alert(`Counts must sum to ${totalQty} (currently ${sum}).`);
+                    return;
+                }
+                if (Object.keys(counts).length === 0) {
+                    alert('Assign at least one card to a condition.');
+                    return;
+                }
+                overlay.style.display = 'none';
+                // If only one bucket was used, collapse to single-condition form
+                // so the caller can take the cheaper single-update path.
+                if (Object.keys(counts).length === 1) {
+                    const onlyCond = Object.keys(counts)[0];
+                    resolve({ mode: 'single', condition: onlyCond, price_override: null });
+                } else {
+                    resolve({ mode: 'mixed', counts });
+                }
+                return;
+            }
+            overlay.style.display = 'none';
+            const priceVal = document.getElementById('pc-price-override')?.value?.trim();
+            resolve({
+                mode: 'single',
+                condition: area.dataset.val || current,
+                price_override: priceVal ? parseFloat(priceVal) : null,
+            });
+        };
+        document.getElementById('prompt-cancel').onclick = () => {
+            overlay.style.display = 'none';
+            resolve(null);
+        };
+    });
 }
 
 async function verifyGradedSlab(itemId, sessionId, currentCompany, currentGrade) {
@@ -2876,57 +3033,39 @@ async function _rsChangeCondition() {
     const item = _rsItems[_rsIndex];
     if (!item) return;
     const current = (item.condition || 'NM').toUpperCase();
-    const conditions = ['NM', 'LP', 'MP', 'HP', 'DMG'];
+    const qty = item.quantity || 1;
 
-    const overlay = document.getElementById('prompt-overlay');
-    document.getElementById('prompt-title').textContent = 'Change Condition';
-    document.getElementById('prompt-msg').textContent =
-        `Current: ${current}. Pick the new condition — price re-looks up from Scrydex.`;
-    const area = document.getElementById('prompt-input-area');
-    area.dataset.val = current;
-    area.innerHTML = `
-        <div style="margin-bottom:8px;">
-            ${conditions.map(c => `
-                <button class="btn btn-sm rs-cond-btn" data-cond="${c}"
-                        style="margin:4px; min-width:60px; padding:8px 16px; font-size:0.9rem; ${c === current ? 'background:var(--accent); color:#fff;' : ''}">
-                    ${c}
-                </button>`).join('')}
-        </div>
-        <div style="display:flex; gap:8px; align-items:center;">
-            <label style="font-size:0.82rem; color:var(--text-dim); white-space:nowrap;">Price override $</label>
-            <input id="rs-cond-price-override" type="number" step="0.01" min="0" placeholder="leave blank for auto lookup" style="flex:1; font-size:0.9rem; padding:6px;">
-        </div>`;
-    area.querySelectorAll('.rs-cond-btn').forEach(btn => {
-        btn.onclick = () => {
-            area.dataset.val = btn.dataset.cond;
-            area.querySelectorAll('.rs-cond-btn').forEach(b => {
-                b.style.background = '';
-                b.style.color = '';
-            });
-            btn.style.background = 'var(--accent)';
-            btn.style.color = '#fff';
-        };
-    });
-    overlay.style.display = 'flex';
-
-    const result = await new Promise(resolve => {
-        document.getElementById('prompt-ok').onclick = () => {
-            overlay.style.display = 'none';
-            const priceVal = document.getElementById('rs-cond-price-override')?.value?.trim();
-            resolve({
-                condition: area.dataset.val || current,
-                price_override: priceVal ? parseFloat(priceVal) : null,
-            });
-        };
-        document.getElementById('prompt-cancel').onclick = () => {
-            overlay.style.display = 'none';
-            resolve(null);
-        };
+    const result = await pickRawCondition({
+        title: 'Change Condition',
+        message: qty > 1
+            ? `Current: ${current} × ${qty}. Pick a new condition, or "Mixed…" to split this stack.`
+            : `Current: ${current}. Pick the new condition — price re-looks up from Scrydex.`,
+        totalQty: qty,
+        currentCondition: current,
+        allowMixed: qty > 1,
     });
     if (result === null) return;
-    if (result.condition === current && result.price_override === null) return;
 
     try {
+        if (result.mode === 'mixed') {
+            const r = await fetch(`/api/ingest/item/${item.id}/split-conditions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    condition_counts: result.counts,
+                    finalize_verify: false,
+                }),
+            });
+            const d = await r.json();
+            if (!r.ok) { alert(d.error || 'Split failed'); return; }
+            // Splitting created new sibling rows — refresh route view from
+            // the session so they show up in the routing list.
+            if (typeof _loadRouteData === 'function' && _rsSessionId) {
+                _loadRouteData(_rsSessionId);
+            }
+            return;
+        }
+        if (result.condition === current && result.price_override === null) return;
         const body = { condition: result.condition };
         if (result.price_override !== null) body.price_override = result.price_override;
         const r = await fetch(`/api/ingest/item/${item.id}/update-condition`, {
