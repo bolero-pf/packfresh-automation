@@ -706,6 +706,7 @@ def get_hold(hold_id):
                 JOIN storage_rows sr ON sl.row_id = sr.id
                 WHERE {id_where}
                   AND rc.condition = %s
+                  AND rc.state IN ('STORED','DISPLAY')
                 GROUP BY sl.bin_label, sl.id, sr.location_type
                 ORDER BY available_here DESC
             """, tuple(id_params) + (condition,))
