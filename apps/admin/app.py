@@ -427,9 +427,21 @@ def _ser(d):
 # existing inventory views so the chip list stays consistent with how products
 # were originally tagged. Lowercased for comparison.
 STAFF_INVENTORY_TYPE_TAGS = [
-    "booster box", "booster pack", "etb", "pcetb", "blister",
-    "sleeved", "tin", "collection box", "case",
+    "booster box", "booster pack", "booster bundle", "blister", "sleeved",
+    "etb", "pcetb", "tin", "collection box", "case",
+    "slab",
+    "accessories", "sleeve", "deck box", "playmat", "dice", "board game", "puzzle",
 ]
+
+# Operational / internal tags that aren't useful as floor-staff filters.
+# Excluded from the set-chip facet list. Lowercased.
+STAFF_INVENTORY_HIDE_TAGS = {
+    "new", "sealed", "newest_sort", "ad_eligible", "rare-find", "hot set",
+    "fast-moving", "ingest", "auto-created", "justforfun", "newtrainer",
+    "vault-inventory", "high value", "collector", "holiday", "clearance",
+    "damaged", "limit-2", "limit-4", "buildbattle", "strategy", "grade-10",
+    "bb & wf",
+}
 
 
 def _tags_like_clause(tag: str) -> tuple[str, str]:
@@ -461,7 +473,7 @@ def staff_inventory_items():
     sets = [s for s in request.args.getlist("set") if s]
     in_stock_only = request.args.get("in_stock", "1") == "1"
 
-    where = ["status = 'active'"]
+    where = ["UPPER(COALESCE(status,'')) = 'ACTIVE'"]
     params: list = []
 
     if q:
@@ -520,7 +532,7 @@ def staff_inventory_facets():
         SELECT LOWER(TRIM(unnest(string_to_array(COALESCE(tags, ''), ',')))) AS tag,
                COUNT(*) AS n
         FROM inventory_product_cache
-        WHERE status = 'active' AND COALESCE(tags, '') <> ''
+        WHERE UPPER(COALESCE(status,'')) = 'ACTIVE' AND COALESCE(tags, '') <> ''
         GROUP BY tag
         HAVING COUNT(*) >= 3
         ORDER BY n DESC, tag
@@ -534,7 +546,7 @@ def staff_inventory_facets():
             continue
         if t in type_set:
             types.append({"value": t, "count": r["n"]})
-        else:
+        elif t not in STAFF_INVENTORY_HIDE_TAGS:
             sets.append({"value": t, "count": r["n"]})
 
     # Preserve the curated order for type chips, regardless of count rank.
