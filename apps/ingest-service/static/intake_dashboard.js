@@ -4844,8 +4844,8 @@ async function lookupByTcgId(sessionId, offerPct, context) {
             const gradeEntry = companyGrades[gradeVal] || {};
             const cachedPrice = gradeEntry.price;
             const nmRaw = variantData['NM'];
-            const safeName = (card.name||'').replace(/'/g, "\'");
-            const safeSet = setName.replace(/'/g, "\'");
+            const safeName = (card.name||'').replace(/'/g, "\\'");
+            const safeSet = setName.replace(/'/g, "\\'");
             const liveCompany = liveGraded[gradeCompany] || {};
             const live = liveCompany[gradeVal] || null;
 
@@ -4956,15 +4956,15 @@ async function lookupByTcgId(sessionId, offerPct, context) {
                 variantHtml = '<div style="margin-top:8px;">' + variantNames.map(v => {
                     const vData = variants[v] || {};
                     const vPrice = vData[condition];
-                    const safeName = (card.name||'').replace(/'/g, "\'");
-                    const safeSet = setName.replace(/'/g, "\'");
+                    const safeName = (card.name||'').replace(/'/g, "\\'");
+                    const safeSet = setName.replace(/'/g, "\\'");
                     return '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + (vPrice || 0) + ', \'' + context + '\')">' +
                         '<h4>' + (card.name||'') + ' — ' + v + '</h4>' +
                         '<p>' + setName + (cardNum ? ' #'+cardNum : '') + ' · ' + condition + ': ' + (vPrice ? '$'+vPrice.toFixed(2) : 'no price') + ' · Qty ' + qty + '</p></div>';
                 }).join('') + '</div>';
             } else {
-                const safeName = (card.name||'').replace(/'/g, "\'");
-                const safeSet = setName.replace(/'/g, "\'");
+                const safeName = (card.name||'').replace(/'/g, "\\'");
+                const safeSet = setName.replace(/'/g, "\\'");
                 variantHtml = '<div class="search-result" onclick="addCardFromSearch(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'' + condition + '\', ' + qty + ', ' + (price || 0) + ', \'' + context + '\')">' +
                     '<h4>' + (card.name||'') + '</h4>' +
                     '<p>' + setName + ' · ' + condition + ': $' + displayPrice + ' · Qty ' + qty + '</p></div>';
