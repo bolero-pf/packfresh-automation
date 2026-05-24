@@ -1413,6 +1413,40 @@ def reverse_grading(card_id):
     return jsonify({"success": True, "card_name": card["card_name"]})
 
 
+@app.route("/api/grading/scan", methods=["POST"])
+def scan_grading():
+    """Scan a barcode from the At Grading view: flip REMOVED+GRADING →
+    PENDING_RETURN so the next /api/returns/store call assigns a storage bin.
+    Mirrors /api/returns/scan, but only accepts cards currently at grading."""
+    barcode = (request.get_json() or {}).get("barcode", "").strip()
+    card = db.query_one("""
+        SELECT id, card_name, condition, state, removal_reason
+        FROM raw_cards WHERE barcode = %s
+    """, (barcode,))
+    if not card:
+        return jsonify({"error": "Barcode not found"}), 404
+    if card["state"] != "REMOVED" or card["removal_reason"] != "GRADING":
+        return jsonify({
+            "error": f"Card is {card['state']}/{card['removal_reason'] or '-'}, not at grading",
+            "card_name": card["card_name"],
+        }), 409
+    db.execute("""
+        UPDATE raw_cards
+           SET state = 'PENDING_RETURN',
+               removal_reason = NULL,
+               removal_date = NULL,
+               current_hold_id = NULL,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = %s
+    """, (str(card["id"]),))
+    return jsonify({
+        "success":   True,
+        "card_name": card["card_name"],
+        "condition": card["condition"],
+        "barcode":   barcode,
+    })
+
+
 @app.route("/api/missing/<card_id>/gone", methods=["POST"])
 def mark_gone(card_id):
     """Permanently mark a missing card as GONE (lost/theft)."""

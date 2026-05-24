@@ -513,7 +513,7 @@ body.standalone .standalone-bar { display: flex; }
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
         <div>
           <div class="page-title">At Grading</div>
-          <div class="page-sub">Cards physically sent out for grading. Reverse to send the card to the Return Queue for re-shelving.</div>
+          <div class="page-sub">Cards physically sent out for grading. Scan a barcode or click Reverse to send the card to the Return Queue for re-shelving.</div>
         </div>
         <button class="btn btn-sm" onclick="manualRefreshActiveView()" title="Refresh list" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">↻ Refresh</button>
       </div>
@@ -1187,6 +1187,20 @@ async function handleScan(barcode) {
         loadMissing();
         refreshBadges();
       }
+    } catch(e) {
+      flash('red');
+      toast(`✕ ${e.message}`, 'red');
+    }
+  } else if (activeView === 'view-grading') {
+    // Scan a barcode at At Grading → flip REMOVED+GRADING → PENDING_RETURN.
+    // The card disappears from this list and appears in the Return Queue,
+    // where the existing scan-and-store flow re-bins it.
+    try {
+      const d = await post('/api/grading/scan', { barcode });
+      flash('green');
+      toast(`↩ ${d.card_name} → Return Queue`, 'green');
+      loadGrading();
+      refreshBadges();
     } catch(e) {
       flash('red');
       toast(`✕ ${e.message}`, 'red');
