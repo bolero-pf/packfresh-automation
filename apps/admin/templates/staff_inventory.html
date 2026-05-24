@@ -149,9 +149,7 @@
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     <button class="clear-btn" id="clear-btn" onclick="clearSearch()" style="display:none;">Clear</button>
   </div>
-  <div class="chip-group-label">Type</div>
-  <div class="chip-row" id="type-chips"></div>
-  <div class="chip-group-label">Set / Category</div>
+  <div class="chip-group-label">Era</div>
   <div class="chip-row" id="set-chips"></div>
 </header>
 
@@ -166,14 +164,13 @@
 <script>
 const state = {
   q: "",
-  types: new Set(),
   sets: new Set(),
   // Default: in-stock only. Explicit text search overrides this server-side
   // so OOS items still surface when you're hunting for a specific name.
   inStock: true,
 };
 
-let facets = { types: [], sets: [] };
+let facets = { sets: [] };
 let searchTimer = null;
 
 function esc(s) {
@@ -195,14 +192,8 @@ async function loadFacets() {
 }
 
 function renderChips() {
-  const typeRow = document.getElementById("type-chips");
   const setRow = document.getElementById("set-chips");
-
-  typeRow.innerHTML = facets.types.map(t => chipHtml(t.value, state.types.has(t.value), "type")).join("");
   setRow.innerHTML = facets.sets.map(s => chipHtml(s.value, state.sets.has(s.value), "set")).join("");
-
-  typeRow.querySelectorAll(".chip").forEach(c =>
-    c.addEventListener("click", () => toggleChip("types", c.dataset.value)));
   setRow.querySelectorAll(".chip").forEach(c =>
     c.addEventListener("click", () => toggleChip("sets", c.dataset.value)));
 }
@@ -229,7 +220,6 @@ function clearSearch() {
 async function load() {
   const params = new URLSearchParams();
   if (state.q) params.set("q", state.q);
-  for (const t of state.types) params.append("type", t);
   for (const s of state.sets) params.append("set", s);
   if (!state.inStock) params.set("in_stock", "0");
 

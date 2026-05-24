@@ -423,25 +423,10 @@ def _ser(d):
 # Reads inventory_product_cache (refreshed by the inventory service). Open to
 # all staff — read-only, no edit endpoints. Front-of-house lookup tool.
 
-# Core product-type chips. Kept short on purpose — the long tail
-# (booster bundle, deck box, playmat, etc.) is findable via search.
-STAFF_INVENTORY_TYPE_TAGS = [
-    "booster pack", "booster box", "etb", "collection box", "tin",
-    "blister", "slab", "accessories",
-]
-
-# Operational / internal / pan-catalog tags that aren't useful as
-# floor-staff filters. Excluded from the set-chip facet list. Lowercased.
-STAFF_INVENTORY_HIDE_TAGS = {
-    "new", "sealed", "pokemon", "newest_sort", "ad_eligible", "rare-find",
-    "hot set", "fast-moving", "ingest", "auto-created", "justforfun",
-    "newtrainer", "vault-inventory", "high value", "collector", "holiday",
-    "clearance", "damaged", "limit-2", "limit-4", "buildbattle", "strategy",
-    "grade-10", "bb & wf", "vintage", "psa",
-}
-
-# Max number of set/category chips shown. Top-N by product count.
-STAFF_INVENTORY_SET_CHIP_LIMIT = 8
+# Era chips are auto-discovered (any tag ending with " era"). Specific
+# expansions ("evolving skies", "crown zenith", etc.) and product types
+# stay reachable via the search box — chips are reserved for groupings
+# broad enough to be worth printing as a saved view.
 
 
 def _tags_like_clause(tag: str) -> tuple[str, str]:
@@ -469,7 +454,6 @@ def staff_inventory_items():
         return auth_result
 
     q = (request.args.get("q") or "").strip()
-    types = [t for t in request.args.getlist("type") if t]
     sets = [s for s in request.args.getlist("set") if s]
     in_stock_only = request.args.get("in_stock", "1") == "1"
 
@@ -485,10 +469,6 @@ def staff_inventory_items():
     elif in_stock_only:
         where.append("COALESCE(shopify_qty, 0) > 0")
 
-    for t in types:
-        sql, p = _tags_like_clause(t)
-        where.append(sql)
-        params.append(p)
     for s in sets:
         sql, p = _tags_like_clause(s)
         where.append(sql)
@@ -521,9 +501,9 @@ def staff_inventory_items():
 
 @app.route("/api/staff-inventory/facets")
 def staff_inventory_facets():
-    """Return chip-filter options. Product types come from a curated list;
-    sets are pulled live from tags that look like set names (anything that
-    isn't a known product-type tag and appears on at least 3 products)."""
+    """Return chip-filter options. Only era tags become chips — they're broad
+    enough to make a useful saved/printable view. Everything else stays
+    reachable via the text search."""
     auth_result = require_auth()
     if auth_result:
         return auth_result
@@ -537,28 +517,12 @@ def staff_inventory_facets():
         HAVING COUNT(*) >= 3
         ORDER BY n DESC, tag
     """)
-    type_set = {t.lower() for t in STAFF_INVENTORY_TYPE_TAGS}
-    types_by_value = {}
-    sets = []
-    for r in rows:
-        t = (r["tag"] or "").strip()
-        if not t:
-            continue
-        if t in type_set:
-            types_by_value[t] = {"value": t, "count": r["n"]}
-        elif t not in STAFF_INVENTORY_HIDE_TAGS:
-            sets.append({"value": t, "count": r["n"]})
-
-    # Preserve the curated order for type chips, regardless of count rank.
-    ordered_types = [types_by_value[t] for t in STAFF_INVENTORY_TYPE_TAGS
-                     if t in types_by_value]
-
-    # Sets are already sorted by count DESC from the query. Cap to keep the
-    # chip row scannable — long-tail sets stay reachable via text search.
-    return jsonify({
-        "types": ordered_types,
-        "sets": sets[:STAFF_INVENTORY_SET_CHIP_LIMIT],
-    })
+    sets = [
+        {"value": (r["tag"] or "").strip(), "count": r["n"]}
+        for r in rows
+        if (r["tag"] or "").strip().endswith(" era")
+    ]
+    return jsonify({"sets": sets})
 
 
 if __name__ == "__main__":
