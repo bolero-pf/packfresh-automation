@@ -417,5 +417,135 @@ def _ser(d):
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Staff Inventory (read-only)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Reads inventory_product_cache (refreshed by the inventory service). Open to
+# all staff — read-only, no edit endpoints. Front-of-house lookup tool.
+
+# Tag values used to classify sealed products in Shopify. Sourced from the
+# existing inventory views so the chip list stays consistent with how products
+# were originally tagged. Lowercased for comparison.
+STAFF_INVENTORY_TYPE_TAGS = [
+    "booster box", "booster pack", "etb", "pcetb", "blister",
+    "sleeved", "tin", "collection box", "case",
+]
+
+
+def _tags_like_clause(tag: str) -> tuple[str, str]:
+    """Build a (sql, param) pair that matches a single tag inside the
+    comma-separated `tags` column. Mirrors the pattern used by
+    inventory/routes/inventory.py."""
+    return (
+        "(',' || LOWER(REPLACE(COALESCE(tags, ''), ', ', ',')) || ',') LIKE %s",
+        f"%,{tag.lower()},%",
+    )
+
+
+@app.route("/staff-inventory")
+def staff_inventory_page():
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+    return render_template("staff_inventory.html", user=get_current_user())
+
+
+@app.route("/api/staff-inventory/items")
+def staff_inventory_items():
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+
+    q = (request.args.get("q") or "").strip()
+    types = [t for t in request.args.getlist("type") if t]
+    sets = [s for s in request.args.getlist("set") if s]
+    in_stock_only = request.args.get("in_stock", "1") == "1"
+
+    where = ["status = 'active'"]
+    params: list = []
+
+    if q:
+        # Explicit search: surface OOS too so staff know an item exists but
+        # isn't on hand. Search across title, sku, and barcode.
+        where.append("(LOWER(title) LIKE %s OR LOWER(COALESCE(sku,'')) LIKE %s OR LOWER(COALESCE(barcode,'')) LIKE %s)")
+        like = f"%{q.lower()}%"
+        params.extend([like, like, like])
+    elif in_stock_only:
+        where.append("COALESCE(shopify_qty, 0) > 0")
+
+    for t in types:
+        sql, p = _tags_like_clause(t)
+        where.append(sql)
+        params.append(p)
+    for s in sets:
+        sql, p = _tags_like_clause(s)
+        where.append(sql)
+        params.append(p)
+
+    rows = db.query(f"""
+        SELECT shopify_variant_id, shopify_product_id, title, sku, barcode,
+               shopify_price, shopify_qty, image_url, tags
+        FROM inventory_product_cache
+        WHERE {' AND '.join(where)}
+        ORDER BY title
+        LIMIT 500
+    """, tuple(params))
+
+    items = []
+    for r in rows:
+        items.append({
+            "shopify_variant_id": str(r["shopify_variant_id"]),
+            "shopify_product_id": str(r["shopify_product_id"]),
+            "title": r["title"],
+            "sku": r["sku"],
+            "barcode": r["barcode"],
+            "price": float(r["shopify_price"]) if r["shopify_price"] is not None else None,
+            "qty": int(r["shopify_qty"] or 0),
+            "image_url": r["image_url"],
+            "tags": [t.strip() for t in (r["tags"] or "").split(",") if t.strip()],
+        })
+    return jsonify({"items": items, "truncated": len(items) >= 500})
+
+
+@app.route("/api/staff-inventory/facets")
+def staff_inventory_facets():
+    """Return chip-filter options. Product types come from a curated list;
+    sets are pulled live from tags that look like set names (anything that
+    isn't a known product-type tag and appears on at least 3 products)."""
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+
+    rows = db.query("""
+        SELECT LOWER(TRIM(unnest(string_to_array(COALESCE(tags, ''), ',')))) AS tag,
+               COUNT(*) AS n
+        FROM inventory_product_cache
+        WHERE status = 'active' AND COALESCE(tags, '') <> ''
+        GROUP BY tag
+        HAVING COUNT(*) >= 3
+        ORDER BY n DESC, tag
+    """)
+    type_set = {t.lower() for t in STAFF_INVENTORY_TYPE_TAGS}
+    types = []
+    sets = []
+    for r in rows:
+        t = (r["tag"] or "").strip()
+        if not t:
+            continue
+        if t in type_set:
+            types.append({"value": t, "count": r["n"]})
+        else:
+            sets.append({"value": t, "count": r["n"]})
+
+    # Preserve the curated order for type chips, regardless of count rank.
+    ordered_types = []
+    by_value = {x["value"]: x for x in types}
+    for tag in STAFF_INVENTORY_TYPE_TAGS:
+        if tag in by_value:
+            ordered_types.append(by_value[tag])
+
+    return jsonify({"types": ordered_types, "sets": sets})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=False)

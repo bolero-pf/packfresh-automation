@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Staff Inventory · Pack Fresh</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pf-static/pf_theme.css">
+<script src="/pf-static/pf_ui.js"></script>
+<style>
+  body { min-height:100vh; margin:0; font-family:'DM Sans',system-ui,sans-serif; }
+
+  header {
+    position:sticky; top:0; z-index:10;
+    background:var(--bg);
+    border-bottom:1px solid var(--border);
+    padding:14px 18px 0;
+  }
+  .header-top {
+    display:flex; align-items:center; justify-content:space-between;
+    gap:10px; margin-bottom:12px;
+  }
+  .header-top h1 {
+    margin:0; font-size:1.15rem; font-weight:700;
+    display:flex; align-items:center; gap:8px;
+  }
+  .back-link {
+    color:var(--text-dim); text-decoration:none;
+    font-size:0.85rem; padding:6px 10px; border-radius:8px;
+  }
+  .back-link:hover { background:var(--surface); }
+
+  .search-row {
+    display:flex; gap:8px; margin-bottom:10px;
+  }
+  .search-row input {
+    flex:1; height:42px; padding:0 14px;
+    border:1.5px solid var(--border); border-radius:10px;
+    background:var(--surface); color:var(--text);
+    font-size:1rem; font-family:inherit;
+    outline:none;
+  }
+  .search-row input:focus { border-color:var(--accent); }
+  .clear-btn {
+    height:42px; padding:0 12px;
+    background:transparent; border:1.5px solid var(--border); border-radius:10px;
+    color:var(--text-dim); font-size:0.85rem; cursor:pointer;
+  }
+  .clear-btn:hover { color:var(--text); border-color:var(--text-dim); }
+
+  .chip-row {
+    display:flex; gap:6px; padding-bottom:12px;
+    overflow-x:auto; scrollbar-width:none;
+    -webkit-overflow-scrolling:touch;
+  }
+  .chip-row::-webkit-scrollbar { display:none; }
+  .chip-group-label {
+    font-size:0.65rem; text-transform:uppercase; letter-spacing:0.1em;
+    color:var(--text-dim); padding:6px 0 4px 2px;
+  }
+  .chip {
+    flex-shrink:0;
+    background:var(--surface); color:var(--text);
+    border:1.5px solid var(--border); border-radius:999px;
+    padding:6px 12px; font-size:0.82rem; font-weight:500;
+    cursor:pointer; white-space:nowrap;
+    transition:background 0.1s, border-color 0.1s, color 0.1s;
+  }
+  .chip:hover { border-color:var(--text-dim); }
+  .chip.active {
+    background:var(--accent); border-color:var(--accent); color:#fff;
+  }
+  .chip.toggle {
+    border-style:dashed;
+  }
+  .chip.toggle.active { border-style:solid; }
+
+  .main {
+    max-width:900px; margin:0 auto; padding:14px 14px 60px;
+  }
+
+  .status-line {
+    color:var(--text-dim); font-size:0.78rem;
+    margin:0 4px 10px; display:flex; justify-content:space-between;
+  }
+
+  .list {
+    display:flex; flex-direction:column; gap:8px;
+  }
+  .item {
+    display:grid; grid-template-columns:64px 1fr auto;
+    gap:12px; align-items:center;
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:12px; padding:10px 12px;
+  }
+  .item .thumb {
+    width:64px; height:64px; border-radius:8px;
+    background:var(--surface-2,#1d2026); overflow:hidden;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .item .thumb img { width:100%; height:100%; object-fit:contain; }
+  .item .thumb .ph { color:var(--text-dim); font-size:1.4rem; }
+  .item .info { min-width:0; }
+  .item .name {
+    font-weight:600; font-size:0.95rem;
+    overflow:hidden; text-overflow:ellipsis;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+  }
+  .item .meta {
+    color:var(--text-dim); font-size:0.75rem;
+    margin-top:3px; font-family:'DM Mono',monospace;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .item .right {
+    text-align:right; min-width:74px;
+  }
+  .item .price {
+    font-weight:700; font-size:1rem;
+  }
+  .item .qty {
+    margin-top:3px; font-size:0.78rem; color:var(--text-dim);
+  }
+  .item .qty.oos { color:var(--red,#e25555); font-weight:600; }
+
+  .empty {
+    text-align:center; padding:60px 20px; color:var(--text-dim);
+  }
+  .empty .hint { font-size:0.85rem; margin-top:8px; }
+
+  .loading {
+    text-align:center; padding:40px; color:var(--text-dim);
+  }
+
+  @media (min-width:700px) {
+    .list { display:grid; grid-template-columns:1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-top">
+    <h1>📋 Staff Inventory</h1>
+    <a class="back-link" href="/">← Dashboard</a>
+  </div>
+  <div class="search-row">
+    <input id="q" type="search" placeholder="Search name, SKU, or barcode…"
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    <button class="clear-btn" id="clear-btn" onclick="clearSearch()" style="display:none;">Clear</button>
+  </div>
+  <div class="chip-group-label">Type</div>
+  <div class="chip-row" id="type-chips"></div>
+  <div class="chip-group-label">Set / Category</div>
+  <div class="chip-row" id="set-chips"></div>
+</header>
+
+<div class="main">
+  <div class="status-line">
+    <span id="status">Loading…</span>
+    <span id="oos-note"></span>
+  </div>
+  <div id="list" class="list"></div>
+</div>
+
+<script>
+const state = {
+  q: "",
+  types: new Set(),
+  sets: new Set(),
+  // Default: in-stock only. Explicit text search overrides this server-side
+  // so OOS items still surface when you're hunting for a specific name.
+  inStock: true,
+};
+
+let facets = { types: [], sets: [] };
+let searchTimer = null;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"
+  }[c]));
+}
+
+function fmtPrice(p) {
+  if (p === null || p === undefined) return "—";
+  return "$" + Number(p).toFixed(2);
+}
+
+async function loadFacets() {
+  const r = await fetch("/api/staff-inventory/facets", { credentials: "include" });
+  if (!r.ok) return;
+  facets = await r.json();
+  renderChips();
+}
+
+function renderChips() {
+  const typeRow = document.getElementById("type-chips");
+  const setRow = document.getElementById("set-chips");
+
+  typeRow.innerHTML = facets.types.map(t => chipHtml(t.value, state.types.has(t.value), "type")).join("");
+  setRow.innerHTML = facets.sets.map(s => chipHtml(s.value, state.sets.has(s.value), "set")).join("");
+
+  typeRow.querySelectorAll(".chip").forEach(c =>
+    c.addEventListener("click", () => toggleChip("types", c.dataset.value)));
+  setRow.querySelectorAll(".chip").forEach(c =>
+    c.addEventListener("click", () => toggleChip("sets", c.dataset.value)));
+}
+
+function chipHtml(value, active, kind) {
+  return `<button class="chip ${active ? "active" : ""}" data-kind="${kind}" data-value="${esc(value)}">${esc(value)}</button>`;
+}
+
+function toggleChip(setName, value) {
+  const s = state[setName];
+  if (s.has(value)) s.delete(value);
+  else s.add(value);
+  renderChips();
+  load();
+}
+
+function clearSearch() {
+  state.q = "";
+  document.getElementById("q").value = "";
+  document.getElementById("clear-btn").style.display = "none";
+  load();
+}
+
+async function load() {
+  const params = new URLSearchParams();
+  if (state.q) params.set("q", state.q);
+  for (const t of state.types) params.append("type", t);
+  for (const s of state.sets) params.append("set", s);
+  if (!state.inStock) params.set("in_stock", "0");
+
+  const list = document.getElementById("list");
+  list.innerHTML = `<div class="loading">Loading…</div>`;
+
+  const r = await fetch("/api/staff-inventory/items?" + params.toString(), { credentials: "include" });
+  if (!r.ok) {
+    list.innerHTML = `<div class="empty">Failed to load (${r.status}).</div>`;
+    return;
+  }
+  const data = await r.json();
+  render(data);
+}
+
+function render(data) {
+  const list = document.getElementById("list");
+  const status = document.getElementById("status");
+  const oosNote = document.getElementById("oos-note");
+
+  if (!data.items.length) {
+    list.innerHTML = `<div class="empty">
+      No matches.
+      <div class="hint">${state.q ? "Try a different search term." : "Try removing some filters."}</div>
+    </div>`;
+    status.textContent = "0 items";
+    oosNote.textContent = "";
+    return;
+  }
+
+  status.textContent = `${data.items.length}${data.truncated ? "+" : ""} item${data.items.length === 1 ? "" : "s"}`;
+  oosNote.textContent = state.q ? "Showing in-stock + out-of-stock" : "In-stock only";
+
+  list.innerHTML = data.items.map(itemHtml).join("");
+}
+
+function itemHtml(it) {
+  const img = it.image_url
+    ? `<img src="${esc(it.image_url)}" alt="" loading="lazy">`
+    : `<div class="ph">—</div>`;
+  const oos = !it.qty;
+  const qtyHtml = oos
+    ? `<div class="qty oos">OOS</div>`
+    : `<div class="qty">${it.qty} in stock</div>`;
+  const metaBits = [it.barcode || it.sku].filter(Boolean);
+  return `
+    <div class="item">
+      <div class="thumb">${img}</div>
+      <div class="info">
+        <div class="name">${esc(it.title || "(untitled)")}</div>
+        <div class="meta">${esc(metaBits.join(" · "))}</div>
+      </div>
+      <div class="right">
+        <div class="price">${fmtPrice(it.price)}</div>
+        ${qtyHtml}
+      </div>
+    </div>
+  `;
+}
+
+document.getElementById("q").addEventListener("input", e => {
+  state.q = e.target.value.trim();
+  document.getElementById("clear-btn").style.display = state.q ? "" : "none";
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(load, 200);
+});
+
+loadFacets().then(load);
+</script>
+</body>
+</html>
