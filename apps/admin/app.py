@@ -58,6 +58,34 @@ try:
 except Exception as _e:
     logger.warning(f"pin_hash column migration skipped: {_e}")
 
+# Staff Inventory "on display" flag — kept in its own table so cache
+# rebuilds of inventory_product_cache don't wipe the floor's working
+# state. Audit table preserves who/when across toggles.
+try:
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS inventory_on_display (
+            shopify_variant_id BIGINT PRIMARY KEY,
+            on_display         BOOLEAN NOT NULL DEFAULT FALSE,
+            toggled_by         VARCHAR(200),
+            toggled_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS inventory_on_display_audit (
+            id                 BIGSERIAL PRIMARY KEY,
+            shopify_variant_id BIGINT NOT NULL,
+            on_display         BOOLEAN NOT NULL,
+            toggled_by         VARCHAR(200),
+            toggled_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_inv_on_display_audit_variant
+        ON inventory_on_display_audit (shopify_variant_id, toggled_at DESC)
+    """)
+except Exception as _e:
+    logger.warning(f"inventory_on_display migration skipped: {_e}")
+
 # Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
 # In Docker: WORKDIR=/app, shared/ is at /app/shared/ (not ../shared/)
 _shared_static = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared", "static")
@@ -423,10 +451,22 @@ def _ser(d):
 # Reads inventory_product_cache (refreshed by the inventory service). Open to
 # all staff — read-only, no edit endpoints. Front-of-house lookup tool.
 
-# Era chips are auto-discovered (any tag ending with " era"). Specific
-# expansions ("evolving skies", "crown zenith", etc.) and product types
-# stay reachable via the search box — chips are reserved for groupings
-# broad enough to be worth printing as a saved view.
+# Form-factor chips for floor lookup. "Booster Packs" excludes sleeved,
+# blister, booster-bundle, and buildbattle variants so the chip shows
+# loose packs only — those are the ones staff actually grab.
+# Era chips are auto-discovered (any tag ending with " era"); specific
+# expansions stay reachable via the search box.
+STAFF_INVENTORY_TYPE_CHIPS = [
+    {"value": "booster_pack", "label": "Booster Packs",
+     "include": ["booster pack"], "exclude": ["sleeved", "blister", "booster bundle", "buildbattle"]},
+    {"value": "etb",          "label": "ETBs",
+     "include": ["etb"],          "exclude": []},
+    {"value": "booster_box",  "label": "Booster Boxes",
+     "include": ["booster box"],  "exclude": []},
+    {"value": "slab",         "label": "Slabs",
+     "include": ["slab"],         "exclude": []},
+]
+_TYPE_CHIP_BY_VALUE = {c["value"]: c for c in STAFF_INVENTORY_TYPE_CHIPS}
 
 
 def _tags_like_clause(tag: str) -> tuple[str, str]:
@@ -455,31 +495,60 @@ def staff_inventory_items():
 
     q = (request.args.get("q") or "").strip()
     sets = [s for s in request.args.getlist("set") if s]
+    types = [t for t in request.args.getlist("type") if t in _TYPE_CHIP_BY_VALUE]
     in_stock_only = request.args.get("in_stock", "1") == "1"
+    on_display_only = request.args.get("on_display") == "1"
 
-    where = ["UPPER(COALESCE(status,'')) = 'ACTIVE'"]
+    where = ["UPPER(COALESCE(c.status,'')) = 'ACTIVE'"]
     params: list = []
 
     if q:
         # Explicit search: surface OOS too so staff know an item exists but
         # isn't on hand. Search across title, sku, and barcode.
-        where.append("(LOWER(title) LIKE %s OR LOWER(COALESCE(sku,'')) LIKE %s OR LOWER(COALESCE(barcode,'')) LIKE %s)")
+        where.append("(LOWER(c.title) LIKE %s OR LOWER(COALESCE(c.sku,'')) LIKE %s OR LOWER(COALESCE(c.barcode,'')) LIKE %s)")
         like = f"%{q.lower()}%"
         params.extend([like, like, like])
-    elif in_stock_only:
-        where.append("COALESCE(shopify_qty, 0) > 0")
+    elif in_stock_only and not on_display_only:
+        # On-display items are tracked manually — don't hide a flagged
+        # variant just because Shopify qty briefly dropped to 0.
+        where.append("COALESCE(c.shopify_qty, 0) > 0")
 
     for s in sets:
         sql, p = _tags_like_clause(s)
-        where.append(sql)
+        where.append(sql.replace("tags", "c.tags"))
         params.append(p)
 
+    # Type chips: OR across selected types, AND across each type's
+    # include/exclude rules. Lets a "Booster Packs" chip mean "tag includes
+    # 'booster pack' AND tag does not include 'sleeved'/'blister'/etc."
+    if types:
+        clauses = []
+        for tv in types:
+            chip = _TYPE_CHIP_BY_VALUE[tv]
+            sub = []
+            for inc in chip["include"]:
+                sql, p = _tags_like_clause(inc)
+                sub.append(sql.replace("tags", "c.tags"))
+                params.append(p)
+            for exc in chip["exclude"]:
+                sql, p = _tags_like_clause(exc)
+                sub.append("NOT " + sql.replace("tags", "c.tags"))
+                params.append(p)
+            clauses.append("(" + " AND ".join(sub) + ")")
+        where.append("(" + " OR ".join(clauses) + ")")
+
+    if on_display_only:
+        where.append("COALESCE(d.on_display, FALSE) = TRUE")
+
     rows = db.query(f"""
-        SELECT shopify_variant_id, shopify_product_id, title, sku, barcode,
-               shopify_price, shopify_qty, image_url, tags
-        FROM inventory_product_cache
+        SELECT c.shopify_variant_id, c.shopify_product_id, c.title, c.sku, c.barcode,
+               c.shopify_price, c.shopify_qty, c.image_url, c.tags,
+               COALESCE(d.on_display, FALSE) AS on_display
+        FROM inventory_product_cache c
+        LEFT JOIN inventory_on_display d
+          ON d.shopify_variant_id = c.shopify_variant_id
         WHERE {' AND '.join(where)}
-        ORDER BY title
+        ORDER BY c.title
         LIMIT 500
     """, tuple(params))
 
@@ -495,15 +564,68 @@ def staff_inventory_items():
             "qty": int(r["shopify_qty"] or 0),
             "image_url": r["image_url"],
             "tags": [t.strip() for t in (r["tags"] or "").split(",") if t.strip()],
+            "on_display": bool(r["on_display"]),
         })
     return jsonify({"items": items, "truncated": len(items) >= 500})
 
 
+@app.route("/api/staff-inventory/toggle-display", methods=["POST"])
+def staff_inventory_toggle_display():
+    """Flip the on_display flag for a variant. One-tap, no confirmation.
+    Open to all staff; every flip recorded in inventory_on_display_audit."""
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+
+    data = request.get_json(silent=True) or {}
+    try:
+        variant_id = int(data.get("shopify_variant_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "shopify_variant_id required"}), 400
+
+    # Confirm the variant actually exists before recording state for it,
+    # otherwise stale clients could pollute the table.
+    exists = db.query_one(
+        "SELECT 1 FROM inventory_product_cache WHERE shopify_variant_id = %s",
+        (variant_id,)
+    )
+    if not exists:
+        return jsonify({"error": "Unknown variant"}), 404
+
+    cur = db.query_one(
+        "SELECT on_display FROM inventory_on_display WHERE shopify_variant_id = %s",
+        (variant_id,)
+    )
+    new_state = not (cur and cur["on_display"])
+
+    user = get_current_user() or {}
+    actor = user.get("name") or user.get("email") or "unknown"
+
+    db.execute("""
+        INSERT INTO inventory_on_display (shopify_variant_id, on_display, toggled_by, toggled_at)
+        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (shopify_variant_id) DO UPDATE
+        SET on_display = EXCLUDED.on_display,
+            toggled_by = EXCLUDED.toggled_by,
+            toggled_at = EXCLUDED.toggled_at
+    """, (variant_id, new_state, actor))
+
+    db.execute("""
+        INSERT INTO inventory_on_display_audit (shopify_variant_id, on_display, toggled_by)
+        VALUES (%s, %s, %s)
+    """, (variant_id, new_state, actor))
+
+    return jsonify({"ok": True, "on_display": new_state})
+
+
 @app.route("/api/staff-inventory/facets")
 def staff_inventory_facets():
-    """Return chip-filter options. Only era tags become chips — they're broad
-    enough to make a useful saved/printable view. Everything else stays
-    reachable via the text search."""
+    """Return chip-filter options.
+
+    Types: curated form-factor chips (booster packs, ETBs, booster boxes,
+    slabs) — definitions live in STAFF_INVENTORY_TYPE_CHIPS.
+    Sets: auto-discovered era tags (anything ending in " era").
+    Everything else stays reachable via the text search."""
     auth_result = require_auth()
     if auth_result:
         return auth_result
@@ -522,7 +644,9 @@ def staff_inventory_facets():
         for r in rows
         if (r["tag"] or "").strip().endswith(" era")
     ]
-    return jsonify({"sets": sets})
+    types = [{"value": c["value"], "label": c["label"]}
+             for c in STAFF_INVENTORY_TYPE_CHIPS]
+    return jsonify({"types": types, "sets": sets})
 
 
 if __name__ == "__main__":

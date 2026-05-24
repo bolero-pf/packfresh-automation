@@ -50,14 +50,15 @@
   .clear-btn:hover { color:var(--text); border-color:var(--text-dim); }
 
   .chip-row {
-    display:flex; gap:6px; padding-bottom:12px;
+    display:flex; gap:6px; padding-bottom:10px;
     overflow-x:auto; scrollbar-width:none;
     -webkit-overflow-scrolling:touch;
   }
+  .chip-row.last { padding-bottom:14px; }
   .chip-row::-webkit-scrollbar { display:none; }
   .chip-group-label {
     font-size:0.65rem; text-transform:uppercase; letter-spacing:0.1em;
-    color:var(--text-dim); padding:6px 0 4px 2px;
+    color:var(--text-dim); padding:4px 0 4px 2px;
   }
   .chip {
     flex-shrink:0;
@@ -66,15 +67,15 @@
     padding:6px 12px; font-size:0.82rem; font-weight:500;
     cursor:pointer; white-space:nowrap;
     transition:background 0.1s, border-color 0.1s, color 0.1s;
+    font-family:inherit;
   }
   .chip:hover { border-color:var(--text-dim); }
   .chip.active {
     background:var(--accent); border-color:var(--accent); color:#fff;
   }
-  .chip.toggle {
-    border-style:dashed;
+  .chip.on-display.active {
+    background:var(--green,#34d058); border-color:var(--green,#34d058); color:#0c1411;
   }
-  .chip.toggle.active { border-style:solid; }
 
   .main {
     max-width:900px; margin:0 auto; padding:14px 14px 60px;
@@ -83,6 +84,7 @@
   .status-line {
     color:var(--text-dim); font-size:0.78rem;
     margin:0 4px 10px; display:flex; justify-content:space-between;
+    gap:10px; flex-wrap:wrap;
   }
 
   .list {
@@ -93,7 +95,19 @@
     gap:12px; align-items:center;
     background:var(--surface); border:1px solid var(--border);
     border-radius:12px; padding:10px 12px;
+    cursor:pointer;
+    -webkit-tap-highlight-color:transparent;
+    user-select:none;
+    transition:border-color 0.1s, background 0.1s;
   }
+  .item:hover { border-color:var(--text-dim); }
+  .item:active { background:var(--surface-2,#1d2026); }
+  .item.on-display {
+    border-color:var(--green,#34d058);
+    box-shadow:0 0 0 1px var(--green,#34d058) inset;
+  }
+  .item.toggling { opacity:0.6; }
+
   .item .thumb {
     width:64px; height:64px; border-radius:8px;
     background:var(--surface-2,#1d2026); overflow:hidden;
@@ -114,12 +128,20 @@
   }
   .item .right {
     text-align:right; min-width:74px;
+    display:flex; flex-direction:column; align-items:flex-end; gap:2px;
+  }
+  .item .star {
+    font-size:1.1rem; line-height:1;
+    color:var(--border);
+  }
+  .item.on-display .star {
+    color:var(--green,#34d058);
   }
   .item .price {
     font-weight:700; font-size:1rem;
   }
   .item .qty {
-    margin-top:3px; font-size:0.78rem; color:var(--text-dim);
+    font-size:0.78rem; color:var(--text-dim);
   }
   .item .qty.oos { color:var(--red,#e25555); font-weight:600; }
 
@@ -127,6 +149,13 @@
     text-align:center; padding:60px 20px; color:var(--text-dim);
   }
   .empty .hint { font-size:0.85rem; margin-top:8px; }
+  .empty .btn-link {
+    display:inline-block; margin-top:14px;
+    padding:8px 14px; border:1.5px solid var(--border); border-radius:8px;
+    background:var(--surface); color:var(--text);
+    cursor:pointer; font-family:inherit; font-size:0.85rem;
+  }
+  .empty .btn-link:hover { border-color:var(--accent); }
 
   .loading {
     text-align:center; padding:40px; color:var(--text-dim);
@@ -149,8 +178,12 @@
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     <button class="clear-btn" id="clear-btn" onclick="clearSearch()" style="display:none;">Clear</button>
   </div>
+  <div class="chip-group-label">Showing</div>
+  <div class="chip-row" id="state-chips"></div>
+  <div class="chip-group-label">Type</div>
+  <div class="chip-row" id="type-chips"></div>
   <div class="chip-group-label">Era</div>
-  <div class="chip-row" id="set-chips"></div>
+  <div class="chip-row last" id="set-chips"></div>
 </header>
 
 <div class="main">
@@ -164,13 +197,16 @@
 <script>
 const state = {
   q: "",
+  types: new Set(),
   sets: new Set(),
+  // Default working view per spec: "On Display" filter on at page load.
+  onDisplay: true,
   // Default: in-stock only. Explicit text search overrides this server-side
   // so OOS items still surface when you're hunting for a specific name.
   inStock: true,
 };
 
-let facets = { sets: [] };
+let facets = { types: [], sets: [] };
 let searchTimer = null;
 
 function esc(s) {
@@ -192,14 +228,32 @@ async function loadFacets() {
 }
 
 function renderChips() {
+  const stateRow = document.getElementById("state-chips");
+  stateRow.innerHTML =
+    `<button class="chip on-display ${state.onDisplay ? "active" : ""}" data-kind="on-display">📍 On Display</button>`;
+  stateRow.querySelector(".chip").addEventListener("click", () => {
+    state.onDisplay = !state.onDisplay;
+    renderChips();
+    load();
+  });
+
+  const typeRow = document.getElementById("type-chips");
+  typeRow.innerHTML = (facets.types || []).map(t =>
+    chipHtml(t.value, t.label || t.value, state.types.has(t.value))
+  ).join("");
+  typeRow.querySelectorAll(".chip").forEach(c =>
+    c.addEventListener("click", () => toggleChip("types", c.dataset.value)));
+
   const setRow = document.getElementById("set-chips");
-  setRow.innerHTML = facets.sets.map(s => chipHtml(s.value, state.sets.has(s.value), "set")).join("");
+  setRow.innerHTML = (facets.sets || []).map(s =>
+    chipHtml(s.value, s.value, state.sets.has(s.value))
+  ).join("");
   setRow.querySelectorAll(".chip").forEach(c =>
     c.addEventListener("click", () => toggleChip("sets", c.dataset.value)));
 }
 
-function chipHtml(value, active, kind) {
-  return `<button class="chip ${active ? "active" : ""}" data-kind="${kind}" data-value="${esc(value)}">${esc(value)}</button>`;
+function chipHtml(value, label, active) {
+  return `<button class="chip ${active ? "active" : ""}" data-value="${esc(value)}">${esc(label)}</button>`;
 }
 
 function toggleChip(setName, value) {
@@ -220,7 +274,9 @@ function clearSearch() {
 async function load() {
   const params = new URLSearchParams();
   if (state.q) params.set("q", state.q);
+  for (const t of state.types) params.append("type", t);
   for (const s of state.sets) params.append("set", s);
+  if (state.onDisplay) params.set("on_display", "1");
   if (!state.inStock) params.set("in_stock", "0");
 
   const list = document.getElementById("list");
@@ -241,10 +297,19 @@ function render(data) {
   const oosNote = document.getElementById("oos-note");
 
   if (!data.items.length) {
-    list.innerHTML = `<div class="empty">
-      No matches.
-      <div class="hint">${state.q ? "Try a different search term." : "Try removing some filters."}</div>
-    </div>`;
+    if (state.onDisplay && !state.q && !state.types.size && !state.sets.size) {
+      // First-run / empty-display state — explain how to populate it.
+      list.innerHTML = `<div class="empty">
+        Nothing on display yet.
+        <div class="hint">Turn off the On Display filter, then tap an item to flag it.</div>
+        <button class="btn-link" onclick="turnOffDisplayFilter()">Show all in-stock</button>
+      </div>`;
+    } else {
+      list.innerHTML = `<div class="empty">
+        No matches.
+        <div class="hint">${state.q ? "Try a different search term." : "Try removing some filters."}</div>
+      </div>`;
+    }
     status.textContent = "0 items";
     oosNote.textContent = "";
     return;
@@ -254,6 +319,8 @@ function render(data) {
   oosNote.textContent = state.q ? "Showing in-stock + out-of-stock" : "In-stock only";
 
   list.innerHTML = data.items.map(itemHtml).join("");
+  list.querySelectorAll(".item").forEach(el =>
+    el.addEventListener("click", () => toggleDisplay(el)));
 }
 
 function itemHtml(it) {
@@ -265,19 +332,62 @@ function itemHtml(it) {
     ? `<div class="qty oos">OOS</div>`
     : `<div class="qty">${it.qty} in stock</div>`;
   const metaBits = [it.barcode || it.sku].filter(Boolean);
+  const onDisplayClass = it.on_display ? " on-display" : "";
+  const star = it.on_display ? "★" : "☆";
   return `
-    <div class="item">
+    <div class="item${onDisplayClass}" data-variant-id="${esc(it.shopify_variant_id)}">
       <div class="thumb">${img}</div>
       <div class="info">
         <div class="name">${esc(it.title || "(untitled)")}</div>
         <div class="meta">${esc(metaBits.join(" · "))}</div>
       </div>
       <div class="right">
+        <span class="star" aria-label="${it.on_display ? "On display" : "Tap to put on display"}">${star}</span>
         <div class="price">${fmtPrice(it.price)}</div>
         ${qtyHtml}
       </div>
     </div>
   `;
+}
+
+async function toggleDisplay(el) {
+  if (el.classList.contains("toggling")) return;
+  const variantId = el.dataset.variantId;
+  const wasOn = el.classList.contains("on-display");
+
+  // Optimistic flip. Reverted if the API rejects.
+  el.classList.add("toggling");
+  el.classList.toggle("on-display", !wasOn);
+  const star = el.querySelector(".star");
+  if (star) star.textContent = wasOn ? "☆" : "★";
+
+  try {
+    const r = await fetch("/api/staff-inventory/toggle-display", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      credentials: "include",
+      body: JSON.stringify({shopify_variant_id: variantId}),
+    });
+    if (!r.ok) throw new Error("toggle failed: " + r.status);
+    const data = await r.json();
+    // Sync to server truth in case of contention.
+    el.classList.toggle("on-display", !!data.on_display);
+    if (star) star.textContent = data.on_display ? "★" : "☆";
+  } catch (e) {
+    // Revert optimistic flip.
+    el.classList.toggle("on-display", wasOn);
+    if (star) star.textContent = wasOn ? "★" : "☆";
+    if (window.toast) window.toast("Couldn't update — try again");
+    else alert("Couldn't update — try again");
+  } finally {
+    el.classList.remove("toggling");
+  }
+}
+
+function turnOffDisplayFilter() {
+  state.onDisplay = false;
+  renderChips();
+  load();
 }
 
 document.getElementById("q").addEventListener("input", e => {
