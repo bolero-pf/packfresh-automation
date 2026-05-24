@@ -781,19 +781,8 @@
                 var results = (data.results || []).slice(0, 15);
                 var html = '';
                 for (var i = 0; i < results.length; i++) {
-                    _promoResults[i] = results[i];
                     var r = results[i];
-                    var price = parseFloat(r.market_price || 0);
-                    var setName = r.set_name || r.setName || r.set || '';
-                    var cardNum = r.number || r.cardNumber || '';
-                    var rarity = r.rarity || '';
-                    var detail = [setName, cardNum ? '#' + cardNum : '', rarity].filter(Boolean).join(' \u00b7 ');
-                    html += '<div class="bd-search-result" data-sr-idx="' + i + '" data-sr-type="promo">';
-                    html += '<span class="bd-sr-name">' + _esc(r.name || r.product_name || '');
-                    if (detail) html += '<br><span class="bd-sr-detail">' + _esc(detail) + '</span>';
-                    html += '</span>';
-                    html += '<span class="bd-sr-price">' + (price > 0 ? '$' + price.toFixed(2) : '') + '</span>';
-                    html += '</div>';
+                    html += _renderPromoRow(r, i);
                 }
                 panel.innerHTML = html || '<div style="color:var(--text-dim,#888);font-size:11px;">No results</div>';
                 _bindSearchResultClicks();
@@ -803,15 +792,106 @@
             });
     }
 
+    // Render one promo card with chips per variant. Each chip's pickId is
+    // stored on _promoResults so the existing click handler can resolve back
+    // to the right variant. Mirrors the intake/relink chip picker shape.
+    function _renderPromoRow(card, rowIdx) {
+        var baseName = card.nameEn || card.name || card.product_name || '';
+        var setName = card.set_name || card.setName || (card.set && card.set.name) || '';
+        var cardNum = card.cardNumber || card.number || card.card_number || '';
+        var rarity = card.rarity || '';
+        var baseTcg = card.tcgplayer_id || card.tcgPlayerId || card.tcgplayerId || card.id || null;
+        var cardImg = card.imageCdnUrl400 || card.imageCdnUrl || card.imageCdnUrl800
+                      || card.image_small || card.image_medium || card.image_large || '';
+
+        var prices = card.prices || {};
+        var variantsObj = (prices && typeof prices === 'object' && prices.variants) || {};
+        var variantNames = Object.keys(variantsObj);
+
+        // Build a list of variant chips. No-variants payload still renders a
+        // single Default chip pointing at the base card.
+        var variants = [];
+        if (variantNames.length === 0) {
+            var fallbackPrice = (typeof prices === 'object')
+                ? (prices.nm || prices.market || prices.mid || 0)
+                : 0;
+            variants.push({
+                name: '', tcgId: baseTcg, img: cardImg,
+                price: parseFloat(fallbackPrice) || 0,
+            });
+        } else {
+            variantNames.forEach(function(vname) {
+                var vData = variantsObj[vname] || {};
+                var condEntry = vData['Near Mint'] || vData['NM'] || {};
+                var p = (typeof condEntry === 'object') ? (condEntry.price || 0) : (condEntry || 0);
+                var vImg = vData._image_small || vData._image_medium || vData._image_large || cardImg;
+                var vTcg = vData._tcgplayer_id || baseTcg;
+                variants.push({
+                    name: vname, tcgId: vTcg, img: vImg,
+                    price: parseFloat(p) || 0,
+                });
+            });
+        }
+        variants.sort(function(a, b) { return (b.price || 0) - (a.price || 0); });
+
+        // Stash each variant pick \u2014 the existing _bindSearchResultClicks
+        // handler will resolve `data-sr-idx` -> _promoResults[idx] -> add comp.
+        var chipsHtml = '';
+        for (var vi = 0; vi < variants.length; vi++) {
+            var v = variants[vi];
+            var pickId = 'p' + rowIdx + '_v' + vi;
+            var variantedName = v.name ? (baseName + ' (' + v.name + ')') : baseName;
+            _promoResults[pickId] = {
+                tcgplayer_id: v.tcgId,
+                name: variantedName,
+                set_name: setName,
+                market_price: v.price,
+            };
+            var isFoil = v.name && /foil|holo|etched/i.test(v.name);
+            var isChase = v.name && /alt|manga|premium|special|enchanted|fullArt|jollyRoger|snowflake/i.test(v.name);
+            var baselineNonFoil = variants.find(function(x) { return !/foil|holo|etched/i.test(x.name||''); });
+            var highlight = isChase || (isFoil && variants.length > 1 && (v.price||0) > ((baselineNonFoil && baselineNonFoil.price)||0));
+            var bg = highlight ? 'var(--amber,#fbbf24)' : 'var(--bg-alt,#16162a)';
+            var color = highlight ? '#000' : 'var(--text,#e0e0e0)';
+            var label = v.name || 'Default';
+            var icon = isFoil ? '\u2726 ' : '';
+            var priceText = (v.price > 0) ? '$' + v.price.toFixed(2) : '\u2014';
+            chipsHtml += '<span class="bd-search-result" data-sr-idx="' + pickId + '" data-sr-type="promo" '
+                      + 'style="display:inline-flex;align-items:center;gap:5px;background:' + bg + ';color:' + color
+                      + ';padding:4px 8px;border-radius:5px;font-size:11px;font-weight:600;cursor:pointer;'
+                      + 'border:1px solid var(--border,#333);justify-content:flex-start;">'
+                      + icon + _esc(label)
+                      + ' <span style="font-weight:700;">' + priceText + '</span>'
+                      + '</span>';
+        }
+
+        var setCodeId = (cardNum ? '#' + cardNum : '');
+        var detail = [setName, setCodeId, rarity].filter(Boolean).join(' \u00b7 ');
+        var imgHtml = cardImg
+            ? '<img src="' + _esc(cardImg) + '" loading="lazy" style="width:52px;height:72px;object-fit:contain;border-radius:4px;flex-shrink:0;background:var(--bg-alt,#16162a);">'
+            : '<div style="width:52px;height:72px;background:var(--bg-alt,#16162a);border-radius:4px;flex-shrink:0;"></div>';
+
+        return '<div style="display:flex;gap:8px;padding:6px;border-bottom:1px solid var(--border,#222);align-items:flex-start;">'
+            + imgHtml
+            + '<div style="flex:1;min-width:0;">'
+            +   '<div style="font-weight:600;font-size:12px;">' + _esc(baseName) + '</div>'
+            +   (detail ? '<div style="font-size:10px;color:var(--text-dim,#888);margin-bottom:4px;">' + _esc(detail) + '</div>' : '')
+            +   '<div style="display:flex;gap:4px;flex-wrap:wrap;">' + chipsHtml + '</div>'
+            + '</div>'
+            + '</div>';
+    }
+
     function _bindSearchResultClicks() {
         if (!_overlayEl) return;
         var items = _overlayEl.querySelectorAll('.bd-search-result');
         for (var i = 0; i < items.length; i++) {
             items[i].addEventListener('click', function() {
-                var idx = parseInt(this.getAttribute('data-sr-idx'));
+                // Promo pickIds are strings ("p0_v0"); sealed are numeric
+                // indexes. JS object lookup handles both.
+                var key = this.getAttribute('data-sr-idx');
                 var type = this.getAttribute('data-sr-type');
                 var results = type === 'promo' ? _promoResults : _searchResults;
-                var r = results[idx];
+                var r = results[key];
                 if (!r) return;
 
                 var tcgId = r.tcgplayer_id || r.tcgplayerId || r.tcgPlayerId || r.id;

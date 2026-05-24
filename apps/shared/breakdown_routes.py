@@ -606,26 +606,24 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
             retry = details.get("retry_after", 60) if isinstance(details, dict) else 60
             return jsonify({"results": [], "error": str(e.args[0]) if e.args else str(e), "retry_after": retry}), 429
 
-    # ─── PPT search (cards/promos) ──────────────────────────────────
+    # ─── Card/promo search (Scrydex-first via PriceProvider) ────────
+    # Returns prices.variants so the recipe editor can render per-printing
+    # chips (Default / Holofoil / Snowflake / etc.) instead of binding every
+    # variant to the base card's tcgplayer_id. Same payload shape as intake's
+    # /api/search/cards — frontend can render chips identically.
 
     @bp.route("/search-cards")
     def search_cards():
         q = request.args.get("q", "").strip()
         if not q:
             return jsonify({"results": []})
-        ppt = _get_ppt()
-        if not ppt:
-            return jsonify({"results": [], "error": "PPT not configured"}), 503
+        pricing = _get_ppt()
+        if not pricing:
+            return jsonify({"results": [], "error": "Price provider not configured"}), 503
         try:
             set_name = request.args.get("set_name", "").strip() or None
             limit = request.args.get("limit", 8, type=int)
-            results = ppt.search_cards(q, set_name=set_name, limit=limit)
-            # Extract NM price for each card
-            for r in (results or []):
-                if not r.get("market_price"):
-                    conds = (r.get("prices") or {}).get("conditions") or {}
-                    nm = conds.get("Near Mint") or conds.get("NM") or {}
-                    r["market_price"] = nm.get("price") or (r.get("prices") or {}).get("market") or 0
+            results = pricing.search_cards(q, set_name=set_name, limit=limit) or []
             return jsonify({"results": results})
         except Exception as e:
             return jsonify({"results": [], "error": str(e)}), 500
