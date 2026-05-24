@@ -423,25 +423,25 @@ def _ser(d):
 # Reads inventory_product_cache (refreshed by the inventory service). Open to
 # all staff — read-only, no edit endpoints. Front-of-house lookup tool.
 
-# Tag values used to classify sealed products in Shopify. Sourced from the
-# existing inventory views so the chip list stays consistent with how products
-# were originally tagged. Lowercased for comparison.
+# Core product-type chips. Kept short on purpose — the long tail
+# (booster bundle, deck box, playmat, etc.) is findable via search.
 STAFF_INVENTORY_TYPE_TAGS = [
-    "booster box", "booster pack", "booster bundle", "blister", "sleeved",
-    "etb", "pcetb", "tin", "collection box", "case",
-    "slab",
-    "accessories", "sleeve", "deck box", "playmat", "dice", "board game", "puzzle",
+    "booster pack", "booster box", "etb", "collection box", "tin",
+    "blister", "slab", "accessories",
 ]
 
-# Operational / internal tags that aren't useful as floor-staff filters.
-# Excluded from the set-chip facet list. Lowercased.
+# Operational / internal / pan-catalog tags that aren't useful as
+# floor-staff filters. Excluded from the set-chip facet list. Lowercased.
 STAFF_INVENTORY_HIDE_TAGS = {
-    "new", "sealed", "newest_sort", "ad_eligible", "rare-find", "hot set",
-    "fast-moving", "ingest", "auto-created", "justforfun", "newtrainer",
-    "vault-inventory", "high value", "collector", "holiday", "clearance",
-    "damaged", "limit-2", "limit-4", "buildbattle", "strategy", "grade-10",
-    "bb & wf",
+    "new", "sealed", "pokemon", "newest_sort", "ad_eligible", "rare-find",
+    "hot set", "fast-moving", "ingest", "auto-created", "justforfun",
+    "newtrainer", "vault-inventory", "high value", "collector", "holiday",
+    "clearance", "damaged", "limit-2", "limit-4", "buildbattle", "strategy",
+    "grade-10", "bb & wf", "vintage", "psa",
 }
+
+# Max number of set/category chips shown. Top-N by product count.
+STAFF_INVENTORY_SET_CHIP_LIMIT = 8
 
 
 def _tags_like_clause(tag: str) -> tuple[str, str]:
@@ -538,25 +538,27 @@ def staff_inventory_facets():
         ORDER BY n DESC, tag
     """)
     type_set = {t.lower() for t in STAFF_INVENTORY_TYPE_TAGS}
-    types = []
+    types_by_value = {}
     sets = []
     for r in rows:
         t = (r["tag"] or "").strip()
         if not t:
             continue
         if t in type_set:
-            types.append({"value": t, "count": r["n"]})
+            types_by_value[t] = {"value": t, "count": r["n"]}
         elif t not in STAFF_INVENTORY_HIDE_TAGS:
             sets.append({"value": t, "count": r["n"]})
 
     # Preserve the curated order for type chips, regardless of count rank.
-    ordered_types = []
-    by_value = {x["value"]: x for x in types}
-    for tag in STAFF_INVENTORY_TYPE_TAGS:
-        if tag in by_value:
-            ordered_types.append(by_value[tag])
+    ordered_types = [types_by_value[t] for t in STAFF_INVENTORY_TYPE_TAGS
+                     if t in types_by_value]
 
-    return jsonify({"types": ordered_types, "sets": sets})
+    # Sets are already sorted by count DESC from the query. Cap to keep the
+    # chip row scannable — long-tail sets stay reachable via text search.
+    return jsonify({
+        "types": ordered_types,
+        "sets": sets[:STAFF_INVENTORY_SET_CHIP_LIMIT],
+    })
 
 
 if __name__ == "__main__":
