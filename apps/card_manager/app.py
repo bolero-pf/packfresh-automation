@@ -461,6 +461,9 @@ def sidebar_badges():
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_RETURN') AS returns,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'MISSING')        AS missing,
           (SELECT COUNT(*) FROM raw_cards WHERE state = 'PENDING_SALE')   AS active_listings,
+          (SELECT COUNT(*) FROM raw_cards
+             WHERE state = 'REMOVED' AND removal_reason = 'GRADING'
+          ) AS grading,
           (SELECT MAX(created_at) FROM holds
              WHERE status IN ('PENDING','PULLING','READY')
                AND cohort IS DISTINCT FROM 'champion'
@@ -472,6 +475,7 @@ def sidebar_badges():
         "returns":         int(row["returns"] or 0),
         "missing":         int(row["missing"] or 0),
         "active_listings": int(row["active_listings"] or 0),
+        "grading":         int(row["grading"] or 0),
         "latest_hold_at":  latest.isoformat() if latest else None,
     })
 
@@ -1372,6 +1376,43 @@ def list_missing():
     return jsonify({"cards": [_ser(dict(r)) for r in rows]})
 
 
+@app.route("/api/grading")
+def list_grading():
+    """All raw cards sent out for grading (state=REMOVED, removal_reason=GRADING).
+    Surfaces the same shape as missing/returns so the UI can render uniformly."""
+    rows = db.query("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.condition,
+               rc.card_number, rc.image_url, rc.current_price,
+               rc.removal_date AS sent_at
+        FROM raw_cards rc
+        WHERE rc.state = 'REMOVED' AND rc.removal_reason = 'GRADING'
+        ORDER BY rc.removal_date DESC NULLS LAST
+    """)
+    return jsonify({"cards": [_ser(dict(r)) for r in rows]})
+
+
+@app.route("/api/grading/<card_id>/reverse", methods=["POST"])
+def reverse_grading(card_id):
+    """Undo a 'sent to grading' decision: route the card to the Return Queue so
+    the operator can re-shelve it through the normal store-returns flow."""
+    card = db.query_one("""
+        SELECT id, card_name FROM raw_cards
+        WHERE id::text = %s AND state = 'REMOVED' AND removal_reason = 'GRADING'
+    """, (card_id,))
+    if not card:
+        return jsonify({"error": "Card not found or not in grading state"}), 404
+    db.execute("""
+        UPDATE raw_cards
+           SET state = 'PENDING_RETURN',
+               removal_reason = NULL,
+               removal_date = NULL,
+               current_hold_id = NULL,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = %s
+    """, (card_id,))
+    return jsonify({"success": True, "card_name": card["card_name"]})
+
+
 @app.route("/api/missing/<card_id>/gone", methods=["POST"])
 def mark_gone(card_id):
     """Permanently mark a missing card as GONE (lost/theft)."""
@@ -1412,6 +1453,25 @@ def scan_return():
             "condition": card["condition"],
             "barcode":   barcode,
             "was_missing": True,
+        })
+
+    # DISPLAY-state cards: operator has the card in hand and needs to put it
+    # back somewhere. Surface in Return Queue (preserves bin_id so the
+    # display_cards branch in store_returns re-shelves to the original
+    # case/binder slot). STORED is included for the same reason — relocate-
+    # in-hand cards shouldn't get stuck because their state didn't match.
+    if card["state"] in ("DISPLAY", "STORED"):
+        db.execute("""
+            UPDATE raw_cards
+            SET state = 'PENDING_RETURN', current_hold_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (str(card["id"]),))
+        return jsonify({
+            "success":   True,
+            "card_name": card["card_name"],
+            "condition": card["condition"],
+            "barcode":   barcode,
         })
 
     if card["state"] != "PENDING_RETURN":

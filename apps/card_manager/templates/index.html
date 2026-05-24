@@ -449,6 +449,10 @@ body.standalone .standalone-bar { display: flex; }
       ⚠ Missing Cards
       <span class="nav-badge" id="badge-missing"></span>
     </div>
+    <div class="nav-item" onclick="showView('grading')" id="nav-grading">
+      🎓 At Grading
+      <span class="nav-badge" id="badge-grading"></span>
+    </div>
     <div class="nav-item" onclick="showView('audit')" id="nav-audit">
       🔎 Audit
     </div>
@@ -500,6 +504,20 @@ body.standalone .standalone-bar { display: flex; }
         <button class="btn btn-sm" onclick="manualRefreshActiveView()" title="Refresh list" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">↻ Refresh</button>
       </div>
       <div id="missing-content">
+        <div class="empty"><div class="spinner"></div></div>
+      </div>
+    </div>
+
+    <!-- At Grading -->
+    <div class="view" id="view-grading">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div>
+          <div class="page-title">At Grading</div>
+          <div class="page-sub">Cards physically sent out for grading. Reverse to send the card to the Return Queue for re-shelving.</div>
+        </div>
+        <button class="btn btn-sm" onclick="manualRefreshActiveView()" title="Refresh list" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">↻ Refresh</button>
+      </div>
+      <div id="grading-content">
         <div class="empty"><div class="spinner"></div></div>
       </div>
     </div>
@@ -648,6 +666,7 @@ function showView(name) {
   if (name === 'holds')     loadHolds();
   if (name === 'returns')   loadReturns();
   if (name === 'missing')   loadMissing();
+  if (name === 'grading')   loadGrading();
   if (name === 'audit')     loadAudit();
   if (name === 'editor')    document.getElementById('editor-scan').focus();
   if (name === 'display')   loadDisplay();
@@ -1384,6 +1403,59 @@ async function markGone(cardId) {
     await post(`/api/missing/${cardId}/gone`, {});
     toast('Card marked as gone', 'red');
     loadMissing();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+// ── At Grading ────────────────────────────────────────────────────────────────
+let _gradingCardsCache = [];
+
+async function loadGrading() {
+  try {
+    const d = await get('/api/grading');
+    const cards = d.cards || [];
+    _gradingCardsCache = cards;
+    const badge = document.getElementById('badge-grading');
+    badge.textContent = cards.length;
+    badge.classList.toggle('visible', cards.length > 0);
+    renderGrading(cards);
+  } catch(e) {
+    document.getElementById('grading-content').innerHTML = `<div class="empty"><p style="color:var(--red)">${e.message}</p></div>`;
+  }
+}
+
+function renderGrading(cards) {
+  const el = document.getElementById('grading-content');
+  if (!cards.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">🎓</div><p>No cards out at grading</p></div>';
+    return;
+  }
+  el.innerHTML = `
+    <div style="font-size:0.82rem;color:var(--dim);margin-bottom:12px;">${cards.length} card${cards.length!==1?'s':''} physically out at grading. Reverse to route the card to the Return Queue (re-shelve to storage or set out from there).</div>
+    ${cards.map(c => `
+      <div class="return-card" style="margin-bottom:6px;">
+        ${c.image_url ? `<img src="${esc(c.image_url)}" style="width:36px;aspect-ratio:2.5/3.5;object-fit:contain;border-radius:3px;">` : ''}
+        <div style="flex:1;">
+          <div style="font-weight:600;">${esc(c.card_name)}</div>
+          <div style="font-size:0.75rem;color:var(--dim);">${esc(c.set_name||'')}${c.card_number ? ' · #' + esc(c.card_number) : ''} · ${esc(c.condition)} · sent ${_fmtTime(c.sent_at)}</div>
+        </div>
+        <div style="font-family:var(--mono);font-size:0.72rem;color:var(--dim);">${esc(c.barcode)}</div>
+        <button class="btn btn-sm" style="font-size:0.72rem;padding:4px 10px;"
+                onclick="reverseGrading('${c.id}')">↩ Reverse</button>
+      </div>
+    `).join('')}
+  `;
+}
+
+async function reverseGrading(cardId) {
+  const card = _gradingCardsCache.find(c => c.id === cardId);
+  const cardName = card ? card.card_name : 'this card';
+  if (!await themedConfirm('Reverse Grading Decision',
+      `Mark "${cardName}" as no longer at grading and send it to the Return Queue?`)) return;
+  try {
+    await post(`/api/grading/${cardId}/reverse`, {});
+    toast('Sent to Return Queue', 'green');
+    loadGrading();
+    refreshBadges();
   } catch(e) { toast(e.message, 'red'); }
 }
 
@@ -3055,7 +3127,7 @@ async function removeFeatured(id) {
 // full reload.
 let _lastLatestHoldAt = null;
 let _pollSeq = 0;  // 0 = haven't done first poll yet; suppresses boot-time notify
-let _badgeCounts = { holds: 0, returns: 0, missing: 0, active_listings: 0 };
+let _badgeCounts = { holds: 0, returns: 0, missing: 0, grading: 0, active_listings: 0 };
 
 async function refreshBadges() {
   try {
@@ -3069,6 +3141,7 @@ async function refreshBadges() {
     set('badge-holds',    d.holds);
     set('badge-returns',  d.returns);
     set('badge-missing',  d.missing);
+    set('badge-grading',  d.grading);
     set('badge-sell',     d.active_listings);
 
     // Detect a brand-new hold arriving and ping the notify sound.
@@ -3094,11 +3167,13 @@ async function refreshBadges() {
     if (activeView === 'view-holds'    && d.holds            !== prev.holds)            loadHolds();
     if (activeView === 'view-returns'  && d.returns          !== prev.returns)          loadReturns();
     if (activeView === 'view-missing'  && d.missing          !== prev.missing)          loadMissing();
+    if (activeView === 'view-grading'  && d.grading          !== prev.grading)          loadGrading();
     if (activeView === 'view-sell'     && d.active_listings  !== prev.active_listings)  refreshActiveListings();
 
     _badgeCounts = {
       holds: d.holds, returns: d.returns,
-      missing: d.missing, active_listings: d.active_listings,
+      missing: d.missing, grading: d.grading,
+      active_listings: d.active_listings,
     };
   } catch(e) { /* silent — sidebar nav stays stale rather than flashing errors */ }
 }
@@ -3115,6 +3190,7 @@ function manualRefreshActiveView() {
   if (activeView === 'view-holds')        loadHolds();
   else if (activeView === 'view-returns') loadReturns();
   else if (activeView === 'view-missing') loadMissing();
+  else if (activeView === 'view-grading') loadGrading();
   else if (activeView === 'view-sell')    { refreshActiveListings(); renderSell(); }
   else if (activeView === 'view-display') loadDisplay();
   else if (activeView === 'view-binders') loadBinders();
