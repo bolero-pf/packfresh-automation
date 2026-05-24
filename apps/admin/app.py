@@ -86,6 +86,28 @@ try:
 except Exception as _e:
     logger.warning(f"inventory_on_display migration skipped: {_e}")
 
+# Staff Inventory saved print views. Filters/sort serialized as JSONB so
+# the schema doesn't need to change every time we add a new filter axis.
+try:
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS staff_inventory_saved_views (
+            id          BIGSERIAL PRIMARY KEY,
+            name        VARCHAR(200) NOT NULL,
+            filters     JSONB NOT NULL,
+            sort        VARCHAR(50) NOT NULL DEFAULT 'name',
+            created_by  VARCHAR(200),
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_by  VARCHAR(200),
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_views_name_lower
+        ON staff_inventory_saved_views (LOWER(name))
+    """)
+except Exception as _e:
+    logger.warning(f"staff_inventory_saved_views migration skipped: {_e}")
+
 # Serve shared static assets (pf_theme.css, pf_ui.js) at /pf-static/
 # In Docker: WORKDIR=/app, shared/ is at /app/shared/ (not ../shared/)
 _shared_static = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared", "static")
@@ -487,17 +509,30 @@ def staff_inventory_page():
     return render_template("staff_inventory.html", user=get_current_user())
 
 
-@app.route("/api/staff-inventory/items")
-def staff_inventory_items():
-    auth_result = require_auth()
-    if auth_result:
-        return auth_result
+# Sort options shared by the items API and the print page. Keys are what
+# the client sends; values are SQL ORDER BY clauses (without the keyword).
+STAFF_INVENTORY_SORTS = {
+    "name":       "c.title",
+    "set":        ("(SELECT MIN(TRIM(t)) FROM unnest(string_to_array(LOWER(COALESCE(c.tags,'')), ',')) t "
+                   "WHERE TRIM(t) LIKE '%% era') NULLS LAST, c.title"),
+    "price_asc":  "c.shopify_price ASC NULLS LAST, c.title",
+    "price_desc": "c.shopify_price DESC NULLS LAST, c.title",
+    "qty_desc":   "c.shopify_qty DESC NULLS LAST, c.title",
+}
+STAFF_INVENTORY_DEFAULT_SORT = "set"
 
-    q = (request.args.get("q") or "").strip()
-    sets = [s for s in request.args.getlist("set") if s]
-    types = [t for t in request.args.getlist("type") if t in _TYPE_CHIP_BY_VALUE]
-    in_stock_only = request.args.get("in_stock", "1") == "1"
-    on_display_only = request.args.get("on_display") == "1"
+
+def _query_staff_items(filters: dict, sort: str = STAFF_INVENTORY_DEFAULT_SORT,
+                       limit: int = 500) -> list[dict]:
+    """Build + run the staff-inventory query for both the API and the print
+    page. `filters` mirrors what the page sends:
+        {q, types[], sets[], on_display: bool, in_stock: bool}
+    """
+    q = (filters.get("q") or "").strip()
+    sets = list(filters.get("sets") or [])
+    types = [t for t in (filters.get("types") or []) if t in _TYPE_CHIP_BY_VALUE]
+    in_stock_only = bool(filters.get("in_stock", True))
+    on_display_only = bool(filters.get("on_display"))
 
     where = ["UPPER(COALESCE(c.status,'')) = 'ACTIVE'"]
     params: list = []
@@ -519,8 +554,7 @@ def staff_inventory_items():
         params.append(p)
 
     # Type chips: OR across selected types, AND across each type's
-    # include/exclude rules. Lets a "Booster Packs" chip mean "tag includes
-    # 'booster pack' AND tag does not include 'sleeved'/'blister'/etc."
+    # include/exclude rules.
     if types:
         clauses = []
         for tv in types:
@@ -540,6 +574,8 @@ def staff_inventory_items():
     if on_display_only:
         where.append("COALESCE(d.on_display, FALSE) = TRUE")
 
+    order_by = STAFF_INVENTORY_SORTS.get(sort) or STAFF_INVENTORY_SORTS[STAFF_INVENTORY_DEFAULT_SORT]
+
     rows = db.query(f"""
         SELECT c.shopify_variant_id, c.shopify_product_id, c.title, c.sku, c.barcode,
                c.shopify_price, c.shopify_qty, c.image_url, c.tags,
@@ -548,8 +584,8 @@ def staff_inventory_items():
         LEFT JOIN inventory_on_display d
           ON d.shopify_variant_id = c.shopify_variant_id
         WHERE {' AND '.join(where)}
-        ORDER BY c.title
-        LIMIT 500
+        ORDER BY {order_by}
+        LIMIT {int(limit)}
     """, tuple(params))
 
     items = []
@@ -566,6 +602,28 @@ def staff_inventory_items():
             "tags": [t.strip() for t in (r["tags"] or "").split(",") if t.strip()],
             "on_display": bool(r["on_display"]),
         })
+    return items
+
+
+def _filters_from_request_args(args) -> dict:
+    return {
+        "q": (args.get("q") or "").strip(),
+        "sets": [s for s in args.getlist("set") if s],
+        "types": [t for t in args.getlist("type") if t],
+        "in_stock": args.get("in_stock", "1") == "1",
+        "on_display": args.get("on_display") == "1",
+    }
+
+
+@app.route("/api/staff-inventory/items")
+def staff_inventory_items():
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+
+    filters = _filters_from_request_args(request.args)
+    sort = request.args.get("sort") or "name"
+    items = _query_staff_items(filters, sort=sort)
     return jsonify({"items": items, "truncated": len(items) >= 500})
 
 
@@ -647,6 +705,167 @@ def staff_inventory_facets():
     types = [{"value": c["value"], "label": c["label"]}
              for c in STAFF_INVENTORY_TYPE_CHIPS]
     return jsonify({"types": types, "sets": sets})
+
+
+# ─── Saved print views ────────────────────────────────────────────────────────
+import json as _json
+
+
+def _serialize_view(row) -> dict:
+    f = row["filters"]
+    if isinstance(f, str):
+        try: f = _json.loads(f)
+        except Exception: f = {}
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "filters": f or {},
+        "sort": row["sort"],
+        "created_by": row.get("created_by"),
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "updated_by": row.get("updated_by"),
+        "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
+    }
+
+
+def _normalize_view_payload(data: dict) -> tuple[str, dict, str] | tuple[None, None, None]:
+    name = (data.get("name") or "").strip()
+    if not name or len(name) > 200:
+        return None, None, None
+    filters = data.get("filters") or {}
+    if not isinstance(filters, dict):
+        return None, None, None
+    # Whitelist filter keys so noise from the client doesn't end up in the JSONB.
+    clean = {
+        "q": (filters.get("q") or "").strip(),
+        "types": [str(t) for t in (filters.get("types") or []) if t in _TYPE_CHIP_BY_VALUE],
+        "sets": [str(s) for s in (filters.get("sets") or []) if s],
+        "on_display": bool(filters.get("on_display")),
+        "in_stock": bool(filters.get("in_stock", True)),
+    }
+    sort = data.get("sort") or STAFF_INVENTORY_DEFAULT_SORT
+    if sort not in STAFF_INVENTORY_SORTS:
+        sort = STAFF_INVENTORY_DEFAULT_SORT
+    return name, clean, sort
+
+
+@app.route("/api/staff-inventory/views")
+def list_saved_views():
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+    rows = db.query("""
+        SELECT id, name, filters, sort, created_by, created_at, updated_by, updated_at
+        FROM staff_inventory_saved_views
+        ORDER BY LOWER(name)
+    """)
+    return jsonify({"views": [_serialize_view(r) for r in rows]})
+
+
+@app.route("/api/staff-inventory/views", methods=["POST"])
+def create_saved_view():
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+    data = request.get_json(silent=True) or {}
+    name, filters, sort = _normalize_view_payload(data)
+    if not name:
+        return jsonify({"error": "name + filters required"}), 400
+
+    user = get_current_user() or {}
+    actor = user.get("name") or user.get("email") or "unknown"
+    try:
+        row = db.query_one("""
+            INSERT INTO staff_inventory_saved_views
+                   (name, filters, sort, created_by, updated_by)
+            VALUES (%s, %s::jsonb, %s, %s, %s)
+            RETURNING id, name, filters, sort, created_by, created_at, updated_by, updated_at
+        """, (name, _json.dumps(filters), sort, actor, actor))
+    except Exception as e:
+        msg = str(e).lower()
+        if "duplicate" in msg or "unique" in msg:
+            return jsonify({"error": "A view with that name already exists"}), 409
+        raise
+    return jsonify({"view": _serialize_view(row)})
+
+
+@app.route("/api/staff-inventory/views/<int:view_id>", methods=["PATCH"])
+def update_saved_view(view_id):
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+    data = request.get_json(silent=True) or {}
+    name, filters, sort = _normalize_view_payload(data)
+    if not name:
+        return jsonify({"error": "name + filters required"}), 400
+
+    user = get_current_user() or {}
+    actor = user.get("name") or user.get("email") or "unknown"
+    try:
+        row = db.query_one("""
+            UPDATE staff_inventory_saved_views
+            SET name       = %s,
+                filters    = %s::jsonb,
+                sort       = %s,
+                updated_by = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            RETURNING id, name, filters, sort, created_by, created_at, updated_by, updated_at
+        """, (name, _json.dumps(filters), sort, actor, view_id))
+    except Exception as e:
+        msg = str(e).lower()
+        if "duplicate" in msg or "unique" in msg:
+            return jsonify({"error": "A view with that name already exists"}), 409
+        raise
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({"view": _serialize_view(row)})
+
+
+@app.route("/api/staff-inventory/views/<int:view_id>", methods=["DELETE"])
+def delete_saved_view(view_id):
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+    db.execute("DELETE FROM staff_inventory_saved_views WHERE id = %s", (view_id,))
+    return jsonify({"ok": True})
+
+
+# ─── Print page ──────────────────────────────────────────────────────────────
+
+@app.route("/staff-inventory/print")
+def staff_inventory_print():
+    """Print-friendly page. Accepts either ?view=<id> to pull a saved view,
+    or the same query params as the main page for an ad-hoc print."""
+    auth_result = require_auth()
+    if auth_result:
+        return auth_result
+
+    view_id = request.args.get("view", type=int)
+    view = None
+    if view_id:
+        row = db.query_one("""
+            SELECT id, name, filters, sort, created_by, created_at, updated_by, updated_at
+            FROM staff_inventory_saved_views WHERE id = %s
+        """, (view_id,))
+        if not row:
+            return "View not found", 404
+        view = _serialize_view(row)
+        filters = view["filters"]
+        sort = view["sort"]
+        title = view["name"]
+    else:
+        filters = _filters_from_request_args(request.args)
+        sort = request.args.get("sort") or STAFF_INVENTORY_DEFAULT_SORT
+        title = (request.args.get("title") or "").strip() or "Staff Inventory"
+
+    items = _query_staff_items(filters, sort=sort, limit=500)
+    printed_at = datetime.now(timezone.utc).astimezone().strftime("%a %b %d %Y · %I:%M %p")
+    return render_template(
+        "staff_inventory_print.html",
+        title=title, items=items, printed_at=printed_at,
+        view=view, item_count=len(items),
+    )
 
 
 if __name__ == "__main__":

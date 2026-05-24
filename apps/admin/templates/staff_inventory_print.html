@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · Price Sheet</title>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.code128.min.js"></script>
+<style>
+  /* Screen styles — only seen during the brief moment before print fires.
+     Designed so the on-screen render previews exactly what'll print. */
+  html, body { background:#f4f4f4; margin:0; padding:0;
+               font-family:'Helvetica Neue', Arial, sans-serif; color:#000; }
+
+  .page-toolbar {
+    position:fixed; top:0; left:0; right:0; z-index:100;
+    background:#222; color:#fff;
+    padding:8px 16px;
+    display:flex; align-items:center; gap:12px; justify-content:space-between;
+    font-size:0.85rem;
+  }
+  .page-toolbar .btn {
+    background:#fff; color:#000; border:0;
+    padding:6px 14px; border-radius:6px; cursor:pointer;
+    font-size:0.85rem; font-weight:600; font-family:inherit;
+  }
+  .page-toolbar .btn-ghost {
+    background:transparent; color:#fff; border:1px solid #555;
+  }
+  .page-toolbar a { color:#9ec5ff; text-decoration:none; }
+
+  .sheet {
+    /* US Letter portrait. */
+    width:8.5in; min-height:11in; box-sizing:border-box;
+    margin:60px auto 24px;
+    padding:0.5in 0.45in 0.55in;
+    background:#fff;
+    box-shadow:0 2px 16px rgba(0,0,0,0.08);
+    display:flex; flex-direction:column;
+  }
+
+  .sheet-header {
+    display:flex; justify-content:space-between; align-items:flex-end;
+    border-bottom:2px solid #000;
+    padding-bottom:8px; margin-bottom:14px;
+  }
+  .sheet-title {
+    font-size:18pt; font-weight:700; letter-spacing:0.01em;
+  }
+  .sheet-meta {
+    font-size:9pt; color:#555; text-align:right;
+  }
+
+  .grid {
+    flex:1;
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    grid-auto-rows:1fr;
+    gap:0.18in;
+    /* 4 rows × 2 cols = 8 per page. */
+  }
+
+  .card {
+    border:1px solid #999;
+    border-radius:6px;
+    padding:8px 10px;
+    display:grid;
+    grid-template-columns:0.95in 1fr;
+    grid-template-rows:auto 1fr auto;
+    column-gap:10px;
+    row-gap:4px;
+    page-break-inside:avoid;
+    break-inside:avoid;
+    min-height:0; /* allow shrinking inside grid track */
+  }
+  .card .thumb {
+    grid-row:1 / span 3;
+    width:0.95in; height:0.95in;
+    background:#f4f4f4; border:1px solid #ddd; border-radius:4px;
+    display:flex; align-items:center; justify-content:center;
+    overflow:hidden;
+  }
+  .card .thumb img {
+    max-width:100%; max-height:100%; object-fit:contain;
+  }
+  .card .thumb .ph { color:#888; font-size:8pt; }
+  .card .name {
+    font-size:9.5pt; font-weight:700; line-height:1.15;
+    overflow:hidden; text-overflow:ellipsis;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+  }
+  .card .footer-line {
+    display:flex; align-items:flex-end; justify-content:space-between;
+    gap:6px;
+  }
+  .card .barcode-wrap {
+    min-width:0; /* let svg shrink */
+    flex:1;
+  }
+  .card .barcode-wrap svg {
+    display:block; width:100%; height:0.45in;
+  }
+  .card .barcode-wrap .no-bc {
+    color:#888; font-size:8pt; font-style:italic;
+  }
+  .card .priceblock {
+    text-align:right; white-space:nowrap;
+  }
+  .card .price {
+    font-size:13pt; font-weight:700; line-height:1;
+  }
+  .card .qty {
+    font-size:8.5pt; color:#333; margin-top:2px;
+  }
+  .card .qty.oos { color:#c00; font-weight:700; }
+  .card .sku {
+    font-family:'Courier New', monospace; font-size:7pt;
+    color:#666;
+    text-align:center; margin-top:1px;
+  }
+
+  .sheet-footer {
+    margin-top:12px; padding-top:6px;
+    border-top:1px solid #ccc;
+    display:flex; justify-content:space-between;
+    font-size:8pt; color:#666;
+  }
+
+  .empty-state {
+    padding:80px 20px; text-align:center; color:#666;
+  }
+
+  @page { size: letter portrait; margin: 0.35in; }
+
+  @media print {
+    body { background:#fff; }
+    .page-toolbar { display:none; }
+    .sheet {
+      margin:0 auto;
+      box-shadow:none;
+      page-break-after:always;
+    }
+    .sheet:last-child { page-break-after:auto; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page-toolbar">
+  <div>
+    <a href="javascript:history.back()">← Back</a>
+    &nbsp;·&nbsp;
+    <span>{{ title }} — {{ item_count }} item{{ '' if item_count == 1 else 's' }}, {{ printed_at }}</span>
+  </div>
+  <div>
+    <button class="btn-ghost btn" onclick="window.print()" style="margin-right:8px;">Print</button>
+  </div>
+</div>
+
+{% if not items %}
+<div class="sheet">
+  <div class="empty-state">No items match this view.</div>
+</div>
+{% endif %}
+
+{# Pages built client-side so the per-page header/footer can re-render
+   and JsBarcode can wire barcodes after the DOM is in place. #}
+<div id="pages"></div>
+
+<script>
+const ITEMS = {{ items|tojson }};
+const TITLE = {{ title|tojson }};
+const PRINTED_AT = {{ printed_at|tojson }};
+const ITEMS_PER_PAGE = 8;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"
+  }[c]));
+}
+function fmtPrice(p) {
+  if (p === null || p === undefined) return "—";
+  return "$" + Number(p).toFixed(2);
+}
+
+function cardHtml(it, idx) {
+  const img = it.image_url
+    ? `<img src="${esc(it.image_url)}" alt="">`
+    : `<div class="ph">no image</div>`;
+  const oos = !it.qty;
+  const qtyHtml = oos
+    ? `<div class="qty oos">OUT OF STOCK</div>`
+    : `<div class="qty">${it.qty} in stock</div>`;
+
+  const bc = it.barcode || "";
+  const barcodeHtml = bc
+    ? `<svg class="bc-svg" data-bc="${esc(bc)}" data-idx="${idx}"></svg>
+       <div class="sku">${esc(bc)}</div>`
+    : `<div class="no-bc">No barcode</div>`;
+
+  return `
+    <div class="card">
+      <div class="thumb">${img}</div>
+      <div class="name">${esc(it.title || "(untitled)")}</div>
+      <div class="footer-line">
+        <div class="barcode-wrap">${barcodeHtml}</div>
+      </div>
+      <div class="priceblock">
+        <div class="price">${fmtPrice(it.price)}</div>
+        ${qtyHtml}
+      </div>
+    </div>
+  `;
+}
+
+function pageHtml(items, pageIdx, totalPages) {
+  return `
+    <div class="sheet">
+      <div class="sheet-header">
+        <div class="sheet-title">${esc(TITLE)}</div>
+        <div class="sheet-meta">
+          Page ${pageIdx + 1} of ${totalPages}
+        </div>
+      </div>
+      <div class="grid">
+        ${items.map((it, i) => cardHtml(it, pageIdx * ITEMS_PER_PAGE + i)).join("")}
+      </div>
+      <div class="sheet-footer">
+        <div>Printed ${esc(PRINTED_AT)}</div>
+        <div>${ITEMS.length} item${ITEMS.length === 1 ? "" : "s"} total</div>
+      </div>
+    </div>
+  `;
+}
+
+function render() {
+  if (!ITEMS.length) return;
+  const pages = [];
+  for (let i = 0; i < ITEMS.length; i += ITEMS_PER_PAGE) {
+    pages.push(ITEMS.slice(i, i + ITEMS_PER_PAGE));
+  }
+  document.getElementById("pages").innerHTML = pages
+    .map((p, idx) => pageHtml(p, idx, pages.length)).join("");
+
+  // Wire up barcodes after the DOM exists. Code 128 matches the existing
+  // shared/barcode_gen.py format so the same POS scanners read them.
+  document.querySelectorAll("svg.bc-svg").forEach(el => {
+    const value = el.dataset.bc;
+    try {
+      JsBarcode(el, value, {
+        format: "CODE128",
+        displayValue: false,
+        margin: 0,
+        height: 38,
+        width: 1.4,
+      });
+    } catch (e) {
+      el.outerHTML = `<div class="no-bc">${esc(value)} (couldn't render)</div>`;
+    }
+  });
+
+  // Auto-print only after all images are loaded — otherwise the layout
+  // shifts mid-print and barcodes can shrink. Pass ?noprint=1 to skip
+  // (handy when laying out the sheet by eye).
+  if (window.location.search.includes("noprint=1")) return;
+  const imgs = Array.from(document.querySelectorAll(".card .thumb img"));
+  const waits = imgs.map(img => img.complete ? Promise.resolve() :
+    new Promise(res => { img.onload = img.onerror = res; }));
+  Promise.all(waits).then(() => setTimeout(() => window.print(), 250));
+}
+
+render();
+</script>
+</body>
+</html>

@@ -49,6 +49,54 @@
   }
   .clear-btn:hover { color:var(--text); border-color:var(--text-dim); }
 
+  .toolbar {
+    display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;
+    align-items:center;
+  }
+  .toolbar select, .toolbar .tb-btn {
+    height:36px; padding:0 12px;
+    border:1.5px solid var(--border); border-radius:8px;
+    background:var(--surface); color:var(--text);
+    font-size:0.85rem; font-family:inherit; cursor:pointer;
+    outline:none;
+  }
+  .toolbar select { padding-right:30px; }
+  .toolbar .tb-btn:hover { border-color:var(--accent); }
+  .toolbar .tb-btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .toolbar .tb-btn.danger { color:var(--red,#e25555); }
+  .toolbar .tb-btn:disabled { opacity:0.4; cursor:not-allowed; }
+  .toolbar .spacer { flex:1; }
+  .toolbar .lbl {
+    font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em;
+    color:var(--text-dim);
+  }
+
+  /* Centered modal for "Save view" / confirmations. */
+  .modal-mask {
+    position:fixed; inset:0; z-index:50;
+    background:rgba(0,0,0,0.55);
+    display:none; align-items:center; justify-content:center;
+    padding:16px;
+  }
+  .modal-mask.open { display:flex; }
+  .modal-box {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:14px; padding:22px;
+    width:100%; max-width:380px;
+  }
+  .modal-box h3 { margin:0 0 12px; font-size:1.05rem; }
+  .modal-box p { margin:0 0 14px; color:var(--text-dim); font-size:0.9rem; }
+  .modal-box .mi {
+    width:100%; height:42px; padding:0 12px;
+    border:1.5px solid var(--border); border-radius:8px;
+    background:var(--bg); color:var(--text);
+    font-family:inherit; font-size:1rem; outline:none;
+    box-sizing:border-box;
+  }
+  .modal-box .mi:focus { border-color:var(--accent); }
+  .modal-box .row { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
+  .modal-box .err { color:var(--red,#e25555); font-size:0.85rem; margin-top:8px; min-height:1.2em; }
+
   .chip-row {
     display:flex; gap:6px; padding-bottom:10px;
     overflow-x:auto; scrollbar-width:none;
@@ -178,6 +226,22 @@
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     <button class="clear-btn" id="clear-btn" onclick="clearSearch()" style="display:none;">Clear</button>
   </div>
+  <div class="toolbar">
+    <select id="view-picker" title="Saved views">
+      <option value="">— Saved views —</option>
+    </select>
+    <button class="tb-btn" id="save-view-btn" onclick="openSaveView()">Save view</button>
+    <button class="tb-btn danger" id="delete-view-btn" onclick="deleteCurrentView()" style="display:none;">Delete</button>
+    <span class="spacer"></span>
+    <select id="sort-picker" title="Sort order">
+      <option value="set">Set, then name</option>
+      <option value="name">Name</option>
+      <option value="price_desc">Price: high → low</option>
+      <option value="price_asc">Price: low → high</option>
+      <option value="qty_desc">Most in stock</option>
+    </select>
+    <button class="tb-btn primary" onclick="openPrint()">🖨 Print</button>
+  </div>
   <div class="chip-group-label">Showing</div>
   <div class="chip-row" id="state-chips"></div>
   <div class="chip-group-label">Type</div>
@@ -194,6 +258,19 @@
   <div id="list" class="list"></div>
 </div>
 
+<div class="modal-mask" id="save-view-modal">
+  <div class="modal-box">
+    <h3>Save view</h3>
+    <p>Names this filter combo + sort so you can print or recall it later.</p>
+    <input class="mi" id="view-name" placeholder="e.g. Booster Boxes on Display" maxlength="200">
+    <div class="err" id="view-err"></div>
+    <div class="row">
+      <button class="tb-btn" onclick="closeSaveView()">Cancel</button>
+      <button class="tb-btn primary" onclick="submitSaveView()">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const state = {
   q: "",
@@ -204,9 +281,12 @@ const state = {
   // Default: in-stock only. Explicit text search overrides this server-side
   // so OOS items still surface when you're hunting for a specific name.
   inStock: true,
+  sort: "set",
+  currentViewId: null,
 };
 
 let facets = { types: [], sets: [] };
+let savedViews = [];
 let searchTimer = null;
 
 function esc(s) {
@@ -233,6 +313,7 @@ function renderChips() {
     `<button class="chip on-display ${state.onDisplay ? "active" : ""}" data-kind="on-display">📍 On Display</button>`;
   stateRow.querySelector(".chip").addEventListener("click", () => {
     state.onDisplay = !state.onDisplay;
+    detachFromView();
     renderChips();
     load();
   });
@@ -260,8 +341,17 @@ function toggleChip(setName, value) {
   const s = state[setName];
   if (s.has(value)) s.delete(value);
   else s.add(value);
+  detachFromView();
   renderChips();
   load();
+}
+
+function detachFromView() {
+  // Any user-initiated filter change means we're no longer "viewing" the
+  // saved view they picked — clear the picker selection + hide Delete.
+  state.currentViewId = null;
+  document.getElementById("view-picker").value = "";
+  document.getElementById("delete-view-btn").style.display = "none";
 }
 
 function clearSearch() {
@@ -271,13 +361,19 @@ function clearSearch() {
   load();
 }
 
-async function load() {
+function buildFilterParams() {
   const params = new URLSearchParams();
   if (state.q) params.set("q", state.q);
   for (const t of state.types) params.append("type", t);
   for (const s of state.sets) params.append("set", s);
   if (state.onDisplay) params.set("on_display", "1");
   if (!state.inStock) params.set("in_stock", "0");
+  if (state.sort) params.set("sort", state.sort);
+  return params;
+}
+
+async function load() {
+  const params = buildFilterParams();
 
   const list = document.getElementById("list");
   list.innerHTML = `<div class="loading">Loading…</div>`;
@@ -393,11 +489,162 @@ function turnOffDisplayFilter() {
 document.getElementById("q").addEventListener("input", e => {
   state.q = e.target.value.trim();
   document.getElementById("clear-btn").style.display = state.q ? "" : "none";
+  detachFromView();
   clearTimeout(searchTimer);
   searchTimer = setTimeout(load, 200);
 });
 
-loadFacets().then(load);
+// ─── Saved views ────────────────────────────────────────────────────────────
+async function loadSavedViews() {
+  const r = await fetch("/api/staff-inventory/views", { credentials: "include" });
+  if (!r.ok) return;
+  const data = await r.json();
+  savedViews = data.views || [];
+  renderViewPicker();
+}
+
+function renderViewPicker() {
+  const sel = document.getElementById("view-picker");
+  const current = sel.value;
+  sel.innerHTML = `<option value="">— Saved views —</option>` +
+    savedViews.map(v => `<option value="${v.id}">${esc(v.name)}</option>`).join("");
+  if (current && savedViews.some(v => String(v.id) === current)) {
+    sel.value = current;
+  }
+}
+
+function applyView(view) {
+  state.currentViewId = view.id;
+  state.q = view.filters.q || "";
+  state.types = new Set(view.filters.types || []);
+  state.sets = new Set(view.filters.sets || []);
+  state.onDisplay = !!view.filters.on_display;
+  state.inStock = view.filters.in_stock !== false;
+  state.sort = view.sort || "set";
+
+  document.getElementById("q").value = state.q;
+  document.getElementById("clear-btn").style.display = state.q ? "" : "none";
+  document.getElementById("sort-picker").value = state.sort;
+  document.getElementById("delete-view-btn").style.display = "";
+  renderChips();
+  load();
+}
+
+document.getElementById("view-picker").addEventListener("change", e => {
+  const id = e.target.value;
+  if (!id) {
+    state.currentViewId = null;
+    document.getElementById("delete-view-btn").style.display = "none";
+    return;
+  }
+  const view = savedViews.find(v => String(v.id) === id);
+  if (view) applyView(view);
+});
+
+document.getElementById("sort-picker").addEventListener("change", e => {
+  state.sort = e.target.value;
+  detachFromView();
+  load();
+});
+
+function currentFiltersPayload() {
+  return {
+    q: state.q,
+    types: [...state.types],
+    sets: [...state.sets],
+    on_display: state.onDisplay,
+    in_stock: state.inStock,
+  };
+}
+
+function openSaveView() {
+  document.getElementById("view-err").textContent = "";
+  document.getElementById("view-name").value = "";
+  document.getElementById("save-view-modal").classList.add("open");
+  setTimeout(() => document.getElementById("view-name").focus(), 30);
+}
+function closeSaveView() {
+  document.getElementById("save-view-modal").classList.remove("open");
+}
+async function submitSaveView() {
+  const name = document.getElementById("view-name").value.trim();
+  const err = document.getElementById("view-err");
+  err.textContent = "";
+  if (!name) { err.textContent = "Name is required."; return; }
+  const r = await fetch("/api/staff-inventory/views", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    credentials: "include",
+    body: JSON.stringify({ name, filters: currentFiltersPayload(), sort: state.sort }),
+  });
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({}));
+    err.textContent = data.error || `Failed (${r.status}).`;
+    return;
+  }
+  const data = await r.json();
+  closeSaveView();
+  await loadSavedViews();
+  document.getElementById("view-picker").value = String(data.view.id);
+  state.currentViewId = data.view.id;
+  document.getElementById("delete-view-btn").style.display = "";
+}
+document.getElementById("view-name").addEventListener("keydown", e => {
+  if (e.key === "Enter") submitSaveView();
+  if (e.key === "Escape") closeSaveView();
+});
+document.getElementById("save-view-modal").addEventListener("click", e => {
+  if (e.target.id === "save-view-modal") closeSaveView();
+});
+
+async function deleteCurrentView() {
+  if (!state.currentViewId) return;
+  const view = savedViews.find(v => v.id === state.currentViewId);
+  if (!view) return;
+  const ok = confirm(`Delete saved view "${view.name}"?`);
+  if (!ok) return;
+  const r = await fetch(`/api/staff-inventory/views/${view.id}`, {
+    method: "DELETE", credentials: "include",
+  });
+  if (!r.ok) {
+    alert("Failed to delete.");
+    return;
+  }
+  state.currentViewId = null;
+  document.getElementById("delete-view-btn").style.display = "none";
+  await loadSavedViews();
+  document.getElementById("view-picker").value = "";
+}
+
+function openPrint() {
+  // Prefer the saved view if one's loaded, otherwise pass current filters
+  // directly. New tab so the main page state isn't disturbed.
+  let url;
+  if (state.currentViewId) {
+    url = `/staff-inventory/print?view=${state.currentViewId}`;
+  } else {
+    const params = buildFilterParams();
+    params.set("title", printableTitle());
+    url = "/staff-inventory/print?" + params.toString();
+  }
+  window.open(url, "_blank");
+}
+
+function printableTitle() {
+  const bits = [];
+  if (state.onDisplay) bits.push("On Display");
+  for (const t of state.types) {
+    const chip = (facets.types || []).find(x => x.value === t);
+    if (chip) bits.push(chip.label);
+  }
+  for (const s of state.sets) bits.push(s);
+  if (state.q) bits.push(`"${state.q}"`);
+  return bits.length ? bits.join(" · ") : "Staff Inventory";
+}
+
+document.getElementById("sort-picker").value = state.sort;
+
+loadFacets().then(loadSavedViews).then(load);
 </script>
 </body>
 </html>
