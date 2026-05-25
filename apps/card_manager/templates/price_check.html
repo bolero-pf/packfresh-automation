@@ -520,13 +520,14 @@ function wireTiles(container) {
 
 async function loadRails() {
   try {
-    const url = '/api/price-check/recent' +
-                (DEVICE_ID ? '?device_id=' + encodeURIComponent(DEVICE_ID) : '');
-    const r = await fetch(url);
+    const r = await fetch('/api/price-check/recent');
     if (!r.ok) return;
     const data = await r.json();
     const hot = data.hot || [];
-    const recent = data.recent || [];
+    // Drop anything already in Hot so the two rails complement each
+    // other instead of double-rendering the same tile.
+    const hotKeys = new Set(hot.map(x => x.identifier));
+    const recent = (data.recent || []).filter(x => !hotKeys.has(x.identifier));
 
     if (hot.length) {
       hotEl.innerHTML = hot.map(tileHtml).join('');

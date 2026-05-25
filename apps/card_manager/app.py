@@ -477,10 +477,10 @@ def price_check_log():
 
 @app.route("/api/price-check/recent")
 def price_check_recent():
-    """Hot Right Now + Recently Checked. `device_id` scopes the recent
-    list. Both sections collapse repeated lookups of the same identifier
-    so the same item doesn't fill the rail."""
-    device_id = (request.args.get("device_id") or "").strip()[:64] or None
+    """Hot Right Now + Recently Checked. Both rails are global — we
+    don't get enough price-check volume to justify per-device scoping,
+    and a single shared rail is more useful as "what's been getting
+    looked up around the store" than as one-station history."""
 
     # "Hot" — last hour, recency-weighted (half-life ≈ 30 min via
     # EXP(-Δseconds/1800)). HAVING COUNT > 1 filters one-off scans so the
@@ -502,25 +502,22 @@ def price_check_recent():
         LIMIT %s
     """, (PRICE_CHECK_HOT_LIMIT,))
 
-    # "Recently checked" — per-device, last 24h, most-recently-touched
-    # row per identifier. Empty list when there's no device cookie yet.
-    recent = []
-    if device_id:
-        recent = db.query("""
-            SELECT identifier,
-                   (array_agg(title     ORDER BY looked_up_at DESC))[1] AS title,
-                   (array_agg(set_name  ORDER BY looked_up_at DESC))[1] AS set_name,
-                   (array_agg(image_url ORDER BY looked_up_at DESC))[1] AS image_url,
-                   (array_agg(price     ORDER BY looked_up_at DESC))[1] AS price,
-                   (array_agg(kind      ORDER BY looked_up_at DESC))[1] AS kind,
-                   MAX(looked_up_at)                                    AS last_seen
-            FROM price_check_lookups
-            WHERE device_id = %s
-              AND looked_up_at > NOW() - INTERVAL '24 hours'
-            GROUP BY identifier
-            ORDER BY MAX(looked_up_at) DESC
-            LIMIT %s
-        """, (device_id, PRICE_CHECK_RECENT_LIMIT))
+    # "Recently checked" — last 24h across all devices, most-recently-
+    # touched row per identifier.
+    recent = db.query("""
+        SELECT identifier,
+               (array_agg(title     ORDER BY looked_up_at DESC))[1] AS title,
+               (array_agg(set_name  ORDER BY looked_up_at DESC))[1] AS set_name,
+               (array_agg(image_url ORDER BY looked_up_at DESC))[1] AS image_url,
+               (array_agg(price     ORDER BY looked_up_at DESC))[1] AS price,
+               (array_agg(kind      ORDER BY looked_up_at DESC))[1] AS kind,
+               MAX(looked_up_at)                                    AS last_seen
+        FROM price_check_lookups
+        WHERE looked_up_at > NOW() - INTERVAL '24 hours'
+        GROUP BY identifier
+        ORDER BY MAX(looked_up_at) DESC
+        LIMIT %s
+    """, (PRICE_CHECK_RECENT_LIMIT,))
 
     def fmt(row):
         return {
