@@ -95,9 +95,54 @@ def _heal_stale_hold_locks():
         logger.warning(f"_heal_stale_hold_locks failed: {e}")
 
 
+def _heal_grading_dupes():
+    """Collapse the BARCODED + REMOVED+GRADING pair the ingest pipeline left
+    behind when raw cards routed to grade had already been pre-barcoded. The
+    REMOVED row carries a phantom never-printed barcode; the BARCODED row
+    holds the physical label. Keep the BARCODED row (flipped to REMOVED), drop
+    the orphan. Cheap one-shot on boot; no-op once the table is clean."""
+    try:
+        rows = db.query("""
+            WITH bc AS (
+              SELECT id, intake_item_id,
+                     ROW_NUMBER() OVER (PARTITION BY intake_item_id ORDER BY created_at) AS rn
+                FROM raw_cards
+               WHERE intake_item_id IS NOT NULL
+                 AND state IN ('BARCODED','BARCODED_STORAGE','BARCODED_DISPLAY',
+                               'ROUTED_STORAGE','ROUTED_BINDER')
+            ),
+            rm AS (
+              SELECT id, intake_item_id, removal_date,
+                     ROW_NUMBER() OVER (PARTITION BY intake_item_id ORDER BY created_at) AS rn
+                FROM raw_cards
+               WHERE intake_item_id IS NOT NULL
+                 AND state = 'REMOVED' AND removal_reason = 'GRADING'
+            )
+            SELECT bc.id AS barcoded_id, rm.id AS removed_id, rm.removal_date AS removal_date
+              FROM bc JOIN rm ON rm.intake_item_id = bc.intake_item_id AND rm.rn = bc.rn
+        """)
+        if not rows:
+            return
+        for r in rows:
+            db.execute("""
+                UPDATE raw_cards
+                   SET state = 'REMOVED',
+                       removal_reason = 'GRADING',
+                       removal_date = COALESCE(%s, CURRENT_TIMESTAMP),
+                       bin_id = NULL,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE id::text = %s
+            """, (r.get("removal_date"), str(r["barcoded_id"])))
+            db.execute("DELETE FROM raw_cards WHERE id::text = %s", (str(r["removed_id"]),))
+        logger.info(f"_heal_grading_dupes: collapsed {len(rows)} BARCODED/REMOVED grading pair(s)")
+    except Exception as e:
+        logger.warning(f"_heal_grading_dupes failed: {e}")
+
+
 _ensure_columns()
 _ensure_price_check_tables()
 _heal_stale_hold_locks()
+_heal_grading_dupes()
 
 SHOPIFY_STORE   = os.environ.get("SHOPIFY_STORE", "")
 SHOPIFY_TOKEN   = os.environ.get("SHOPIFY_TOKEN", "")
@@ -1512,69 +1557,134 @@ def list_missing():
     return jsonify({"cards": [_ser(dict(r)) for r in rows]})
 
 
+_BARCODED_STATES = ('BARCODED', 'BARCODED_STORAGE', 'BARCODED_DISPLAY',
+                    'ROUTED_STORAGE', 'ROUTED_BINDER')
+
+
 @app.route("/api/grading")
 def list_grading():
-    """All raw cards sent out for grading (state=REMOVED, removal_reason=GRADING).
-    Surfaces the same shape as missing/returns so the UI can render uniformly."""
+    """All raw cards sent out for grading. Prefers the pre-barcoded sibling's
+    barcode when the ingest pipeline double-wrote the row (REMOVED row with a
+    phantom barcode + BARCODED row carrying the physical label) so the barcode
+    shown here matches what's actually on the card."""
     rows = db.query("""
         SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.condition,
                rc.card_number, rc.image_url, rc.current_price,
-               rc.removal_date AS sent_at
+               rc.removal_date AS sent_at,
+               sib.barcode AS sibling_barcode
         FROM raw_cards rc
+        LEFT JOIN LATERAL (
+            SELECT barcode FROM raw_cards
+             WHERE intake_item_id = rc.intake_item_id
+               AND intake_item_id IS NOT NULL
+               AND state = ANY(%s)
+             ORDER BY created_at ASC
+             LIMIT 1
+        ) sib ON TRUE
         WHERE rc.state = 'REMOVED' AND rc.removal_reason = 'GRADING'
         ORDER BY rc.removal_date DESC NULLS LAST
-    """)
-    return jsonify({"cards": [_ser(dict(r)) for r in rows]})
+    """, (list(_BARCODED_STATES),))
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("sibling_barcode"):
+            d["barcode"] = d["sibling_barcode"]
+        d.pop("sibling_barcode", None)
+        out.append(_ser(d))
+    return jsonify({"cards": out})
+
+
+def _resolve_grading_target(card):
+    """Given a raw_cards row matched by scan, return (target_id, orphan_id_or_None)
+    where target_id is the row to flip to PENDING_RETURN and orphan_id is a
+    dupe row to delete. Handles the BARCODED + REMOVED+GRADING duplicate pair
+    left behind by the pre-barcoded → grade ingest bug.
+
+    Returns (None, None) if the card isn't at grading (directly or via sibling)."""
+    state = card["state"]
+    removal = card.get("removal_reason")
+    iid = card.get("intake_item_id")
+
+    if state == "REMOVED" and removal == "GRADING":
+        if iid:
+            sib = db.query_one("""
+                SELECT id FROM raw_cards
+                 WHERE intake_item_id = %s AND state = ANY(%s)
+                 ORDER BY created_at ASC LIMIT 1
+            """, (str(iid), list(_BARCODED_STATES)))
+            if sib:
+                return str(sib["id"]), str(card["id"])
+        return str(card["id"]), None
+
+    if state in _BARCODED_STATES and iid:
+        sib = db.query_one("""
+            SELECT id FROM raw_cards
+             WHERE intake_item_id = %s
+               AND state = 'REMOVED' AND removal_reason = 'GRADING'
+             ORDER BY removal_date DESC LIMIT 1
+        """, (str(iid),))
+        if sib:
+            return str(card["id"]), str(sib["id"])
+
+    return None, None
+
+
+def _flip_to_pending_return(card_id, orphan_id):
+    db.execute("""
+        UPDATE raw_cards
+           SET state = 'PENDING_RETURN',
+               removal_reason = NULL,
+               removal_date = NULL,
+               current_hold_id = NULL,
+               bin_id = NULL,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = %s
+    """, (card_id,))
+    if orphan_id:
+        db.execute("DELETE FROM raw_cards WHERE id::text = %s", (orphan_id,))
 
 
 @app.route("/api/grading/<card_id>/reverse", methods=["POST"])
 def reverse_grading(card_id):
     """Undo a 'sent to grading' decision: route the card to the Return Queue so
-    the operator can re-shelve it through the normal store-returns flow."""
+    the operator can re-shelve it through the normal store-returns flow.
+
+    If the row has a pre-barcoded sibling (ingest dupe), flip the sibling and
+    delete this orphan so the printed barcode keeps working downstream."""
     card = db.query_one("""
-        SELECT id, card_name FROM raw_cards
-        WHERE id::text = %s AND state = 'REMOVED' AND removal_reason = 'GRADING'
-    """, (card_id,))
-    if not card:
-        return jsonify({"error": "Card not found or not in grading state"}), 404
-    db.execute("""
-        UPDATE raw_cards
-           SET state = 'PENDING_RETURN',
-               removal_reason = NULL,
-               removal_date = NULL,
-               current_hold_id = NULL,
-               updated_at = CURRENT_TIMESTAMP
+        SELECT id, card_name, state, removal_reason, intake_item_id FROM raw_cards
          WHERE id::text = %s
     """, (card_id,))
+    if not card:
+        return jsonify({"error": "Card not found"}), 404
+    target, orphan = _resolve_grading_target(card)
+    if not target:
+        return jsonify({"error": "Card not in grading state"}), 404
+    _flip_to_pending_return(target, orphan)
     return jsonify({"success": True, "card_name": card["card_name"]})
 
 
 @app.route("/api/grading/scan", methods=["POST"])
 def scan_grading():
-    """Scan a barcode from the At Grading view: flip REMOVED+GRADING →
+    """Scan a barcode from the At Grading view: flip the matching card →
     PENDING_RETURN so the next /api/returns/store call assigns a storage bin.
-    Mirrors /api/returns/scan, but only accepts cards currently at grading."""
+    Accepts either the REMOVED+GRADING row directly OR a BARCODED row whose
+    intake_item has a REMOVED+GRADING sibling (the ingest-dupe path); collapses
+    the duplicate so future scans go through cleanly."""
     barcode = (request.get_json() or {}).get("barcode", "").strip()
     card = db.query_one("""
-        SELECT id, card_name, condition, state, removal_reason
+        SELECT id, card_name, condition, state, removal_reason, intake_item_id
         FROM raw_cards WHERE barcode = %s
     """, (barcode,))
     if not card:
         return jsonify({"error": "Barcode not found"}), 404
-    if card["state"] != "REMOVED" or card["removal_reason"] != "GRADING":
+    target, orphan = _resolve_grading_target(card)
+    if not target:
         return jsonify({
             "error": f"Card is {card['state']}/{card['removal_reason'] or '-'}, not at grading",
             "card_name": card["card_name"],
         }), 409
-    db.execute("""
-        UPDATE raw_cards
-           SET state = 'PENDING_RETURN',
-               removal_reason = NULL,
-               removal_date = NULL,
-               current_hold_id = NULL,
-               updated_at = CURRENT_TIMESTAMP
-         WHERE id = %s
-    """, (str(card["id"]),))
+    _flip_to_pending_return(target, orphan)
     return jsonify({
         "success":   True,
         "card_name": card["card_name"],

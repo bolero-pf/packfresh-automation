@@ -2239,8 +2239,56 @@ def _push_raw_to_display(item: dict) -> dict:
     }
 
 
+def _place_pre_barcoded_as_graded(item: dict) -> dict | None:
+    """If the intake_item already has pre-push BARCODED-family raw_cards rows,
+    flip them to REMOVED+GRADING in place instead of inserting a new row with
+    a fresh barcode. Mirrors _place_pre_barcoded for the grade leg — keeps the
+    printed physical label canonical so card_manager scans match."""
+    item_id = item.get("id")
+    if not item_id:
+        return None
+    rows = db.query("""
+        SELECT id, card_name FROM raw_cards
+         WHERE intake_item_id = %s
+           AND state IN ('BARCODED','BARCODED_STORAGE','BARCODED_DISPLAY',
+                         'ROUTED_STORAGE','ROUTED_BINDER')
+         ORDER BY created_at ASC
+    """, (str(item_id),))
+    if not rows:
+        return None
+    ids = [str(r["id"]) for r in rows]
+    db.execute("""
+        UPDATE raw_cards
+           SET state = 'REMOVED',
+               removal_reason = 'GRADING',
+               removal_date = CURRENT_TIMESTAMP,
+               bin_id = NULL,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id::text = ANY(%s)
+    """, (ids,))
+    return {
+        "action":       "raw_card_graded",
+        "destination":  "grade",
+        "product_name": rows[0]["card_name"],
+        "quantity":     len(rows),
+        "barcodes":     [],
+        "bins":         [],
+    }
+
+
 def _push_raw_to_grade(item: dict) -> dict:
-    """Mark raw card as sent for grading. No barcode, no bin assignment."""
+    """Mark raw card as sent for grading. No bin assignment.
+
+    Pre-barcoded fast path: if BARCODED-family rows already exist for this
+    intake_item, flip them in place — otherwise we'd leave the printed-label
+    row orphaned and write a phantom REMOVED row with a never-printed barcode.
+    That's the dupe that surfaces in card_manager's At Grading view and breaks
+    scan-to-return.
+    """
+    pre = _place_pre_barcoded_as_graded(item)
+    if pre is not None:
+        return pre
+
     tcg_id    = item.get("tcgplayer_id")
     sx_id     = item.get("scrydex_id")
     card_name = item.get("product_name", "Unknown")
