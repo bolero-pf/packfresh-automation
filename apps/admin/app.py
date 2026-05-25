@@ -105,6 +105,13 @@ try:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_views_name_lower
         ON staff_inventory_saved_views (LOWER(name))
     """)
+    # show_price added 2026-05-25: lets a saved view print as a "book of
+    # barcodes" with prices suppressed. Stock levels are never printed —
+    # they go stale faster than the sheet lasts.
+    db.execute("""
+        ALTER TABLE staff_inventory_saved_views
+        ADD COLUMN IF NOT EXISTS show_price BOOLEAN NOT NULL DEFAULT TRUE
+    """)
 except Exception as _e:
     logger.warning(f"staff_inventory_saved_views migration skipped: {_e}")
 
@@ -721,6 +728,7 @@ def _serialize_view(row) -> dict:
         "name": row["name"],
         "filters": f or {},
         "sort": row["sort"],
+        "show_price": bool(row.get("show_price", True)),
         "created_by": row.get("created_by"),
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
         "updated_by": row.get("updated_by"),
@@ -728,13 +736,14 @@ def _serialize_view(row) -> dict:
     }
 
 
-def _normalize_view_payload(data: dict) -> tuple[str, dict, str] | tuple[None, None, None]:
+def _normalize_view_payload(data: dict):
+    """Returns (name, filters, sort, show_price) or (None, None, None, None)."""
     name = (data.get("name") or "").strip()
     if not name or len(name) > 200:
-        return None, None, None
+        return None, None, None, None
     filters = data.get("filters") or {}
     if not isinstance(filters, dict):
-        return None, None, None
+        return None, None, None, None
     # Whitelist filter keys so noise from the client doesn't end up in the JSONB.
     clean = {
         "q": (filters.get("q") or "").strip(),
@@ -746,7 +755,8 @@ def _normalize_view_payload(data: dict) -> tuple[str, dict, str] | tuple[None, N
     sort = data.get("sort") or STAFF_INVENTORY_DEFAULT_SORT
     if sort not in STAFF_INVENTORY_SORTS:
         sort = STAFF_INVENTORY_DEFAULT_SORT
-    return name, clean, sort
+    show_price = bool(data.get("show_price", True))
+    return name, clean, sort, show_price
 
 
 @app.route("/api/staff-inventory/views")
@@ -755,7 +765,8 @@ def list_saved_views():
     if auth_result:
         return auth_result
     rows = db.query("""
-        SELECT id, name, filters, sort, created_by, created_at, updated_by, updated_at
+        SELECT id, name, filters, sort, show_price,
+               created_by, created_at, updated_by, updated_at
         FROM staff_inventory_saved_views
         ORDER BY LOWER(name)
     """)
@@ -768,7 +779,7 @@ def create_saved_view():
     if auth_result:
         return auth_result
     data = request.get_json(silent=True) or {}
-    name, filters, sort = _normalize_view_payload(data)
+    name, filters, sort, show_price = _normalize_view_payload(data)
     if not name:
         return jsonify({"error": "name + filters required"}), 400
 
@@ -777,10 +788,11 @@ def create_saved_view():
     try:
         row = db.query_one("""
             INSERT INTO staff_inventory_saved_views
-                   (name, filters, sort, created_by, updated_by)
-            VALUES (%s, %s::jsonb, %s, %s, %s)
-            RETURNING id, name, filters, sort, created_by, created_at, updated_by, updated_at
-        """, (name, _json.dumps(filters), sort, actor, actor))
+                   (name, filters, sort, show_price, created_by, updated_by)
+            VALUES (%s, %s::jsonb, %s, %s, %s, %s)
+            RETURNING id, name, filters, sort, show_price,
+                      created_by, created_at, updated_by, updated_at
+        """, (name, _json.dumps(filters), sort, show_price, actor, actor))
     except Exception as e:
         msg = str(e).lower()
         if "duplicate" in msg or "unique" in msg:
@@ -795,7 +807,7 @@ def update_saved_view(view_id):
     if auth_result:
         return auth_result
     data = request.get_json(silent=True) or {}
-    name, filters, sort = _normalize_view_payload(data)
+    name, filters, sort, show_price = _normalize_view_payload(data)
     if not name:
         return jsonify({"error": "name + filters required"}), 400
 
@@ -807,11 +819,13 @@ def update_saved_view(view_id):
             SET name       = %s,
                 filters    = %s::jsonb,
                 sort       = %s,
+                show_price = %s,
                 updated_by = %s,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = %s
-            RETURNING id, name, filters, sort, created_by, created_at, updated_by, updated_at
-        """, (name, _json.dumps(filters), sort, actor, view_id))
+            RETURNING id, name, filters, sort, show_price,
+                      created_by, created_at, updated_by, updated_at
+        """, (name, _json.dumps(filters), sort, show_price, actor, view_id))
     except Exception as e:
         msg = str(e).lower()
         if "duplicate" in msg or "unique" in msg:
@@ -843,9 +857,11 @@ def staff_inventory_print():
 
     view_id = request.args.get("view", type=int)
     view = None
+    show_price_default = True
     if view_id:
         row = db.query_one("""
-            SELECT id, name, filters, sort, created_by, created_at, updated_by, updated_at
+            SELECT id, name, filters, sort, show_price,
+                   created_by, created_at, updated_by, updated_at
             FROM staff_inventory_saved_views WHERE id = %s
         """, (view_id,))
         if not row:
@@ -854,17 +870,26 @@ def staff_inventory_print():
         filters = view["filters"]
         sort = view["sort"]
         title = view["name"]
+        show_price_default = view["show_price"]
     else:
         filters = _filters_from_request_args(request.args)
         sort = request.args.get("sort") or STAFF_INVENTORY_DEFAULT_SORT
         title = (request.args.get("title") or "").strip() or "Staff Inventory"
+
+    # URL param wins over the saved-view default so the print toolbar can
+    # flip prices on/off without modifying the view itself.
+    sp_param = request.args.get("show_price")
+    if sp_param is not None:
+        show_price = sp_param == "1"
+    else:
+        show_price = show_price_default
 
     items = _query_staff_items(filters, sort=sort, limit=500)
     printed_at = datetime.now(timezone.utc).astimezone().strftime("%a %b %d %Y · %I:%M %p")
     return render_template(
         "staff_inventory_print.html",
         title=title, items=items, printed_at=printed_at,
-        view=view, item_count=len(items),
+        view=view, item_count=len(items), show_price=show_price,
     )
 
 

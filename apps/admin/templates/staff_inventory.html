@@ -263,6 +263,10 @@
     <h3>Save view</h3>
     <p>Names this filter combo + sort so you can print or recall it later.</p>
     <input class="mi" id="view-name" placeholder="e.g. Booster Boxes on Display" maxlength="200">
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:0.88rem;cursor:pointer;">
+      <input type="checkbox" id="view-show-price" checked>
+      Show prices on printout
+    </label>
     <div class="err" id="view-err"></div>
     <div class="row">
       <button class="tb-btn" onclick="closeSaveView()">Cancel</button>
@@ -560,6 +564,7 @@ function currentFiltersPayload() {
 function openSaveView() {
   document.getElementById("view-err").textContent = "";
   document.getElementById("view-name").value = "";
+  document.getElementById("view-show-price").checked = true;
   document.getElementById("save-view-modal").classList.add("open");
   setTimeout(() => document.getElementById("view-name").focus(), 30);
 }
@@ -571,11 +576,17 @@ async function submitSaveView() {
   const err = document.getElementById("view-err");
   err.textContent = "";
   if (!name) { err.textContent = "Name is required."; return; }
+  const showPrice = document.getElementById("view-show-price").checked;
   const r = await fetch("/api/staff-inventory/views", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     credentials: "include",
-    body: JSON.stringify({ name, filters: currentFiltersPayload(), sort: state.sort }),
+    body: JSON.stringify({
+      name,
+      filters: currentFiltersPayload(),
+      sort: state.sort,
+      show_price: showPrice,
+    }),
   });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));

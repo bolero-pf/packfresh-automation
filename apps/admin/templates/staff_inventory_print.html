@@ -29,7 +29,9 @@
   .page-toolbar a { color:#9ec5ff; text-decoration:none; }
 
   .sheet {
-    /* US Letter portrait. */
+    /* US Letter portrait. min-height keeps the on-screen preview the
+       size of a real page; the grid uses fixed row heights so a partial
+       final page leaves whitespace instead of stretching cards. */
     width:8.5in; min-height:11in; box-sizing:border-box;
     margin:60px auto 24px;
     padding:0.5in 0.45in 0.55in;
@@ -51,30 +53,31 @@
   }
 
   .grid {
-    flex:1;
     display:grid;
     grid-template-columns:1fr 1fr;
-    grid-auto-rows:1fr;
+    /* Fixed row height so a partial final page doesn't stretch its
+       cards to fill 11in. 4 rows × 2.2in ≈ 9in of content area. */
+    grid-auto-rows:2.2in;
     gap:0.18in;
-    /* 4 rows × 2 cols = 8 per page. */
   }
 
   .card {
     border:1px solid #999;
     border-radius:6px;
-    padding:8px 10px;
+    padding:10px 12px;
     display:grid;
-    grid-template-columns:0.95in 1fr;
+    grid-template-columns:1.05in 1fr;
     grid-template-rows:auto 1fr auto;
-    column-gap:10px;
-    row-gap:4px;
+    column-gap:12px;
+    row-gap:6px;
     page-break-inside:avoid;
     break-inside:avoid;
-    min-height:0; /* allow shrinking inside grid track */
+    min-height:0;
+    overflow:hidden;
   }
   .card .thumb {
     grid-row:1 / span 3;
-    width:0.95in; height:0.95in;
+    width:1.05in; height:1.4in;
     background:#f4f4f4; border:1px solid #ddd; border-radius:4px;
     display:flex; align-items:center; justify-content:center;
     overflow:hidden;
@@ -84,39 +87,37 @@
   }
   .card .thumb .ph { color:#888; font-size:8pt; }
   .card .name {
-    font-size:9.5pt; font-weight:700; line-height:1.15;
+    font-size:10pt; font-weight:700; line-height:1.18;
     overflow:hidden; text-overflow:ellipsis;
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
   }
+  .card .priceblock {
+    font-size:14pt; font-weight:700; line-height:1;
+    color:#000;
+    align-self:start;
+  }
   .card .footer-line {
     display:flex; align-items:flex-end; justify-content:space-between;
-    gap:6px;
+    gap:8px;
+    grid-column:2;
   }
   .card .barcode-wrap {
-    min-width:0; /* let svg shrink */
-    flex:1;
+    min-width:0; flex:1;
   }
   .card .barcode-wrap svg {
-    display:block; width:100%; height:0.45in;
+    display:block; width:100%; height:0.55in;
   }
   .card .barcode-wrap .no-bc {
     color:#888; font-size:8pt; font-style:italic;
   }
-  .card .priceblock {
-    text-align:right; white-space:nowrap;
-  }
-  .card .price {
-    font-size:13pt; font-weight:700; line-height:1;
-  }
-  .card .qty {
-    font-size:8.5pt; color:#333; margin-top:2px;
-  }
-  .card .qty.oos { color:#c00; font-weight:700; }
   .card .sku {
-    font-family:'Courier New', monospace; font-size:7pt;
-    color:#666;
-    text-align:center; margin-top:1px;
+    font-family:'Courier New', monospace; font-size:7.5pt;
+    color:#444;
+    text-align:center; margin-top:2px;
   }
+  /* Book-of-barcodes mode: more vertical room for the barcode when the
+     price is hidden. */
+  body.no-price .card .barcode-wrap svg { height:0.75in; }
 
   .sheet-footer {
     margin-top:12px; padding-top:6px;
@@ -152,6 +153,11 @@
     <span>{{ title }} — {{ item_count }} item{{ '' if item_count == 1 else 's' }}, {{ printed_at }}</span>
   </div>
   <div>
+    <label style="margin-right:14px;cursor:pointer;">
+      <input type="checkbox" id="show-price-cb" {% if show_price %}checked{% endif %}
+             onchange="togglePrice(this.checked)" style="vertical-align:middle;">
+      Show prices
+    </label>
     <button class="btn-ghost btn" onclick="window.print()" style="margin-right:8px;">Print</button>
   </div>
 </div>
@@ -170,7 +176,10 @@
 const ITEMS = {{ items|tojson }};
 const TITLE = {{ title|tojson }};
 const PRINTED_AT = {{ printed_at|tojson }};
+const SHOW_PRICE = {{ show_price|tojson }};
 const ITEMS_PER_PAGE = 8;
+
+if (!SHOW_PRICE) document.body.classList.add("no-price");
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"]/g, c => ({
@@ -186,10 +195,6 @@ function cardHtml(it, idx) {
   const img = it.image_url
     ? `<img src="${esc(it.image_url)}" alt="">`
     : `<div class="ph">no image</div>`;
-  const oos = !it.qty;
-  const qtyHtml = oos
-    ? `<div class="qty oos">OUT OF STOCK</div>`
-    : `<div class="qty">${it.qty} in stock</div>`;
 
   const bc = it.barcode || "";
   const barcodeHtml = bc
@@ -197,16 +202,17 @@ function cardHtml(it, idx) {
        <div class="sku">${esc(bc)}</div>`
     : `<div class="no-bc">No barcode</div>`;
 
+  const priceHtml = SHOW_PRICE
+    ? `<div class="priceblock">${fmtPrice(it.price)}</div>`
+    : "";
+
   return `
     <div class="card">
       <div class="thumb">${img}</div>
       <div class="name">${esc(it.title || "(untitled)")}</div>
+      ${priceHtml}
       <div class="footer-line">
         <div class="barcode-wrap">${barcodeHtml}</div>
-      </div>
-      <div class="priceblock">
-        <div class="price">${fmtPrice(it.price)}</div>
-        ${qtyHtml}
       </div>
     </div>
   `;
@@ -273,6 +279,15 @@ function render() {
   const waits = imgs.map(img => img.complete ? Promise.resolve() :
     new Promise(res => { img.onload = img.onerror = res; }));
   Promise.all(waits).then(() => setTimeout(() => window.print(), 250));
+}
+
+function togglePrice(on) {
+  // Reload so the server re-renders with the new flag — keeps the
+  // url state shareable and avoids a stale "Show prices" checkbox.
+  const u = new URL(window.location.href);
+  u.searchParams.set("show_price", on ? "1" : "0");
+  u.searchParams.set("noprint", "1");  // don't auto-print after the reload
+  window.location.href = u.toString();
 }
 
 render();
