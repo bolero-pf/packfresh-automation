@@ -140,6 +140,61 @@ body {
   .pc-input-wrap input { font-size: 1.4rem; padding: 8px 0; }
   .pc-input-wrap { padding: 22px 26px; }
 }
+
+.pc-rails {
+  margin-top: 28px;
+  display: grid;
+  gap: 22px;
+}
+.pc-rail-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  font-size: 0.72rem; color: var(--dim, #8a8e98);
+  text-transform: uppercase; letter-spacing: 0.1em;
+  margin-bottom: 10px;
+}
+.pc-rail-head .pc-rail-title { font-weight: 700; color: var(--text, #e7e8ea); letter-spacing: 0.06em; }
+.pc-rail-head .pc-rail-empty { color: var(--dim, #8a8e98); font-style: italic; text-transform: none; letter-spacing: 0; }
+.pc-rail {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+.pc-tile {
+  background: var(--surface-2, #1d2026);
+  border: 1.5px solid var(--border, #2a2d33);
+  border-radius: 10px;
+  padding: 10px;
+  display: flex; flex-direction: column; gap: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.1s;
+  text-align: left;
+  min-width: 0;
+}
+.pc-tile:hover { border-color: var(--accent, #4f7df9); transform: translateY(-1px); }
+.pc-tile-img {
+  aspect-ratio: 3/4;
+  background: var(--surface, #16181c);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+.pc-tile-img.sealed { aspect-ratio: 1; }
+.pc-tile-img img { width: 100%; height: 100%; object-fit: contain; }
+.pc-tile-img .no-img { font-size: 1.6rem; opacity: 0.3; }
+.pc-tile-name {
+  font-size: 0.82rem; font-weight: 600; line-height: 1.2;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.pc-tile-price {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.95rem; font-weight: 700;
+  color: var(--green, #4ade80);
+}
+.pc-tile-meta {
+  font-size: 0.68rem; color: var(--dim, #8a8e98);
+  display: flex; gap: 6px;
+}
 </style>
 </head>
 <body>
@@ -164,6 +219,21 @@ body {
     <div class="icon">🃏</div>
     <p>Scan a barcode, or type a card / product name to look up.</p>
   </div>
+
+  <div id="pc-rails" class="pc-rails" style="display:none;">
+    <div id="pc-hot-section" style="display:none;">
+      <div class="pc-rail-head">
+        <span class="pc-rail-title">🔥 Hot right now</span>
+      </div>
+      <div id="pc-hot" class="pc-rail"></div>
+    </div>
+    <div id="pc-recent-section" style="display:none;">
+      <div class="pc-rail-head">
+        <span class="pc-rail-title">↻ Recently checked</span>
+      </div>
+      <div id="pc-recent" class="pc-rail"></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -171,6 +241,30 @@ const inp = document.getElementById('pc-input');
 const resultEl = document.getElementById('pc-result');
 const listEl   = document.getElementById('pc-list');
 const emptyEl  = document.getElementById('pc-empty');
+const railsEl  = document.getElementById('pc-rails');
+const hotEl    = document.getElementById('pc-hot');
+const hotSect  = document.getElementById('pc-hot-section');
+const recentEl = document.getElementById('pc-recent');
+const recentSect = document.getElementById('pc-recent-section');
+
+// Stable per-browser id so "recently checked" follows the device, not
+// the customer. Survives reloads. Generated once + stashed in
+// localStorage — wrapped in try/catch because private-window iOS can
+// throw on localStorage access.
+function getDeviceId() {
+  try {
+    let id = localStorage.getItem('pf_pc_device');
+    if (!id) {
+      id = 'd_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+      localStorage.setItem('pf_pc_device', id);
+    }
+    return id;
+  } catch (_) {
+    return null;
+  }
+}
+const DEVICE_ID = getDeviceId();
+let LAST_LOGGED_KEY = null;  // throttle dup logs of the same result
 
 function focusInput() { try { inp.focus(); } catch(e) {} }
 focusInput();
@@ -180,7 +274,7 @@ window.addEventListener('focus', focusInput);
 // when the user is clicking a clickable result.
 document.addEventListener('click', (e) => {
   if (e.target.tagName === 'INPUT') return;
-  if (e.target.closest('.pc-row')) return;
+  if (e.target.closest('.pc-row, .pc-tile')) return;
   setTimeout(focusInput, 0);
 });
 
@@ -208,12 +302,21 @@ function clearAll() {
   emptyEl.style.display = 'none';
 }
 
+function updateRailsVisibility() {
+  // Rails sit below the primary content. Hide them while the search
+  // list is up — it's already filling the same role — and show them
+  // otherwise (empty state OR a single result with room below).
+  const listShown = listEl.style.display !== 'none';
+  railsEl.style.display = listShown ? 'none' : '';
+}
+
 function showEmpty() {
   clearAll();
   emptyEl.style.display = 'block';
+  updateRailsVisibility();
 }
 
-function showResult(data) {
+function showResult(data, originalInput) {
   clearAll();
 
   const isRaw = data.kind === 'raw';
@@ -247,6 +350,34 @@ function showResult(data) {
       '<div class="pc-source">' + esc(data.source_label) + '</div>' +
     '</div>';
   resultEl.classList.add('show');
+  updateRailsVisibility();
+  logLookup(data, originalInput);
+}
+
+function logLookup(data, originalInput) {
+  // Best-effort lookup log. Identifier prefers a stable key (the
+  // input/barcode for direct scans, falling back to title) so the
+  // server can collapse repeated lookups of the same thing.
+  if (!data) return;
+  const identifier = (originalInput || data.barcode || data.title || '').trim();
+  if (!identifier) return;
+  const key = identifier + '|' + (data.title || '');
+  if (key === LAST_LOGGED_KEY) return;  // don't spam the same row
+  LAST_LOGGED_KEY = key;
+
+  fetch('/api/price-check/log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      device_id: DEVICE_ID,
+      identifier,
+      kind:      data.kind,
+      title:     data.title,
+      set_name:  data.set_name,
+      image_url: data.image_url,
+      price:     data.price,
+    }),
+  }).then(() => { loadRails(); }).catch(() => {});
 }
 
 function showList(results, q) {
@@ -254,9 +385,11 @@ function showList(results, q) {
   if (!results.length) {
     emptyEl.style.display = 'block';
     emptyEl.innerHTML = '<div class="icon">🔍</div><p>No matches for "' + esc(q) + '".</p>';
+    updateRailsVisibility();
     return;
   }
   listEl.style.display = 'grid';
+  updateRailsVisibility();
   const rows = results.map((r, i) => {
     const isRaw = r.kind === 'raw';
     const imgClass = isRaw ? '' : 'sealed';
@@ -300,7 +433,7 @@ async function lookup(input) {
     const r = await fetch('/api/price-check?barcode=' + encodeURIComponent(input));
     if (r.ok) {
       const d = await r.json();
-      showResult(d);
+      showResult(d, input);
       try { pfSound.success(); } catch(_) {}
       return;
     }
@@ -322,7 +455,7 @@ async function lookup(input) {
     const d = await r.json();
     const results = d.results || [];
     if (results.length === 1) {
-      showResult(results[0]);
+      showResult(results[0], input);
       try { pfSound.success(); } catch(_) {}
     } else {
       showList(results, input);
@@ -348,6 +481,75 @@ inp.addEventListener('keydown', (e) => {
   if (!v) return;
   lookup(v);
 });
+
+// ─── Hot Right Now + Recently Checked ───────────────────────────────────────
+function tileHtml(it) {
+  const isRaw = it.kind === 'raw';
+  const imgClass = isRaw ? '' : 'sealed';
+  const img = it.image_url
+    ? '<img src="' + esc(it.image_url) + '" alt="">'
+    : '<div class="no-img">' + (isRaw ? '🃏' : '📦') + '</div>';
+  const price = (it.price !== null && it.price !== undefined)
+    ? '$' + Number(it.price).toFixed(2)
+    : '—';
+  const meta = [];
+  if (it.set_name) meta.push(esc(it.set_name));
+  if (it.hits && it.hits > 1) meta.push(it.hits + '×');
+  return '<button class="pc-tile" data-identifier="' + esc(it.identifier) + '">' +
+           '<div class="pc-tile-img ' + imgClass + '">' + img + '</div>' +
+           '<div class="pc-tile-name">' + esc(it.title || it.identifier) + '</div>' +
+           (meta.length ? '<div class="pc-tile-meta">' + meta.join(' · ') + '</div>' : '') +
+           '<div class="pc-tile-price">' + price + '</div>' +
+         '</button>';
+}
+
+function wireTiles(container) {
+  container.querySelectorAll('.pc-tile').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = el.dataset.identifier;
+      if (!id) return;
+      // Re-running through lookup() means tapping a tile takes the same
+      // barcode-then-search path as typing the value directly. Clears
+      // the throttle key so the click logs a fresh hit for "hot".
+      LAST_LOGGED_KEY = null;
+      lookup(id);
+    });
+  });
+}
+
+async function loadRails() {
+  try {
+    const url = '/api/price-check/recent' +
+                (DEVICE_ID ? '?device_id=' + encodeURIComponent(DEVICE_ID) : '');
+    const r = await fetch(url);
+    if (!r.ok) return;
+    const data = await r.json();
+    const hot = data.hot || [];
+    const recent = data.recent || [];
+
+    if (hot.length) {
+      hotEl.innerHTML = hot.map(tileHtml).join('');
+      wireTiles(hotEl);
+      hotSect.style.display = '';
+    } else {
+      hotSect.style.display = 'none';
+    }
+
+    if (recent.length) {
+      recentEl.innerHTML = recent.map(tileHtml).join('');
+      wireTiles(recentEl);
+      recentSect.style.display = '';
+    } else {
+      recentSect.style.display = 'none';
+    }
+  } catch (_) { /* rails are best-effort */ }
+}
+
+loadRails();
+// Refresh "Hot right now" every minute so the kiosk reflects current
+// traffic without needing a reload. Recent will refresh on next lookup.
+setInterval(loadRails, 60000);
 </script>
 </body>
 </html>

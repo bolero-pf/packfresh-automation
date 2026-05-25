@@ -45,6 +45,36 @@ def _ensure_columns():
         logger.debug(f"inventory_product_cache.barcode migration skipped ({e})")
 
 
+def _ensure_price_check_tables():
+    """Lookup log for the customer price-check kiosk. Powers the
+    'Hot right now' (global, last hour, recency-weighted) and 'Recently
+    checked' (per-device, last 24h) sections on /price-check."""
+    try:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS price_check_lookups (
+                id            BIGSERIAL PRIMARY KEY,
+                device_id     VARCHAR(64),
+                identifier    VARCHAR(300) NOT NULL,
+                kind          VARCHAR(20),
+                title         VARCHAR(500),
+                set_name      VARCHAR(200),
+                image_url     TEXT,
+                price         NUMERIC(10,2),
+                looked_up_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pcl_device_time
+            ON price_check_lookups (device_id, looked_up_at DESC)
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pcl_time
+            ON price_check_lookups (looked_up_at DESC)
+        """)
+    except Exception as e:
+        logger.warning(f"price_check_lookups migration skipped ({e})")
+
+
 def _heal_stale_hold_locks():
     """Clear current_hold_id on any raw_card whose referenced hold is in a
     terminal status. These accumulate when staff scan a sibling copy during
@@ -66,6 +96,7 @@ def _heal_stale_hold_locks():
 
 
 _ensure_columns()
+_ensure_price_check_tables()
 _heal_stale_hold_locks()
 
 SHOPIFY_STORE   = os.environ.get("SHOPIFY_STORE", "")
@@ -133,7 +164,8 @@ register_auth_hooks(
     app,
     public_paths=('/health', '/ping', '/favicon.ico',
                   '/price-check', '/price-check/',
-                  '/api/price-check', '/api/price-check/search'),
+                  '/api/price-check', '/api/price-check/search',
+                  '/api/price-check/log', '/api/price-check/recent'),
 )  # any authenticated user otherwise
 
 
@@ -399,6 +431,113 @@ def price_check_search():
             logger.warning(f"price-check search Shopify lookup failed for {q!r}: {e}")
 
     return jsonify({"results": results[:12]})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Price-check lookup log → Hot Right Now + Recently Checked
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# How many rows each section returns.
+PRICE_CHECK_HOT_LIMIT    = 6
+PRICE_CHECK_RECENT_LIMIT = 10
+
+
+@app.route("/api/price-check/log", methods=["POST"])
+def price_check_log():
+    """Append a single lookup row. Called by the kiosk after every
+    successful resolve (barcode or click-from-list). No-op on invalid
+    payloads — the kiosk page shouldn't fail because logging hiccupped."""
+    data = request.get_json(silent=True) or {}
+    identifier = (data.get("identifier") or "").strip()
+    if not identifier or len(identifier) > 300:
+        return jsonify({"ok": False, "error": "identifier required"}), 400
+
+    device_id = (data.get("device_id") or "").strip()[:64] or None
+    kind = (data.get("kind") or "").strip()[:20] or None
+    title = (data.get("title") or "").strip()[:500] or None
+    set_name = (data.get("set_name") or "").strip()[:200] or None
+    image_url = (data.get("image_url") or "").strip() or None
+    price_raw = data.get("price")
+    try:
+        price_val = float(price_raw) if price_raw is not None else None
+    except (TypeError, ValueError):
+        price_val = None
+
+    try:
+        db.execute("""
+            INSERT INTO price_check_lookups
+                   (device_id, identifier, kind, title, set_name, image_url, price)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (device_id, identifier, kind, title, set_name, image_url, price_val))
+    except Exception as e:
+        logger.warning(f"price_check_log insert failed: {e}")
+        return jsonify({"ok": False}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/price-check/recent")
+def price_check_recent():
+    """Hot Right Now + Recently Checked. `device_id` scopes the recent
+    list. Both sections collapse repeated lookups of the same identifier
+    so the same item doesn't fill the rail."""
+    device_id = (request.args.get("device_id") or "").strip()[:64] or None
+
+    # "Hot" — last hour, recency-weighted (half-life ≈ 30 min via
+    # EXP(-Δseconds/1800)). HAVING COUNT > 1 filters one-off scans so the
+    # rail reflects real traffic, not whoever just walked up.
+    hot = db.query("""
+        SELECT identifier,
+               (array_agg(title       ORDER BY looked_up_at DESC))[1] AS title,
+               (array_agg(set_name    ORDER BY looked_up_at DESC))[1] AS set_name,
+               (array_agg(image_url   ORDER BY looked_up_at DESC))[1] AS image_url,
+               (array_agg(price       ORDER BY looked_up_at DESC))[1] AS price,
+               (array_agg(kind        ORDER BY looked_up_at DESC))[1] AS kind,
+               COUNT(*)                                                AS hits,
+               MAX(looked_up_at)                                       AS last_seen
+        FROM price_check_lookups
+        WHERE looked_up_at > NOW() - INTERVAL '1 hour'
+        GROUP BY identifier
+        HAVING COUNT(*) > 1
+        ORDER BY SUM(EXP(-EXTRACT(EPOCH FROM (NOW() - looked_up_at))/1800.0)) DESC
+        LIMIT %s
+    """, (PRICE_CHECK_HOT_LIMIT,))
+
+    # "Recently checked" — per-device, last 24h, most-recently-touched
+    # row per identifier. Empty list when there's no device cookie yet.
+    recent = []
+    if device_id:
+        recent = db.query("""
+            SELECT identifier,
+                   (array_agg(title     ORDER BY looked_up_at DESC))[1] AS title,
+                   (array_agg(set_name  ORDER BY looked_up_at DESC))[1] AS set_name,
+                   (array_agg(image_url ORDER BY looked_up_at DESC))[1] AS image_url,
+                   (array_agg(price     ORDER BY looked_up_at DESC))[1] AS price,
+                   (array_agg(kind      ORDER BY looked_up_at DESC))[1] AS kind,
+                   MAX(looked_up_at)                                    AS last_seen
+            FROM price_check_lookups
+            WHERE device_id = %s
+              AND looked_up_at > NOW() - INTERVAL '24 hours'
+            GROUP BY identifier
+            ORDER BY MAX(looked_up_at) DESC
+            LIMIT %s
+        """, (device_id, PRICE_CHECK_RECENT_LIMIT))
+
+    def fmt(row):
+        return {
+            "identifier": row["identifier"],
+            "title":      row["title"],
+            "set_name":   row.get("set_name"),
+            "image_url":  row.get("image_url"),
+            "price":      float(row["price"]) if row.get("price") is not None else None,
+            "kind":       row.get("kind"),
+            "hits":       int(row["hits"]) if row.get("hits") is not None else None,
+            "last_seen":  row["last_seen"].isoformat() if row.get("last_seen") else None,
+        }
+
+    return jsonify({
+        "hot":    [fmt(r) for r in hot],
+        "recent": [fmt(r) for r in recent],
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
