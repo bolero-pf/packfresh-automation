@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} · Price Sheet</title>
-<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.code128.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
 <style>
   /* Screen styles — only seen during the brief moment before print fires.
      Designed so the on-screen render previews exactly what'll print. */
@@ -243,6 +243,12 @@ function render() {
 
   // Wire up barcodes after the DOM exists. Code 128 matches the existing
   // shared/barcode_gen.py format so the same POS scanners read them.
+  if (typeof JsBarcode === "undefined") {
+    document.querySelectorAll("svg.bc-svg").forEach(el => {
+      el.outerHTML = `<div class="no-bc">Barcode library failed to load — check network/CSP.</div>`;
+    });
+    return;  // skip the print trigger so the user can see what's wrong
+  }
   document.querySelectorAll("svg.bc-svg").forEach(el => {
     const value = el.dataset.bc;
     try {
@@ -254,7 +260,8 @@ function render() {
         width: 1.4,
       });
     } catch (e) {
-      el.outerHTML = `<div class="no-bc">${esc(value)} (couldn't render)</div>`;
+      console.error("JsBarcode failed for", value, e);
+      el.outerHTML = `<div class="no-bc">${esc(value)} (couldn't render: ${esc(e.message || e)})</div>`;
     }
   });
 
