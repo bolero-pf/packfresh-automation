@@ -41,6 +41,33 @@ def main() -> int:
 
     for game in games:
         client = ScrydexClient(scrydex_key, scrydex_team, db=shared_db, game=game)
+
+        # Discovery: register any expansions Scrydex knows about that we haven't
+        # seen yet, so new releases flow into the nightly run automatically.
+        # ON CONFLICT DO NOTHING preserves any active=FALSE rows the operator
+        # deliberately disabled.
+        try:
+            discovered = client.get_expansions()
+            if discovered:
+                existing_ids = {r["expansion_id"] for r in shared_db.query(
+                    "SELECT expansion_id FROM scrydex_sync_log WHERE game = %s", (game,))}
+                new_rows = [(game, e["id"], e.get("name")) for e in discovered
+                            if e.get("id") and e["id"] not in existing_ids]
+                if new_rows:
+                    with shared_db.get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.executemany("""
+                                INSERT INTO scrydex_sync_log (game, expansion_id, expansion_name, active)
+                                VALUES (%s, %s, %s, TRUE)
+                                ON CONFLICT (game, expansion_id) DO NOTHING
+                            """, new_rows)
+                        conn.commit()
+                    sample = ", ".join(r[2] or r[1] for r in new_rows[:3])
+                    more = f" (+{len(new_rows)-3} more)" if len(new_rows) > 3 else ""
+                    print(f"🆕 {game}: registered {len(new_rows)} new expansion(s) — {sample}{more}")
+        except Exception as e:
+            print(f"⚠ {game}: expansion discovery failed ({e}) — proceeding with known sets")
+
         rows = shared_db.query(
             "SELECT expansion_id FROM scrydex_sync_log WHERE game = %s AND active = TRUE", (game,))
         expansion_ids = [r["expansion_id"] for r in rows]
