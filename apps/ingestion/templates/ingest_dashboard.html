@@ -697,6 +697,12 @@ function _setSort(v) {
     try { localStorage.setItem('pf_sort_by', v); } catch(e) {}
 }
 let _currentGroupBy = 'none';    // 'none' | 'type' | 'set'
+// Filter: when true, only unmapped (is_mapped=false) items appear in Verify.
+// Lets staff rip through a "needs link" backlog without scrolling past linked rows.
+let _showUnlinkedOnly = false;
+// Tracks which inline relink panels are open across re-renders so the picker
+// stays expanded after sort/group changes redraw the table.
+let _expandedRelinkPanels = {};
 // Push tab view mode — 'consolidated' (totals per product) or 'by_source'
 // (grouped under the original intake item / breakdown parent for provenance).
 let _pushViewMode = (typeof localStorage !== 'undefined' && localStorage.getItem('pf_push_view')) || 'consolidated';
@@ -1086,10 +1092,14 @@ function _renderVerifyContent(data) {
     const totalCount = allItems.length;
     const pct = totalCount > 0 ? Math.round((verifiedCount / totalCount) * 100) : 0;
     const allVerified = verifiedCount === totalCount && totalCount > 0;
+    const unlinkedCount = allItems.filter(i => !i.is_mapped && !i.pushed_at && i.item_status !== 'missing' && i.item_status !== 'broken_down').length;
 
     // Split into unverified and verified
-    const unverifiedItems = allItems.filter(i => !isItemVerified(i));
+    let unverifiedItems = allItems.filter(i => !isItemVerified(i));
     const verifiedItems = allItems.filter(isItemVerified);
+    if (_showUnlinkedOnly) {
+        unverifiedItems = unverifiedItems.filter(i => !i.is_mapped);
+    }
     const sortedUnverified = _sortItems(unverifiedItems);
     const sortedVerified = _sortItems(verifiedItems);
     const unverifiedGroups = _groupItems(sortedUnverified);
@@ -1106,7 +1116,14 @@ function _renderVerifyContent(data) {
         <div class="progress-bar" style="margin-bottom:12px;">
             <div class="fill" style="width:${pct}%; background:${allVerified ? 'var(--green)' : 'var(--accent)'};"></div>
         </div>
-        ${_renderSortToolbar()}`;
+        ${_renderSortToolbar()}
+        ${unlinkedCount > 0 ? `<div style="margin:8px 0 12px 0; padding:8px 10px; background:rgba(255,170,0,0.08); border-left:3px solid var(--amber); border-radius:4px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span style="font-size:0.85rem;">🔗 <strong>${unlinkedCount}</strong> item${unlinkedCount === 1 ? ' needs' : 's need'} a link before barcoding.</span>
+            <label style="font-size:0.82rem; display:flex; align-items:center; gap:6px; cursor:pointer; margin-left:auto;">
+                <input type="checkbox" ${_showUnlinkedOnly ? 'checked' : ''} onchange="_showUnlinkedOnly=this.checked; _rerenderStage();">
+                Show only unlinked
+            </label>
+        </div>` : ''}`;
 
     // Unverified items — always visible
     if (unverifiedItems.length > 0) {
@@ -1186,12 +1203,20 @@ function _renderVerifyRow(item, sessionId) {
     if (isMissing) rowStyle = 'opacity:0.4; text-decoration:line-through;';
     else if (isDamaged) rowStyle = 'background:rgba(255,170,0,0.06);';
     else if (isVerified) rowStyle = 'background:rgba(45,212,160,0.04);';
+    else if (!item.is_mapped) rowStyle = 'background:rgba(255,170,0,0.05);';
 
     const isPushed = !!item.pushed_at;
     const isBrokenDown = (item.item_status === 'broken_down');
     const isLocked = isPushed || isBrokenDown;
+    // Unmapped + still actionable (not pushed/missing/broken) → render inline relink picker
+    // instead of the regular verify cell. Verifying an unmapped item is meaningless because
+    // it can't be barcoded (push_raw_items requires is_mapped = TRUE).
+    const isUnlinkActionable = !item.is_mapped && !isLocked && !isMissing;
     let verifyCell = '';
-    if (isLocked) {
+    if (isUnlinkActionable) {
+        verifyCell = `<button class="verify-btn" style="background:var(--amber); color:#000; font-weight:600;"
+            onclick="toggleInlineRelink('${item.id}')">🔗 Link</button>`;
+    } else if (isLocked) {
         // Pushed or broken-down items are locked
         const label = isBrokenDown ? '🔨 Broken Down' : isMissing ? '✗ Missing' : isDamaged ? '⚠ Damaged' : '✓ Pushed';
         const cls = isBrokenDown ? 'verified' : isMissing ? 'verified-missing' : isDamaged ? 'verified-damaged' : 'verified';
@@ -1295,13 +1320,17 @@ function _renderVerifyRow(item, sessionId) {
     const variantChip = isRaw && variantStr ? pfVariantLabel(variantStr) : '';
     const printingBadges = isRaw ? pfCardPrintingBadges(item.set_name, item.expansion_id, variantStr) : '';
 
-    return `<tr style="${rowStyle}" data-item-id="${item.id}">
+    const unmappedBadge = isUnlinkActionable
+        ? ' <span class="badge badge-amber" style="font-size:0.62rem; vertical-align:middle;">NEEDS LINK</span>'
+        : '';
+
+    const mainRow = `<tr style="${rowStyle}" data-item-id="${item.id}">
         <td class="name-cell" data-label="">
             <div style="display:flex; gap:10px; align-items:flex-start;">
                 ${thumb}
                 <div style="flex:1; min-width:0;">
                     <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-                        <span style="font-weight:600;">${name}</span>${variantChip}${printingBadges}
+                        <span style="font-weight:600;">${name}</span>${variantChip}${printingBadges}${unmappedBadge}
                     </div>
                     ${item.set_name ? '<div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">' + item.set_name + (item.card_number ? ' #' + item.card_number : '') + '</div>' : ''}
                     ${item.tcgplayer_id ? '<div style="font-size:0.7rem; color:var(--text-dim);">TCG#' + item.tcgplayer_id + '</div>' : ''}
@@ -1314,6 +1343,180 @@ function _renderVerifyRow(item, sessionId) {
         <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}</td>
         <td data-label="Verify">${verifyCell}</td>
     </tr>`;
+
+    if (!isUnlinkActionable) return mainRow;
+
+    // Inline relink panel — hidden by default, toggled by the 🔗 Link button.
+    // Pre-fills query from product_name + set_name so Search is one click away.
+    const preQuery = (item.product_name || '').replace(/"/g, '&quot;');
+    const preSet = (item.set_name || '').replace(/"/g, '&quot;');
+    const expanded = !!_expandedRelinkPanels[item.id];
+    const display = expanded ? '' : 'display:none;';
+    const panelRow = `<tr class="inline-relink-row" data-relink-for="${item.id}" style="${display}">
+        <td colspan="6" style="background:var(--surface-2); padding:10px 14px; border-bottom:1px solid var(--border);">
+            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;">
+                <div style="flex:2; min-width:180px;">
+                    <label style="font-size:0.75rem; color:var(--text-dim);">Card name</label>
+                    <input type="text" id="inline-relink-q-${item.id}" value="${preQuery}"
+                           style="width:100%; margin-top:3px;"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();inlineRelinkSearch('${item.id}');}">
+                </div>
+                <div style="flex:2; min-width:160px;">
+                    <label style="font-size:0.75rem; color:var(--text-dim);">Set (optional)</label>
+                    <input type="text" id="inline-relink-set-${item.id}" value="${preSet}"
+                           style="width:100%; margin-top:3px;"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();inlineRelinkSearch('${item.id}');}">
+                </div>
+                <button class="btn btn-sm btn-primary" style="height:36px;" onclick="inlineRelinkSearch('${item.id}')">Search</button>
+                <div style="display:flex; gap:6px; align-items:flex-end;">
+                    <div>
+                        <label style="font-size:0.75rem; color:var(--text-dim);">Or TCG ID</label>
+                        <input type="number" id="inline-relink-tcg-${item.id}" placeholder="e.g. 591055" style="width:110px; margin-top:3px;">
+                    </div>
+                    <button class="btn btn-sm btn-success" style="height:36px;" onclick="inlineRelinkByTcgId('${item.id}')">Link</button>
+                </div>
+            </div>
+            <div id="inline-relink-results-${item.id}" style="max-height:280px; overflow-y:auto;"></div>
+        </td>
+    </tr>`;
+    return mainRow + panelRow;
+}
+
+function toggleInlineRelink(itemId) {
+    const wasOpen = !!_expandedRelinkPanels[itemId];
+    if (wasOpen) {
+        delete _expandedRelinkPanels[itemId];
+    } else {
+        _expandedRelinkPanels[itemId] = true;
+    }
+    const panel = document.querySelector(`tr.inline-relink-row[data-relink-for="${itemId}"]`);
+    if (panel) {
+        panel.style.display = wasOpen ? 'none' : '';
+        if (!wasOpen) {
+            // First open: auto-fire the search using the prefilled name + set
+            const q = document.getElementById(`inline-relink-q-${itemId}`);
+            if (q) q.focus();
+            setTimeout(() => inlineRelinkSearch(itemId), 80);
+        }
+    } else {
+        // Panel hasn't rendered yet (shouldn't happen normally) — re-render
+        _rerenderStage();
+    }
+}
+
+async function inlineRelinkSearch(itemId) {
+    const qEl = document.getElementById(`inline-relink-q-${itemId}`);
+    const sEl = document.getElementById(`inline-relink-set-${itemId}`);
+    const resultsEl = document.getElementById(`inline-relink-results-${itemId}`);
+    if (!resultsEl) return;
+    const query = (qEl?.value || '').trim();
+    const setName = (sEl?.value || '').trim();
+    if (!query && !setName) {
+        resultsEl.innerHTML = '<p style="color:var(--text-dim); font-size:0.82rem;">Enter a name or set</p>';
+        return;
+    }
+    resultsEl.innerHTML = '<div class="loading"><span class="spinner"></span> Searching cache...</div>';
+    try {
+        const r = await fetch('/api/ingest/search-cards', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query, set_name: setName, limit: 20 }),
+        });
+        const d = await r.json();
+        if (!r.ok) { resultsEl.innerHTML = `<div class="alert alert-error">${d.error || 'Search failed'}</div>`; return; }
+        const results = d.results || [];
+        if (!results.length) {
+            resultsEl.innerHTML = '<div style="padding:8px; color:var(--text-dim); font-size:0.82rem;">No matches in Scrydex cache. Try fewer words, a different set, or paste the TCGPlayer ID directly.</div>';
+            return;
+        }
+        resultsEl.innerHTML = results.map(p => {
+            const tcgId = p.tcgplayer_id;
+            const img = p.image
+                ? `<img src="${p.image}" style="width:36px;height:50px;object-fit:contain;border-radius:3px;margin-right:8px;flex-shrink:0;">`
+                : '';
+            const price = p.market_price != null ? ' · NM $' + p.market_price.toFixed(2) : '';
+            const pname = (p.product_name || '').replace(/'/g, "\\'");
+            const psname = (p.set_name || '').replace(/'/g, "\\'");
+            // Scrydex-only rows have no TCG ID yet — flag them as not directly linkable
+            const linkable = tcgId != null;
+            const action = linkable
+                ? `onclick="inlineRelinkPick('${itemId}', ${tcgId}, '${pname}', ${p.market_price || 0}, '${psname}')"`
+                : 'title="Scrydex-only — no TCG mapping yet, can\'t link"';
+            const opacity = linkable ? '' : 'opacity:0.45; cursor:not-allowed;';
+            return `<div class="search-result" style="display:flex; align-items:center; padding:6px 8px; border:1px solid var(--border); border-radius:4px; margin-bottom:4px; cursor:${linkable ? 'pointer' : 'not-allowed'}; ${opacity}"
+                    onmouseover="if(${linkable})this.style.background='var(--surface)'"
+                    onmouseout="this.style.background='transparent'"
+                    ${action}>
+                ${img}
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:600; font-size:0.85rem;">${p.product_name}${p.card_number ? ' #' + p.card_number : ''}</div>
+                    <div style="font-size:0.72rem; color:var(--text-dim);">${p.set_name || ''}${linkable ? ' · TCG#' + tcgId : ' · Scrydex-only'}${price}</div>
+                </div>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        resultsEl.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+async function inlineRelinkPick(itemId, tcgId, name, price, setName) {
+    try {
+        const r = await fetch(`/api/ingest/item/${itemId}/relink`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                product_name: name,
+                tcgplayer_id: tcgId,
+                market_price: price,
+                set_name: setName || null,
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Relink failed'); return; }
+        // Server returns the updated item — mirror it locally so the row re-renders
+        // as mapped without a session reload.
+        const merged = d.item || {};
+        _updateLocalItem(itemId, {
+            is_mapped: true,
+            tcgplayer_id: tcgId,
+            product_name: name,
+            set_name: setName || merged.set_name || null,
+            market_price: merged.market_price ?? price,
+        });
+        delete _expandedRelinkPanels[itemId];
+        _rerenderStage();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+async function inlineRelinkByTcgId(itemId) {
+    const el = document.getElementById(`inline-relink-tcg-${itemId}`);
+    const raw = (el?.value || '').trim();
+    if (!raw) { alert('Enter a TCGPlayer ID'); return; }
+    const tcgId = parseInt(raw, 10);
+    if (isNaN(tcgId)) { alert('TCG ID must be a number'); return; }
+    try {
+        const r = await fetch(`/api/ingest/item/${itemId}/relink`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ tcgplayer_id: tcgId }),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Relink failed'); return; }
+        const merged = d.item || {};
+        _updateLocalItem(itemId, {
+            is_mapped: true,
+            tcgplayer_id: tcgId,
+            product_name: merged.product_name || undefined,
+            set_name: merged.set_name || undefined,
+            market_price: merged.market_price ?? undefined,
+        });
+        delete _expandedRelinkPanels[itemId];
+        _rerenderStage();
+    } catch (err) {
+        alert(err.message);
+    }
 }
 
 // Update local session data for an item (avoids full reload)
