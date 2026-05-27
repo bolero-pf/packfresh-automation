@@ -2269,7 +2269,10 @@ function _patchRouteSummary(wasReviewed) {
 // B/S/G/K (keyboard) and dest-button clicks change the displayed card's
 // destination LOCALLY (and persist destination only — `commit=false` so
 // `routing_reviewed_at` stays null). The scan event is the commit signal.
-// Done button / empty-Enter commits the displayed card and ends.
+// Done button / empty-Enter ENDS the session — it does NOT silently
+// commit the displayed card. If the displayed card is still unreviewed
+// on Finish, it's surfaced through the same "X cards not routed" prompt
+// as every other unreviewed card.
 //
 // _rsCounts only includes COMMITTED items so the per-destination totals
 // match what's actually been routed, not "preview if I scan".
@@ -2573,8 +2576,12 @@ function _renderSessionCard() {
     const condColors = { 'NM': 'var(--green)', 'LP': '#e6a817', 'MP': 'var(--orange)', 'HP': 'var(--red)', 'DMG': 'var(--red)' };
     const condColor = condColors[cond] || 'var(--text-dim)';
 
-    // Progress percentage
-    const progPct = Math.round(((_rsIndex + 1) / total) * 100);
+    // Progress reflects routed count, not display position. Out-of-order
+    // scans + the "Jump to first unreviewed" path used to make the bar
+    // jump backward as _rsIndex moved earlier in the list, even though
+    // the staffer was making forward progress.
+    const reviewedNow = _rsItems.filter(i => i.routing_reviewed_at).length;
+    const progPct = Math.round((reviewedNow / total) * 100);
 
     let html = '';
 
@@ -2788,8 +2795,9 @@ function _renderSessionCard() {
     html += `</div>`;
 
     // ── Scan input + warning ──
-    // Empty submit (no barcode in the box) = "this is the last card" — commit
-    // + end. Subsequent scans commit-and-jump. See _rsScanSubmit below.
+    // Empty submit (no barcode in the box) = "end the session" — does NOT
+    // commit the displayed card. Subsequent scans commit-and-jump. See
+    // _rsScanSubmit below.
     html += `<form id="rs-scan-form" onsubmit="return _rsScanSubmit(event);" style="display:flex; justify-content:center; margin-top:20px;" autocomplete="off">
         <input type="text" id="rs-scan-input" autocomplete="off" placeholder="📷 Scan next card — or press Enter on empty input to finish"
                style="width:100%; max-width:420px; padding:9px 14px; font-size:0.9rem;
@@ -2804,7 +2812,7 @@ function _renderSessionCard() {
         <button class="btn btn-secondary" onclick="_rsNav(-1)" ${_rsIndex === 0 ? 'disabled' : ''} style="padding:8px 20px;">&larr; Prev</button>
         <button class="btn btn-success" onclick="_rsFinish()" style="padding:10px 36px; font-size:1.05rem; font-weight:700;">
             <span style="font-size:0.7rem; opacity:0.7; display:block; margin-bottom:1px;">[Enter on empty]</span>
-            Done — Commit &amp; Finish
+            Done — Finish
         </button>
         <button class="btn btn-secondary" onclick="_rsNav(1)" ${_rsIndex >= total - 1 ? 'disabled' : ''} style="padding:8px 20px;">Next &rarr;</button>
     </div>`;
@@ -3205,15 +3213,17 @@ async function _rsCommitCurrent() {
     }
 }
 
-// Done / empty-Enter: commit the displayed card and end the session.
-// Triggered by the explicit Done button or by submitting the scan form
-// with an empty input. Per Issue #11 state machine, this is the "end"
-// gesture — no more cards coming.
+// Done / empty-Enter: end the session. Triggered by the explicit Done
+// button or by submitting the scan form with an empty input. Per Issue
+// #11 state machine, this is the "end" gesture — no more cards coming.
+//
+// Does NOT silently commit the displayed card. A stray scanner Enter or
+// accidental click otherwise routed whichever card was on screen to its
+// default destination (Mega Charizard X session 2026-05-27 — staffer hit
+// Enter mid-route, lost track of which cards were committed). The
+// displayed card, if unreviewed, falls through to the unreviewed-confirm
+// below and is handled the same as every other unreviewed card.
 async function _rsFinish() {
-    if (_rsIndex >= 0 && _rsItems[_rsIndex] && !_rsItems[_rsIndex].routing_reviewed_at) {
-        const ok = await _rsCommitCurrent();
-        if (!ok) return;
-    }
     // Guard: refuse to finish if any items are still unreviewed. Push step
     // now also requires routing_reviewed_at IS NOT NULL, so an unreviewed
     // item that slipped through here would otherwise sit invisibly in the
