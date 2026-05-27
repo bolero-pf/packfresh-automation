@@ -3433,13 +3433,21 @@ async function _rsCommitCurrent() {
 // button or by submitting the scan form with an empty input. Per Issue
 // #11 state machine, this is the "end" gesture — no more cards coming.
 //
-// Does NOT silently commit the displayed card. A stray scanner Enter or
-// accidental click otherwise routed whichever card was on screen to its
-// default destination (Mega Charizard X session 2026-05-27 — staffer hit
-// Enter mid-route, lost track of which cards were committed). The
-// displayed card, if unreviewed, falls through to the unreviewed-confirm
-// below and is handled the same as every other unreviewed card.
+// Commits the displayed card ONLY when it's the last unreviewed card —
+// in that case, Done IS the commit signal (there's no "scan the next
+// card" gesture left to drive a commit). Mid-route, when many cards are
+// still unreviewed, a stray scanner Enter must not silently route
+// whichever card is on screen (Mega Charizard X session 2026-05-27 —
+// staffer hit Enter mid-route, lost track of which cards were committed)
+// — those fall through to the "X cards not routed" prompt instead.
 async function _rsFinish() {
+    if (_rsIndex >= 0 && _rsItems[_rsIndex] && !_rsItems[_rsIndex].routing_reviewed_at) {
+        const unreviewedCount = _rsItems.filter(i => !i.routing_reviewed_at).length;
+        if (unreviewedCount === 1) {
+            const ok = await _rsCommitCurrent();
+            if (!ok) return;
+        }
+    }
     // Guard: refuse to finish if any items are still unreviewed. Push step
     // now also requires routing_reviewed_at IS NOT NULL, so an unreviewed
     // item that slipped through here would otherwise sit invisibly in the
