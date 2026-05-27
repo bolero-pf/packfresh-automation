@@ -18,7 +18,7 @@ import csv
 import hashlib
 import re
 from decimal import Decimal, InvalidOperation
-from collectr_html_parser import _normalize_set_name
+from collectr_html_parser import _normalize_set_name, _is_card_number
 from io import StringIO
 from typing import NamedTuple
 
@@ -94,18 +94,17 @@ def _is_raw_card(row: dict) -> bool:
     """
     Determine if a row represents a raw card vs sealed product.
     A row is raw if it has a meaningful Card Number AND Rarity.
-    
+
     Note: Some sealed blisters have bracket text that might look like card data
-    but won't have actual card numbers.
+    but won't have actual card numbers. Card-number shape check is shared with
+    the HTML parser so subset codes (GG40, TG07/TG30, SV13/SV94, SWSH001,
+    OP14-041, LOB-EN001, etc.) match consistently.
     """
     card_number = (row.get("Card Number") or "").strip()
     rarity = (row.get("Rarity") or "").strip()
-    
-    # Must have both a non-empty card number and rarity to be considered raw
-    if card_number and rarity:
-        # Additional check: card number should look like a card number (digits, possibly with /)
-        if re.match(r"^[\d]+(/[\d]+)?$", card_number):
-            return True
+
+    if card_number and rarity and _is_card_number(card_number):
+        return True
     return False
 
 
@@ -187,11 +186,16 @@ def parse_collectr_csv(file_content: str) -> ParseResult:
                 continue
 
             market_price = _parse_decimal(row.get(market_price_col, "0"))
-            is_raw = _is_raw_card(row)
 
             if not portfolio_name:
                 portfolio_name = (row.get("Portfolio Name") or "").strip()
 
+            grade_str = (row.get("Grade") or "Ungraded").strip()
+            is_graded, grade_company, grade_value = _parse_grade(grade_str)
+
+            # Graded slabs are always raw cards regardless of card-number shape —
+            # the slab is the source of truth, not the rarity/number heuristic.
+            is_raw = True if is_graded else _is_raw_card(row)
             product_type = "raw" if is_raw else "sealed"
             if is_raw:
                 raw_count += 1
@@ -199,9 +203,6 @@ def parse_collectr_csv(file_content: str) -> ParseResult:
                 sealed_count += 1
 
             total_market += market_price * quantity
-
-            grade_str = (row.get("Grade") or "Ungraded").strip()
-            is_graded, grade_company, grade_value = _parse_grade(grade_str)
 
             item = ParsedItem(
                 product_name=product_name,
