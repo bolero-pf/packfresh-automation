@@ -1705,7 +1705,11 @@ def _compute_weighted_cost(current_cost, current_qty, our_unit_cost, adding_qty)
 
 def _resolve_storage_card_type(item: dict, tcg_id, scrydex_id) -> tuple[str, dict | None]:
     """Return (canonical_card_type, card_data_or_None) using PPT then Scrydex.
-    Falls back to 'pokemon' if both miss. Shared between barcode + push paths."""
+
+    Falls back to the operator-selected game on intake_items.game (set by the
+    manual-entry form for cards Scrydex/PPT don't catalog) and finally to
+    'pokemon' if neither path resolves. Shared between barcode + push paths.
+    """
     card_type = None
     card_data = None
     if tcg_id and pricing:
@@ -1726,7 +1730,10 @@ def _resolve_storage_card_type(item: dict, tcg_id, scrydex_id) -> tuple[str, dic
         except Exception as e:
             logger.debug(f"scrydex game lookup for TCG#{tcg_id} failed: {e}")
     if not card_type:
-        card_type = "pokemon"
+        # Honor the operator's manual selection before defaulting to Pokemon —
+        # otherwise a manually-entered MTG promo silently routes to a Pokemon bin.
+        manual_game = (item.get("game") or "").strip()
+        card_type = _canonical_card_type(manual_game) if manual_game else "pokemon"
     return card_type, card_data
 
 
@@ -2013,11 +2020,13 @@ def _push_raw_item(item: dict) -> dict:
         except Exception as e:
             logger.debug(f"scrydex game lookup for TCG#{tcg_id} failed: {e}")
 
-    # Default if everything failed (manual entries, off-catalog cards):
-    # fall back to pokemon bin to preserve previous behavior. The downstream
-    # raw_cards row also stores card_type so it can be corrected later.
+    # Honor the operator's manual selection (intake_items.game) before
+    # falling back to Pokemon — otherwise a manually-entered MTG promo
+    # silently routes to a Pokemon bin. The downstream raw_cards row also
+    # stores card_type so it can be corrected later if still wrong.
     if not card_type:
-        card_type = "pokemon"
+        manual_game = (item.get("game") or "").strip()
+        card_type = _canonical_card_type(manual_game) if manual_game else "pokemon"
 
     # Assign bin(s) — one card at a time for placement accuracy
     assignments = assign_bins(card_type, qty, db)
@@ -3264,14 +3273,14 @@ def _explode_intake_to_singles(item: dict, session_id: str) -> list[str]:
                 condition, rarity, variant, language, variance,
                 quantity, market_price, offer_price, unit_cost_basis,
                 product_type, is_mapped, item_status, is_graded, grade_company, grade_value,
-                routing_destination, verified_at, listing_condition,
+                routing_destination, verified_at, listing_condition, game,
                 created_at
             ) VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
                 1, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s,
-                %s, %s, %s,
+                %s, %s, %s, %s,
                 (SELECT created_at + (%s * INTERVAL '1 microsecond') FROM intake_items WHERE id = %s)
             )
         """, (
@@ -3284,6 +3293,7 @@ def _explode_intake_to_singles(item: dict, session_id: str) -> list[str]:
             item.get("item_status", "good"), item.get("is_graded", False),
             item.get("grade_company"), item.get("grade_value"),
             dest, item.get("verified_at"), item.get("listing_condition"),
+            item.get("game"),
             i + 1, item_id,
         ))
 

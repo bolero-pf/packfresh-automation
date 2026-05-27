@@ -299,13 +299,19 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
                          offer_percentage: Decimal,
                          is_graded: bool = False, grade_company: str = "",
                          grade_value: str = "",
-                         variance: str = "") -> dict:
+                         variance: str = "",
+                         game: str = None) -> dict:
     """
     Add a single raw card item to a session (manual entry flow).
 
     tcgplayer_id may be None for cards Scrydex doesn't track (MTG PEOE
     promos, prerelease stamps, Scrydex-only JP). In that case the row is
     marked is_mapped=FALSE so staff can relink later if a mapping shows up.
+
+    `game` is the operator-selected game for manual entries — required so bin
+    routing in ingestion doesn't silently default unmapped cards to Pokemon.
+    For mapped (tcgplayer_id-bearing) entries it's still respected but
+    ingestion will prefer the looked-up game from Scrydex/PPT when available.
 
     Inserts one row with quantity=N — matches the CSV/Collectr/HTML import
     paths. Identity (per-copy barcode) is minted at finalize in ingestion's
@@ -325,13 +331,14 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
             (session_id, product_name, tcgplayer_id, product_type,
              set_name, card_number, condition, rarity, variance,
              quantity, market_price, offer_price, unit_cost_basis, is_mapped,
-             is_graded, grade_company, grade_value)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             is_graded, grade_company, grade_value, game)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
     """, (session_id, product_name, tcgplayer_id, "raw",
           set_name, card_number, condition, rarity, variance or "",
           qty, market_price, offer_total, unit_cost, is_mapped,
-          is_graded, grade_company or None, grade_value or None))
+          is_graded, grade_company or None, grade_value or None,
+          (game or "").strip().lower() or None))
     _backfill_scrydex_ids(session_id)
     return row
 

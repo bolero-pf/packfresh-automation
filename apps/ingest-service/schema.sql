@@ -89,6 +89,7 @@ CREATE TABLE intake_items (
     card_number VARCHAR(50),
     condition VARCHAR(20), -- NM, LP, MP, HP, DMG
     rarity VARCHAR(50),
+    game VARCHAR(32), -- 'pokemon'/'magic'/'onepiece'/etc; set on manual entry, else derived from tcgplayer_id lookup
     
     -- Pricing
     quantity INTEGER NOT NULL DEFAULT 1,

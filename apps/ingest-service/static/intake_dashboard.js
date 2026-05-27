@@ -959,6 +959,13 @@ function toggleIntakeCardManual() {
             document.getElementById('intake-card-condition')?.value || 'NM';
         document.getElementById('intake-card-manual-qty').value =
             document.getElementById('intake-card-qty')?.value || '1';
+        const gameSel = document.getElementById('intake-card-manual-game');
+        if (gameSel) {
+            try {
+                const sticky = localStorage.getItem('intake_manual_last_game');
+                if (sticky) gameSel.value = sticky;
+            } catch (_) { /* localStorage unavailable */ }
+        }
         setTimeout(() => nm.focus(), 50);
     }
 }
@@ -971,6 +978,7 @@ async function submitIntakeCardManual() {
     if (isNaN(price) || price < 0) { alert('Enter a valid price'); return; }
 
     const tcgRaw = document.getElementById('intake-card-manual-tcgid').value.trim();
+    const game = (document.getElementById('intake-card-manual-game')?.value || 'pokemon');
     const body = {
         session_id: intakeSessionId,
         card_name: name,
@@ -981,6 +989,7 @@ async function submitIntakeCardManual() {
         variance: document.getElementById('intake-card-manual-variant').value.trim() || null,
         quantity: parseInt(document.getElementById('intake-card-manual-qty').value) || 1,
         condition: document.getElementById('intake-card-manual-cond').value,
+        game: game,
     };
     try {
         const r = await fetch('/api/intake/add-raw-card', {
@@ -989,6 +998,7 @@ async function submitIntakeCardManual() {
         });
         const d = await r.json();
         if (!r.ok) { alert(d.error || 'Add failed'); return; }
+        try { localStorage.setItem('intake_manual_last_game', game); } catch (_) {}
         // Reset form, keep drawer open for next entry
         ['intake-card-manual-name','intake-card-manual-set','intake-card-manual-cardnum',
          'intake-card-manual-tcgid','intake-card-manual-variant','intake-card-manual-price']

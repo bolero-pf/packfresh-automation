@@ -311,6 +311,7 @@ def add_raw_card():
         grade_company=data.get("grade_company", "") or "",
         grade_value=data.get("grade_value", "") or "",
         variance=(data.get("variance") or "").strip(),
+        game=(data.get("game") or "").strip().lower() or None,
     )
 
     # Recalculate session totals
