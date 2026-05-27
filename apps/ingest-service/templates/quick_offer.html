@@ -21,6 +21,17 @@
         .qo-title { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.5px; }
         .qo-title span { color: var(--accent); }
         .qo-sub { font-size: 0.85rem; color: var(--text-dim); }
+        .qo-name-input {
+            width: 260px;
+            padding: 8px 12px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            background: var(--surface-2);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+        .qo-name-input:focus { outline: none; border-color: var(--accent); }
         .qo-status { margin-left: auto; font-size: 0.8rem; color: var(--text-dim); font-family: var(--font-mono, ui-monospace, monospace); }
 
         .qo-totals {
@@ -142,6 +153,9 @@
                 <div class="qo-title">Pack <span>Fresh</span> · Quick Offer</div>
                 <div class="qo-sub">Walk-in counter · 75% credit / 65% cash</div>
             </div>
+            <input type="text" id="qo-customer-name" class="qo-name-input"
+                   placeholder="Name this session (customer name)"
+                   maxlength="100" autocomplete="off">
             <div class="qo-status" id="qo-session-info">Starting session…</div>
             <!-- The shared intake_dashboard.js's checkHealth() pulses these every
                  30s; without the elements present, the call throws on null. -->
@@ -334,6 +348,11 @@
     const QO_CASH_PCT = 65;
     const QO_CREDIT_PCT = 75;
 
+    function qoCustomerName() {
+        const el = document.getElementById('qo-customer-name');
+        return (el && el.value || '').trim();
+    }
+
     // Lazy session create. The old behavior — kicking this off on page load
     // and after every reset — was littering the Active Offers tab with empty
     // "Quick Offer" sessions every time staff so much as opened the page.
@@ -349,7 +368,7 @@
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
-                        customer_name: 'Quick Offer',
+                        customer_name: qoCustomerName() || 'Quick Offer',
                         session_type: 'mixed',
                         cash_percentage: QO_CASH_PCT,
                         credit_percentage: QO_CREDIT_PCT,
@@ -369,6 +388,27 @@
             }
         })();
         return _qoSessionStarting;
+    }
+
+    // Rename after the session is created — so staff who forgot to type a
+    // name first (or who only learn the customer's name partway through)
+    // can still get a real label in the ingest queue. Debounced so we're
+    // not POSTing on every keystroke.
+    let _qoRenameTimer = null;
+    function qoScheduleRename() {
+        clearTimeout(_qoRenameTimer);
+        _qoRenameTimer = setTimeout(qoCommitRename, 500);
+    }
+    async function qoCommitRename() {
+        if (!intakeSessionId) return;
+        const name = qoCustomerName() || 'Quick Offer';
+        try {
+            await fetch('/api/intake/session/' + intakeSessionId + '/rename', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ customer_name: name }),
+            });
+        } catch (err) { /* silent — next blur retries */ }
     }
 
     // Override the upstream loader. The dashboard table layout doesn't fit the
@@ -503,12 +543,14 @@
 
     async function qoReset() {
         intakeSessionId = null;
+        clearTimeout(_qoRenameTimer);
         document.getElementById('qo-items-wrap').innerHTML = '<div class="qo-empty">Search and add items to see the offer.</div>';
         document.getElementById('intake-search-results').innerHTML = '';
         qoUpdateTotals(0, 0, 0);
         qoSetActionsEnabled(false);
-        // Clear the search inputs so the next customer starts fresh
-        ['intake-sealed-search','intake-card-search','intake-card-set','intake-card-tcgid'].forEach(id => {
+        // Clear the search inputs and the customer-name input so the next
+        // customer starts fresh.
+        ['intake-sealed-search','intake-card-search','intake-card-set','intake-card-tcgid','qo-customer-name'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.value = '';
         });
@@ -520,7 +562,7 @@
         if (graded && graded.checked) { graded.checked = false; toggleIntakeGraded(); }
         switchIntakeType('sealed');
         document.getElementById('qo-session-info').textContent = 'Walk-in counter — search to start';
-        document.getElementById('intake-sealed-search').focus();
+        document.getElementById('qo-customer-name').focus();
     }
 
     function qoFlash(msg, color) {
@@ -575,7 +617,10 @@
     document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('qo-session-info').textContent = 'Walk-in counter — search to start';
         switchIntakeType('sealed');
-        document.getElementById('intake-sealed-search').focus();
+        const nameEl = document.getElementById('qo-customer-name');
+        nameEl.addEventListener('input', qoScheduleRename);
+        nameEl.addEventListener('blur', qoCommitRename);
+        nameEl.focus();
     });
 
     // The upstream JS uses themedConfirm/themedPrompt for some flows

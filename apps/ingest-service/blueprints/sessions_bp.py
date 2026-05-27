@@ -571,6 +571,20 @@ def create_session():
     return jsonify({"success": True, "session": _serialize(session)})
 
 
+@bp.route("/api/intake/session/<session_id>/rename", methods=["POST"])
+def rename_session(session_id):
+    """Update the customer_name label on a session. Used by Quick Offer so
+    walk-in sessions can be tagged with the customer's name (or any short
+    label) instead of all appearing as generic 'Quick Offer' rows in the
+    ingest queue."""
+    data = request.json or {}
+    name = (data.get("customer_name") or "").strip()[:100] or "Walk-in"
+    db.execute(
+        "UPDATE intake_sessions SET customer_name = %s WHERE id = %s",
+        (name, session_id),
+    )
+    return jsonify({"success": True, "customer_name": name})
+
 
 @bp.route("/api/intake/session/<session_id>", methods=["GET"])
 def get_session(session_id):
