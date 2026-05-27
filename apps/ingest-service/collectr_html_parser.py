@@ -90,9 +90,10 @@ def _normalize_condition(raw: str) -> str:
 
 
 def _is_card_number(val: str) -> bool:
-    """Return True if the string looks like a Pokemon card number.
+    """Return True if the string looks like a TCG card number.
     Handles: 4, 107, 79/73, 096/182, SV13/SV94, SVP 200, SWSH 262,
-             TG16/TG30, 55a, 11/108, PROMO, etc.
+             TG16/TG30, 55a, 11/108, PROMO, OP14-041, ST01-001,
+             LOB-EN001, etc.
     """
     v = val.strip()
     if not v:
@@ -100,9 +101,10 @@ def _is_card_number(val: str) -> bool:
     # Pure number or number/number (with optional leading zeros)
     if re.match(r"^\d+(/\d+)?$", v):
         return True
-    # Alphanumeric (with optional spaces) and optional slash:
-    # SVP 200, SWSH001, SV13/SV94, RC01/RC32, TG16/TG30, 55a, etc.
-    if re.match(r"^[A-Z0-9]+(\s+[A-Z0-9]+)?(/[A-Z0-9]+(\s+[A-Z0-9]+)?)?$", v, re.IGNORECASE):
+    # Alphanumeric (with optional spaces or hyphens) and optional slash:
+    # SVP 200, SWSH001, SV13/SV94, RC01/RC32, TG16/TG30, 55a,
+    # OP14-041, ST01-001, LOB-EN001, etc.
+    if re.match(r"^[A-Z0-9]+(?:[-\s][A-Z0-9]+)*(/[A-Z0-9]+(?:[-\s][A-Z0-9]+)*)?$", v, re.IGNORECASE):
         return True
     return False
 
