@@ -3687,7 +3687,11 @@ function _relinkRenderResults(results, resultsDiv, append) {
                     const tcg = pick.tcgId ? parseInt(pick.tcgId) : null;
                     const sid = pick.scrydexId || null;
                     if (!tcg && !sid) return;
-                    _relinkFetchAndShowConditions(tcg, sid);
+                    // pick.variant is the chip the user clicked. Without it
+                    // _relinkFetchAndShowConditions falls back to Scrydex's
+                    // primary_printing and the operator has to re-click the
+                    // variant they already picked.
+                    _relinkFetchAndShowConditions(tcg, sid, pick.variant || null);
                 },
                 onTryPpt: () => _relinkDoSearch('ppt'),
             });
@@ -3984,7 +3988,7 @@ async function _relinkSealedConfirm({ tcgId, scrydexId, price, name, setName }) 
     } catch(err) { resultsDiv.innerHTML = '<div class="alert alert-error">' + err.message + '</div>'; }
 }
 
-async function _relinkFetchAndShowConditions(tcgId, scrydexId) {
+async function _relinkFetchAndShowConditions(tcgId, scrydexId, variantHint) {
     const rs = window._relinkState;
     const resultsDiv = document.getElementById('relink-results');
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading pricing...</div>';
@@ -4010,7 +4014,13 @@ async function _relinkFetchAndShowConditions(tcgId, scrydexId) {
         if (!r.ok) { resultsDiv.innerHTML = '<div class="alert alert-error">' + (d.error||'Failed') + '</div>'; return; }
         const card = d.card || {};
         const variants = d.variants || {};
-        let primary = d.primary_printing || Object.keys(variants)[0] || 'Default';
+        // Honor the chip the operator clicked over Scrydex's primary_printing —
+        // for cards with multiple printings (foil/normal/etched/1st Edition)
+        // primary_printing usually wins to 'normal' but the operator pointed
+        // at the specific row they wanted.
+        let primary = (variantHint && variants[variantHint])
+            ? variantHint
+            : (d.primary_printing || Object.keys(variants)[0] || 'Default');
         if (!variants[primary] && Object.keys(variants).length) primary = Object.keys(variants)[0];
         rs.tcgId = tcgId || (card.tcgplayer_id || null);
         rs.scrydexId = scrydexId || card.scrydex_id || null;
