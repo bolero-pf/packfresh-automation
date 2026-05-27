@@ -5594,36 +5594,69 @@ function _refreshPctControls() {
     ctrls.style.display = dirty ? 'inline-flex' : 'none';
 }
 
+// Mirrors backend calc_offer_price: raw cards under $2 pay a flat 25%
+// regardless of session %, damaged items pay 0.88×. Returns the two
+// fixed quantities the % ↔ $ calculator needs: the locked bulk subtotal
+// (which a session-% change can't move) and the non-bulk base that the
+// session % gets applied to. Reads from window._sessionItems (populated
+// by viewSession).
+function _computeOfferBreakdown() {
+    const items = Array.isArray(window._sessionItems) ? window._sessionItems : [];
+    let bulkOffer = 0;
+    let nonBulkBase = 0;
+    for (const it of items) {
+        const status = it.item_status || 'good';
+        if (status !== 'good' && status !== 'damaged') continue;
+        const market = Number(it.market_price || 0);
+        const qty = Number(it.quantity || 0);
+        if (market <= 0 || qty <= 0) continue;
+        const dmg = status === 'damaged' ? 0.88 : 1;
+        const isBulk = (it.product_type === 'raw') && market < 2;
+        if (isBulk) {
+            bulkOffer += market * qty * 0.25 * dmg;
+        } else {
+            nonBulkBase += market * qty * dmg;
+        }
+    }
+    return { bulkOffer, nonBulkBase };
+}
+
 // Triggered by either percentage <input> in the session modal. Forward-
-// syncs the matching dollar field, then refreshes Save/Cancel visibility.
+// syncs the matching dollar field using the bulk-aware formula, then
+// refreshes Save/Cancel visibility.
 function onPctEdit(sessionId, kind) {
     if (kind) {
         const pctEl = document.getElementById(`pct-${kind}-input`);
         const amtEl = document.getElementById(`amt-${kind}-input`);
         if (pctEl && amtEl) {
-            const market = Number(pctEl.dataset.market || 0);
             const pct = parseFloat(pctEl.value);
-            if (!isNaN(pct) && market > 0) {
-                amtEl.value = (market * pct / 100).toFixed(2);
+            if (!isNaN(pct)) {
+                const { bulkOffer, nonBulkBase } = _computeOfferBreakdown();
+                const amt = bulkOffer + nonBulkBase * pct / 100;
+                amtEl.value = amt.toFixed(2);
             }
         }
     }
     _refreshPctControls();
 }
 
-// Triggered by either dollar-amount <input>. Back-calculates the matching
-// percentage to two decimals (closest XX.XX%) so the user can target a
-// specific payout dollar amount instead of guessing a percentage.
+// Triggered by either dollar-amount <input>. Back-calculates the
+// percentage that — after the bulk-$2 floor and any damaged-item
+// discounts — actually produces the requested payout. Clamped to
+// [0, 100]; amounts below the bulk floor or above what 100% can pay
+// show the achievable boundary instead.
 function onAmountEdit(sessionId, kind) {
     const amtEl = document.getElementById(`amt-${kind}-input`);
     const pctEl = document.getElementById(`pct-${kind}-input`);
     if (!amtEl || !pctEl) return;
-    const market = Number(amtEl.dataset.market || 0);
     const amt = parseFloat(amtEl.value);
-    if (!isNaN(amt) && market > 0) {
-        const pct = Math.round((amt / market) * 10000) / 100;
-        const clamped = Math.max(0, Math.min(100, pct));
-        pctEl.value = clamped.toFixed(2);
+    if (!isNaN(amt)) {
+        const { bulkOffer, nonBulkBase } = _computeOfferBreakdown();
+        if (nonBulkBase > 0) {
+            const pct = Math.round(((amt - bulkOffer) / nonBulkBase) * 10000) / 100;
+            const clamped = Math.max(0, Math.min(100, pct));
+            pctEl.value = clamped.toFixed(2);
+        }
     }
     _refreshPctControls();
 }
