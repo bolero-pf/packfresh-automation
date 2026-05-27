@@ -1437,10 +1437,18 @@ async function inlineRelinkSearch(itemId) {
             const price = p.market_price != null ? ' · NM $' + p.market_price.toFixed(2) : '';
             const pname = (p.product_name || '').replace(/'/g, "\\'");
             const psname = (p.set_name || '').replace(/'/g, "\\'");
+            const variantStr = p.variant || '';
+            const escVariant = variantStr.replace(/'/g, "\\'");
+            // Variant chip distinguishes printings that share a TCG ID (foil vs
+            // normal, prereleaseStamp, etc.) — without it foil and normal rows
+            // look identical and operators pick the wrong price tier.
+            const variantChip = variantStr
+                ? (typeof pfVariantLabel === 'function' ? pfVariantLabel(variantStr) : ` <span style="font-size:0.65rem; padding:1px 6px; border-radius:3px; background:var(--surface); color:var(--text-dim); margin-left:4px;">${variantStr}</span>`)
+                : '';
             // Scrydex-only rows have no TCG ID yet — flag them as not directly linkable
             const linkable = tcgId != null;
             const action = linkable
-                ? `onclick="inlineRelinkPick('${itemId}', ${tcgId}, '${pname}', ${p.market_price || 0}, '${psname}')"`
+                ? `onclick="inlineRelinkPick('${itemId}', ${tcgId}, '${pname}', ${p.market_price || 0}, '${psname}', '${escVariant}')"`
                 : 'title="Scrydex-only — no TCG mapping yet, can\'t link"';
             const opacity = linkable ? '' : 'opacity:0.45; cursor:not-allowed;';
             return `<div class="search-result" style="display:flex; align-items:center; padding:6px 8px; border:1px solid var(--border); border-radius:4px; margin-bottom:4px; cursor:${linkable ? 'pointer' : 'not-allowed'}; ${opacity}"
@@ -1449,7 +1457,7 @@ async function inlineRelinkSearch(itemId) {
                     ${action}>
                 ${img}
                 <div style="flex:1; min-width:0;">
-                    <div style="font-weight:600; font-size:0.85rem;">${p.product_name}${p.card_number ? ' #' + p.card_number : ''}</div>
+                    <div style="font-weight:600; font-size:0.85rem;">${p.product_name}${p.card_number ? ' #' + p.card_number : ''}${variantChip}</div>
                     <div style="font-size:0.72rem; color:var(--text-dim);">${p.set_name || ''}${linkable ? ' · TCG#' + tcgId : ' · Scrydex-only'}${price}</div>
                 </div>
             </div>`;
@@ -1459,7 +1467,7 @@ async function inlineRelinkSearch(itemId) {
     }
 }
 
-async function inlineRelinkPick(itemId, tcgId, name, price, setName) {
+async function inlineRelinkPick(itemId, tcgId, name, price, setName, variant) {
     try {
         const r = await fetch(`/api/ingest/item/${itemId}/relink`, {
             method: 'POST',
@@ -1469,6 +1477,10 @@ async function inlineRelinkPick(itemId, tcgId, name, price, setName) {
                 tcgplayer_id: tcgId,
                 market_price: price,
                 set_name: setName || null,
+                // variant distinguishes foil vs normal vs prereleaseStamp etc.
+                // for cards that share a TCG ID — without it the relink
+                // endpoint resolves the wrong price row.
+                variant: variant || null,
             }),
         });
         const d = await r.json();
@@ -1481,6 +1493,7 @@ async function inlineRelinkPick(itemId, tcgId, name, price, setName) {
             tcgplayer_id: tcgId,
             product_name: name,
             set_name: setName || merged.set_name || null,
+            variant: variant || merged.variant || null,
             market_price: merged.market_price ?? price,
         });
         delete _expandedRelinkPanels[itemId];
