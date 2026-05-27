@@ -4,12 +4,12 @@
 
 ## Two Cohorts
 1. **Guests** (in-store iPad) — browse Raw / Sealed / Slabs → hold request → staff pulls → pay at register/POS
-2. **Champions** (VIP3, remote) — browse Raw only → checkout via Shopify Storefront API → native Shopify checkout
+2. **VIPs** (VIP1 / VIP2 / VIP3, remote) — browse Raw only → checkout via Shopify Storefront API → native Shopify checkout. Internally still called the "champion" cohort (DB `cohort='champion'`, header `X-Champion-Email`); the customer-facing label is tier-aware (`Champion` for VIP3, `VIP1`/`VIP2` otherwise). Tier check lives in `VIP_TIERS` / `_resolve_vip_tier` in `app.py`.
 
 ## Mode detection (instore vs champion)
 The cohort is determined per-request in `_resolve_kiosk_mode` (sets `g.kiosk_mode`):
 - **`instore`** — request carries the `pf_kiosk_device` HttpOnly cookie that points to a non-revoked row in `kiosk_devices`. Set once via `/activate?token=…` during iPad setup. Legacy `?key=KIOSK_ACCESS_KEY` URL param is still accepted as a fallback.
-- **`champion`** — request carries `X-Champion-Email` header set by the frontend after VIP3 verification.
+- **`champion`** — request carries `X-Champion-Email` header set by the frontend after VIP verification (any of VIP1/VIP2/VIP3).
 - **`None`** — anonymous; locked out except for the gate UI and `/api/champion/identify`.
 
 `_allowed_kinds(mode)` returns `['raw','sealed','slab']` for instore and `['raw']` for champion. Sealed/slab endpoints 403 in champion mode (defense in depth).
@@ -34,7 +34,7 @@ The cohort is determined per-request in `_resolve_kiosk_mode` (sets `g.kiosk_mod
 - `/api/card` — Raw card detail (individual copies)
 - `/api/products?kind=sealed|slab` — Sealed/Slab catalog from `inventory_product_cache` (in-store only)
 - `/api/hold` — mixed Raw / Sealed / Slab hold creation (one customer, one cart)
-- `/api/champion/identify` — email → Shopify customer lookup → VIP3 check
+- `/api/champion/identify` — email → Shopify customer lookup → VIP tier check (VIP1/VIP2/VIP3); returns `tier` so the frontend can render a tier-aware label
 - `/api/checkout` — Champion checkout (Raw only): hold + temp Shopify products + Storefront cart
 
 ### Staff
@@ -53,8 +53,8 @@ The cohort is determined per-request in `_resolve_kiosk_mode` (sets `g.kiosk_mod
 - `/api/cleanup/abandoned` — Champion expiry (existing); background loop also handles in-store unclaimed REQUESTED + PULLED→UNRESOLVED reconciliation
 
 ## Champion Checkout Flow
-1. Champion enters email → `/api/champion/identify` verifies VIP3 tag via Shopify GraphQL
-2. Champion clicks "Checkout on Shopify" → `/api/checkout`:
+1. VIP enters email → `/api/champion/identify` verifies any of VIP1/VIP2/VIP3 tag via Shopify GraphQL
+2. VIP clicks "Checkout on Shopify" → `/api/checkout` (re-verifies any VIP tier):
    - Creates hold (locks cards via `current_hold_id`)
    - Creates real ACTIVE Shopify products (published ONLY to "Kiosk" headless channel, invisible on Online Store)
    - Creates Storefront API cart with variant GIDs → returns `checkoutUrl`

@@ -1096,11 +1096,11 @@ function showAccessGate() {
       <div style="margin-bottom:12px;color:var(--dim);"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="13" height="16" rx="2"/><path d="M8 4h11a2 2 0 0 1 2 2v14"/></svg></div>
       <div style="font-size:1.2rem;font-weight:700;margin-bottom:8px;">Commonlands Card Browser</div>
       <div style="color:var(--dim);margin-bottom:20px;">This kiosk is for in-store use. Ask a staff member for access.</div>
-      <div style="color:var(--dim);font-size:0.82rem;">Champion? <a href="#" onclick="showChampionAccessLogin(event)" style="color:var(--accent);">Sign in with your email</a></div>
+      <div style="color:var(--dim);font-size:0.82rem;">VIP? <a href="#" onclick="showChampionAccessLogin(event)" style="color:var(--accent);">Sign in with your email</a></div>
       <div id="gate-champion-form" style="display:none;max-width:300px;margin:16px auto 0;">
         <input class="form-input" id="gate-champ-email" type="email" placeholder="your@email.com" style="margin-bottom:8px;">
         <div id="gate-champ-error" style="display:none;color:var(--red);font-size:0.82rem;margin-bottom:8px;"></div>
-        <button class="btn btn-gold" style="width:100%;" onclick="gateChampionVerify()">Verify Champion Status</button>
+        <button class="btn btn-gold" style="width:100%;" onclick="gateChampionVerify()">Verify VIP Status</button>
       </div>
     </div>
   `;
@@ -1118,13 +1118,13 @@ async function gateChampionVerify() {
   try {
     const d = await post('/api/champion/identify', { email });
     if (d.verified) {
-      _champion = { verified: true, first_name: d.first_name, customer_gid: d.customer_gid, email: d.email, checkout_enabled: d.checkout_enabled };
+      _champion = { verified: true, first_name: d.first_name, customer_gid: d.customer_gid, email: d.email, tier: d.tier, checkout_enabled: d.checkout_enabled };
       _saveChampion();
       _hasAccess = true;
       updateChampionUI();
       location.reload();
     } else {
-      errEl.textContent = d.reason || 'Not a Champion account.';
+      errEl.textContent = d.reason || 'Not a VIP account.';
       errEl.style.display = 'block';
     }
   } catch(e) {
@@ -1141,7 +1141,20 @@ let _allowedKinds = ['raw'];  // restricted in champion mode, full set in-store
 let _activeKind = 'raw';
 
 // Champion state — persisted in localStorage
-let _champion = null;  // { verified, first_name, customer_gid, email }
+let _champion = null;  // { verified, first_name, customer_gid, email, tier }
+
+// Display label for the verified VIP. Customer-facing tier names:
+// VIP3 → Champion, VIP2 → Guardian, VIP1 → Adventurer. Pre-tier-rollout
+// localStorage rows have no `tier` field — assume Champion since that
+// was the only cohort that could sign in before.
+function _championLabel() {
+  if (!_champion || !_champion.verified) return '';
+  const tier = (_champion.tier || '').toUpperCase();
+  if (!tier || tier === 'VIP3') return 'Champion';
+  if (tier === 'VIP2') return 'Guardian';
+  if (tier === 'VIP1') return 'Adventurer';
+  return 'VIP';
+}
 
 function _saveChampion() {
   try { localStorage.setItem('pf_champion', JSON.stringify(_champion)); } catch(e) {}
@@ -1166,7 +1179,7 @@ function updateChampionUI() {
   const bar = document.getElementById('champion-bar');
   if (!bar) return;
   if (_champion && _champion.verified) {
-    bar.innerHTML = `<span style="color:var(--accent);font-weight:700;">★ Champion</span><span style="color:var(--text);margin-left:4px;">${esc(_champion.first_name || _champion.email)}</span><button class="btn btn-outline" style="padding:2px 10px;font-size:0.72rem;margin-left:auto;line-height:1;" onclick="_clearChampion()">Sign Out</button>`;
+    bar.innerHTML = `<span style="color:var(--accent);font-weight:700;">★ ${esc(_championLabel())}</span><span style="color:var(--text);margin-left:4px;">${esc(_champion.first_name || _champion.email)}</span><button class="btn btn-outline" style="padding:2px 10px;font-size:0.72rem;margin-left:auto;line-height:1;" onclick="_clearChampion()">Sign Out</button>`;
     bar.style.display = 'flex';
   } else {
     bar.innerHTML = '';
@@ -3440,9 +3453,9 @@ function renderCart(panel) {
       <div class="cart-total-val">$${estimatedTotal.toFixed(2)}</div>
     </div>
     ${_champion && _champion.verified ? `
-      <!-- Champion checkout -->
+      <!-- VIP checkout -->
       <div style="background:rgba(223,163,42,0.08);border:1px solid rgba(223,163,42,0.25);border-radius:8px;padding:12px;margin-bottom:12px;">
-        <div style="font-weight:700;color:var(--accent);margin-bottom:4px;">★ Champion</div>
+        <div style="font-weight:700;color:var(--accent);margin-bottom:4px;">★ ${esc(_championLabel())}</div>
         <div style="font-size:0.82rem;color:var(--dim);">Browsing as ${esc(_champion.email)}</div>
       </div>
       ${_champion.checkout_enabled ? `
@@ -3458,20 +3471,20 @@ function renderCart(panel) {
         </div>
       `}
     ` : `
-      <!-- Guest hold request / Champion sign-in. The Champion CTA only
+      <!-- Guest hold request / VIP sign-in. The VIP CTA only
            makes sense on remote browsers (no in-store device cookie) —
            in-store customers pay at the register, not online, so we
            hide the whole section there. -->
       ${_mode !== 'instore' ? `
         <div id="champion-section" style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px;">
-          <div style="font-size:0.82rem;color:var(--dim);margin-bottom:8px;">★ <a href="#" onclick="showChampionLogin(event)" style="color:var(--accent);">Champion? Sign in to checkout online</a></div>
+          <div style="font-size:0.82rem;color:var(--dim);margin-bottom:8px;">★ <a href="#" onclick="showChampionLogin(event)" style="color:var(--accent);">VIP? Sign in to checkout online</a></div>
           <div id="champion-login-form" style="display:none;">
             <div class="form-row">
-              <label class="form-label">Champion Email</label>
+              <label class="form-label">VIP Email</label>
               <input class="form-input" id="champ-email" type="email" placeholder="your@email.com" autocomplete="email">
             </div>
             <div id="champ-error" style="display:none;" class="warning"></div>
-            <button class="btn btn-outline" style="width:100%;" id="champ-verify-btn" onclick="verifyChampion()">Verify Champion Status</button>
+            <button class="btn btn-outline" style="width:100%;" id="champ-verify-btn" onclick="verifyChampion()">Verify VIP Status</button>
           </div>
         </div>
       ` : ''}
@@ -3589,21 +3602,21 @@ async function verifyChampion() {
   try {
     const d = await post('/api/champion/identify', { email });
     if (d.verified) {
-      _champion = { verified: true, first_name: d.first_name, customer_gid: d.customer_gid, email: d.email, checkout_enabled: d.checkout_enabled };
+      _champion = { verified: true, first_name: d.first_name, customer_gid: d.customer_gid, email: d.email, tier: d.tier, checkout_enabled: d.checkout_enabled };
       _saveChampion();
       updateChampionUI();
-      renderCart(document.getElementById('cart-panel'));  // re-render with Champion mode
+      renderCart(document.getElementById('cart-panel'));  // re-render with VIP mode
     } else {
-      errEl.textContent = d.reason || 'Not a Champion account.';
+      errEl.textContent = d.reason || 'Not a VIP account.';
       errEl.style.display = 'block';
       btn.disabled = false;
-      btn.textContent = 'Verify Champion Status';
+      btn.textContent = 'Verify VIP Status';
     }
   } catch(e) {
     errEl.textContent = e.message || 'Verification failed.';
     errEl.style.display = 'block';
     btn.disabled = false;
-    btn.textContent = 'Verify Champion Status';
+    btn.textContent = 'Verify VIP Status';
   }
 }
 
@@ -3612,7 +3625,7 @@ async function submitChampionCheckout() {
   const btn = document.getElementById('submit-btn');
 
   if (!_champion || !_champion.verified) {
-    errEl.textContent = 'Please sign in as a Champion first.';
+    errEl.textContent = 'Please sign in as a VIP first.';
     errEl.style.display = 'block';
     return;
   }

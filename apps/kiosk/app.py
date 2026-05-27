@@ -4,7 +4,7 @@ Customer-facing card browse + hold request system.
 
 Two cohorts:
   1. Guests (in-store) — browse + hold requests, staff pulls cards, pay at register
-  2. Champions (VIP3, remote) — browse + checkout via Shopify Storefront API cart
+  2. Champions (VIP1/2/3, remote) — browse + checkout via Shopify Storefront API cart
 
 Read-only on raw_cards. Writes to holds + hold_items.
 Cards are aggregated by (card_name, set_name) with qty per condition.
@@ -344,7 +344,7 @@ def _resolve_kiosk_mode():
     """
     Determine the mode of the current request:
       - 'instore'  : trusted iPad with valid device cookie (or legacy ?key=)
-      - 'champion' : remote VIP3 customer (verified via X-Champion-Email header)
+      - 'champion' : remote VIP customer (any of VIP1/VIP2/VIP3; verified via X-Champion-Email header)
       - None       : unauthenticated; only the gate UI / champion identify is allowed
 
     Sets g.kiosk_mode + g.kiosk_device_id. Cheap; safe to call from before_request.
@@ -2489,11 +2489,24 @@ def _delete_all_products_for_sku(sku: str) -> list[str]:
 # Champion Identification
 # ═══════════════════════════════════════════════════════════════════════════════
 
+VIP_TIERS = ("VIP3", "VIP2", "VIP1")  # ordered highest-first so we surface the top tier
+
+
+def _resolve_vip_tier(tags: list[str]) -> str | None:
+    """Return the highest VIP tier present in the customer's tag list, or None."""
+    upper = [t.strip().upper() for t in (tags or [])]
+    for t in VIP_TIERS:
+        if t in upper:
+            return t
+    return None
+
+
 @app.route("/api/champion/identify", methods=["POST"])
 def champion_identify():
     """
-    Look up a Shopify customer by email and verify they have VIP3 tag.
-    No auth layer — just identity check. They still must log in at Shopify checkout.
+    Look up a Shopify customer by email and verify they hold any VIP tier
+    (VIP1/VIP2/VIP3). No auth layer — just identity check. They still must
+    log in at Shopify checkout.
     """
     data = request.get_json() or {}
     email = (data.get("email") or "").strip().lower()
@@ -2524,15 +2537,16 @@ def champion_identify():
         return jsonify({"verified": False, "reason": "No account found with that email"}), 200
 
     customer = edges[0]["node"]
-    tags = [t.strip().upper() for t in (customer.get("tags") or [])]
-    if "VIP3" not in tags:
-        return jsonify({"verified": False, "reason": "Only Champions can check out online"}), 200
+    tier = _resolve_vip_tier(customer.get("tags") or [])
+    if not tier:
+        return jsonify({"verified": False, "reason": "VIP account required"}), 200
 
     return jsonify({
         "verified": True,
         "first_name": customer.get("firstName") or "",
         "customer_gid": customer["id"],
         "email": customer.get("email") or email,
+        "tier": tier,
         "checkout_enabled": KIOSK_CHECKOUT_ENABLED,
     })
 
@@ -2604,7 +2618,7 @@ def _create_kiosk_product(card, hold_id):
 def champion_checkout():
     """
     Champion checkout flow:
-    1. Verify VIP3 status
+    1. Verify VIP status (VIP1/VIP2/VIP3)
     2. Create hold (lock cards)
     3. Create real Shopify products (active, Kiosk channel only)
     4. Create Storefront API cart → get checkout URL
@@ -2632,17 +2646,16 @@ def champion_checkout():
 
     # Estimate cart total for minimum check
 
-    # ── Step 1: Re-verify Champion ──────────────────────────────────────────
+    # ── Step 1: Re-verify VIP status ────────────────────────────────────────
     verify_result = _shopify_gql("""
         query($id: ID!) {
           customer(id: $id) { tags }
         }
     """, {"id": customer_gid})
-    tags = [t.strip().upper() for t in (
+    if not _resolve_vip_tier(
         verify_result.get("data", {}).get("customer", {}).get("tags") or []
-    )]
-    if "VIP3" not in tags:
-        return jsonify({"error": "Only Champions can check out online"}), 403
+    ):
+        return jsonify({"error": "VIP account required"}), 403
 
     # ── Step 2: Resolve available cards (same as create_hold) ───────────────
     lines_resolved = []
