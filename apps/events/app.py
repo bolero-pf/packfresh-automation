@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, request, jsonify, render_template_string, redirect
 
-import shopify_client as sc
+import events_shopify as sc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

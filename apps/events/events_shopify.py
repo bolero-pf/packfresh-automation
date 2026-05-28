@@ -1,5 +1,8 @@
 """
-events/shopify_client.py — Shopify Admin GraphQL helpers for the events service.
+events/events_shopify.py — Shopify Admin GraphQL helpers for the events service.
+
+Named events_shopify (NOT shopify_client) to avoid colliding with
+shared/shopify_client.py on PYTHONPATH, which would shadow this module.
 
 Wraps metaobject CRUD + file upload calls used by the events console.
 

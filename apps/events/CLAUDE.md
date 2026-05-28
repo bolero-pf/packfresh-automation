@@ -9,7 +9,7 @@ Google rich results. Discord publisher is deferred.
 
 ## Key Files
 - **app.py** — Flask app: console UI + API endpoints inline
-- **shopify_client.py** — Shopify Admin GraphQL helpers for metaobjects + files
+- **events_shopify.py** — Shopify Admin GraphQL helpers for metaobjects + files (named to avoid shadowing shared/shopify_client.py on PYTHONPATH)
 - **Dockerfile / railway.toml** — Standard service deploy
 
 ## Metaobjects (source of truth — NO local DB)
