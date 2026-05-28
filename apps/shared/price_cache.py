@@ -87,6 +87,31 @@ GRADE_TO_KEY = {
     ("SGC", "10"): "sgc10", ("SGC", "9"): "sgc9",
 }
 
+# Reverse of VARIANT_DISPLAY for incoming names from UI/intake. First
+# occurrence wins so duplicate display values ("Holofoil" comes from both
+# "holofoil" and "unlimitedHolofoil") collapse to the canonical modern form.
+VARIANT_NATIVE: dict = {}
+for _k, _v in VARIANT_DISPLAY.items():
+    VARIANT_NATIVE.setdefault(_v, _k)
+
+
+def _to_native_variant(name: Optional[str]) -> Optional[str]:
+    """Normalize a variant name to the Scrydex-native form the cache stores.
+
+    Accepts either Scrydex-native ('holofoil', 'altArt') or display ('Holofoil',
+    'Alt Art'). intake_items.variance is written display-cased by the condition
+    picker UI, so without this, lookups filtered by variant miss every row.
+    Unknown values pass through unchanged.
+    """
+    if not name:
+        return None
+    s = name.strip()
+    if not s:
+        return None
+    if s in VARIANT_DISPLAY:  # already native
+        return s
+    return VARIANT_NATIVE.get(s, s)
+
 
 def _to_usd(price, currency: Optional[str]) -> Optional[Decimal]:
     """Convert a cached price to USD based on its row currency.
@@ -151,6 +176,7 @@ class PriceCache:
         if not scrydex_id and not tcgplayer_id:
             return None
         cache_cond = _normalize_condition(condition)
+        variant = _to_native_variant(variant)
 
         params: list = []
         where_parts = ["product_type = 'card'", "price_type = 'raw'",
@@ -194,6 +220,7 @@ class PriceCache:
         """
         if not scrydex_id and not tcgplayer_id:
             return {}
+        variant = _to_native_variant(variant)
 
         params: list = []
         where_parts = ["product_type = 'card'", "price_type = 'raw'",
@@ -240,6 +267,7 @@ class PriceCache:
         defensively."""
         if not scrydex_id and not tcgplayer_id:
             return None
+        variant = _to_native_variant(variant)
 
         params: list = []
         where_parts = ["product_type = 'card'", "price_type = 'graded'",
@@ -278,6 +306,7 @@ class PriceCache:
         graded row the cache has for this card+variant. Prices are USD."""
         if not scrydex_id and not tcgplayer_id:
             return {}
+        variant = _to_native_variant(variant)
 
         params: list = []
         where_parts = ["product_type = 'card'", "price_type = 'graded'",
