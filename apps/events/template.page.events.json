@@ -1,0 +1,9 @@
+{
+  "sections": {
+    "main": {
+      "type": "events-index",
+      "settings": {}
+    }
+  },
+  "order": ["main"]
+}

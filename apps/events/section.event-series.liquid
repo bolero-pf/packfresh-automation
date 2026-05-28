@@ -1,0 +1,343 @@
+{% comment %}
+  Common Lands Events — Series Detail Section (OS 2.0)
+  Paste into your theme at: sections/event-series.liquid
+
+  Referenced from: templates/metaobject/event.json
+  The `metaobject` global is available in metaobject template sections and holds
+  the current EventSeries entry.
+
+  Sister metaobject expected: API id `event_occurence` (note: single 'r' — preserved
+  from initial setup to avoid breaking existing entries) with fields:
+    series (reference → event), start_datetime, end_datetime,
+    fb_event_url, cancelled, discord_message_id, discord_scheduled_event_id, label
+{% endcomment %}
+
+{%- assign series = metaobject -%}
+{%- assign now_unix = 'now' | date: '%s' | times: 1 -%}
+{%- assign horizon_unix = now_unix | plus: 7776000 -%}{%- comment -%} 90 days {%- endcomment -%}
+
+{%- assign o_unix = '' -%}
+{%- assign o_end = '' -%}
+{%- assign o_fb = '' -%}
+{%- assign o_cancelled = '' -%}
+
+{%- for occ in shop.metaobjects.event_occurence.values -%}
+  {%- assign ref = occ.series.value -%}
+  {%- if ref == blank -%}{%- continue -%}{%- endif -%}
+  {%- if ref.handle != series.handle -%}{%- continue -%}{%- endif -%}
+  {%- assign s_unix = occ.start_datetime.value | date: '%s' | times: 1 -%}
+  {%- if s_unix == 0 -%}{%- continue -%}{%- endif -%}
+  {%- if s_unix < now_unix -%}{%- continue -%}{%- endif -%}
+  {%- if s_unix > horizon_unix -%}{%- continue -%}{%- endif -%}
+  {%- assign e_unix = occ.end_datetime.value | date: '%s' | times: 1 -%}
+  {%- if e_unix <= s_unix -%}{%- assign e_unix = s_unix | plus: 10800 -%}{%- endif -%}
+  {%- assign o_unix = o_unix | append: s_unix | append: '|' -%}
+  {%- assign o_end = o_end | append: e_unix | append: '|' -%}
+  {%- assign fb = occ.fb_event_url.value | default: '' -%}
+  {%- assign o_fb = o_fb | append: fb | append: '|' -%}
+  {%- if occ.cancelled.value -%}
+    {%- assign o_cancelled = o_cancelled | append: '1|' -%}
+  {%- else -%}
+    {%- assign o_cancelled = o_cancelled | append: '0|' -%}
+  {%- endif -%}
+{%- endfor -%}
+
+{%- assign arr_unix = o_unix | split: '|' -%}
+{%- assign arr_end = o_end | split: '|' -%}
+{%- assign arr_fb = o_fb | split: '|' -%}
+{%- assign arr_cancel = o_cancelled | split: '|' -%}
+
+{%- assign sort_keys = '' -%}
+{%- for u in arr_unix -%}
+  {%- assign padded = u | prepend: '0000000000' | slice: -10, 10 -%}
+  {%- assign sort_keys = sort_keys | append: padded | append: ':' | append: forloop.index0 | append: ',' -%}
+{%- endfor -%}
+{%- assign sort_keys = sort_keys | split: ',' | sort -%}
+
+{%- assign cost_money = series.entry_cost.value -%}
+{%- assign is_free = false -%}
+{%- if cost_money == blank or cost_money == 0 -%}{%- assign is_free = true -%}{%- endif -%}
+{%- assign discord_invite = 'https://discord.gg/NXhEgkS5cQ' -%}
+
+<div class="cl-event-detail">
+  <style>
+    .cl-event-detail {
+      max-width: 880px !important;
+      margin: 48px auto !important;
+      padding: 0 24px !important;
+      color: #e4e4e7 !important;
+    }
+    .cl-event-detail * { box-sizing: border-box; }
+    .cl-event-back {
+      display: inline-block !important;
+      color: #71717a !important;
+      text-decoration: none !important;
+      font-size: 14px !important;
+      margin-bottom: 16px !important;
+      transition: color 0.15s !important;
+    }
+    .cl-event-back:hover { color: #e4e4e7 !important; }
+    .cl-event-hero-wrap {
+      width: 100% !important;
+      aspect-ratio: 21 / 9 !important;
+      background: linear-gradient(135deg, #22232d, #1a1b23) !important;
+      border-radius: 20px !important;
+      overflow: hidden !important;
+      margin-bottom: 28px !important;
+    }
+    .cl-event-hero-wrap img {
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      display: block !important;
+    }
+    .cl-event-title {
+      font-size: 44px !important;
+      font-weight: 800 !important;
+      letter-spacing: -0.02em !important;
+      margin: 0 0 12px !important;
+      color: #e4e4e7 !important;
+      line-height: 1.15 !important;
+    }
+    .cl-event-meta {
+      display: flex !important;
+      flex-wrap: wrap !important;
+      gap: 16px 24px !important;
+      color: #a1a1aa !important;
+      font-size: 16px !important;
+      margin-bottom: 28px !important;
+    }
+    .cl-event-meta-item { display: inline-flex !important; align-items: center !important; gap: 8px !important; }
+    .cl-event-meta-cost-free { color: #22c55e !important; font-weight: 600 !important; }
+    .cl-event-section {
+      background: #1a1b23 !important;
+      border: 1px solid #2a2b35 !important;
+      border-radius: 16px !important;
+      padding: 28px !important;
+      margin-bottom: 20px !important;
+    }
+    .cl-event-section h2 {
+      font-size: 13px !important;
+      font-weight: 700 !important;
+      text-transform: uppercase !important;
+      letter-spacing: 0.1em !important;
+      color: #71717a !important;
+      margin: 0 0 14px !important;
+    }
+    .cl-event-long {
+      color: #d4d4d8 !important;
+      font-size: 17px !important;
+      line-height: 1.7 !important;
+    }
+    .cl-event-long p { margin: 0 0 14px !important; }
+    .cl-event-long p:last-child { margin-bottom: 0 !important; }
+    .cl-event-long a { color: #f59e0b !important; }
+    .cl-occ-list { list-style: none !important; padding: 0 !important; margin: 0 !important; }
+    .cl-occ-item {
+      display: flex !important;
+      align-items: center !important;
+      justify-content: space-between !important;
+      gap: 16px !important;
+      padding: 16px 0 !important;
+      border-bottom: 1px solid #2a2b35 !important;
+      flex-wrap: wrap !important;
+    }
+    .cl-occ-item:last-child { border-bottom: none !important; }
+    .cl-occ-item.cancelled { opacity: 0.5 !important; }
+    .cl-occ-when { display: flex !important; flex-direction: column !important; gap: 2px !important; }
+    .cl-occ-date {
+      color: #e4e4e7 !important;
+      font-weight: 600 !important;
+      font-size: 16px !important;
+    }
+    .cl-occ-date.cancelled { text-decoration: line-through !important; color: #71717a !important; }
+    .cl-occ-time { color: #f59e0b !important; font-size: 14px !important; }
+    .cl-occ-fb {
+      display: inline-block !important;
+      background: #1877F2 !important;
+      color: #fff !important;
+      padding: 8px 18px !important;
+      border-radius: 8px !important;
+      font-size: 14px !important;
+      font-weight: 600 !important;
+      text-decoration: none !important;
+      transition: background 0.15s !important;
+    }
+    .cl-occ-fb:hover { background: #1466d4 !important; color: #fff !important; }
+    .cl-occ-cancelled-tag {
+      color: #ef4444 !important;
+      font-size: 13px !important;
+      font-weight: 600 !important;
+      text-transform: uppercase !important;
+      letter-spacing: 0.05em !important;
+    }
+    .cl-event-actions {
+      display: flex !important;
+      flex-wrap: wrap !important;
+      gap: 12px !important;
+      margin-top: 28px !important;
+    }
+    .cl-btn {
+      display: inline-block !important;
+      padding: 14px 28px !important;
+      border-radius: 12px !important;
+      font-weight: 600 !important;
+      font-size: 16px !important;
+      text-decoration: none !important;
+      transition: background 0.15s, transform 0.1s !important;
+    }
+    .cl-btn-discord { background: #5865F2 !important; color: #fff !important; }
+    .cl-btn-discord:hover { background: #4752c4 !important; transform: translateY(-1px) !important; }
+    .cl-btn-outline {
+      background: transparent !important;
+      color: #a1a1aa !important;
+      border: 1px solid #2a2b35 !important;
+    }
+    .cl-btn-outline:hover { border-color: #f59e0b !important; color: #e4e4e7 !important; }
+    .cl-no-occ { color: #71717a !important; font-style: italic !important; }
+    @media (max-width: 600px) {
+      .cl-event-detail { margin: 24px auto !important; }
+      .cl-event-title { font-size: 30px !important; }
+      .cl-occ-item { flex-direction: column !important; align-items: flex-start !important; gap: 8px !important; }
+      .cl-btn { width: 100% !important; text-align: center !important; }
+      .cl-occ-fb { width: 100% !important; text-align: center !important; }
+    }
+  </style>
+
+  <a href="/pages/events" class="cl-event-back">&larr; All events</a>
+
+  <div class="cl-event-hero-wrap">
+    {%- if series.hero_image.value != blank -%}
+      <img src="{{ series.hero_image.value | image_url: width: 1600 }}"
+           alt="{{ series.title.value | escape }}"
+           width="1600" height="686" loading="lazy">
+    {%- endif -%}
+  </div>
+
+  <h1 class="cl-event-title">{{ series.title.value | escape }}</h1>
+
+  <div class="cl-event-meta">
+    {%- if series.schedule_description.value != blank -%}
+      <span class="cl-event-meta-item">&#128197; {{ series.schedule_description.value | escape }}</span>
+    {%- endif -%}
+    {%- if is_free -%}
+      <span class="cl-event-meta-item cl-event-meta-cost-free">&#127894; Free entry</span>
+    {%- else -%}
+      <span class="cl-event-meta-item">&#127894; Entry: {{ cost_money | money }}</span>
+    {%- endif -%}
+    <span class="cl-event-meta-item">&#128205; Common Lands, Flower Mound, TX</span>
+  </div>
+
+  {%- if series.description_long != blank -%}
+    <div class="cl-event-section">
+      <h2>About this event</h2>
+      <div class="cl-event-long">{{ series.description_long | metafield_tag }}</div>
+    </div>
+  {%- elsif series.description_short.value != blank -%}
+    <div class="cl-event-section">
+      <h2>About this event</h2>
+      <div class="cl-event-long"><p>{{ series.description_short.value | escape }}</p></div>
+    </div>
+  {%- endif -%}
+
+  <div class="cl-event-section">
+    <h2>Upcoming dates</h2>
+    {%- if sort_keys.size > 0 -%}
+      <ul class="cl-occ-list">
+        {%- for key in sort_keys -%}
+          {%- assign parts = key | split: ':' -%}
+          {%- assign u = parts[0] | times: 1 -%}
+          {%- assign idx = parts[1] | times: 1 -%}
+          {%- if u == 0 -%}{%- continue -%}{%- endif -%}
+          {%- assign fb = arr_fb[idx] -%}
+          {%- assign is_cancelled = arr_cancel[idx] -%}
+          <li class="cl-occ-item{% if is_cancelled == '1' %} cancelled{% endif %}">
+            <div class="cl-occ-when">
+              <span class="cl-occ-date{% if is_cancelled == '1' %} cancelled{% endif %}">{{ u | date: '%A, %B %-d' }}</span>
+              <span class="cl-occ-time">{{ u | date: '%-I:%M %p' }}</span>
+            </div>
+            {%- if is_cancelled == '1' -%}
+              <span class="cl-occ-cancelled-tag">Cancelled</span>
+            {%- elsif fb != '' -%}
+              <a href="{{ fb }}" class="cl-occ-fb" target="_blank" rel="noopener">RSVP on Facebook</a>
+            {%- endif -%}
+          </li>
+        {%- endfor -%}
+      </ul>
+    {%- else -%}
+      <p class="cl-no-occ">No upcoming dates posted yet. Check back soon!</p>
+    {%- endif -%}
+  </div>
+
+  <div class="cl-event-actions">
+    <a href="{{ discord_invite }}" class="cl-btn cl-btn-discord" target="_blank" rel="noopener">Join our Discord</a>
+    <a href="/pages/events" class="cl-btn cl-btn-outline">All events</a>
+  </div>
+</div>
+
+{%- assign canonical_url = shop.url | append: '/events/' | append: series.handle -%}
+{%- assign image_url = '' -%}
+{%- if series.hero_image.value != blank -%}
+  {%- assign image_url = series.hero_image.value | image_url: width: 1600 -%}
+{%- endif -%}
+{%- assign desc_text = series.description_short.value | default: series.title.value | strip_html | strip_newlines | escape -%}
+
+<script type="application/ld+json">
+[
+{%- assign first = true -%}
+{%- for key in sort_keys -%}
+  {%- assign parts = key | split: ':' -%}
+  {%- assign u = parts[0] | times: 1 -%}
+  {%- assign idx = parts[1] | times: 1 -%}
+  {%- if u == 0 -%}{%- continue -%}{%- endif -%}
+  {%- assign is_cancelled = arr_cancel[idx] -%}
+  {%- assign e_unix = arr_end[idx] | times: 1 -%}
+  {%- assign fb = arr_fb[idx] -%}
+  {%- if first %}{%- assign first = false -%}{%- else -%},{%- endif %}
+  {
+    "@context": "https://schema.org",
+    "@type": "Event",
+    "name": {{ series.title.value | json }},
+    "startDate": "{{ u | date: '%Y-%m-%dT%H:%M:%S%z' }}",
+    "endDate": "{{ e_unix | date: '%Y-%m-%dT%H:%M:%S%z' }}",
+    "eventAttendanceMode": "https://schema.org/OfflineEventAttendanceMode",
+    "eventStatus": "{% if is_cancelled == '1' %}https://schema.org/EventCancelled{% else %}https://schema.org/EventScheduled{% endif %}",
+    "location": {
+      "@type": "Place",
+      "name": "Common Lands",
+      "address": {
+        "@type": "PostalAddress",
+        "addressLocality": "Flower Mound",
+        "addressRegion": "TX",
+        "addressCountry": "US"
+      }
+    },
+    "organizer": {
+      "@type": "Organization",
+      "name": "Common Lands",
+      "url": {{ shop.url | json }}
+    },
+    {%- if image_url != '' %}
+    "image": [{{ image_url | json }}],
+    {%- endif %}
+    "description": "{{ desc_text }}",
+    "url": {% if fb != '' %}{{ fb | json }}{% else %}{{ canonical_url | json }}{% endif %},
+    "offers": {
+      "@type": "Offer",
+      "price": "{% if is_free %}0.00{% else %}{{ cost_money | money_without_currency | replace: ',', '' }}{% endif %}",
+      "priceCurrency": "USD",
+      "availability": "https://schema.org/InStock",
+      "validFrom": "{{ 'now' | date: '%Y-%m-%dT%H:%M:%S%z' }}",
+      "url": {% if fb != '' %}{{ fb | json }}{% else %}{{ canonical_url | json }}{% endif %}
+    }
+  }
+{%- endfor -%}
+]
+</script>
+
+{% schema %}
+{
+  "name": "Event Series Detail",
+  "settings": []
+}
+{% endschema %}

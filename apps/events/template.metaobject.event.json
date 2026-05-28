@@ -1,0 +1,9 @@
+{
+  "sections": {
+    "main": {
+      "type": "event-series",
+      "settings": {}
+    }
+  },
+  "order": ["main"]
+}
