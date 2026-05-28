@@ -4795,6 +4795,9 @@ function toggleSessionGraded() {
 function smartCardSearch(sessionId, offerPct, context) {
     const ids = _getCardFormIds(context);
     const tcgId = (document.getElementById(ids.tcgid)?.value || '').trim();
+    // Manual entry replaces any prior pick — drop the stashed scrydex_id so
+    // a stale Scrydex-only pick can't ride along with a freshly typed TCG ID.
+    window._gradedPickScrydex = null;
     if (tcgId) {
         lookupByTcgId(sessionId, offerPct, context);
     } else {
@@ -4809,14 +4812,20 @@ async function lookupByTcgId(sessionId, offerPct, context) {
     const ids = _getCardFormIds(context);
     const tcgId = (document.getElementById(ids.tcgid)?.value || '').trim();
     const resultsDiv = document.getElementById(ids.results);
-    if (!tcgId) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a TCGPlayer ID</div>'; return; }
+    // Scrydex-only cards (JP Pokemon, MTG PEOE promos) have no TCG mapping —
+    // addCardFromSearch's graded fast-path stashes the picked scrydex_id here
+    // so we can look them up without forcing the operator to type a TCG ID.
+    const stashedScrydex = window._gradedPickScrydex || null;
+    if (!tcgId && !stashedScrydex) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a TCGPlayer ID</div>'; return; }
 
-    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up TCG#' + tcgId + '...</div>';
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Looking up ' + (tcgId ? 'TCG#' + tcgId : stashedScrydex) + '...</div>';
     const condition = document.getElementById(ids.cond).value;
     const qty = parseInt(document.getElementById(ids.qty).value) || 1;
 
     try {
-        const lookupBody = { tcgplayer_id: parseInt(tcgId) };
+        const lookupBody = {};
+        if (tcgId) lookupBody.tcgplayer_id = parseInt(tcgId);
+        if (stashedScrydex) lookupBody.scrydex_id = stashedScrydex;
         if (_isGradedContext(context)) {
             const _gf = _getGradeFields(context);
             lookupBody.grade_company = _gf.company;
@@ -4952,15 +4961,19 @@ async function lookupByTcgId(sessionId, offerPct, context) {
 
             if (nmRaw) gradedHtml += '<div style="font-size:0.78rem; color:var(--text-dim); margin-bottom:10px;">Raw NM reference: $' + Number(nmRaw).toFixed(2) + '</div>';
 
-            // Add buttons
+            // Add buttons. Scrydex-only cards (JP, MTG promos) have no
+            // tcgId — bake `null` into the call and pass scrydex_id as the
+            // trailing arg so the backend can persist the link.
+            const _tcgArg = tcgId ? tcgId : 'null';
+            const _sxArg = stashedScrydex ? "'" + stashedScrydex.replace(/'/g, "\\'") + "'" : "''";
             if (effectivePrice) {
                 const offerAmt = (effectivePrice * qty * offerPct / 100).toFixed(2);
-                gradedHtml += '<div class="search-result" onclick="_finalizeCardAdd(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + effectivePrice + ', \'' + context + '\', null, \'\')">' +
+                gradedHtml += '<div class="search-result" onclick="_finalizeCardAdd(\'' + sessionId + '\', ' + _tcgArg + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + effectivePrice + ', \'' + context + '\', null, \'\', ' + _sxArg + ')">' +
                     '<h4>Add ' + gradeCompany + ' ' + gradeVal + ' — ' + (card.name||'') + '</h4>' +
                     '<p>$' + Number(effectivePrice).toFixed(2) + ' · Qty ' + qty + ' · Offer: $' + offerAmt + '</p></div>';
             }
             if (nmRaw && (!effectivePrice || thinData)) {
-                gradedHtml += '<div class="search-result" onclick="_finalizeCardAdd(\'' + sessionId + '\', ' + tcgId + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + nmRaw + ', \'' + context + '\', null, \'\')">' +
+                gradedHtml += '<div class="search-result" onclick="_finalizeCardAdd(\'' + sessionId + '\', ' + _tcgArg + ', \'' + safeName + '\', \'' + safeSet + '\', \'' + cardNum + '\', \'' + rarity + '\', \'NM\', ' + qty + ', ' + nmRaw + ', \'' + context + '\', null, \'\', ' + _sxArg + ')">' +
                     '<h4>Add at Raw NM — ' + (card.name||'') + '</h4><p>$' + Number(nmRaw).toFixed(2) + ' · Qty ' + qty + '</p></div>';
             }
             gradedHtml += '</div>';
@@ -5245,7 +5258,10 @@ async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, r
     if (_isGradedContext(context)) {
         const ids = _getCardFormIds(context);
         const tcgInput = document.getElementById(ids.tcgid);
-        if (tcgInput) tcgInput.value = String(tcgId);
+        // Scrydex-only cards (JP, MTG promos) have no tcgId — fall back to
+        // the picked scrydex_id so lookupByTcgId can still resolve the card.
+        if (tcgInput) tcgInput.value = tcgId ? String(tcgId) : '';
+        window._gradedPickScrydex = scrydexId || null;
         // offerPctHint is the captured session/intake percentage from the
         // search caller; falls back to the dashboard input or 65 (the
         // associate cash default + Quick Offer's locked %).
@@ -5294,12 +5310,12 @@ async function addCardFromSearch(sessionId, tcgId, cardName, setName, cardNum, r
 
     const variantNames = Object.keys(variants);
     if (!variantNames.length) {
-        _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv, preselectedVariant || '');
+        _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv, preselectedVariant || '', scrydexId || '');
         return;
     }
 
     // Store pending card data and show condition picker
-    window._pendingCard = { sessionId, tcgId, cardName, setName, cardNum, rarity, qty, context, variants, primaryVariant };
+    window._pendingCard = { sessionId, tcgId, cardName, setName, cardNum, rarity, qty, context, variants, primaryVariant, scrydexId };
     _renderConditionPicker(resultsDiv, condition);
 }
 
@@ -5370,7 +5386,7 @@ function _renderConditionPicker(resultsDiv, selectedCond) {
     });
     // Confirm
     document.getElementById('cond-confirm-btn').addEventListener('click', function() {
-        _finalizeCardAdd(pc.sessionId, pc.tcgId, pc.cardName, pc.setName, pc.cardNum, pc.rarity, selectedCond, qty, selectedPrice || 0, pc.context, null, pc.primaryVariant || '');
+        _finalizeCardAdd(pc.sessionId, pc.tcgId, pc.cardName, pc.setName, pc.cardNum, pc.rarity, selectedCond, qty, selectedPrice || 0, pc.context, null, pc.primaryVariant || '', pc.scrydexId || '');
     });
     // Cancel
     document.getElementById('cond-cancel-btn').addEventListener('click', function() {
@@ -5378,7 +5394,7 @@ function _renderConditionPicker(resultsDiv, selectedCond) {
     });
 }
 
-async function _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv, variance) {
+async function _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, rarity, condition, qty, price, context, resultsDiv, variance, scrydexId) {
     if (!resultsDiv) resultsDiv = document.getElementById(context === 'session' ? 'session-raw-results' : context === 'intake' ? 'intake-search-results' : 'raw-search-results');
 
     if (!price || price <= 0) {
@@ -5409,6 +5425,7 @@ async function _finalizeCardAdd(sessionId, tcgId, cardName, setName, cardNum, ra
                 rarity: rarity, quantity: qty, market_price: price,
                 is_graded: isGraded, grade_company: gradeCompany, grade_value: gradeValue,
                 variance: variance || '',
+                scrydex_id: scrydexId || '',
             }),
         });
         const d = await r.json();

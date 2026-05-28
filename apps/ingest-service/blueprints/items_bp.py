@@ -208,6 +208,7 @@ def add_raw_card():
             tcgplayer_id = int(data["tcgplayer_id"])
         except (ValueError, TypeError) as e:
             return jsonify({"error": f"Invalid tcgplayer_id: {e}"}), 400
+    scrydex_id = (data.get("scrydex_id") or "").strip() or None
     try:
         quantity = int(data["quantity"])
     except (ValueError, TypeError) as e:
@@ -300,6 +301,7 @@ def add_raw_card():
         session_id=data["session_id"],
         product_name=data["card_name"],
         tcgplayer_id=tcgplayer_id,
+        scrydex_id=scrydex_id,
         set_name=data.get("set_name", ""),
         card_number=data.get("card_number", ""),
         condition=data["condition"],

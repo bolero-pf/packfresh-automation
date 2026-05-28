@@ -300,13 +300,15 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
                          is_graded: bool = False, grade_company: str = "",
                          grade_value: str = "",
                          variance: str = "",
-                         game: str = None) -> dict:
+                         game: str = None,
+                         scrydex_id: str = None) -> dict:
     """
     Add a single raw card item to a session (manual entry flow).
 
-    tcgplayer_id may be None for cards Scrydex doesn't track (MTG PEOE
-    promos, prerelease stamps, Scrydex-only JP). In that case the row is
-    marked is_mapped=FALSE so staff can relink later if a mapping shows up.
+    tcgplayer_id may be None for cards Scrydex doesn't track in TCGplayer's
+    marketplace (Scrydex-only JP, MTG PEOE promos). Such picks still carry a
+    scrydex_id from search — persist it so the row is mapped without a TCG
+    link. is_mapped is true when either identifier is present.
 
     `game` is the operator-selected game for manual entries — required so bin
     routing in ingestion doesn't silently default unmapped cards to Pokemon.
@@ -325,16 +327,17 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
     offer_total, unit_cost = calc_offer_price(
         market_price, qty, offer_percentage, product_type="raw")
 
-    is_mapped = tcgplayer_id is not None
+    sx = (scrydex_id or "").strip() or None
+    is_mapped = (tcgplayer_id is not None) or (sx is not None)
     row = execute_returning("""
         INSERT INTO intake_items
-            (session_id, product_name, tcgplayer_id, product_type,
+            (session_id, product_name, tcgplayer_id, scrydex_id, product_type,
              set_name, card_number, condition, rarity, variance,
              quantity, market_price, offer_price, unit_cost_basis, is_mapped,
              is_graded, grade_company, grade_value, game)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
-    """, (session_id, product_name, tcgplayer_id, "raw",
+    """, (session_id, product_name, tcgplayer_id, sx, "raw",
           set_name, card_number, condition, rarity, variance or "",
           qty, market_price, offer_total, unit_cost, is_mapped,
           is_graded, grade_company or None, grade_value or None,
