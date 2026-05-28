@@ -1,7 +1,7 @@
 """
 shared/shopify_client.py
 
-Shopify GraphQL + REST client shared across intake, ingestion, and inventory.
+Shopify GraphQL + REST client shared across intake, ingestion, inventory, events.
 
 Single source of truth — do not copy this into individual apps.
 Each app's Dockerfile adds /app/shared to PYTHONPATH.
@@ -13,10 +13,130 @@ Env vars (read by callers, not here):
 
 import os
 import time
+import json
 import logging
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+# ─── Metaobject helpers (module-level utilities) ─────────────────────────────
+
+def metaobject_fields_to_dict(node: dict) -> dict:
+    """Flatten a Shopify metaobject node's `fields` list into {key: value}.
+    Includes id/handle/displayName/type as top-level keys.
+
+    Resolves File and Metaobject references when the query selected them. For
+    File refs, value becomes {id, url, alt, width, height}. For Metaobject refs,
+    value becomes {id, handle, type} (nested fields can be re-fetched if needed).
+
+    Booleans ("true"/"false") are converted to Python bool.
+    """
+    out = {
+        "id": node.get("id"),
+        "handle": node.get("handle"),
+        "displayName": node.get("displayName"),
+        "type": node.get("type"),
+    }
+    for f in node.get("fields") or []:
+        k = f.get("key")
+        v = f.get("value")
+        ref = f.get("reference")
+        if ref:
+            if "image" in ref:
+                img = ref.get("image") or {}
+                out[k] = {
+                    "id": ref.get("id"),
+                    "url": img.get("url"),
+                    "alt": img.get("altText"),
+                    "width": img.get("width"),
+                    "height": img.get("height"),
+                }
+                continue
+            if "handle" in ref and "type" in ref:
+                out[k] = {
+                    "id": ref.get("id"),
+                    "handle": ref.get("handle"),
+                    "type": ref.get("type"),
+                }
+                continue
+        if v in ("true", "false"):
+            out[k] = v == "true"
+        else:
+            out[k] = v
+    return out
+
+
+def build_metaobject_field_inputs(fields: dict) -> list[dict]:
+    """Convert {key: value} into Shopify MetaobjectFieldInput list.
+
+    Handles:
+      - rich text / money values as dict/list → JSON-encoded string
+      - booleans → 'true'/'false'
+      - None values are skipped (avoids clobbering existing field with null)
+    """
+    out = []
+    for k, v in fields.items():
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            out.append({"key": k, "value": "true" if v else "false"})
+        elif isinstance(v, (dict, list)):
+            out.append({"key": k, "value": json.dumps(v)})
+        else:
+            out.append({"key": k, "value": str(v)})
+    return out
+
+
+def plain_text_to_rich_text(text: str) -> dict:
+    """Convert plain text (blank-line paragraph breaks) into Shopify rich text JSON."""
+    if not text:
+        return {"type": "root", "children": []}
+    paragraphs = [p.strip() for p in text.replace("\r\n", "\n").split("\n\n") if p.strip()]
+    children = []
+    for p in paragraphs:
+        flat = " ".join(line.strip() for line in p.split("\n") if line.strip())
+        children.append({
+            "type": "paragraph",
+            "children": [{"type": "text", "value": flat}],
+        })
+    return {"type": "root", "children": children}
+
+
+def rich_text_to_plain(rich_value) -> str:
+    """Best-effort extract plain text from a Shopify rich text JSON value."""
+    if not rich_value:
+        return ""
+    try:
+        tree = json.loads(rich_value) if isinstance(rich_value, str) else rich_value
+    except Exception:
+        return rich_value if isinstance(rich_value, str) else ""
+    paragraphs = []
+
+    def _walk(node):
+        if not isinstance(node, dict):
+            return ""
+        t = node.get("type")
+        if t == "text":
+            return node.get("value", "")
+        children = node.get("children") or []
+        return "".join(_walk(c) for c in children)
+
+    for child in (tree.get("children") or []):
+        paragraphs.append(_walk(child))
+    return "\n\n".join(p for p in paragraphs if p)
+
+
+# ─── Factory for env-configured client (used by services) ────────────────────
+
+def shopify_client_from_env() -> "ShopifyClient":
+    """Build a ShopifyClient using SHOPIFY_TOKEN + SHOPIFY_STORE env vars.
+    Raises RuntimeError if either is unset."""
+    token = os.getenv("SHOPIFY_TOKEN")
+    store = os.getenv("SHOPIFY_STORE")
+    if not token or not store:
+        raise RuntimeError("SHOPIFY_TOKEN and SHOPIFY_STORE env vars are required")
+    return ShopifyClient(token, store)
 
 
 def _extract_committed(variant: dict) -> int:
@@ -516,5 +636,173 @@ class ShopifyClient:
             "variant_id":        variant["id"],
             "inventory_item_id": variant.get("inventory_item_id"),
         }
+
+    # ─── Metaobjects ─────────────────────────────────────────────────────────────
+
+    # GraphQL fragment that resolves both File (MediaImage) and Metaobject references
+    # in a single fields {} block. Harmless on fields that aren't references.
+    _METAOBJECT_FIELDS_FRAGMENT = """
+      id
+      handle
+      displayName
+      type
+      fields {
+        key
+        value
+        reference {
+          ... on MediaImage {
+            id
+            image { url altText width height }
+          }
+          ... on Metaobject {
+            id
+            handle
+            type
+          }
+        }
+      }
+    """
+
+    def metaobjects_list(self, type_str: str, first: int = 100) -> list[dict]:
+        """List all metaobjects of a given type. Returns list of flattened dicts
+        (see metaobject_fields_to_dict). Pages up to `first` (max 250)."""
+        query = f"""
+        query listMO($first: Int!) {{
+          metaobjects(type: "{type_str}", first: $first) {{
+            edges {{ node {{ {self._METAOBJECT_FIELDS_FRAGMENT} }} }}
+          }}
+        }}
+        """
+        data = self._gql(query, {"first": first})
+        edges = (data.get("metaobjects") or {}).get("edges") or []
+        return [metaobject_fields_to_dict(e["node"]) for e in edges]
+
+    def metaobject_get(self, gid: str) -> dict | None:
+        """Fetch a single metaobject by GID."""
+        query = f"""
+        query getMO($id: ID!) {{
+          metaobject(id: $id) {{ {self._METAOBJECT_FIELDS_FRAGMENT} }}
+        }}
+        """
+        data = self._gql(query, {"id": gid})
+        node = data.get("metaobject")
+        return metaobject_fields_to_dict(node) if node else None
+
+    def metaobject_create(self, type_str: str, fields: dict) -> dict:
+        """Create a metaobject. `fields` keys map to the metaobject's field handles."""
+        mutation = """
+        mutation createMO($metaobject: MetaobjectCreateInput!) {
+          metaobjectCreate(metaobject: $metaobject) {
+            metaobject { id handle displayName }
+            userErrors { field message code }
+          }
+        }
+        """
+        data = self._gql(mutation, {"metaobject": {
+            "type": type_str,
+            "fields": build_metaobject_field_inputs(fields),
+        }})
+        result = data.get("metaobjectCreate") or {}
+        errs = result.get("userErrors") or []
+        if errs:
+            raise ShopifyError(f"metaobjectCreate({type_str}) errors: {errs}")
+        return result.get("metaobject") or {}
+
+    def metaobject_update(self, gid: str, fields: dict) -> dict:
+        """Update a metaobject's fields. Unspecified fields are left unchanged."""
+        mutation = """
+        mutation updateMO($id: ID!, $metaobject: MetaobjectUpdateInput!) {
+          metaobjectUpdate(id: $id, metaobject: $metaobject) {
+            metaobject { id handle displayName }
+            userErrors { field message code }
+          }
+        }
+        """
+        data = self._gql(mutation, {
+            "id": gid,
+            "metaobject": {"fields": build_metaobject_field_inputs(fields)},
+        })
+        result = data.get("metaobjectUpdate") or {}
+        errs = result.get("userErrors") or []
+        if errs:
+            raise ShopifyError(f"metaobjectUpdate errors: {errs}")
+        return result.get("metaobject") or {}
+
+    def metaobject_delete(self, gid: str) -> None:
+        """Delete a metaobject by GID."""
+        mutation = """
+        mutation deleteMO($id: ID!) {
+          metaobjectDelete(id: $id) {
+            deletedId
+            userErrors { field message code }
+          }
+        }
+        """
+        data = self._gql(mutation, {"id": gid})
+        errs = (data.get("metaobjectDelete") or {}).get("userErrors") or []
+        if errs:
+            raise ShopifyError(f"metaobjectDelete errors: {errs}")
+
+    # ─── File upload (Shopify Files API) ─────────────────────────────────────────
+
+    def upload_image_to_files(self, file_bytes: bytes, filename: str, mime_type: str) -> str:
+        """Upload an image to Shopify Files. Returns the MediaImage GID.
+
+        Three steps: stagedUploadsCreate → POST bytes to staged target → fileCreate."""
+        # Step 1: staged upload target
+        staged_mutation = """
+        mutation staged($input: [StagedUploadInput!]!) {
+          stagedUploadsCreate(input: $input) {
+            stagedTargets { url resourceUrl parameters { name value } }
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._gql(staged_mutation, {"input": [{
+            "filename": filename,
+            "mimeType": mime_type,
+            "httpMethod": "POST",
+            "resource": "IMAGE",
+        }]})
+        staged = data.get("stagedUploadsCreate") or {}
+        errs = staged.get("userErrors") or []
+        if errs:
+            raise ShopifyError(f"stagedUploadsCreate errors: {errs}")
+        targets = staged.get("stagedTargets") or []
+        if not targets:
+            raise ShopifyError("stagedUploadsCreate returned no targets")
+        target = targets[0]
+        upload_url = target["url"]
+        resource_url = target["resourceUrl"]
+        params = {p["name"]: p["value"] for p in target.get("parameters", [])}
+
+        # Step 2: POST bytes (S3-style multipart)
+        files = {"file": (filename, file_bytes, mime_type)}
+        r = requests.post(upload_url, data=params, files=files, timeout=60)
+        if not r.ok:
+            raise ShopifyError(f"staged upload failed: {r.status_code} {r.text[:200]}")
+
+        # Step 3: register file as MediaImage
+        create_mutation = """
+        mutation registerFile($files: [FileCreateInput!]!) {
+          fileCreate(files: $files) {
+            files { ... on MediaImage { id image { url } } }
+            userErrors { field message code }
+          }
+        }
+        """
+        data = self._gql(create_mutation, {"files": [{
+            "alt": filename,
+            "contentType": "IMAGE",
+            "originalSource": resource_url,
+        }]})
+        created = data.get("fileCreate") or {}
+        errs = created.get("userErrors") or []
+        if errs:
+            raise ShopifyError(f"fileCreate errors: {errs}")
+        out_files = created.get("files") or []
+        if not out_files:
+            raise ShopifyError("fileCreate returned no files")
+        return out_files[0]["id"]
 
 
