@@ -115,8 +115,12 @@ def index():
 
 @app.route("/api/series", methods=["GET"])
 def api_list_series():
-    items = sc.list_series()
-    return jsonify({"series": [_series_summary(s) for s in items]})
+    try:
+        items = sc.list_series()
+        return jsonify({"series": [_series_summary(s) for s in items]})
+    except Exception as e:
+        logger.exception("list_series failed")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/series", methods=["POST"])
@@ -185,8 +189,12 @@ def _series_fields_from_body(body: dict) -> dict:
 
 @app.route("/api/occurrences", methods=["GET"])
 def api_list_occurrences():
-    items = sc.list_occurrences()
-    return jsonify({"occurrences": [_occurrence_summary(o) for o in items]})
+    try:
+        items = sc.list_occurrences()
+        return jsonify({"occurrences": [_occurrence_summary(o) for o in items]})
+    except Exception as e:
+        logger.exception("list_occurrences failed")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/occurrences", methods=["POST"])
@@ -932,11 +940,23 @@ document.querySelectorAll('.modal-overlay').forEach(o => {
 
 // ---------- Series ----------
 async function loadSeries() {
-  const r = await fetch('/api/series');
-  const d = await r.json();
-  state.series = d.series || [];
-  renderSeriesList();
-  populateSeriesSelects();
+  try {
+    const r = await fetch('/api/series');
+    let d;
+    try { d = await r.json(); } catch (parseErr) {
+      throw new Error('Server returned non-JSON (status ' + r.status + '). Check Railway logs.');
+    }
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    state.series = d.series || [];
+    renderSeriesList();
+    populateSeriesSelects();
+  } catch (e) {
+    document.getElementById('series-list').innerHTML =
+      '<div class="empty-state" style="color:var(--red);">Failed to load series: ' +
+      escapeHtml(e.message) +
+      '<div style="margin-top:12px; font-size:13px; color:var(--text-faint);">Common causes: SHOPIFY_TOKEN / SHOPIFY_STORE env vars missing on Railway, or token lacks read_metaobjects scope.</div></div>';
+    toast(e.message, 'error');
+  }
 }
 
 function renderSeriesList() {
@@ -1103,9 +1123,18 @@ async function handleImageFile(file) {
 
 // ---------- Occurrences ----------
 async function loadOccurrences() {
-  const r = await fetch('/api/occurrences');
-  const d = await r.json();
-  state.occurrences = d.occurrences || [];
+  try {
+    const r = await fetch('/api/occurrences');
+    let d;
+    try { d = await r.json(); } catch (parseErr) {
+      throw new Error('Server returned non-JSON (status ' + r.status + ').');
+    }
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    state.occurrences = d.occurrences || [];
+  } catch (e) {
+    state.occurrences = [];
+    toast('Failed to load occurrences: ' + e.message, 'error');
+  }
 }
 
 function populateSeriesSelects() {
