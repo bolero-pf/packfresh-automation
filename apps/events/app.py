@@ -57,16 +57,33 @@ def _to_store_local(iso_str: str) -> dict:
 def _series_summary(s: dict) -> dict:
     """Trim a series dict for client consumption."""
     hero = s.get("hero_image") or {}
+
+    # entry_cost comes back from Shopify Money field as JSON string
+    # like {"amount":"5.00","currency_code":"USD"}. Extract just the amount
+    # so the <input type="number"> can render it cleanly.
+    raw_cost = s.get("entry_cost")
+    cost_amount = ""
+    if raw_cost:
+        try:
+            cost_data = json.loads(raw_cost) if isinstance(raw_cost, str) else raw_cost
+            if isinstance(cost_data, dict):
+                cost_amount = str(cost_data.get("amount") or "")
+            else:
+                cost_amount = str(raw_cost)
+        except Exception:
+            cost_amount = str(raw_cost)
+
     return {
         "id": s.get("id"),
         "handle": s.get("handle"),
-        "title": s.get("title", ""),
-        "color": s.get("color", ""),
-        "status": s.get("status", "active"),
-        "schedule_description": s.get("schedule_description", ""),
-        "entry_cost": s.get("entry_cost", ""),
-        "description_short": s.get("description_short", ""),
-        "description_long_plain": sc.rich_to_plain_text(s.get("description_long", "")),
+        "title": s.get("title") or "",
+        "color": s.get("color") or "",
+        # Null status = active (not draft). Only explicit "draft" hides a series.
+        "status": s.get("status") or "active",
+        "schedule_description": s.get("schedule_description") or "",
+        "entry_cost": cost_amount,
+        "description_short": s.get("description_short") or "",
+        "description_long_plain": sc.rich_to_plain_text(s.get("description_long") or ""),
         "hero_image_id": hero.get("id"),
         "hero_image_url": hero.get("url"),
     }
