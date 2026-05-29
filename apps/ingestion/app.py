@@ -1807,7 +1807,7 @@ def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
             ppt_card_number or item.get("card_number"), condition, canonicalize_rarity(item.get("rarity")),
             state, cost, charm_ceil_raw(item.get("market_price", cost)),
             image_url,
-            item.get("variance") or item.get("variant"), card_type,
+            _resolve_raw_variant(item), card_type,
             item.get("session_id"),
             str(item_id) if item_id else None,
         ))
@@ -2062,10 +2062,7 @@ def _push_raw_item(item: dict) -> dict:
                 ppt_card_number or item.get("card_number"), condition, canonicalize_rarity(item.get("rarity")),
                 cost, charm_ceil_raw(item.get("market_price", cost)),
                 bin_id, image_url,
-                # intake_items stores it as 'variance', raw_cards as 'variant';
-                # accept either so MTG Foil/etched picks made at intake actually
-                # land on the physical card record.
-                item.get("variance") or item.get("variant"), card_type,
+                _resolve_raw_variant(item), card_type,
                 item.get("session_id"),
                 str(item.get("id")) if item.get("id") else None,
             ))
@@ -2146,6 +2143,36 @@ def _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=None):
     return card_name, set_name, image_url, ppt_card_number
 
 
+def _resolve_raw_variant(item: dict) -> str | None:
+    """Resolve the variant that should land on raw_cards.variant.
+
+    Intake's `variance`/`variant` wins when set. Otherwise look up the
+    Scrydex variant by tcgplayer_id — a single Scrydex card_id can hold
+    multiple printings (regular, metal, reverseHolofoil) that share image
+    + product_name but have distinct prices, and each printing has its own
+    tcgplayer_id. Without this stamp the price updater can't tell metal
+    from holofoil and the editor tiles all variants into the same '' bucket
+    (Mew ex 205 sh3 incident).
+    """
+    explicit = item.get("variance") or item.get("variant")
+    if explicit:
+        return explicit
+    tcg_id = item.get("tcgplayer_id")
+    if not tcg_id:
+        return None
+    try:
+        row = db.query_one("""
+            SELECT variant FROM scrydex_price_cache
+            WHERE tcgplayer_id = %s AND price_type = 'raw'
+            LIMIT 1
+        """, (int(tcg_id),))
+    except Exception:
+        return None
+    if not row:
+        return None
+    return row.get("variant")
+
+
 def _push_raw_to_display(item: dict) -> dict:
     """Push raw card to a binder display location. Barcode + label generated.
 
@@ -2209,7 +2236,7 @@ def _push_raw_to_display(item: dict) -> dict:
                 ppt_card_number or item.get("card_number"), condition, canonicalize_rarity(item.get("rarity")),
                 cost, charm_ceil_raw(item.get("market_price", cost)),
                 bin_id, image_url,
-                item.get("variance") or item.get("variant"),
+                _resolve_raw_variant(item),
                 item.get("session_id"),
                 str(item.get("id")) if item.get("id") else None,
             ))
@@ -2332,7 +2359,7 @@ def _push_raw_to_grade(item: dict) -> dict:
             ppt_card_number or item.get("card_number"), condition, canonicalize_rarity(item.get("rarity")),
             cost, charm_ceil_raw(item.get("market_price", cost)),
             image_url,
-            item.get("variance") or item.get("variant"),
+            _resolve_raw_variant(item),
             item.get("session_id"),
             str(item.get("id")) if item.get("id") else None,
         ))
@@ -3807,7 +3834,8 @@ def push_batch(session_id):
 
     cards = db.query("""
         SELECT rc.id, rc.barcode, rc.state, rc.bin_id, rc.intake_item_id,
-               ii.session_id, ii.routing_destination, ii.item_status
+               ii.session_id, ii.routing_destination, ii.item_status,
+               ii.routing_reviewed_at
           FROM raw_cards rc
           JOIN intake_items ii ON ii.id = rc.intake_item_id
          WHERE rc.barcode = ANY(%s)
@@ -3823,6 +3851,13 @@ def push_batch(session_id):
             errors.append(f"{bc}: not in this session")
         elif c.get("item_status") in ("missing", "rejected"):
             errors.append(f"{bc}: item marked {c['item_status']}")
+        # Route must be explicitly reviewed before bins get assigned. Without
+        # this guard, an unrouted item with the default 'storage' destination
+        # silently passes (routing_destination matches the bin) and lands
+        # binned but invisible to the Route stage forever (pushed_at NOT NULL
+        # filter hides it). Surfaced via the sh3 Mew ex 205 fallout.
+        elif not c.get("routing_reviewed_at"):
+            errors.append(f"{bc}: not yet routed — review in Route stage first")
         elif c["routing_destination"] != expected_dest:
             errors.append(f"{bc}: routed '{c['routing_destination']}', "
                           f"bin {bin_row['bin_label']} expects '{expected_dest}'")

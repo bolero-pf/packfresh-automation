@@ -3337,13 +3337,19 @@ def editor_copies():
     if variant_k:
         extra.append(variant_k)
 
-    id_filter = ""
-    if sx_id:
-        id_filter = "AND scrydex_id = %s"
-        extra.append(sx_id)
-    elif tcg_id:
-        id_filter = "AND tcgplayer_id = %s"
+    # Apply BOTH tcg_id and scrydex_id when present — one Scrydex card_id
+    # can hold multiple printings (Mew ex 205 has separate tcg ids for the
+    # holofoil and the 151 metal card), so filtering only by scrydex_id
+    # would mix them. tcg_id alone is also fine on its own when scrydex
+    # isn't mapped yet.
+    id_filter_parts = []
+    if tcg_id:
+        id_filter_parts.append("tcgplayer_id = %s")
         extra.append(tcg_id)
+    if sx_id:
+        id_filter_parts.append("scrydex_id = %s")
+        extra.append(sx_id)
+    id_filter = ("AND " + " AND ".join(id_filter_parts)) if id_filter_parts else ""
 
     copies = db.query(f"""
         SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
