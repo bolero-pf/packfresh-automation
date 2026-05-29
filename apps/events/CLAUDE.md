@@ -4,7 +4,7 @@
 ## Purpose
 Operational UI for managing in-store events (Commander, FNM, Pokemon League, etc.).
 Backs a public calendar at `/pages/events` and per-series SEO landing pages at
-`/events/<handle>`. Designed primarily for advertising — SEO sitelinks, FB Events,
+`/pages/events/<handle>`. Designed primarily for advertising — SEO sitelinks, FB Events,
 Google rich results. Discord publisher is deferred.
 
 ## Key Files

@@ -996,11 +996,11 @@ function renderSeriesList() {
           <div class="series-schedule">${escapeHtml(s.schedule_description || '')}</div>
           <div class="series-meta">
             <span class="series-status ${s.status || 'draft'}">${s.status || 'draft'}</span>
-            ${s.handle ? ` &middot; /events/${escapeHtml(s.handle)}` : ''}
+            ${s.handle ? ` &middot; /pages/events/${escapeHtml(s.handle)}` : ''}
           </div>
           <div class="series-actions">
             <button class="btn btn-sm" onclick='openSeriesModal(${JSON.stringify(s.id)})'>Edit</button>
-            ${s.handle ? `<a class="btn btn-sm btn-ghost" target="_blank" href="/events/${encodeURIComponent(s.handle)}" onclick="this.href='https://common-lands.com/events/${encodeURIComponent(s.handle)}';">View</a>` : ''}
+            ${s.handle ? `<a class="btn btn-sm btn-ghost" target="_blank" href="https://common-lands.com/pages/events/${encodeURIComponent(s.handle)}">View</a>` : ''}
           </div>
         </div>
       </div>

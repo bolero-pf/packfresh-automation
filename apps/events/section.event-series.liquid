@@ -275,7 +275,11 @@
   </div>
 </div>
 
-{%- assign canonical_url = shop.url | append: '/events/' | append: series.handle -%}
+{%- assign canonical_url = series.system.url -%}
+{%- if canonical_url == blank or canonical_url == '' -%}
+  {%- assign canonical_url = '/pages/events/' | append: series.handle -%}
+{%- endif -%}
+{%- assign canonical_url = shop.url | append: canonical_url -%}
 {%- assign image_url = '' -%}
 {%- if series.hero_image.value != blank -%}
   {%- assign image_url = series.hero_image.value | image_url: width: 1600 -%}

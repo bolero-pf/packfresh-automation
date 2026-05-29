@@ -6,7 +6,7 @@
 
   Renders two months (current + next) as calendar grids. Each day cell shows
   chips for events on that day; each chip links to its parent EventSeries
-  detail page at /events/<series-handle>.
+  detail page at /pages/events/<series-handle>.
 
   Metaobject API ids in use (cannot be renamed after creation):
     Series:     `event`
@@ -47,10 +47,10 @@
   {%- assign is_cancel = '0' -%}
   {%- if occ.cancelled.value -%}{%- assign is_cancel = '1' -%}{%- endif -%}
 
-  {%- comment -%} Prefer Shopify's auto-generated URL; fall back to /events/<handle>. {%- endcomment -%}
+  {%- comment -%} Prefer Shopify's auto-generated URL; fall back to /pages/events/<handle>. {%- endcomment -%}
   {%- assign series_url = series.system.url -%}
   {%- if series_url == blank or series_url == '' -%}
-    {%- assign series_url = '/events/' | append: series.handle -%}
+    {%- assign series_url = '/pages/events/' | append: series.handle -%}
   {%- endif -%}
 
   {%- comment -%} Optional per-series color field; default to amber if unset. {%- endcomment -%}
