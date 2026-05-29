@@ -81,6 +81,10 @@ def delete_metaobject(gid: str) -> None:
     _client_lazy().metaobject_delete(gid)
 
 
+def set_metaobject_status(gid: str, status: str) -> None:
+    _client_lazy().metaobject_set_status(gid, status)
+
+
 def upload_file_to_shopify(file_bytes: bytes, filename: str, mime_type: str) -> str:
     return _client_lazy().upload_image_to_files(file_bytes, filename, mime_type)
 

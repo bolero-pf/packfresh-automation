@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 def metaobject_fields_to_dict(node: dict) -> dict:
     """Flatten a Shopify metaobject node's `fields` list into {key: value}.
-    Includes id/handle/displayName/type as top-level keys.
+    Includes id/handle/displayName/type and publishable_status as top-level keys.
 
     Resolves File and Metaobject references when the query selected them. For
     File refs, value becomes {id, url, alt, width, height}. For Metaobject refs,
@@ -32,11 +32,18 @@ def metaobject_fields_to_dict(node: dict) -> dict:
 
     Booleans ("true"/"false") are converted to Python bool.
     """
+    publishable_status = None
+    caps = node.get("capabilities") or {}
+    pub = caps.get("publishable") or {}
+    if pub:
+        publishable_status = pub.get("status")
+
     out = {
         "id": node.get("id"),
         "handle": node.get("handle"),
         "displayName": node.get("displayName"),
         "type": node.get("type"),
+        "publishable_status": publishable_status,
     }
     for f in node.get("fields") or []:
         k = f.get("key")
@@ -641,11 +648,16 @@ class ShopifyClient:
 
     # GraphQL fragment that resolves both File (MediaImage) and Metaobject references
     # in a single fields {} block. Harmless on fields that aren't references.
+    # Also surfaces Shopify's system publishable status so callers can distinguish
+    # DRAFT (hidden from storefront API) vs ACTIVE entries.
     _METAOBJECT_FIELDS_FRAGMENT = """
       id
       handle
       displayName
       type
+      capabilities {
+        publishable { status }
+      }
       fields {
         key
         value
@@ -688,8 +700,13 @@ class ShopifyClient:
         node = data.get("metaobject")
         return metaobject_fields_to_dict(node) if node else None
 
-    def metaobject_create(self, type_str: str, fields: dict) -> dict:
-        """Create a metaobject. `fields` keys map to the metaobject's field handles."""
+    def metaobject_create(self, type_str: str, fields: dict, status: str = "ACTIVE") -> dict:
+        """Create a metaobject. Entries default to ACTIVE so they're immediately
+        visible to storefront API; new entries via Admin API otherwise default
+        to DRAFT (different from UI-created entries which default ACTIVE).
+
+        `fields` keys map to the metaobject's field handles. `status` is
+        Shopify's system publishable status (ACTIVE | DRAFT)."""
         mutation = """
         mutation createMO($metaobject: MetaobjectCreateInput!) {
           metaobjectCreate(metaobject: $metaobject) {
@@ -701,12 +718,33 @@ class ShopifyClient:
         data = self._gql(mutation, {"metaobject": {
             "type": type_str,
             "fields": build_metaobject_field_inputs(fields),
+            "capabilities": {
+                "publishable": {"status": status},
+            },
         }})
         result = data.get("metaobjectCreate") or {}
         errs = result.get("userErrors") or []
         if errs:
             raise ShopifyError(f"metaobjectCreate({type_str}) errors: {errs}")
         return result.get("metaobject") or {}
+
+    def metaobject_set_status(self, gid: str, status: str) -> None:
+        """Set the system publishable status (ACTIVE | DRAFT) on an existing entry."""
+        mutation = """
+        mutation setStatus($id: ID!, $metaobject: MetaobjectUpdateInput!) {
+          metaobjectUpdate(id: $id, metaobject: $metaobject) {
+            metaobject { id }
+            userErrors { field message code }
+          }
+        }
+        """
+        data = self._gql(mutation, {
+            "id": gid,
+            "metaobject": {"capabilities": {"publishable": {"status": status}}},
+        })
+        errs = (data.get("metaobjectUpdate") or {}).get("userErrors") or []
+        if errs:
+            raise ShopifyError(f"metaobject_set_status errors: {errs}")
 
     def metaobject_update(self, gid: str, fields: dict) -> dict:
         """Update a metaobject's fields. Unspecified fields are left unchanged."""

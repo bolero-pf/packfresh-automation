@@ -113,6 +113,7 @@ def _occurrence_summary(o: dict) -> dict:
         "end_time": end["time"],
         "fb_event_url": o.get("fb_event_url", ""),
         "cancelled": bool(o.get("cancelled", False)),
+        "publishable_status": o.get("publishable_status"),
     }
 
 
@@ -349,6 +350,33 @@ def api_generate_occurrences():
             cur = cur + timedelta(days=7)
 
     return jsonify({"ok": True, "created": created, "failed": failed})
+
+
+# ----- Bulk publish drafts -----
+
+@app.route("/api/occurrences/publish_drafts", methods=["POST"])
+def api_publish_draft_occurrences():
+    """Find all EventOccurrence entries with system status DRAFT and promote them
+    to ACTIVE. Use to recover from bulk-creates that landed as drafts (pre-fix)."""
+    try:
+        items = sc.list_occurrences()
+        drafts = [o for o in items if (o.get("publishable_status") == "DRAFT")]
+        promoted = []
+        failed = []
+        for o in drafts:
+            gid = o.get("id")
+            if not gid:
+                continue
+            try:
+                sc.set_metaobject_status(gid, "ACTIVE")
+                promoted.append(gid)
+            except Exception as e:
+                logger.warning("publish_drafts: %s — %s", gid, e)
+                failed.append({"id": gid, "error": str(e)})
+        return jsonify({"ok": True, "promoted": len(promoted), "failed": failed})
+    except Exception as e:
+        logger.exception("publish_drafts failed")
+        return jsonify({"error": str(e)}), 500
 
 
 # ----- Image upload -----
@@ -679,6 +707,7 @@ CONSOLE_HTML = r"""<!DOCTYPE html>
   }
   .cal-chip:hover { filter: brightness(1.25); }
   .cal-chip.cancelled { opacity: 0.5; text-decoration: line-through; }
+  .cal-chip.draft { outline: 1px dashed currentColor; outline-offset: 1px; opacity: 0.7; }
   .cal-add-hint { display: none; font-size: 10px; color: var(--text-faint); margin-top: auto; }
   .cal-cell:not(.is-other-month):hover .cal-add-hint { display: block; }
 
@@ -743,7 +772,10 @@ CONSOLE_HTML = r"""<!DOCTYPE html>
 <div class="pane" id="pane-calendar">
   <div class="toolbar">
     <div style="color:var(--text-dim); font-size:14px;">Click any date to add an occurrence. Click an existing chip to edit it.</div>
-    <button class="btn" onclick="openGeneratorModal()">Generate occurrences in bulk</button>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="btn" onclick="publishDrafts()" id="btn-publish-drafts" title="Promote all draft occurrences to active. Use to recover bulk-generated occurrences that landed as drafts.">Publish drafts</button>
+      <button class="btn" onclick="openGeneratorModal()">Generate occurrences in bulk</button>
+    </div>
   </div>
   <div id="calendar-root">
     <div class="loading"><div class="spinner"></div></div>
@@ -1295,6 +1327,28 @@ async function runGenerator() {
   }
 }
 
+// ---------- Publish drafts ----------
+async function publishDrafts() {
+  const btn = document.getElementById('btn-publish-drafts');
+  const drafts = state.occurrences.filter(o => o.publishable_status === 'DRAFT');
+  if (!drafts.length) { toast('No draft occurrences to publish', 'success'); return; }
+  if (!confirm(`Publish ${drafts.length} draft occurrence${drafts.length===1?'':'s'} so they appear on the public calendar?`)) return;
+  btn.disabled = true; btn.textContent = 'Publishing…';
+  try {
+    const r = await fetch('/api/occurrences/publish_drafts', {method: 'POST'});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'publish failed');
+    const failCount = (d.failed || []).length;
+    toast(`Published ${d.promoted}${failCount?` (${failCount} failed)`:''}`, failCount ? 'error' : 'success');
+    await loadOccurrences();
+    renderCalendar();
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Publish drafts';
+  }
+}
+
 // ---------- Calendar ----------
 function renderCalendar() {
   if (!state.series.length && !state.occurrences.length) {
@@ -1354,9 +1408,14 @@ function renderMonth(year, month, seriesById) {
       const s = seriesById[o.series_id] || {};
       const color = s.color || '#f59e0b';
       const title = s.title || '(unknown)';
-      chips += `<a class="cal-chip${o.cancelled?' cancelled':''}" data-occ="${escapeAttr(o.id)}"
+      const isDraft = o.publishable_status === 'DRAFT';
+      const classes = ['cal-chip'];
+      if (o.cancelled) classes.push('cancelled');
+      if (isDraft) classes.push('draft');
+      const draftLabel = isDraft ? ' · DRAFT (hidden from public)' : '';
+      chips += `<a class="${classes.join(' ')}" data-occ="${escapeAttr(o.id)}"
         style="background:${color}26; border-color:${color}59; color:${color};"
-        title="${escapeAttr(title)} · ${escapeAttr(timeStr(o.start_time))}${o.fb_event_url?' · FB ✓':''}">
+        title="${escapeAttr(title)} · ${escapeAttr(timeStr(o.start_time))}${o.fb_event_url?' · FB ✓':''}${draftLabel}">
         <strong>${escapeHtml(timeStr(o.start_time))}</strong> ${escapeHtml(title)}
       </a>`;
     }
