@@ -46,6 +46,7 @@ query OrderDetail($id: ID!) {
     note
     createdAt
     tags
+    sourceName
     displayFinancialStatus
     currentTotalPriceSet { shopMoney { amount currencyCode } }
     discountCodes
@@ -663,6 +664,19 @@ def screen_every_order(order_gid: str) -> dict:
     order_name = order.get("name", "?")
     order_total = float(order.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
 
+    # In-store POS sales: goods already left with the customer — none of these
+    # checks apply (no shipping, no fraud verification, no combine).
+    if (order.get("sourceName") or "").lower() == "pos":
+        email = (customer.get("email") or "").strip().lower()
+        _log_screening(order_gid, order_name, email, "skip", "pos", {"order_total": order_total})
+        return {
+            "order_gid": order_gid,
+            "order_name": order_name,
+            "skipped": True,
+            "reason": "pos",
+            "any_flagged": False,
+        }
+
     results = {
         "order_gid": order_gid,
         "order_name": order_name,
@@ -1024,6 +1038,14 @@ def check_fraud_risk(order_gid: str) -> dict:
     data = shopify_gql(ORDER_DETAIL_Q, {"id": order_gid})
     order = data["data"]["order"]
     customer = order.get("customer") or {}
+
+    # POS sales were paid in person — Shopify's fraud risk model targets online
+    # card-not-present fraud and doesn't apply.
+    if (order.get("sourceName") or "").lower() == "pos":
+        order_name = order.get("name", "?")
+        email = (customer.get("email") or "").strip().lower()
+        _log_screening(order_gid, order_name, email, "skip", "pos", {})
+        return {"flagged": False, "reason": "pos_skipped"}
 
     risk = order.get("risk") or {}
     risk_level = None
