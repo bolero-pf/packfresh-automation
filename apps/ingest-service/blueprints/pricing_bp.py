@@ -50,18 +50,71 @@ bp = Blueprint("pricing", __name__)
 
 
 def _maybe_backfill_english_name(session_id, tcgplayer_id, english_name):
-    """Rewrite intake_items.product_name from JP → EN when Scrydex gave us an
-    English form. Only updates rows whose current product_name contains
-    multibyte (CJK) characters, so operator-customized English labels are
-    left alone. Scoped to the session being refreshed.
+    """Rewrite intake_items.product_name + set_name to English + ' (JP)' for
+    JP-set cards. Sean's rule: no Japanese characters in any UI.
 
-    octet_length > char_length is true exactly when the string contains any
-    multibyte UTF-8 codepoint — cleaner than a regex character class and
-    avoids embedded \\x00 issues."""
-    if not english_name or not tcgplayer_id or not session_id:
+    Behavior by scrydex_id:
+      - JP (`*_ja-*`): swap product_name + set_name to Scrydex's
+        product_name_en / expansion_name_en and append ' (JP)'. Applies
+        whether the saved name still has CJK characters or not — so cards
+        linked before this fix still pick up the language tag.
+      - Non-JP: only rewrite when the current product_name has multibyte
+        chars and a clean EN form is available (legacy behavior). Leaves
+        operator-customized English labels alone.
+
+    Scoped to the session being refreshed."""
+    if not tcgplayer_id or not session_id:
         return
-    # If Scrydex itself only has a JP name (no English translation), skip.
-    if any(ord(c) > 127 for c in english_name):
+    try:
+        row = db.query_one(
+            """SELECT scrydex_id, product_name_en, expansion_name_en, product_name, expansion_name
+                 FROM scrydex_price_cache
+                WHERE tcgplayer_id = %s
+                ORDER BY (product_name_en IS NULL), fetched_at DESC
+                LIMIT 1""",
+            (int(tcgplayer_id),),
+        )
+    except Exception as e:
+        logger.warning(f"Scrydex lookup for backfill TCG#{tcgplayer_id} failed: {e}")
+        row = None
+
+    scrydex_id = (row or {}).get("scrydex_id") if row else None
+    is_jp = bool(scrydex_id) and "_ja-" in scrydex_id
+
+    if is_jp:
+        en_name = (row.get("product_name_en") or "").strip() or english_name or row.get("product_name") or ""
+        en_set  = (row.get("expansion_name_en") or "").strip() or row.get("expansion_name") or ""
+        if not en_name:
+            return
+        if not en_name.endswith(" (JP)"):
+            en_name = en_name + " (JP)"
+        if en_set and not en_set.endswith(" (JP)"):
+            en_set = en_set + " (JP)"
+        try:
+            if en_set:
+                db.execute(
+                    """UPDATE intake_items
+                       SET product_name = %s, set_name = %s
+                       WHERE session_id = %s
+                         AND tcgplayer_id = %s
+                         AND (product_name <> %s OR COALESCE(set_name,'') <> %s)""",
+                    (en_name, en_set, session_id, int(tcgplayer_id), en_name, en_set),
+                )
+            else:
+                db.execute(
+                    """UPDATE intake_items
+                       SET product_name = %s
+                       WHERE session_id = %s
+                         AND tcgplayer_id = %s
+                         AND product_name <> %s""",
+                    (en_name, session_id, int(tcgplayer_id), en_name),
+                )
+        except Exception as e:
+            logger.warning(f"JP name backfill failed for TCG#{tcgplayer_id}: {e}")
+        return
+
+    # Non-JP path: legacy multibyte-detection swap. Leaves EN names alone.
+    if not english_name or any(ord(c) > 127 for c in english_name):
         return
     try:
         db.execute(

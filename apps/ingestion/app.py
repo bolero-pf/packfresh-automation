@@ -43,6 +43,7 @@ except ImportError as e:
     logger.error(f"barcode_gen import failed: {e} — raw card push will not work")
     generate_barcode_id = generate_barcode_image = None
 from price_rounding import charm_ceil_raw
+from jp_localize import localize_card_and_set
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -1777,7 +1778,7 @@ def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
     cost      = _unit_cost_basis(item, qty)
     item_id   = item.get("id")
 
-    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(
+    card_name, set_name, image_url, ppt_card_number = _resolve_raw_card_display_data(
         tcg_id, card_name, set_name, scrydex_id=sx_id
     )
     card_type, _ = _resolve_storage_card_type(item, tcg_id, sx_id)
@@ -2121,26 +2122,83 @@ def _scrydex_image_fallback(scrydex_id, tcg_id):
     return None
 
 
-def _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=None):
-    """Shared PPT lookup for raw card push functions. Falls back to
-    scrydex_price_cache for image when PPT can't help (JP / Scrydex-only)."""
+def _resolve_raw_card_display_data(tcg_id, card_name, set_name, scrydex_id=None):
+    """Resolve card_name / set_name / image / card_number for raw_cards INSERT.
+
+    Scrydex-first per repo rule (CLAUDE.md):
+      1. scrydex_price_cache by scrydex_id or tcgplayer_id wins for name,
+         set, image, and card_number. For JP rows we use product_name_en /
+         expansion_name_en with a ' (JP)' suffix so kiosk + dashboards
+         never render Japanese characters.
+      2. PPT is consulted only when Scrydex has no row for the card — its
+         800px CDN URL is still the best image for some older EN sets and
+         it covers the rare TCG-only product Scrydex hasn't indexed.
+
+    Historical: this used to be PPT-first (`_fetch_ppt_data`), which is
+    how JP cards ended up displayed in Japanese — PPT returned a Japanese
+    name for `tcgplayer_id` that mapped to a JP product, and we never
+    looked at Scrydex's English alias. Fixed by inverting the order.
+    """
     image_url = None
     ppt_card_number = None
-    if tcg_id and pricing:
+    scrydex_row = None
+    if scrydex_id or tcg_id:
+        try:
+            if scrydex_id:
+                scrydex_row = db.query_one("""
+                    SELECT product_name, product_name_en,
+                           expansion_name, expansion_name_en,
+                           card_number,
+                           image_large, image_medium, image_small
+                    FROM scrydex_price_cache
+                    WHERE scrydex_id = %s
+                    ORDER BY (product_name_en IS NULL), fetched_at DESC
+                    LIMIT 1
+                """, (scrydex_id,))
+            else:
+                scrydex_row = db.query_one("""
+                    SELECT product_name, product_name_en,
+                           expansion_name, expansion_name_en,
+                           card_number,
+                           image_large, image_medium, image_small
+                    FROM scrydex_price_cache
+                    WHERE tcgplayer_id = %s
+                    ORDER BY (product_name_en IS NULL), fetched_at DESC
+                    LIMIT 1
+                """, (int(tcg_id),))
+        except Exception as e:
+            logger.debug(f"Scrydex card lookup failed (sid={scrydex_id}, tcg={tcg_id}): {e}")
+
+    if scrydex_row:
+        card_name = (scrydex_row.get("product_name") or card_name)
+        set_name  = (scrydex_row.get("expansion_name") or set_name)
+        ppt_card_number = scrydex_row.get("card_number") or ppt_card_number
+        image_url = (scrydex_row.get("image_large")
+                     or scrydex_row.get("image_medium")
+                     or scrydex_row.get("image_small"))
+
+    # PPT as a fallback — only when Scrydex couldn't supply image or name.
+    # PPT's 800px CDN can be sharper than Scrydex's 'large' for some EN sets,
+    # so we still let it upgrade the image if Scrydex didn't have one.
+    if (not scrydex_row or not image_url) and tcg_id and pricing:
         try:
             card_data = pricing.get_card_by_tcgplayer_id(int(tcg_id))
             if card_data:
-                image_url = (card_data.get("imageCdnUrl800")
-                             or card_data.get("imageCdnUrl")
-                             or card_data.get("imageCdnUrl400"))
-                card_name = card_data.get("name") or card_name
-                set_name  = card_data.get("setName") or set_name
-                ppt_card_number = card_data.get("cardNumber") or card_data.get("number")
+                if not image_url:
+                    image_url = (card_data.get("imageCdnUrl800")
+                                 or card_data.get("imageCdnUrl")
+                                 or card_data.get("imageCdnUrl400"))
+                if not scrydex_row:
+                    card_name = card_data.get("name") or card_name
+                    set_name  = card_data.get("setName") or set_name
+                    ppt_card_number = card_data.get("cardNumber") or card_data.get("number")
         except Exception as e:
-            logger.warning(f"PPT fetch for raw card TCG#{tcg_id} failed: {e}")
-    if not image_url:
-        image_url = _scrydex_image_fallback(scrydex_id, tcg_id)
+            logger.warning(f"PPT fallback for raw card TCG#{tcg_id} failed: {e}")
+
+    card_name, set_name = localize_card_and_set(db, scrydex_id, card_name, set_name)
     return card_name, set_name, image_url, ppt_card_number
+
+
 
 
 def _resolve_raw_variant(item: dict) -> str | None:
@@ -2194,7 +2252,7 @@ def _push_raw_to_display(item: dict) -> dict:
     qty       = item.get("quantity", 1)
     cost      = _unit_cost_basis(item, qty)
 
-    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
+    card_name, set_name, image_url, ppt_card_number = _resolve_raw_card_display_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
 
     # Game-aware: Magic cards only land in Magic binders, etc.
     card_type = _canonical_card_type(item.get("game") or "pokemon")
@@ -2333,7 +2391,7 @@ def _push_raw_to_grade(item: dict) -> dict:
     qty       = item.get("quantity", 1)
     cost      = _unit_cost_basis(item, qty)
 
-    card_name, set_name, image_url, ppt_card_number = _fetch_ppt_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
+    card_name, set_name, image_url, ppt_card_number = _resolve_raw_card_display_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
 
     for _ in range(qty):
         barcode_id = generate_barcode_id() if generate_barcode_id else str(_uuid.uuid4())[:20]
