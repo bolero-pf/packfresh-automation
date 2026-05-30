@@ -98,11 +98,13 @@ def sync_customer_orders(full_backfill: bool = False):
         for edge in edges:
             node = edge["node"]
             customer = node.get("customer")
-            if not customer or not customer.get("id"):
+            anonymous = not customer or not customer.get("id")
+            if anonymous:
                 skipped_no_customer += 1
-                continue
+                customer_id = 0  # sentinel for POS walk-ins / guest checkouts
+            else:
+                customer_id = int(gid_numeric(customer["id"]))
 
-            customer_id = int(gid_numeric(customer["id"]))
             order_id = int(gid_numeric(node["id"]))
             order_date = node["createdAt"][:10]
             order_total = float(node.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
@@ -110,6 +112,7 @@ def sync_customer_orders(full_backfill: bool = False):
             net_amount = round(order_total - refund_amount, 2)
 
             fulfillment_status = node.get("displayFulfillmentStatus")
+            channel = "pos" if anonymous else "online"
 
             # Extract line items summary
             items = []
@@ -143,13 +146,16 @@ def sync_customer_orders(full_backfill: bool = False):
             """, (
                 customer_id, order_id, node["id"], node.get("name"),
                 order_date, order_total, refund_amount, net_amount,
-                "online",  # default — POS will show as "pos" when brick-and-mortar is live
+                channel,
                 fulfillment_status,
                 node["createdAt"],
                 item_count,
                 json.dumps(items),
             ))
             total_orders += 1
+
+            if anonymous:
+                continue  # no customer to stub
 
             # Also upsert minimal customer info for the summary
             _upsert_customer_stub(customer_id, customer)
@@ -311,7 +317,7 @@ def compute_daily_business_summary(target_date: date = None):
             COALESCE(SUM(order_total), 0) AS total_revenue,
             COALESCE(SUM(refund_amount), 0) AS total_refunds,
             COALESCE(SUM(net_amount), 0) AS net_revenue,
-            COUNT(DISTINCT customer_id) AS unique_customers,
+            COUNT(DISTINCT customer_id) FILTER (WHERE customer_id <> 0) AS unique_customers,
             ROUND(AVG(net_amount), 2) AS avg_order_value,
             COALESCE(SUM(item_count), 0) AS total_units_sold,
             COUNT(*) FILTER (WHERE channel = 'online') AS orders_online,
