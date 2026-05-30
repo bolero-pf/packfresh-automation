@@ -721,26 +721,25 @@ def split_damaged(item_id: str, damaged_qty: int) -> dict:
     """, (good_qty, good_offer, item_id))
 
     # Create damaged split — preserve scrydex_id / variant / language / rarity /
-    # card_number / product_name_en so the new row keeps its identity for
-    # pricing + push. Set condition='DMG' explicitly so the child renders
-    # correctly (legacy bug: condition was being left NULL and rendering as
-    # "Good"/NM in the UI).
+    # card_number so the new row keeps its identity for pricing + push.
+    # Set condition='DMG' explicitly so the child renders correctly (legacy
+    # bug: condition was being left NULL and rendering as "Good"/NM in the UI).
     damaged_id = str(uuid4())
     damaged_offer = (market_price * DAMAGE_DISCOUNT * offer_pct * damaged_qty).quantize(Decimal("0.01"))
     execute("""
         INSERT INTO intake_items (
-            id, session_id, product_name, product_name_en, set_name,
+            id, session_id, product_name, set_name,
             tcgplayer_id, scrydex_id, card_number, rarity, variant, language,
             variance, quantity, market_price, offer_price, unit_cost_basis,
             product_type, is_mapped, item_status, condition, parent_item_id,
             verified_at, verified_by
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
     """, (
         damaged_id, item["session_id"],
-        item.get("product_name"), item.get("product_name_en"), item.get("set_name"),
+        item.get("product_name"), item.get("set_name"),
         item.get("tcgplayer_id"), item.get("scrydex_id"), item.get("card_number"),
         item.get("rarity"), item.get("variant"), item.get("language", "EN"),
         item.get("variance"), damaged_qty, market_price, damaged_offer,
@@ -883,19 +882,19 @@ def split_by_conditions(item_id: str, condition_counts: dict,
             if verified_now:
                 execute("""
                     INSERT INTO intake_items (
-                        id, session_id, product_name, product_name_en, set_name,
+                        id, session_id, product_name, set_name,
                         tcgplayer_id, scrydex_id, card_number, rarity, variant, language,
                         variance, quantity, market_price, offer_price, unit_cost_basis,
                         product_type, is_mapped, item_status, condition, parent_item_id,
                         verified_at, verified_by
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         CURRENT_TIMESTAMP, %s
                     )
                 """, (
                     child_id, item["session_id"],
-                    item.get("product_name"), item.get("product_name_en"),
+                    item.get("product_name"),
                     item.get("set_name"), item.get("tcgplayer_id"), item.get("scrydex_id"),
                     item.get("card_number"), item.get("rarity"), item.get("variant"),
                     item.get("language", "EN"), item.get("variance"),
@@ -907,19 +906,19 @@ def split_by_conditions(item_id: str, condition_counts: dict,
             else:
                 execute("""
                     INSERT INTO intake_items (
-                        id, session_id, product_name, product_name_en, set_name,
+                        id, session_id, product_name, set_name,
                         tcgplayer_id, scrydex_id, card_number, rarity, variant, language,
                         variance, quantity, market_price, offer_price, unit_cost_basis,
                         product_type, is_mapped, item_status, condition, parent_item_id,
                         verified_at, verified_by
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s
                     )
                 """, (
                     child_id, item["session_id"],
-                    item.get("product_name"), item.get("product_name_en"),
+                    item.get("product_name"),
                     item.get("set_name"), item.get("tcgplayer_id"), item.get("scrydex_id"),
                     item.get("card_number"), item.get("rarity"), item.get("variant"),
                     item.get("language", "EN"), item.get("variance"),
