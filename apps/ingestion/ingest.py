@@ -1803,12 +1803,48 @@ def get_offer_adjustment_summary(session_id: str) -> Optional[dict]:
                            and str(i["id"]) not in snap_id_set]
 
             if new_damaged:
+                # Split the delta into the damage-discount portion and any
+                # remaining missing-qty portion so a "3 damaged + 1 short"
+                # row doesn't display as "Damaged ×3 -$78.75" (which lumps
+                # the missing unit's full value into the damage line).
                 total_damaged_qty = sum(k.get("quantity", 1) for k in new_damaged)
-                adjustments.append({
-                    "type": "damaged",
-                    "description": f"Damaged: {snap['product_name']} (×{total_damaged_qty})",
-                    "amount": amount,
-                })
+                damaged_actual_offer = sum(float(k.get("offer_price") or 0) for k in new_damaged)
+                snap_qty = snap.get("quantity", 1) or 1
+                snap_per_unit_offer = snap_offer / snap_qty
+                damaged_good_value = snap_per_unit_offer * total_damaged_qty
+                damaged_delta = round(damaged_actual_offer - damaged_good_value, 2)
+
+                # Sum every family member's qty (parent + all children) so we
+                # can detect any short count that landed alongside the damage.
+                family_qty = (curr.get("quantity", 1) or 0) + sum(
+                    (i.get("quantity", 1) or 0)
+                    for i in all_current_items
+                    if str(i.get("parent_item_id") or "") == sid
+                    and i.get("item_status") in ("good", "damaged")
+                )
+                missing_qty = snap_qty - family_qty
+                missing_delta = round(-missing_qty * snap_per_unit_offer, 2) if missing_qty > 0 else 0.0
+
+                if abs(damaged_delta) > 0.01 or total_damaged_qty:
+                    adjustments.append({
+                        "type": "damaged",
+                        "description": f"Damaged: {snap['product_name']} (×{total_damaged_qty})",
+                        "amount": damaged_delta,
+                    })
+                if missing_qty > 0 and abs(missing_delta) > 0.01:
+                    adjustments.append({
+                        "type": "missing",
+                        "description": f"Missing: {snap['product_name']} (×{missing_qty})",
+                        "amount": missing_delta,
+                    })
+                # Catch any residual (e.g. condition reprice on the good portion)
+                residual = round(amount - damaged_delta - missing_delta, 2)
+                if abs(residual) > 0.01:
+                    adjustments.append({
+                        "type": "price_changed",
+                        "description": f"Price adjusted: {snap['product_name']}",
+                        "amount": residual,
+                    })
                 continue
 
             # Whole item changed good → damaged
