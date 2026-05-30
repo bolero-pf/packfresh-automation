@@ -621,31 +621,32 @@ class PriceCache:
         """Internal: run the card search query, return [{scrydex_id, tcgplayer_id}].
 
         Tokens match across product_name / product_name_en / card_number /
-        printed_number / expansion_id / expansion_name / expansion_name_en.
-        The *_en columns are critical for non-English cards — JP rows store
-        the JP name in product_name and the English name in product_name_en,
-        so without them an operator typing "blaine arcanine" never finds
-        gym2_ja-34. Mirrors the public `search_cards()` clause."""
+        printed_number / expansion_id / expansion_name / expansion_name_en /
+        scrydex_card_meta.subtypes. The *_en columns are critical for non-English
+        cards. subtypes catches Riftbound's `<Legend> - <Card>` Collectr labels
+        (e.g. "Darius - Hand of Noxus" — "Darius" lives in subtypes, not in
+        product_name). Mirrors the public `search_cards()` clause."""
         full_query = (query or "").strip()
-        where_parts: list = ["product_type = 'card'"]
+        where_parts: list = ["c.product_type = 'card'"]
         params: list = []
         if not all_games:
-            where_parts.append("game = %s")
+            where_parts.append("c.game = %s")
             params.append(self.game)
 
         for forms in self._tokenize(query):
             ors = []
             for f in forms:
-                ors.append("(product_name ILIKE %s OR product_name_en ILIKE %s "
-                           "OR card_number ILIKE %s OR printed_number ILIKE %s "
-                           "OR expansion_id ILIKE %s "
-                           "OR expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
+                ors.append("(c.product_name ILIKE %s OR c.product_name_en ILIKE %s "
+                           "OR c.card_number ILIKE %s OR c.printed_number ILIKE %s "
+                           "OR c.expansion_id ILIKE %s "
+                           "OR c.expansion_name ILIKE %s OR c.expansion_name_en ILIKE %s "
+                           "OR m.subtypes::text ILIKE %s)")
                 p = f"%{f}%"
-                params.extend([p, p, p, p, p, p, p])
+                params.extend([p, p, p, p, p, p, p, p])
             where_parts.append("(" + " OR ".join(ors) + ")")
 
         if set_name:
-            where_parts.append("(expansion_name ILIKE %s OR expansion_name_en ILIKE %s)")
+            where_parts.append("(c.expansion_name ILIKE %s OR c.expansion_name_en ILIKE %s)")
             params.extend([f"%{set_name}%", f"%{set_name}%"])
 
         where_clause = " AND ".join(where_parts)
@@ -654,19 +655,21 @@ class PriceCache:
         score_params: list = []
         if full_query:
             score_sql = (
-                "(CASE WHEN LOWER(printed_number) = LOWER(%s) THEN 100 ELSE 0 END) + "
-                "(CASE WHEN printed_number ILIKE %s THEN 30 ELSE 0 END) + "
-                "(CASE WHEN printed_number ILIKE %s THEN 10 ELSE 0 END)"
+                "(CASE WHEN LOWER(c.printed_number) = LOWER(%s) THEN 100 ELSE 0 END) + "
+                "(CASE WHEN c.printed_number ILIKE %s THEN 30 ELSE 0 END) + "
+                "(CASE WHEN c.printed_number ILIKE %s THEN 10 ELSE 0 END)"
             )
             score_params = [full_query, f"{full_query}%", f"%{full_query}%"]
 
         sql = f"""
             SELECT scrydex_id, tcgplayer_id, score FROM (
-                SELECT DISTINCT ON (scrydex_id) scrydex_id, tcgplayer_id,
+                SELECT DISTINCT ON (c.scrydex_id) c.scrydex_id, c.tcgplayer_id,
                        ({score_sql}) AS score
-                FROM scrydex_price_cache
+                FROM scrydex_price_cache c
+                LEFT JOIN scrydex_card_meta m
+                       ON m.game = c.game AND m.scrydex_id = c.scrydex_id
                 WHERE {where_clause}
-                ORDER BY scrydex_id, condition, price_type
+                ORDER BY c.scrydex_id, c.condition, c.price_type
             ) sub
             ORDER BY score DESC, scrydex_id
             LIMIT %s
@@ -816,26 +819,31 @@ class PriceCache:
         full_query = (query or "").strip()
         full_query_forms = [full_query] if full_query else []
 
-        where_parts: list[str] = ["product_type = 'card'"]
+        where_parts: list[str] = ["c.product_type = 'card'"]
         params: list = []
         if not all_games:
-            where_parts.append("game = %s")
+            where_parts.append("c.game = %s")
             params.append(self.game)
 
         # variant is included in the WHERE so a search like "Masterball" or
         # "Mystery of the Fossils" qualifies via variant alone, not just name.
         # Without it, Pattern variants (PE Masterball/Pokeball) can't pass
-        # the WHERE and never appear.
+        # the WHERE and never appear. subtypes catches Riftbound's
+        # `<Legend> - <CardName>` Collectr labels (e.g. "Darius - Hand of
+        # Noxus" — "Darius" lives in scrydex_card_meta.subtypes, not in
+        # product_name) and Pokemon character tags ("ex"/"V"/...) when
+        # subtypes is populated.
         for forms in self._tokenize(query):
             ors = []
             for f in forms:
-                ors.append("(product_name ILIKE %s OR product_name_en ILIKE %s "
-                           "OR card_number ILIKE %s OR printed_number ILIKE %s "
-                           "OR expansion_id ILIKE %s "
-                           "OR expansion_name ILIKE %s OR expansion_name_en ILIKE %s "
-                           "OR variant ILIKE %s)")
+                ors.append("(c.product_name ILIKE %s OR c.product_name_en ILIKE %s "
+                           "OR c.card_number ILIKE %s OR c.printed_number ILIKE %s "
+                           "OR c.expansion_id ILIKE %s "
+                           "OR c.expansion_name ILIKE %s OR c.expansion_name_en ILIKE %s "
+                           "OR c.variant ILIKE %s "
+                           "OR m.subtypes::text ILIKE %s)")
                 p = f"%{f}%"
-                params.extend([p, p, p, p, p, p, p, p])
+                params.extend([p, p, p, p, p, p, p, p, p])
             where_parts.append("(" + " OR ".join(ors) + ")")
 
         # set_name used to be a hard WHERE filter, but Collectr's set names
@@ -855,15 +863,15 @@ class PriceCache:
         score_params: list = []
         if full_query:
             score_parts.append(
-                "(CASE WHEN LOWER(printed_number) = LOWER(%s) THEN 100 ELSE 0 END)"
+                "(CASE WHEN LOWER(c.printed_number) = LOWER(%s) THEN 100 ELSE 0 END)"
             )
             score_params.append(full_query)
             score_parts.append(
-                "(CASE WHEN printed_number ILIKE %s THEN 30 ELSE 0 END)"
+                "(CASE WHEN c.printed_number ILIKE %s THEN 30 ELSE 0 END)"
             )
             score_params.append(f"{full_query}%")
             score_parts.append(
-                "(CASE WHEN printed_number ILIKE %s THEN 10 ELSE 0 END)"
+                "(CASE WHEN c.printed_number ILIKE %s THEN 10 ELSE 0 END)"
             )
             score_params.append(f"%{full_query}%")
         if set_name:
@@ -872,15 +880,15 @@ class PriceCache:
             # partial matches like Collectr "Mega Evolution" against Scrydex
             # "Mega Evolution Base" / "Mega Evolution: Promo".
             score_parts.append(
-                "(CASE WHEN expansion_name ILIKE %s OR expansion_name_en ILIKE %s "
-                "OR expansion_id ILIKE %s THEN 50 ELSE 0 END)"
+                "(CASE WHEN c.expansion_name ILIKE %s OR c.expansion_name_en ILIKE %s "
+                "OR c.expansion_id ILIKE %s THEN 50 ELSE 0 END)"
             )
             score_params.extend([f"%{set_name}%", f"%{set_name}%", f"%{set_name}%"])
             for tok in (set_name or "").split():
                 if len(tok) < 2:
                     continue
                 score_parts.append(
-                    "(CASE WHEN expansion_name ILIKE %s OR expansion_name_en ILIKE %s "
+                    "(CASE WHEN c.expansion_name ILIKE %s OR c.expansion_name_en ILIKE %s "
                     "THEN 8 ELSE 0 END)"
                 )
                 score_params.extend([f"%{tok}%", f"%{tok}%"])
@@ -903,12 +911,19 @@ class PriceCache:
             if len(primary) < 2:
                 continue
             score_parts.append(
-                "(CASE WHEN product_name ILIKE %s OR product_name_en ILIKE %s "
+                "(CASE WHEN c.product_name ILIKE %s OR c.product_name_en ILIKE %s "
                 "THEN 25 ELSE 0 END)"
             )
             score_params.extend([f"%{primary}%", f"%{primary}%"])
             score_parts.append(
-                "(CASE WHEN variant ILIKE %s THEN 15 ELSE 0 END)"
+                "(CASE WHEN c.variant ILIKE %s THEN 15 ELSE 0 END)"
+            )
+            score_params.append(f"%{primary}%")
+            # Subtype match — lower than name match but distinguishes the
+            # right Darius/Kai'sa printing among many Riftbound rows the
+            # token only matched via subtypes.
+            score_parts.append(
+                "(CASE WHEN m.subtypes::text ILIKE %s THEN 12 ELSE 0 END)"
             )
             score_params.append(f"%{primary}%")
             # Per-token printed_number / card_number boost for numeric tokens.
@@ -920,8 +935,8 @@ class PriceCache:
             # unpadded but Collectr can have either.
             if primary.isdigit():
                 pn_or = " OR ".join(
-                    ["printed_number = %s"] * len(forms)
-                    + ["card_number = %s"] * len(forms)
+                    ["c.printed_number = %s"] * len(forms)
+                    + ["c.card_number = %s"] * len(forms)
                 )
                 score_parts.append(f"(CASE WHEN {pn_or} THEN 60 ELSE 0 END)")
                 score_params.extend(forms + forms)
@@ -930,11 +945,13 @@ class PriceCache:
 
         sql = f"""
             SELECT scrydex_id, tcgplayer_id, score FROM (
-                SELECT DISTINCT ON (scrydex_id) scrydex_id, tcgplayer_id,
+                SELECT DISTINCT ON (c.scrydex_id) c.scrydex_id, c.tcgplayer_id,
                        ({score_sql}) AS score
-                FROM scrydex_price_cache
+                FROM scrydex_price_cache c
+                LEFT JOIN scrydex_card_meta m
+                       ON m.game = c.game AND m.scrydex_id = c.scrydex_id
                 WHERE {where_clause}
-                ORDER BY scrydex_id, condition, price_type
+                ORDER BY c.scrydex_id, c.condition, c.price_type
             ) sub
             ORDER BY score DESC, scrydex_id
             LIMIT %s
