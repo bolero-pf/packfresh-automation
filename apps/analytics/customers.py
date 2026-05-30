@@ -37,6 +37,7 @@ query CustomerOrders($first:Int!, $after:String, $query:String!) {
         totalRefundedSet { shopMoney { amount } }
         lineItems(first:100) {
           edges { node {
+            sku
             variant { id }
             title
             quantity
@@ -119,6 +120,7 @@ def sync_customer_orders(full_backfill: bool = False):
                 item_count += qty
                 variant = li.get("variant")
                 items.append({
+                    "sku": li.get("sku") or None,
                     "variant_id": int(gid_numeric(variant["id"])) if variant and variant.get("id") else None,
                     "title": li.get("title", ""),
                     "qty": qty,
