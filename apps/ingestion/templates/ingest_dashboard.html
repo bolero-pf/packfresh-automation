@@ -2130,8 +2130,9 @@ function _renderBreakdownContent(data) {
         if (!['good','damaged','broken_down'].includes(i.item_status)) return false;
         // Hide pushed leaves, but keep broken_down parents (their tree is the provenance)
         if (i.pushed_at && i.item_status !== 'broken_down') return false;
-        // Raw cards and graded slabs don't get broken down
-        if (i.item_status !== 'broken_down' && (i.product_type === 'raw' || i.is_graded)) return false;
+        // Raw cards don't get broken down. Graded slabs DO show up here so the
+        // operator can compare slab vs raw value and crack them before push.
+        if (i.item_status !== 'broken_down' && i.product_type === 'raw' && !i.is_graded) return false;
         // Must be verified (or broken_down which implies it was)
         if (i.item_status !== 'broken_down' && !i.verified_at) return false;
         return true;
@@ -4335,20 +4336,49 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
         const damageToggle = isDamaged
             ? `<button onclick="markGood('${item.id}', '${sessionId}', ${item.quantity||1})">✅ Mark Good</button>`
             : `<button onclick="markDamaged('${item.id}', '${sessionId}', ${item.quantity||1})">⚠️ Mark Damaged</button>`;
-        actionCell = `
-            <div style="display:flex; align-items:center; gap:6px;">
-                <button class="btn btn-sm btn-primary" style="font-size:0.78rem;padding:3px 10px;" onclick="openBdModal('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button>
-                <div class="action-dropdown-container" style="position:relative;display:inline-block;">
-                    <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.78rem;padding:3px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
-                    <div class="action-dropdown">
-                        <button onclick="relinkItem('${item.id}', '${sessionId}', '${escName}')">🔗 Relink</button>
-                        <button onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Edit Qty</button>
-                        ${damageToggle}
-                        <hr>
-                        <button class="danger" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕ Delete</button>
+
+        if (item.is_graded) {
+            // Slab path: no sealed-breakdown recipe, but cracking to raw is the
+            // analogous "split into something worth more" decision. Same surface.
+            const _crackPayload = JSON.stringify({
+                scrydex_id: item.scrydex_id || null,
+                tcgplayer_id: item.tcgplayer_id || null,
+                grade_company: item.grade_company || '',
+                grade_value: String(item.grade_value || ''),
+                market_price: item.market_price || 0,
+                variant: item.variant || item.variance || null,
+            }).replace(/"/g, '&quot;').replace(/</g, '&lt;');
+            actionCell = `
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <button class="btn btn-sm btn-primary" style="font-size:0.78rem;padding:3px 10px;background:#7c3aed;" onclick="ingestCheckSlabCrack(${_crackPayload})">💎 Crack? Compare</button>
+                    <button class="btn btn-sm btn-secondary" style="font-size:0.78rem;padding:3px 8px;" onclick="convertToRaw('${item.id}', '${sessionId}')">↺ Convert to Raw</button>
+                    <div class="action-dropdown-container" style="position:relative;display:inline-block;">
+                        <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.78rem;padding:3px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                        <div class="action-dropdown">
+                            <button onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${item.grade_company||'PSA'}', '${item.grade_value||''}')">✏️ Change Grade</button>
+                            <button onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Edit Qty</button>
+                            ${damageToggle}
+                            <hr>
+                            <button class="danger" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕ Delete</button>
+                        </div>
                     </div>
-                </div>
-            </div>`;
+                </div>`;
+        } else {
+            actionCell = `
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <button class="btn btn-sm btn-primary" style="font-size:0.78rem;padding:3px 10px;" onclick="openBdModal('${item.id}', '${sessionId}', '${escName}', ${item.quantity||1}, ${item.tcgplayer_id||'null'}, ${item.market_price||0})">🔨 Break Down</button>
+                    <div class="action-dropdown-container" style="position:relative;display:inline-block;">
+                        <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.78rem;padding:3px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
+                        <div class="action-dropdown">
+                            <button onclick="relinkItem('${item.id}', '${sessionId}', '${escName}')">🔗 Relink</button>
+                            <button onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Edit Qty</button>
+                            ${damageToggle}
+                            <hr>
+                            <button class="danger" onclick="deleteItem('${item.id}', '${sessionId}', '${escName}')">✕ Delete</button>
+                        </div>
+                    </div>
+                </div>`;
+        }
     } else if (isReceived && isBroken) {
         actionCell = `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;border-color:var(--amber);" onclick="undoBreakdown('${item.id}', '${sessionId}')">↩ Undo</button>`;
     } else if (isReceived && isChild) {
