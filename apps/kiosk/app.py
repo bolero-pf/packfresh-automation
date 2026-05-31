@@ -2058,7 +2058,13 @@ def create_hold():
     lines_resolved: list[dict] = []
     errors: list[str] = []
     assigned: list[dict] = []
-
+    # Track raw_card ids already picked in this request so a second line with
+    # the same identity (frontend dupes, double-submits, etc.) can't be handed
+    # the same physical copy. Without this guard the loop selects the earliest
+    # available row on every iteration because the lock UPDATE doesn't run
+    # until the persist phase below — manifesting as two hold_items with the
+    # same barcode for a single qty=2 request.
+    allocated_raw_ids: list = []
     for line in items:
         kind = (line.get("kind") or "raw").strip().lower()
         qty  = max(1, int(line.get("qty", 1)))
@@ -2080,6 +2086,13 @@ def create_hold():
                 id_filter = " AND tcgplayer_id = %s"
                 id_params.append(int(tcgplayer_id))
 
+            exclude_filter = ""
+            exclude_params: list = []
+            if allocated_raw_ids:
+                ph = ",".join(["%s"] * len(allocated_raw_ids))
+                exclude_filter = f" AND id NOT IN ({ph})"
+                exclude_params = list(allocated_raw_ids)
+
             available = db.query(f"""
                 SELECT id, barcode FROM raw_cards
                 WHERE card_name = %s AND set_name = %s
@@ -2087,9 +2100,11 @@ def create_hold():
                   AND current_hold_id IS NULL
                   AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s
                   {id_filter}
+                  {exclude_filter}
                 ORDER BY created_at ASC
                 LIMIT %s
-            """, (card_name, set_name, condition, variant, *id_params, qty))
+            """, (card_name, set_name, condition, variant,
+                  *id_params, *exclude_params, qty))
 
             if not available:
                 errors.append(f"No {condition} copies available for {card_name}")
@@ -2098,6 +2113,7 @@ def create_hold():
                 errors.append(f"Only {len(available)} {condition} {card_name} available (requested {qty})")
 
             for card in available:
+                allocated_raw_ids.append(card["id"])
                 lines_resolved.append({
                     "kind": "raw",
                     "card_name": card_name, "set_name": set_name,
@@ -2660,6 +2676,8 @@ def champion_checkout():
     # ── Step 2: Resolve available cards (same as create_hold) ───────────────
     lines_resolved = []
     errors = []
+    # See create_hold for why we track allocated ids across iterations.
+    allocated_raw_ids: list = []
     for line in items:
         card_name = line.get("card_name", "")
         set_name = line.get("set_name", "")
@@ -2680,6 +2698,13 @@ def champion_checkout():
             id_filter = " AND tcgplayer_id = %s"
             id_params.append(int(tcgplayer_id))
 
+        exclude_filter = ""
+        exclude_params: list = []
+        if allocated_raw_ids:
+            ph = ",".join(["%s"] * len(allocated_raw_ids))
+            exclude_filter = f" AND id NOT IN ({ph})"
+            exclude_params = list(allocated_raw_ids)
+
         available = db.query(f"""
             SELECT id, barcode, card_name, set_name, card_number,
                    condition, current_price, image_url
@@ -2689,9 +2714,11 @@ def champion_checkout():
               AND current_hold_id IS NULL
               AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s
               {id_filter}
+              {exclude_filter}
             ORDER BY created_at ASC
             LIMIT %s
-        """, (card_name, set_name, condition, variant, *id_params, qty))
+        """, (card_name, set_name, condition, variant,
+              *id_params, *exclude_params, qty))
 
         if not available:
             errors.append(f"No {condition} copies available for {card_name}")
@@ -2700,6 +2727,7 @@ def champion_checkout():
             errors.append(f"Only {len(available)} {condition} {card_name} available (requested {qty})")
 
         for card in available:
+            allocated_raw_ids.append(card["id"])
             lines_resolved.append(dict(card))
 
     if not lines_resolved:
