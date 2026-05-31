@@ -208,7 +208,9 @@ load();
 </body></html>"""
 
 
-def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/breakdown-cache", name="breakdown_cache"):
+def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/breakdown-cache",
+                                name="breakdown_cache", shopify_delete=None,
+                                generate_barcode=None):
     """
     Factory: returns a Flask Blueprint with all breakdown-cache endpoints.
 
@@ -217,6 +219,12 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
         ppt_getter: callable returning a PriceProvider instance (or None to disable provider features)
         url_prefix: where to mount the blueprint (default /api/breakdown-cache)
         name: blueprint name (must be unique per app, default "breakdown_cache")
+        shopify_delete: optional callable(product_id) -> None used by slab-crack
+            execute to delete the slab's Shopify listing. If None, slab-crack
+            execute will refuse to run against a slab that still has a
+            shopify_product_id (so we never orphan a listing silently).
+        generate_barcode: optional callable() -> str used to mint the new
+            raw_card's barcode on slab-crack execute (defaults to uuid4()[:20]).
     """
     bp = Blueprint(
         name, __name__,
@@ -227,6 +235,7 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
 
     # Import shared logic (will be on PYTHONPATH via shared/)
     import breakdown_logic as logic
+    import slab_crack
 
     def _get_ppt():
         if ppt_getter:
@@ -658,5 +667,89 @@ def create_breakdown_blueprint(db_module, ppt_getter=None, url_prefix="/api/brea
             logger.warning(f"Velocity enrichment skipped: {e}")
 
         return jsonify({"prices": _serialize(prices)})
+
+    # ─── Slab Crack ─────────────────────────────────────────────────
+    # "Crack the slab": for a graded card whose raw equivalent at the
+    # grade-mapped condition is worth more than the slab listing, mark
+    # the slab REMOVED, queue a raw_card row in PENDING_RETURN, and
+    # delete the Shopify listing. Operator processes the new raw card
+    # via card_manager's Return Queue (label-print + scan-to-bin).
+    # Lives alongside breakdown because the use case is identical at
+    # surface level: "should I split this item into something worth more?"
+
+    @bp.route("/slab-crack/<raw_card_id>")
+    def slab_crack_compute(raw_card_id):
+        result = slab_crack.compute_slab_crack(raw_card_id, db_module,
+                                                pricing=_get_ppt())
+        if not result:
+            return jsonify({"error": "raw_card not found"}), 404
+        return jsonify(_serialize(result))
+
+    @bp.route("/slab-crack/compare", methods=["POST"])
+    def slab_crack_compare():
+        """Stateless comparison for intake / ingest (pre-push) slabs that
+        don't have a raw_cards row yet. Body:
+            scrydex_id, tcgplayer_id, grade_company, grade_value,
+            slab_price, variant
+        """
+        data = request.get_json(silent=True) or {}
+        result = slab_crack.compute_crack_from_inputs(
+            db=db_module, pricing=_get_ppt(),
+            scrydex_id=data.get("scrydex_id"),
+            tcgplayer_id=data.get("tcgplayer_id"),
+            grade_company=data.get("grade_company"),
+            grade_value=data.get("grade_value"),
+            slab_price=data.get("slab_price"),
+            variant=data.get("variant"),
+        )
+        return jsonify(_serialize(result))
+
+    @bp.route("/slab-crack/candidates")
+    def slab_crack_candidates():
+        min_delta = request.args.get("min_delta", 1.0, type=float)
+        limit = request.args.get("limit", 500, type=int)
+        rows = slab_crack.list_crack_candidates(
+            db_module, pricing=_get_ppt(),
+            min_delta=min_delta, limit=limit,
+        )
+        return jsonify({"candidates": _serialize(rows), "count": len(rows)})
+
+    @bp.route("/slab-crack/<raw_card_id>/execute", methods=["POST"])
+    def slab_crack_execute(raw_card_id):
+        data = request.get_json(silent=True) or {}
+        target_condition = (data.get("condition") or "").strip().upper() or None
+        operator = data.get("operator")
+
+        # Refuse to run if there's still a Shopify listing and we have no
+        # delete callable wired in — avoids silently orphaning a product.
+        slab_row = db_module.query_one(
+            "SELECT shopify_product_id FROM raw_cards WHERE id = %s",
+            (str(raw_card_id),),
+        )
+        if (slab_row and slab_row.get("shopify_product_id")
+                and shopify_delete is None):
+            return jsonify({
+                "error": "Slab still has a Shopify listing but this service "
+                         "has no shopify_delete callable wired in. Run from "
+                         "card_manager (which owns Shopify writes) or have an "
+                         "operator delist first."
+            }), 400
+
+        try:
+            result = slab_crack.execute_slab_crack(
+                raw_card_id, db_module,
+                target_condition=target_condition,
+                delete_shopify=shopify_delete,
+                operator=operator,
+                generate_barcode=generate_barcode,
+            )
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 502
+        except Exception as e:
+            logger.exception(f"Slab crack execute failed for {raw_card_id}")
+            return jsonify({"error": str(e)}), 500
+        return jsonify(_serialize(result))
 
     return bp

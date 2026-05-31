@@ -1033,7 +1033,17 @@ async function loadIntakeItems() {
                 const isCard = i.product_type === 'raw';
                 let typeBadge;
                 if (i.is_graded) {
-                    typeBadge = '<span class="badge" style="background:var(--accent-alt,#7c3aed);color:#fff;">' + (i.grade_company||'') + ' ' + (i.grade_value||'') + '</span>';
+                    const _crackPayload = JSON.stringify({
+                        scrydex_id: i.scrydex_id || null,
+                        tcgplayer_id: i.tcgplayer_id || null,
+                        grade_company: i.grade_company || '',
+                        grade_value: String(i.grade_value || ''),
+                        market_price: i.market_price || 0,
+                        variant: i.variance || i.variant || null,
+                    }).replace(/"/g, '&quot;').replace(/</g, '&lt;');
+                    typeBadge = '<span class="badge" style="background:var(--accent-alt,#7c3aed);color:#fff;">' + (i.grade_company||'') + ' ' + (i.grade_value||'') + '</span>'
+                        + ' <button class="btn btn-sm" title="Crack to raw — compare prices" style="padding:1px 6px;font-size:0.7rem;background:transparent;color:var(--text-dim);border:1px solid var(--border);" '
+                        + 'onclick="checkSlabCrack(' + _crackPayload + ')">💎</button>';
                 } else if (isCard) {
                     const _c = i.condition || '';
                     const _s = _c==='NM' ? 'background:#14532d;color:#4ade80;' : _c==='LP' ? 'background:rgba(79,125,249,0.18);color:#7aadff;' : _c==='MP' ? 'background:#422006;color:#fbbf24;' : _c==='HP' ? 'background:#431407;color:#fb923c;' : _c==='DMG' ? 'background:#450a0a;color:#f87171;' : 'background:var(--surface-2);color:var(--text-dim);';
@@ -6209,4 +6219,43 @@ async function _enrichIntakeBreakdowns(items, sessionId) {
             }
         });
     } catch(e) { /* silent */ }
+}
+
+// ─── Slab Crack ──────────────────────────────────────────────────
+// Pre-push comparison for graded items: would the raw at the grade-mapped
+// condition be worth more than the slab listing? Read-only at intake — the
+// full crack flow (Shopify delist + return-queue insert) lives in inventory.
+async function checkSlabCrack(payload) {
+    const { scrydex_id, tcgplayer_id, grade_company, grade_value, market_price, variant } = payload || {};
+    try {
+        const r = await fetch('/api/breakdown-cache/slab-crack/compare', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                scrydex_id, tcgplayer_id, grade_company, grade_value,
+                slab_price: market_price, variant
+            })
+        });
+        const d = await r.json();
+        const slab  = (d.slab_listing != null) ? '$' + Number(d.slab_listing).toFixed(2) : '—';
+        const rmap  = (d.raw_price_mapped != null) ? '$' + Number(d.raw_price_mapped).toFixed(2) : 'no data';
+        const rnm   = (d.raw_price_nm != null) ? '$' + Number(d.raw_price_nm).toFixed(2) : '—';
+        const delta = d.delta_mapped;
+        const dStr  = (delta != null) ? ((delta > 0 ? '+' : '') + '$' + Number(delta).toFixed(2)) : '?';
+        const verdict = (delta == null)
+            ? 'No raw market data — can\'t compare.'
+            : (delta > 0
+                ? 'Raw ' + d.mapped_condition + ' beats slab by ' + dStr + '. Consider cracking.'
+                : 'Slab listing still wins by ' + dStr.replace('-', '$') + '. Keep slab.');
+        const msg =
+            grade_company + ' ' + grade_value + ' (mapped → ' + (d.mapped_condition || '?') + ')\n\n' +
+            'Slab listing:   ' + slab + '\n' +
+            'Raw @ mapped:   ' + rmap + '   (Δ ' + dStr + ')\n' +
+            'Raw @ NM:       ' + rnm + '\n\n' +
+            verdict + '\n\n' +
+            'To actually crack: push as slab, then use Inventory → Crack Slab once listed.';
+        alert(msg);
+    } catch (e) {
+        alert('Slab-crack compare failed: ' + e.message);
+    }
 }

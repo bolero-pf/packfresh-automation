@@ -1276,8 +1276,17 @@ function _renderVerifyRow(item, sessionId) {
         // Secondary actions in a dropdown
         let extraActions = '';
         if (item.is_graded) {
+            const _cs = JSON.stringify({
+                scrydex_id: item.scrydex_id || null,
+                tcgplayer_id: item.tcgplayer_id || null,
+                grade_company: item.grade_company || '',
+                grade_value: String(item.grade_value || ''),
+                market_price: item.market_price || 0,
+                variant: item.variant || item.variance || null,
+            }).replace(/"/g, '&quot;');
             extraActions = `
                 <button onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${item.grade_company||'PSA'}', '${item.grade_value||''}')">✏️ Change Grade</button>
+                <button onclick="ingestCheckSlabCrack(${_cs})">💎 Crack? (compare)</button>
                 <button onclick="convertToRaw('${item.id}', '${sessionId}')">↺ Convert to Raw</button>
                 <button onclick="editVerifyQty('${item.id}', '${sessionId}', ${item.quantity||1})">📦 Edit Qty</button>
                 <button onclick="verifyItem('${item.id}', '${sessionId}', 'missing', ${item.quantity||1})">✗ Missing</button>`;
@@ -2055,6 +2064,43 @@ async function convertToRaw(itemId, sessionId) {
         if (!r.ok) { alert(d.error || 'Conversion failed'); return; }
         viewSession(sessionId, true);
     } catch(err) { alert(err.message); }
+}
+
+async function ingestCheckSlabCrack(payload) {
+    // Read-only comparison: would raw at the grade-mapped condition beat the slab listing?
+    // Uses /api/breakdown-cache/slab-crack/compare; no Shopify side effects here.
+    try {
+        const r = await fetch('/api/breakdown-cache/slab-crack/compare', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                scrydex_id:    payload.scrydex_id,
+                tcgplayer_id:  payload.tcgplayer_id,
+                grade_company: payload.grade_company,
+                grade_value:   payload.grade_value,
+                slab_price:    payload.market_price,
+                variant:       payload.variant,
+            }),
+        });
+        const d = await r.json();
+        const fmt = v => (v != null) ? '$' + Number(v).toFixed(2) : '—';
+        const delta = d.delta_mapped;
+        const dStr = (delta != null) ? ((delta > 0 ? '+' : '') + fmt(delta)) : '?';
+        const verdict = (delta == null)
+            ? 'No raw market data — comparison unavailable.'
+            : (delta > 0
+                ? 'Raw ' + d.mapped_condition + ' beats slab by ' + dStr + '. Convert to raw before pushing?'
+                : 'Slab listing still wins. Keep as slab.');
+        alert(
+            (payload.grade_company || '?') + ' ' + (payload.grade_value || '?') +
+            ' → mapped ' + (d.mapped_condition || '?') + '\n\n' +
+            'Slab listing target: ' + fmt(d.slab_listing) + '\n' +
+            'Raw @ mapped:        ' + fmt(d.raw_price_mapped) + '   (Δ ' + dStr + ')\n' +
+            'Raw @ NM:            ' + fmt(d.raw_price_nm) + '\n\n' +
+            verdict
+        );
+    } catch (e) {
+        alert('Slab-crack compare failed: ' + e.message);
+    }
 }
 
 async function undoVerify(itemId, sessionId) {
