@@ -6046,7 +6046,17 @@ async function pushLive(sessionId) {
         && ['storage','display'].includes(i.routing_destination || 'storage')
         && !i.barcoded_at
     );
-    const willPushNow = sealedRawItems.filter(i => !needsBarcodeFirst.includes(i));
+    // Routed gate: a barcoded-but-unrouted raw card would otherwise silently
+    // auto-bin via the pre-barcoded fast path because routing_destination
+    // defaults to 'storage' on barcode. Backend now rejects these — call it
+    // out here so staff aren't surprised when only the sealed portion goes.
+    const needsRouteFirst = sealedRawItems.filter(i =>
+        i.product_type === 'raw'
+        && !i.routing_reviewed_at
+        && !needsBarcodeFirst.includes(i)
+    );
+    const blockedRaw = new Set([...needsBarcodeFirst, ...needsRouteFirst].map(i => i.id));
+    const willPushNow = sealedRawItems.filter(i => !blockedRaw.has(i.id));
     const gradedIds = new Set(gradedItems.map(i => i.id));
     const totalPending = unpushed.length;
     const totalWillPush = gradedItems.length + willPushNow.length;
@@ -6054,6 +6064,9 @@ async function pushLive(sessionId) {
     let confirmMsg = `Push ${totalWillPush} items (${gradedItems.length} graded slabs, ${willPushNow.length} sealed/raw). Cannot be easily undone.`;
     if (needsBarcodeFirst.length > 0) {
         confirmMsg += `\n\n⚠ ${needsBarcodeFirst.length} raw card(s) routed to storage/binder will NOT push — they need Barcode → Route → Push first.`;
+    }
+    if (needsRouteFirst.length > 0) {
+        confirmMsg += `\n\n⚠ ${needsRouteFirst.length} barcoded raw card(s) will NOT push — they need to be Routed first.`;
     }
 
     const ok = await themedConfirm('🚀 Push Session', confirmMsg,
@@ -6510,6 +6523,10 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
         const rows = Array.from({length: item.qty}, (_, idx) => {
             const rowId = `${item.id}-${idx}`;
             const slabLabel = item.qty > 1 ? `Slab ${idx + 1} of ${item.qty}` : `${item.company} ${item.grade}`;
+            // Hydrate from pending_certs persisted server-side so a refresh
+            // (or Railway redeploy) doesn't lose the operator's typed cert/price.
+            const pending = (item.pending_certs && item.pending_certs[idx]) || {};
+            const certVal = (pending.cert || '').toString().replace(/"/g, '&quot;');
             return `
             <div id="graded-row-${rowId}" data-item-id="${item.id}" data-slab-idx="${idx}"
                  style="padding:10px;background:var(--surface-2);border-radius:8px;margin-bottom:8px;">
@@ -6518,8 +6535,9 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
                         <div style="font-weight:600;font-size:0.9rem;">${item.name}${item.card_number ? ' <small style="color:var(--text-dim);">#' + item.card_number + '</small>' : ''}</div>
                         <div style="font-size:0.78rem;color:var(--text-dim);">${item.set_name ? item.set_name + ' · ' : ''}${slabLabel}</div>
                     </div>
-                    <input type="text" id="cert-input-${rowId}" placeholder="Cert # (e.g. 12345678)"
+                    <input type="text" id="cert-input-${rowId}" placeholder="Cert # (e.g. 12345678)" value="${certVal}"
                         style="width:170px;font-size:0.85rem;"
+                        onblur="_savePendingCert('${item.id}',${idx})"
                         onkeydown="if(event.key==='Enter') previewGradedSlab('${item.id}','${sessionId}',${idx})">
                     <button class="btn btn-secondary btn-sm" id="preview-btn-${rowId}"
                         onclick="previewGradedSlab('${item.id}','${sessionId}',${idx})"
@@ -6548,6 +6566,49 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
         panel.innerHTML = '';
         panel.appendChild(certPanel);
     }
+
+    // Auto-preview any rows that came back with a saved cert — the operator
+    // typed these before refresh/redeploy, surface the lookup result without
+    // making them click Preview again on every row.
+    setTimeout(() => {
+        gradedRows.forEach(item => {
+            const certs = item.pending_certs || [];
+            for (let idx = 0; idx < item.qty; idx++) {
+                const entry = certs[idx];
+                if (entry && entry.cert) {
+                    // Fire-and-forget; previewGradedSlab will fill the price
+                    // input from `entry.price` if it has a saved value (see
+                    // overlay in previewGradedSlab below).
+                    previewGradedSlab(item.id, sessionId, idx);
+                }
+            }
+        });
+    }, 0);
+}
+
+// Debounced persist of the typed cert # + price for one slab row. Fires on
+// blur of either input so the operator only loses keystrokes mid-word.
+async function _savePendingCert(itemId, slabIdx) {
+    const rowId      = `${itemId}-${slabIdx}`;
+    const certInput  = document.getElementById(`cert-input-${rowId}`);
+    const priceInput = document.getElementById(`price-input-${rowId}`);
+    const cert  = (certInput?.value || '').trim();
+    const price = (priceInput?.value || '').trim();
+    try {
+        await fetch(`/api/ingest/item/${itemId}/save-pending-cert`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                slab_idx: slabIdx,
+                cert_number: cert || null,
+                price: price === '' ? null : Number(price),
+            }),
+        });
+    } catch (e) {
+        // Autosave is best-effort — silent on failure so we don't spam the
+        // operator with toasts while they're typing across rows.
+        console.warn('save-pending-cert failed:', e);
+    }
 }
 
 async function previewGradedSlab(itemId, sessionId, slabIdx) {
@@ -6569,7 +6630,7 @@ async function previewGradedSlab(itemId, sessionId, slabIdx) {
         const r = await fetch(`/api/ingest/item/${itemId}/preview-graded`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cert_number: cert }),
+            body: JSON.stringify({ cert_number: cert, slab_idx: slabIdx }),
         });
         const d = await r.json();
         if (!r.ok) {
@@ -6716,7 +6777,12 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
     const sd = d.scrydex;
     const thinScrydex = sd && sd.low != null && sd.low === sd.mid && sd.mid === sd.high && sd.high === sd.market;
     const suggested = (sd && !thinScrydex) ? sd.suggested_price : null;
-    const priceVal = suggested != null ? suggested.toFixed(2) : '';
+    // Saved price (operator already chose one before refresh) beats the
+    // auto-suggested comp — don't stomp on their decision.
+    const savedPrice = d.saved_price != null ? d.saved_price : null;
+    const priceVal = savedPrice != null
+        ? Number(savedPrice).toFixed(2)
+        : (suggested != null ? suggested.toFixed(2) : '');
     const cost = d.cost_basis || 0;
 
     return `
@@ -6738,6 +6804,7 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
                 value="${priceVal}"
                 placeholder="enter price"
                 oninput="_updateMarginPreview('${rowId}', ${cost})"
+                onblur="_savePendingCert('${itemId}', ${slabIdx})"
                 style="width:120px;font-size:0.9rem;padding:6px;">
             <button class="btn btn-success btn-sm" id="push-btn-${rowId}"
                 onclick="pushGradedSlab('${itemId}','${sessionId}',${slabIdx})"
@@ -6790,7 +6857,7 @@ async function pushGradedSlab(itemId, sessionId, slabIdx) {
         const r = await fetch(`/api/ingest/item/${itemId}/push-graded`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cert_number: cert, session_id: sessionId, price }),
+            body: JSON.stringify({ cert_number: cert, session_id: sessionId, price, slab_idx: slabIdx }),
         });
         const d = await r.json();
         if (!r.ok) {
@@ -6799,22 +6866,47 @@ async function pushGradedSlab(itemId, sessionId, slabIdx) {
             return;
         }
 
-        // Success — collapse the whole row into a status line
-        const row = document.getElementById(`graded-row-${rowId}`);
-        if (row) {
-            const actionLabel = d.action === 'added_variant' ? '✅ Added variant' : '🆕 New listing';
-            row.style.opacity = '0.6';
-            row.innerHTML = `
-                <div style="display:flex;gap:10px;align-items:center;">
-                    <div style="flex:1;">
-                        <div style="font-weight:600;font-size:0.9rem;">${d.title || 'Slab'}</div>
-                        <div style="font-size:0.78rem;color:var(--text-dim);">Cert: ${cert} · Listed at $${price.toFixed(2)}</div>
-                    </div>
-                    <span style="color:var(--green);font-size:0.85rem;">${actionLabel}</span>
-                </div>
-            `;
+        // Success — flash a toast then re-fetch + re-render so the remaining
+        // rows reflect the server-spliced pending_certs and decremented qty.
+        // Without this, the DOM slab_idx for subsequent rows drifts from the
+        // server's array indices and a later save can land in the wrong slot.
+        const actionLabel = d.action === 'added_variant' ? '✅ Added variant' : '🆕 New listing';
+        if (window.toast) {
+            window.toast(`${actionLabel}: ${d.title || 'Slab'} — $${price.toFixed(2)}`, 'success');
         }
         _pushedItemIds.add(itemId);
+        try {
+            const sr = await fetch(`/api/ingest/session/${sessionId}`);
+            const sd = await sr.json();
+            _currentSessionData = sd;
+            _pushedItemIds = new Set(sd.items.filter(i => i.pushed_at).map(i => i.id));
+            const remainingGraded = (sd.items || []).filter(i =>
+                i.is_graded && !i.pushed_at &&
+                ['good','damaged'].includes(i.item_status || 'good')
+            );
+            const panel = document.getElementById('push-live-results');
+            if (panel && remainingGraded.length > 0) {
+                await _showGradedCertPanel(sessionId, remainingGraded.map(i => i.id), panel, false);
+            } else if (panel) {
+                // All slabs pushed — clear the panel so the operator sees they're done
+                panel.innerHTML = '<div class="alert alert-success">✅ All graded slabs pushed.</div>';
+            }
+        } catch (e) {
+            // Re-render failed; fall back to in-place collapse so the row at least shows it pushed
+            const row = document.getElementById(`graded-row-${rowId}`);
+            if (row) {
+                row.style.opacity = '0.6';
+                row.innerHTML = `
+                    <div style="display:flex;gap:10px;align-items:center;">
+                        <div style="flex:1;">
+                            <div style="font-weight:600;font-size:0.9rem;">${d.title || 'Slab'}</div>
+                            <div style="font-size:0.78rem;color:var(--text-dim);">Cert: ${cert} · Listed at $${price.toFixed(2)}</div>
+                        </div>
+                        <span style="color:var(--green);font-size:0.85rem;">${actionLabel}</span>
+                    </div>
+                `;
+            }
+        }
     } catch(err) {
         if (pushBtn) { pushBtn.disabled = false; pushBtn.textContent = '🚀 Push Slab Live'; }
         resultEl.innerHTML = `<span style="color:var(--red);">❌ ${err.message}</span>`;

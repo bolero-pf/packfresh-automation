@@ -370,6 +370,15 @@ def get_session(session_id):
         d["store_qty"] = int(sp["shopify_qty"] or 0) if sp else None
         vel = velocity_map.get(i.get("tcgplayer_id"))
         d["velocity"] = _serialize(vel) if vel else None
+        # Normalize pending_certs to a list — older psycopg2 builds hand back
+        # JSONB as a string; the frontend's `item.pending_certs[idx]` would
+        # then index into the raw JSON text instead of an array.
+        pc = d.get("pending_certs")
+        if isinstance(pc, str):
+            try: d["pending_certs"] = json.loads(pc)
+            except Exception: d["pending_certs"] = []
+        elif pc is None:
+            d["pending_certs"] = []
         serialized.append(d)
 
     return jsonify({
@@ -1067,14 +1076,29 @@ def push_dry_run(session_id):
         and (i.get("routing_destination") or "storage") in ("storage", "display")
         and not i.get("barcoded_at")
     ]
-    if skipped_unbarcoded:
-        skipped_ids = {str(i["id"]) for i in skipped_unbarcoded}
+    # Routed gate: any raw card without routing_reviewed_at hasn't actually
+    # been routed — routing_destination defaults to 'storage' on barcode, so
+    # without this check a barcoded-but-unrouted card silently auto-bins via
+    # _place_pre_barcoded when Sean pushes only the sealed portion of a mixed
+    # session.
+    skipped_unrouted = [
+        i for i in active
+        if i.get("product_type") == "raw" and not i.get("is_graded")
+        and not i.get("routing_reviewed_at")
+    ]
+    if skipped_unbarcoded or skipped_unrouted:
+        skipped_ids = {str(i["id"]) for i in skipped_unbarcoded} | \
+                      {str(i["id"]) for i in skipped_unrouted}
         active = [i for i in active if str(i["id"]) not in skipped_ids]
 
     if not active:
+        if skipped_unrouted and not skipped_unbarcoded:
+            return jsonify({"error": f"{len(skipped_unrouted)} raw card(s) need to be Routed first.",
+                            "skipped_unrouted": len(skipped_unrouted)}), 400
         if skipped_unbarcoded:
             return jsonify({"error": f"{len(skipped_unbarcoded)} raw card(s) need Barcode → Route → Push first.",
-                            "skipped_unbarcoded": len(skipped_unbarcoded)}), 400
+                            "skipped_unbarcoded": len(skipped_unbarcoded),
+                            "skipped_unrouted": len(skipped_unrouted)}), 400
         return jsonify({"error": "No active mapped items to preview"}), 400
 
     # Split by product_type
@@ -1194,6 +1218,7 @@ def push_dry_run(session_id):
         "would_ingest_raw":     sum(1 for r in results if r.get("action") == "would_ingest_raw"),
         "would_push_graded":    sum(1 for r in results if r.get("action") == "would_push_graded"),
         "skipped_unbarcoded":   len(skipped_unbarcoded),
+        "skipped_unrouted":     len(skipped_unrouted),
     })
 
 
@@ -1451,15 +1476,32 @@ def push_session_live(session_id):
         and (i.get("routing_destination") or "storage") in ("storage", "display")
         and not i.get("barcoded_at")
     ]
-    if skipped_unbarcoded:
-        skipped_ids = {str(i["id"]) for i in skipped_unbarcoded}
+    # Routed gate: routing_destination defaults to 'storage' on barcode, so a
+    # barcoded-but-unrouted card silently auto-bins via _place_pre_barcoded
+    # when only the sealed half of a mixed session is pushed. Mixed-session
+    # workflow is Verify → Breakdown → Barcode → (push sealed) — the raw side
+    # has to wait for Route before it can ride along on a push.
+    skipped_unrouted = [
+        i for i in active
+        if i.get("product_type") == "raw" and not i.get("is_graded")
+        and not i.get("routing_reviewed_at")
+    ]
+    if skipped_unbarcoded or skipped_unrouted:
+        skipped_ids = {str(i["id"]) for i in skipped_unbarcoded} | \
+                      {str(i["id"]) for i in skipped_unrouted}
         active = [i for i in active if str(i["id"]) not in skipped_ids]
 
     if not active:
+        if skipped_unrouted and not skipped_unbarcoded:
+            return jsonify({
+                "error": f"{len(skipped_unrouted)} raw card(s) need to be Routed before they can be pushed.",
+                "skipped_unrouted": len(skipped_unrouted),
+            }), 400
         if skipped_unbarcoded:
             return jsonify({
                 "error": f"{len(skipped_unbarcoded)} raw card(s) need to go through Barcode → Route → Push first. Storage/display raw cards can't be pushed inline anymore.",
                 "skipped_unbarcoded": len(skipped_unbarcoded),
+                "skipped_unrouted":   len(skipped_unrouted),
             }), 400
         already_pushed = [i for i in items if i.get("pushed_at")]
         if already_pushed:
@@ -1494,6 +1536,7 @@ def push_session_live(session_id):
         "status": "running",
         "total": len(active_dicts),
         "skipped_unbarcoded": len(skipped_unbarcoded),
+        "skipped_unrouted":   len(skipped_unrouted),
     })
 
 
@@ -2754,6 +2797,12 @@ def preview_graded_item(item_id):
     """
     data = request.get_json(silent=True) or {}
     cert_number = (data.get("cert_number") or "").strip()
+    # slab_idx lets the preview surface back the saved listing price for that
+    # exact row so a refresh-and-resume cycle prefers what the operator chose.
+    try:
+        slab_idx = int(data.get("slab_idx")) if data.get("slab_idx") is not None else None
+    except (TypeError, ValueError):
+        slab_idx = None
     if not cert_number:
         return jsonify({"error": "cert_number required"}), 400
 
@@ -2767,6 +2816,17 @@ def preview_graded_item(item_id):
     qty     = max(1, int(item.get("quantity") or 1))
     unit_cost = float(item.get("offer_price") or 0) / qty
 
+    saved_price = None
+    if slab_idx is not None and slab_idx >= 0:
+        arr = item.get("pending_certs") or []
+        if isinstance(arr, str):
+            try: arr = json.loads(arr)
+            except Exception: arr = []
+        if isinstance(arr, list) and slab_idx < len(arr):
+            entry = arr[slab_idx]
+            if isinstance(entry, dict) and entry.get("price") is not None:
+                saved_price = entry.get("price")
+
     result = {
         "company":     company,
         "grade":       grade,
@@ -2774,6 +2834,7 @@ def preview_graded_item(item_id):
         "product_name": item.get("product_name"),
         "set_name":    item.get("set_name"),
         "cost_basis":  round(unit_cost, 2),
+        "saved_price": saved_price,
     }
 
     # ── Grader lookup (cert + images + pop) ─────────────────────────────────
@@ -2888,11 +2949,22 @@ def push_graded_item(item_id):
     cert_number = (data.get("cert_number") or "").strip()
     session_id  = data.get("session_id")
     price_override = data.get("price")  # From preview panel — user's chosen listing price
+    # slab_idx = position in parent's pending_certs array; used to splice the
+    # entry after a successful push so on refresh the operator sees their other
+    # unsubmitted certs in the correct rows.
+    slab_idx = data.get("slab_idx")
+    try:
+        slab_idx = int(slab_idx) if slab_idx is not None else None
+    except (TypeError, ValueError):
+        slab_idx = None
 
     if not cert_number:
         return jsonify({"error": "cert_number is required"}), 400
 
-    # Load item
+    # Load item — `parent_id` is the pre-split item the operator clicked Push on;
+    # `item_id` may swap to a fresh child after split_one_slab. The pending_certs
+    # array lives on the parent.
+    parent_id = item_id
     item = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
     if not item:
         return jsonify({"error": "Item not found"}), 404
@@ -2989,12 +3061,101 @@ def push_graded_item(item_id):
         WHERE id = %s
     """, (cert_number, item_id))
 
+    # Splice the consumed entry out of the parent's pending_certs so on refresh
+    # the operator sees their other typed (but unsubmitted) certs in the right
+    # rows. If parent_id == item_id (qty was 1, no split happened) the parent
+    # is now pushed and won't render rows anyway — splice is harmless.
+    if slab_idx is not None and slab_idx >= 0:
+        parent = db.query_one(
+            "SELECT pending_certs FROM intake_items WHERE id = %s",
+            (parent_id,),
+        )
+        if parent:
+            arr = parent.get("pending_certs") or []
+            if isinstance(arr, str):
+                try: arr = json.loads(arr)
+                except Exception: arr = []
+            if isinstance(arr, list) and slab_idx < len(arr):
+                arr.pop(slab_idx)
+                db.execute(
+                    "UPDATE intake_items SET pending_certs = %s::jsonb WHERE id = %s",
+                    (json.dumps(arr), parent_id),
+                )
+
     # Update session status — central helper also stamps ingested_at,
     # which the prior inline UPDATE skipped.
     if session_id:
         ingest.try_advance_to_ingested(session_id)
 
     return jsonify({"success": True, **result})
+
+
+@app.route("/api/ingest/item/<item_id>/save-pending-cert", methods=["POST"])
+def save_pending_cert(item_id):
+    """
+    Persist typed cert # + listing price for an unpushed graded slab so the
+    operator survives a refresh (or Railway redeploy) without losing work.
+
+    POST body:
+        { "slab_idx": 0, "cert_number": "12345678", "price": 250.00 }
+
+    `slab_idx` is the row position within the parent item's qty (0-based).
+    Stored as JSONB array on intake_items.pending_certs; nulls pad sparse
+    indices so positions stay stable when entries are filled out of order.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        slab_idx = int(data.get("slab_idx"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "slab_idx must be an integer"}), 400
+    if slab_idx < 0 or slab_idx > 999:
+        return jsonify({"error": "slab_idx out of range"}), 400
+
+    cert_number = (data.get("cert_number") or "").strip() or None
+    price_raw   = data.get("price")
+    price       = None
+    if price_raw not in (None, ""):
+        try:
+            price = float(price_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "price must be a number"}), 400
+
+    item = db.query_one(
+        "SELECT pending_certs, pushed_at FROM intake_items WHERE id = %s",
+        (item_id,),
+    )
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+    if item.get("pushed_at"):
+        # Nothing pending to save once the item is pushed
+        return jsonify({"success": True, "skipped": "already_pushed"})
+
+    arr = item.get("pending_certs") or []
+    if isinstance(arr, str):
+        try: arr = json.loads(arr)
+        except Exception: arr = []
+    if not isinstance(arr, list):
+        arr = []
+    # Pad sparse positions with nulls so slab_idx stays stable
+    while len(arr) <= slab_idx:
+        arr.append(None)
+
+    if cert_number is None and price is None:
+        arr[slab_idx] = None
+    else:
+        existing = arr[slab_idx] if isinstance(arr[slab_idx], dict) else {}
+        entry = dict(existing)
+        if cert_number is not None:
+            entry["cert"] = cert_number
+        if price is not None:
+            entry["price"] = price
+        arr[slab_idx] = entry
+
+    db.execute(
+        "UPDATE intake_items SET pending_certs = %s::jsonb WHERE id = %s",
+        (json.dumps(arr), item_id),
+    )
+    return jsonify({"success": True, "pending_certs": arr})
 
 
 # ═══════════════════════════════════════════════════════════════════
