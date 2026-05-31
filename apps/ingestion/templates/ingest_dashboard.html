@@ -5248,6 +5248,17 @@ async function _aiPickCardVariant(tcgId, cardName, setName, cardNum, rarity, var
     await _aiShowConditionPicker(tcgId, cardName, setName, cardNum, rarity, variant, qty, condition);
 }
 
+function _aiCondPrice(raw) {
+    // Prices arrive as numbers, numeric strings (Flask serializes Decimal as a
+    // string), or {price: ...} objects. Coerce to a finite Number or null so
+    // .toFixed() never blows up the picker render (the cause of the old
+    // "Loading conditions…" hang).
+    if (raw == null) return null;
+    const v = (typeof raw === 'object') ? raw.price : raw;
+    const n = Number(v);
+    return (v != null && v !== '' && !isNaN(n)) ? n : null;
+}
+
 async function _aiShowConditionPicker(tcgId, cardName, setName, cardNum, rarity, variant, qty, condition) {
     const resultsDiv = document.getElementById('add-item-search-results');
     resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Loading conditions...</div>';
@@ -5271,16 +5282,15 @@ async function _aiShowConditionPicker(tcgId, cardName, setName, cardNum, rarity,
                 <span style="color:var(--text-dim);"> — ${setName}${cardNum ? ' #'+cardNum : ''} · ${variant || 'Default'} · TCG#${tcgId}</span></div>
             <div style="display:grid; grid-template-columns:repeat(5, 1fr); gap:8px; margin-bottom:12px;">`;
         ['NM','LP','MP','HP','DMG'].forEach(cond => {
-            const p = variantData[cond];
-            const has = p != null && p !== undefined;
+            const num = _aiCondPrice(variantData[cond]);
+            const has = num != null;
             const sel = cond === selCond;
             html += `<div data-aicond="${cond}" style="background:${sel?'var(--accent)':'var(--surface)'}; color:${sel?'#fff':'var(--text)'}; padding:10px 6px; border-radius:6px; text-align:center; cursor:pointer; border:1px solid var(--border); opacity:${has?'1':'0.4'};">
                 <div style="font-size:0.75rem; font-weight:600;">${cond}</div>
-                <div style="font-size:1rem; font-weight:700;">${has ? '$' + (typeof p === 'object' ? p.price : p).toFixed(2) : '—'}</div>
+                <div style="font-size:1rem; font-weight:700;">${has ? '$' + num.toFixed(2) : '—'}</div>
             </div>`;
         });
-        const selP = variantData[selCond];
-        const selPrice = selP != null ? (typeof selP === 'object' ? selP.price : selP) : null;
+        const selPrice = _aiCondPrice(variantData[selCond]);
         html += `</div><div style="display:flex; gap:8px;">
             <button id="ai-confirm-cond" class="btn btn-primary">Add ${selCond}${selPrice ? ' — $' + selPrice.toFixed(2) : ''}</button>
             <button onclick="_aiBackToSearch()" class="btn btn-secondary">Cancel</button>
