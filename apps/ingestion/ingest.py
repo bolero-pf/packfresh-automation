@@ -368,7 +368,10 @@ def update_item_condition(item_id: str, condition: str, price_provider=None, pri
     qty = item.get("quantity", 1)
     tcg_id = item.get("tcgplayer_id")
     sid = item.get("scrydex_id")  # preferred when set (Scrydex-only cards, incl. old JP)
-    variant = item.get("variant")
+    # Intake writes the printing marker to `variance`; ingest's relink/unexpected
+    # paths write to `variant`. Read both so a route-stage condition change
+    # doesn't fall through and pick the holofoil row off the variant ranking.
+    variant = item.get("variant") or item.get("variance")
 
     if price_override is not None:
         new_market = Decimal(str(price_override)).quantize(Decimal("0.01"))
@@ -623,7 +626,7 @@ def convert_item_type(item_id: str, to_graded: bool,
             try:
                 cond_price = price_provider.get_raw_condition_price(
                     scrydex_id=sid, tcgplayer_id=int(tcg_id) if tcg_id else None,
-                    condition=cond, variant=item.get("variant"),
+                    condition=cond, variant=item.get("variant") or item.get("variance"),
                 )
                 if cond_price is not None:
                     new_market = cond_price
@@ -813,7 +816,7 @@ def split_by_conditions(item_id: str, condition_counts: dict,
     offer_pct = Decimal(str(session.get("offer_percentage", 65))) / 100
     sid = item.get("scrydex_id")
     tcg_id = item.get("tcgplayer_id")
-    variant = item.get("variant")
+    variant = item.get("variant") or item.get("variance")
     old_condition = (item.get("condition") or "NM").upper().strip()
     base_market = item.get("market_price")
     cogs_locked = bool(item.get("verified_at")) and not finalize_verify
