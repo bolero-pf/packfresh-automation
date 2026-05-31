@@ -815,16 +815,21 @@ def lookup_card():
             return jsonify({"error": "Card not found"}), 404
 
         # Live graded comps — cached aggregates are often 3× off for MTG/Pokemon.
+        # This is a serial fan-out of live eBay/Scrydex calls (one per company×grade),
+        # so it's only worth paying for when the caller actually renders graded prices.
+        # The raw condition picker reads only `variants`, so it opts out (default) and
+        # avoids hanging on "Loading conditions..." when the comps API is slow.
         live_graded = {}
-        try:
-            from graded_pricing import get_live_graded_comps
-            for company_name, grades in (view.get("graded") or {}).items():
-                for grade_val in grades:
-                    live = get_live_graded_comps(int(tcgplayer_id), company_name, grade_val, db)
-                    if live:
-                        live_graded.setdefault(company_name, {})[grade_val] = live
-        except Exception as e:
-            logger.warning(f"Live graded enrichment failed for TCG#{tcgplayer_id}: {e}")
+        if data.get("include_live_graded"):
+            try:
+                from graded_pricing import get_live_graded_comps
+                for company_name, grades in (view.get("graded") or {}).items():
+                    for grade_val in grades:
+                        live = get_live_graded_comps(int(tcgplayer_id), company_name, grade_val, db)
+                        if live:
+                            live_graded.setdefault(company_name, {})[grade_val] = live
+            except Exception as e:
+                logger.warning(f"Live graded enrichment failed for TCG#{tcgplayer_id}: {e}")
 
         return jsonify({
             "card": view,
