@@ -701,7 +701,10 @@ def push_graded_slab(
     """
     company = grade_company.upper()
 
-    # ── 1. Fetch PSA data (PSA only) ────────────────────────────────────────
+    # ── 1. Fetch grader data (PSA via API, CGC via Selenium scrape) ─────────
+    # The `psa_cert` variable name is historical — title/description/tags
+    # treat it as a generic PSACert-shaped dict, so CGC's scraped values
+    # flow through unchanged. Other graders (BGS/SGC) stay manual.
     psa_cert    = None
     image_urls  = []
 
@@ -716,6 +719,16 @@ def push_graded_slab(
             raise  # bubble up — caller should halt the batch
         except Exception as e:
             logger.warning(f"PSA fetch failed for {cert_number}: {e} — proceeding without")
+    elif company == "CGC" and cert_number:
+        try:
+            import cgc_client
+            psa_cert   = cgc_client.get_cgc_data(cert_number)
+            image_urls = cgc_client.get_cgc_images(cert_number)
+            logger.info(f"CGC data scraped for cert {cert_number}")
+        except Exception as e:
+            # CGC scrape is best-effort — log + push the slab without enriched
+            # fields rather than block the operator's listing on a flaky scrape.
+            logger.warning(f"CGC fetch failed for {cert_number}: {e} — proceeding without")
 
     # ── 2. Build title + description ────────────────────────────────────────
     title       = build_title(psa_cert, ppt_card, company, grade_value)

@@ -2838,7 +2838,10 @@ def preview_graded_item(item_id):
     }
 
     # ── Grader lookup (cert + images + pop) ─────────────────────────────────
-    # PSA is wired. BGS/CGC/SGC: return placeholder, user fills price manually.
+    # PSA: official API. CGC: Selenium scrape of cgctradingcards.com/certlookup.
+    # Other graders (BGS/SGC): return placeholder, operator fills price manually.
+    # Key in `result` stays "psa" so the existing preview UI doesn't need a
+    # parallel rendering branch — it's the generic "grader payload" slot.
     if company == "PSA" and psa_client:
         try:
             psa_cert = psa_client.get_psa_data(cert_number)
@@ -2861,6 +2864,29 @@ def preview_graded_item(item_id):
         except Exception as e:
             logger.exception(f"PSA preview failed for cert {cert_number}: {e}")
             return jsonify({"error": f"PSA lookup failed: {e}"}), 500
+    elif company == "CGC":
+        try:
+            import cgc_client
+            cgc_cert = cgc_client.get_cgc_data(cert_number)
+            result["psa"] = {
+                "year":                cgc_cert.get("Year"),
+                "subject":              cgc_cert.get("Subject"),
+                "brand":                cgc_cert.get("Brand"),
+                "variety":              cgc_cert.get("Variety"),
+                "card_number":          cgc_cert.get("CardNumber"),
+                "grade_description":    cgc_cert.get("GradeDescription"),
+                "total_population":     cgc_cert.get("TotalPopulation"),
+                "population_higher":    cgc_cert.get("PopulationHigher"),
+                "qualifier_population": None,
+            }
+            result["images"] = cgc_client.get_cgc_images(cert_number)
+        except cgc_client.CGCNotFound:
+            return jsonify({"error": f"CGC cert {cert_number} not found"}), 404
+        except cgc_client.CGCScrapeFailed as e:
+            return jsonify({"error": f"CGC lookup failed: {e}"}), 502
+        except Exception as e:
+            logger.exception(f"CGC preview failed for cert {cert_number}: {e}")
+            return jsonify({"error": f"CGC lookup failed: {e}"}), 500
     else:
         result["psa"] = None
         result["images"] = []

@@ -6555,7 +6555,7 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
     certPanel.innerHTML = `
         <div style="font-size:1rem;font-weight:700;margin-bottom:12px;">🏅 Graded Slabs — Enter Cert Numbers</div>
         <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:14px;">
-            ${slabCount} slab${slabCount === 1 ? '' : 's'} to push. For each: enter cert → 🔍 Preview to fetch PSA + Scrydex data → review, set listing price → 🚀 Push Slab Live. Each cert becomes its own Shopify product.
+            ${slabCount} slab${slabCount === 1 ? '' : 's'} to push. For each: enter cert → 🔍 Preview to fetch grader + Scrydex data → review, set listing price → 🚀 Push Slab Live. Each cert becomes its own Shopify product.
         </p>
         ${slabRowsHtml}
     `;
@@ -6674,14 +6674,18 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
         const scrydexSet = d.scrydex_card?.set_name || '—';
         const mismatch = d.set_mismatch;
         const setRowStyle = mismatch ? 'background:rgba(255,70,70,0.12);' : '';
+        // Heading + set-label use the actual grader so CGC slabs don't read
+        // "PSA Cert #". The data shape is shared (preview endpoint normalizes
+        // CGC scrape into the same fields), only the labels differ.
+        const graderName = d.company || 'PSA';
         psaHtml = `
           <div style="flex:1;min-width:240px;">
-            <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">🏅 PSA Cert #${cert}</div>
+            <div style="font-weight:700;font-size:0.85rem;margin-bottom:6px;">🏅 ${graderName} Cert #${cert}</div>
             <table style="font-size:0.78rem;width:100%;">
               <tr><td style="color:var(--text-dim);padding-right:8px;">Year</td><td>${d.psa.year||'—'}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Subject</td><td>${d.psa.subject||'—'}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Variety</td><td>${d.psa.variety||'—'}</td></tr>
-              <tr style="${setRowStyle}"><td style="color:var(--text-dim);padding-right:8px;">Set (PSA)</td><td>${psaSet}${mismatch ? ' ⚠️' : ''}</td></tr>
+              <tr style="${setRowStyle}"><td style="color:var(--text-dim);padding-right:8px;">Set (${graderName})</td><td>${psaSet}${mismatch ? ' ⚠️' : ''}</td></tr>
               <tr style="${setRowStyle}"><td style="color:var(--text-dim);padding-right:8px;">Set (cache)</td><td>${scrydexSet}${mismatch ? ' ⚠️' : ''}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Card #</td><td>${d.psa.card_number||'—'}</td></tr>
               <tr><td style="color:var(--text-dim);padding-right:8px;">Grade</td><td>${d.psa.grade_description||`${d.company} ${d.grade}`}</td></tr>
@@ -6690,7 +6694,7 @@ function _renderGradedPreview(d, itemId, sessionId, slabIdx, cert) {
             </table>
             ${mismatch ? `
               <div style="margin-top:6px;padding:6px 8px;background:rgba(255,70,70,0.12);border-left:3px solid var(--red);font-size:0.75rem;color:var(--red);">
-                ⚠️ PSA brand and cached set name don't match — the intake TCG ID (${d.scrydex_card?.card_name||'?'}) is likely for a different card/set.
+                ⚠️ ${graderName} set and cached set name don't match — the intake TCG ID (${d.scrydex_card?.card_name||'?'}) is likely for a different card/set.
                 <button class="btn btn-sm" style="margin-left:8px;font-size:0.72rem;padding:3px 8px;background:var(--red);color:#fff;border:none;"
                   onclick="openRelinkModal('${itemId}','${sessionId}',${slabIdx})">
                   🔗 Re-link Card
