@@ -786,6 +786,7 @@ function _postRenderStage() {
     if (_currentStage === 'breakdown') {
         _lastRenderedItems = items;
         _enrichBreakdownSummaries(items, sessionId, true);
+        _enrichSlabCrackBadges(items);
     }
     if (_currentStage === 'route') {
         _loadRouteData(s.id);
@@ -2067,8 +2068,22 @@ async function convertToRaw(itemId, sessionId) {
 }
 
 async function ingestCheckSlabCrack(payload) {
-    // Read-only comparison: would raw at the grade-mapped condition beat the slab listing?
-    // Uses /api/breakdown-cache/slab-crack/compare; no Shopify side effects here.
+    // Open the compare modal: fetches the slab-vs-raw delta, shows the math,
+    // lets the operator pick the target condition, and on confirm calls
+    // convert-type to crack the slab (intake_items.is_graded → FALSE + new
+    // condition). No Shopify side-effects at intake — that's deferred to push.
+    const overlay = document.getElementById('prompt-overlay');
+    document.getElementById('prompt-title').textContent =
+        '💎 Crack the Slab? ' + (payload.grade_company||'?') + ' ' + (payload.grade_value||'?');
+    document.getElementById('prompt-msg').textContent = payload.product_name || '';
+    const area = document.getElementById('prompt-input-area');
+    area.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:14px;">Loading comparison…</div>';
+    const okBtn = document.getElementById('prompt-ok');
+    okBtn.textContent = 'Crack';
+    okBtn.disabled = true;
+    overlay.style.display = 'flex';
+
+    let compareData = null;
     try {
         const r = await fetch('/api/breakdown-cache/slab-crack/compare', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2081,26 +2096,89 @@ async function ingestCheckSlabCrack(payload) {
                 variant:       payload.variant,
             }),
         });
-        const d = await r.json();
+        compareData = await r.json();
+    } catch (e) {
+        area.innerHTML = '<div style="color:var(--red);padding:12px;">Compare failed: ' + e.message + '</div>';
+        okBtn.disabled = false;
+    }
+
+    if (compareData) {
         const fmt = v => (v != null) ? '$' + Number(v).toFixed(2) : '—';
-        const delta = d.delta_mapped;
-        const dStr = (delta != null) ? ((delta > 0 ? '+' : '') + fmt(delta)) : '?';
+        const delta = compareData.delta_mapped;
+        const dStr = (delta != null) ? ((delta > 0 ? '+' : '') + fmt(delta).replace('$-','-$')) : '?';
+        const deltaColor = (delta == null) ? 'var(--text-dim)'
+                          : (delta > 5  ? 'var(--green)'
+                          : (delta > 0  ? '#7aadff'
+                          : 'var(--red)'));
         const verdict = (delta == null)
             ? 'No raw market data — comparison unavailable.'
-            : (delta > 0
-                ? 'Raw ' + d.mapped_condition + ' beats slab by ' + dStr + '. Convert to raw before pushing?'
-                : 'Slab listing still wins. Keep as slab.');
-        alert(
-            (payload.grade_company || '?') + ' ' + (payload.grade_value || '?') +
-            ' → mapped ' + (d.mapped_condition || '?') + '\n\n' +
-            'Slab listing target: ' + fmt(d.slab_listing) + '\n' +
-            'Raw @ mapped:        ' + fmt(d.raw_price_mapped) + '   (Δ ' + dStr + ')\n' +
-            'Raw @ NM:            ' + fmt(d.raw_price_nm) + '\n\n' +
-            verdict
-        );
-    } catch (e) {
-        alert('Slab-crack compare failed: ' + e.message);
+            : (delta > 5
+                ? 'Raw ' + compareData.mapped_condition + ' beats slab by ' + dStr + '. Crack recommended.'
+                : (delta > 0
+                    ? 'Raw ' + compareData.mapped_condition + ' beats slab by ' + dStr + '. Close call.'
+                    : 'Slab listing still wins by ' + fmt(-delta) + '. Don\'t crack.'));
+
+        const conds = ['NM','LP','MP','HP','DMG'];
+        const defaultCond = compareData.mapped_condition || 'NM';
+        area.dataset.cond = defaultCond;
+        area.innerHTML = `
+            <div style="font-size:0.85rem;line-height:1.7;background:var(--surface-2);padding:10px 14px;border-radius:8px;">
+                <div style="display:flex;justify-content:space-between;"><span>Slab listing target</span><strong>${fmt(compareData.slab_listing)}</strong></div>
+                <div style="display:flex;justify-content:space-between;"><span>Raw @ ${compareData.mapped_condition || '?'} (mapped)</span><strong>${fmt(compareData.raw_price_mapped)}</strong></div>
+                <div style="display:flex;justify-content:space-between;"><span>Raw @ NM (ceiling)</span><strong style="color:var(--text-dim);">${fmt(compareData.raw_price_nm)}</strong></div>
+                <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);margin-top:6px;padding-top:6px;"><span>Estimated upside</span><strong style="color:${deltaColor};">${dStr}</strong></div>
+            </div>
+            <div style="margin-top:10px;font-size:0.83rem;color:${deltaColor};">${verdict}</div>
+            <div style="margin-top:14px;font-size:0.78rem;color:var(--text-dim);">Operator override (you see the card when it pops):</div>
+            <div id="crack-cond-row" style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
+                ${conds.map(c=>`<button type="button" class="btn btn-sm" data-c="${c}" style="min-width:50px;padding:6px 12px;${c===defaultCond?'background:var(--green);color:#000;':''}">${c}</button>`).join('')}
+            </div>`;
+
+        // Hook condition buttons
+        area.querySelectorAll('#crack-cond-row button').forEach(b => {
+            b.onclick = () => {
+                area.dataset.cond = b.dataset.c;
+                area.querySelectorAll('#crack-cond-row button').forEach(bb => {
+                    if (bb.dataset.c === b.dataset.c) {
+                        bb.style.background = 'var(--green)'; bb.style.color = '#000';
+                    } else {
+                        bb.style.background = ''; bb.style.color = '';
+                    }
+                });
+            };
+        });
+
+        okBtn.disabled = false;
     }
+
+    // Wire OK / Cancel
+    const result = await new Promise(resolve => {
+        okBtn.onclick = () => {
+            overlay.style.display = 'none';
+            resolve({ condition: area.dataset.cond || 'NM' });
+        };
+        document.getElementById('prompt-cancel').onclick = () => {
+            overlay.style.display = 'none';
+            resolve(null);
+        };
+    });
+    if (result === null) return;
+
+    // Execute the crack via the existing convert-type endpoint
+    try {
+        const body = {
+            to_graded: false,
+            condition: result.condition,
+            price_override: null,
+        };
+        const r = await fetch(`/api/ingest/item/${payload.item_id}/convert-type`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok) { alert(d.error || 'Crack failed'); return; }
+        viewSession(payload.session_id, true);
+    } catch(err) { alert(err.message); }
 }
 
 async function undoVerify(itemId, sessionId) {
@@ -4282,6 +4360,70 @@ async function _pushDiscardScans() {
 }
 
 // ── BREAKDOWN SUMMARY ENRICHMENT (uses shared breakdown_inline.js) ──────────
+async function _enrichSlabCrackBadges(items) {
+    // For each slab in view, fetch the slab-crack compare and decorate the row
+    // with a colored at-a-glance badge:
+    //   green  Δ > $5    → crack recommended
+    //   blue   Δ ≥ $0    → close call, operator discretion
+    //   red    Δ < $0    → slab listing wins, don't crack
+    //   grey               no raw market data
+    const slabs = items.filter(i => i.is_graded
+        && ['good','damaged'].includes(i.item_status)
+        && !i.pushed_at);
+    if (!slabs.length) return;
+
+    await Promise.all(slabs.map(async item => {
+        const cell = document.querySelector(`tr[data-item-id="${item.id}"] td.name-cell`);
+        if (!cell) return;
+        cell.querySelectorAll('.slab-crack-badge').forEach(e => e.remove());
+        try {
+            const r = await fetch('/api/breakdown-cache/slab-crack/compare', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    scrydex_id:    item.scrydex_id || null,
+                    tcgplayer_id:  item.tcgplayer_id || null,
+                    grade_company: item.grade_company || '',
+                    grade_value:   String(item.grade_value || ''),
+                    slab_price:    item.market_price || 0,
+                    variant:       item.variant || item.variance || null,
+                }),
+            });
+            const d = await r.json();
+            const delta = d.delta_mapped;
+            let color, label, title;
+            if (delta == null) {
+                color = 'background:rgba(139,151,173,0.15);color:var(--text-dim);';
+                label = '💎 ?';
+                title = 'No raw market data for this slab — comparison unavailable.';
+            } else if (delta > 5) {
+                color = 'background:rgba(52,211,153,0.18);color:var(--green);';
+                label = '💎 +$' + delta.toFixed(2) + ' CRACK';
+                title = 'Raw ' + (d.mapped_condition || '?') + ' worth $' + (d.raw_price_mapped||0).toFixed(2)
+                      + ' — beats slab listing by $' + delta.toFixed(2) + '. Crack recommended.';
+            } else if (delta >= 0) {
+                color = 'background:rgba(79,125,249,0.18);color:#7aadff;';
+                label = '💎 +$' + delta.toFixed(2) + ' CLOSE';
+                title = 'Raw ' + (d.mapped_condition || '?') + ' edges out slab by $' + delta.toFixed(2)
+                      + '. Operator discretion.';
+            } else {
+                color = 'background:rgba(248,113,113,0.18);color:#ff9a9a;';
+                label = '🚫 SLAB WINS $' + Math.abs(delta).toFixed(2);
+                title = 'Slab listing ($' + (d.slab_listing||0).toFixed(2)
+                      + ') beats raw ' + (d.mapped_condition || '?') + ' ($'
+                      + (d.raw_price_mapped||0).toFixed(2) + '). Keep as slab.';
+            }
+            const badge = document.createElement('span');
+            badge.className = 'badge slab-crack-badge';
+            badge.style.cssText = color + 'font-size:0.65rem;margin-left:6px;';
+            badge.title = title;
+            badge.textContent = label;
+            const nameDiv = cell.querySelector('div > div');  // the row with name+badges
+            if (nameDiv) nameDiv.appendChild(badge);
+            else cell.appendChild(badge);
+        } catch (e) { /* silent */ }
+    }));
+}
+
 async function _enrichBreakdownSummaries(items, sessionId, isReceived) {
     if (!isReceived) return;
     const tcgIds = [...new Set(items
@@ -4322,6 +4464,7 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
     else if (isDamaged) rowStyle = 'background:rgba(255,170,0,0.06);';
 
     let badges = '';
+    if (item.is_graded) badges += ' <span class="badge" style="background:#7c3aed;color:#fff;font-size:0.65rem;">' + (item.grade_company||'?') + ' ' + (item.grade_value||'?') + '</span>';
     if (isDamaged) badges += ' <span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>';
     if (isBroken) badges += ' <span class="badge" style="background:rgba(124,147,245,0.15);color:var(--accent);font-size:0.65rem;">🔨 BROKEN DOWN ✓</span>';
     if (isChild) badges += ' <span class="badge badge-blue" style="font-size:0.65rem;">FROM BREAKDOWN</span>';
@@ -4341,6 +4484,9 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
             // Slab path: no sealed-breakdown recipe, but cracking to raw is the
             // analogous "split into something worth more" decision. Same surface.
             const _crackPayload = JSON.stringify({
+                item_id: item.id,
+                session_id: sessionId,
+                product_name: item.product_name || '',
                 scrydex_id: item.scrydex_id || null,
                 tcgplayer_id: item.tcgplayer_id || null,
                 grade_company: item.grade_company || '',
@@ -4350,12 +4496,12 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
             }).replace(/"/g, '&quot;').replace(/</g, '&lt;');
             actionCell = `
                 <div style="display:flex; align-items:center; gap:6px;">
-                    <button class="btn btn-sm btn-primary" style="font-size:0.78rem;padding:3px 10px;background:#7c3aed;" onclick="ingestCheckSlabCrack(${_crackPayload})">💎 Crack? Compare</button>
-                    <button class="btn btn-sm btn-secondary" style="font-size:0.78rem;padding:3px 8px;" onclick="convertToRaw('${item.id}', '${sessionId}')">↺ Convert to Raw</button>
+                    <button class="btn btn-sm btn-primary" style="font-size:0.78rem;padding:3px 10px;background:#7c3aed;" onclick="ingestCheckSlabCrack(${_crackPayload})">💎 Crack the Slab</button>
                     <div class="action-dropdown-container" style="position:relative;display:inline-block;">
                         <button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.78rem;padding:3px 8px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button>
                         <div class="action-dropdown">
                             <button onclick="verifyGradedSlab('${item.id}', '${sessionId}', '${item.grade_company||'PSA'}', '${item.grade_value||''}')">✏️ Change Grade</button>
+                            <button onclick="convertToRaw('${item.id}', '${sessionId}')">↺ Convert to Raw (no compare)</button>
                             <button onclick="editItemQty('${item.id}', '${sessionId}', ${item.quantity||1})">✏️ Edit Qty</button>
                             ${damageToggle}
                             <hr>
