@@ -10,6 +10,7 @@ Handles:
 
 import json
 import logging
+import os
 from decimal import Decimal
 from typing import Optional
 from uuid import uuid4
@@ -505,19 +506,32 @@ def update_item_grade(item_id: str, grade_company: str = None, grade_value: str 
             except Exception as e:
                 logger.warning(f"Scrydex graded lookup failed for sid={sid} tcg={tcg_id}: {e}")
 
-        # PPT fallback (cache-first, then live PPT) via the scalar API
-        if new_market is None and price_provider:
+        # PPT fallback — call PPT DIRECTLY (not through price_provider). The
+        # configured PriceProvider may be in scrydex-only mode (per CLAUDE.md
+        # the canonical config for pricing), in which case its get_graded_price
+        # never hits PPT. But for graded prices specifically, PPT often has
+        # eBay-derived data (ebay.salesByGrade.psa9 etc.) on cards whose
+        # scrydex_id has no listings — MCAP bucket cards like Ancient Mew
+        # (miscp-1) are the canonical example: Scrydex has zero graded data,
+        # PPT has PSA 8/9/10 medians + counts. Hitting PPT directly here is
+        # the documented last-resort PPT-for-graded fallback.
+        if new_market is None and tcg_id:
             try:
-                graded_price = price_provider.get_graded_price(
-                    scrydex_id=sid, tcgplayer_id=int(tcg_id) if tcg_id else None,
-                    company=company, grade=grade,
-                )
-                if graded_price is not None:
-                    new_market = graded_price
-                    logger.info(f"Grade update price from PPT fallback: ${new_market} "
-                                f"for {company} {grade} TCG#{tcg_id}")
+                from ppt_client import PPTClient
+                ppt_key = os.getenv("PPT_API_KEY", "")
+                if ppt_key:
+                    ppt_direct = PPTClient(ppt_key)
+                    graded_price = ppt_direct.get_graded_price_for(
+                        int(tcg_id), company=company, grade=grade,
+                    )
+                    if graded_price is not None:
+                        new_market = graded_price
+                        logger.info(f"Grade update price from PPT direct fallback: ${new_market} "
+                                    f"for {company} {grade} TCG#{tcg_id}")
+                else:
+                    logger.warning(f"PPT_API_KEY not set — graded fallback unavailable for TCG#{tcg_id}")
             except Exception as e:
-                logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
+                logger.warning(f"PPT direct graded lookup failed for TCG#{tcg_id}: {e}")
 
     updates = ["grade_company = %s", "grade_value = %s"]
     params = [company, grade]
@@ -595,19 +609,25 @@ def convert_item_type(item_id: str, to_graded: bool,
                 except Exception as e:
                     logger.warning(f"Scrydex graded lookup failed for TCG#{tcg_id}: {e}")
 
-            # PPT fallback via scalar API (cache-first, then live PPT)
-            if new_market is None and price_provider:
+            # PPT fallback — call PPT DIRECTLY. Scrydex-only mode (canonical
+            # per CLAUDE.md) hides PPT behind price_provider, but PPT has
+            # ebay.salesByGrade for cards Scrydex doesn't index (MCAP bucket,
+            # etc.). Same pattern as update_item_grade — see that fn's note.
+            if new_market is None and tcg_id:
                 try:
-                    graded_price = price_provider.get_graded_price(
-                        scrydex_id=sid, tcgplayer_id=int(tcg_id) if tcg_id else None,
-                        company=company, grade=grade,
-                    )
-                    if graded_price is not None:
-                        new_market = graded_price
-                        logger.info(f"Graded price from PPT fallback: ${new_market} "
-                                    f"for {company} {grade} TCG#{tcg_id}")
+                    from ppt_client import PPTClient
+                    ppt_key = os.getenv("PPT_API_KEY", "")
+                    if ppt_key:
+                        ppt_direct = PPTClient(ppt_key)
+                        graded_price = ppt_direct.get_graded_price_for(
+                            int(tcg_id), company=company, grade=grade,
+                        )
+                        if graded_price is not None:
+                            new_market = graded_price
+                            logger.info(f"Graded price from PPT direct fallback: ${new_market} "
+                                        f"for {company} {grade} TCG#{tcg_id}")
                 except Exception as e:
-                    logger.warning(f"PPT graded lookup failed for TCG#{tcg_id}: {e}")
+                    logger.warning(f"PPT direct graded lookup failed for TCG#{tcg_id}: {e}")
 
         updates = [
             "is_graded = TRUE",
