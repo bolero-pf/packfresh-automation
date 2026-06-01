@@ -2151,14 +2151,19 @@ async function ingestCheckSlabCrack(payload) {
         okBtn.disabled = false;
     }
 
-    // Wire OK / Cancel
+    // Wire OK / Cancel. Reset the shared prompt-ok button label so the next
+    // modal that opens (Change Grade, Convert to Raw, etc.) doesn't inherit
+    // "Crack" — the prompt overlay is shared across all dialogs.
+    const _resetOkBtn = () => { okBtn.textContent = 'OK'; okBtn.disabled = false; };
     const result = await new Promise(resolve => {
         okBtn.onclick = () => {
             overlay.style.display = 'none';
+            _resetOkBtn();
             resolve({ condition: area.dataset.cond || 'NM' });
         };
         document.getElementById('prompt-cancel').onclick = () => {
             overlay.style.display = 'none';
+            _resetOkBtn();
             resolve(null);
         };
     });
