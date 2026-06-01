@@ -122,7 +122,8 @@ def create_session(customer_name: str, session_type: str,
                    credit_percentage: Decimal = None,
                    is_walk_in: bool = False,
                    file_name: str = None, file_hash: str = None,
-                   employee_id: str = None, notes: str = None) -> dict:
+                   employee_id: str = None, notes: str = None,
+                   bulk_tiers: list[dict] = None) -> dict:
     """Create a new intake session. Returns the full session row.
 
     Cash/credit split (Phase 2):
@@ -135,14 +136,37 @@ def create_session(customer_name: str, session_type: str,
       - `is_walk_in` flags counter sessions; on accept the writer skips
         the offered → accepted → received pickup/mail interstitial and
         jumps straight to received.
+      - `bulk_tiers` overrides the column DEFAULT (legacy <$2 → 25%); pass
+        None to inherit the DB default.
     """
+    import json as _json
     # Defense in depth: ensure we always have a cash percentage even when a
     # caller still passes only the legacy offer_percentage.
     cash_pct = cash_percentage if cash_percentage is not None else offer_percentage
     credit_pct = credit_percentage  # may legitimately be None on legacy callers
     legacy_pct = offer_percentage if offer_percentage is not None else cash_pct
 
+    tiers_json = None
+    if bulk_tiers is not None:
+        normalized = _normalize_bulk_tiers(bulk_tiers)
+        tiers_json = _json.dumps([
+            {"max": float(t["max"]), "pct": float(t["pct"])} for t in normalized
+        ])
+
     session_id = str(uuid4())
+    if tiers_json is not None:
+        return execute_returning("""
+            INSERT INTO intake_sessions
+                (id, customer_name, session_type, offer_percentage,
+                 cash_percentage, credit_percentage, is_walk_in,
+                 source_file_name, source_file_hash, employee_id, notes,
+                 bulk_tiers)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            RETURNING *
+        """, (session_id, customer_name, session_type, legacy_pct,
+              cash_pct, credit_pct, bool(is_walk_in),
+              file_name, file_hash, employee_id, notes, tiers_json))
+    # No tiers supplied → let the column DEFAULT supply the legacy bucket.
     return execute_returning("""
         INSERT INTO intake_sessions
             (id, customer_name, session_type, offer_percentage,
@@ -301,7 +325,8 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
                          grade_value: str = "",
                          variance: str = "",
                          game: str = None,
-                         scrydex_id: str = None) -> dict:
+                         scrydex_id: str = None,
+                         bulk_tiers: list[dict] = None) -> dict:
     """
     Add a single raw card item to a session (manual entry flow).
 
@@ -324,8 +349,15 @@ def add_single_raw_item(session_id: str, product_name: str, tcgplayer_id,
     Returns the created intake_item row.
     """
     qty = max(1, int(quantity))
+    if bulk_tiers is None:
+        sess = query_one(
+            "SELECT bulk_tiers FROM intake_sessions WHERE id = %s",
+            (session_id,),
+        )
+        bulk_tiers = _session_bulk_tiers(sess)
     offer_total, unit_cost = calc_offer_price(
-        market_price, qty, offer_percentage, product_type="raw")
+        market_price, qty, offer_percentage, product_type="raw",
+        bulk_tiers=bulk_tiers)
 
     sx = (scrydex_id or "").strip() or None
     is_mapped = (tcgplayer_id is not None) or (sx is not None)
@@ -379,7 +411,7 @@ def map_item(item_id: str, tcgplayer_id: int = None,
         raise ValueError(f"Item {item_id} not found")
 
     session = query_one(
-        "SELECT offer_percentage FROM intake_sessions WHERE id = %s",
+        "SELECT offer_percentage, bulk_tiers FROM intake_sessions WHERE id = %s",
         (item["session_id"],)
     )
     if not session:
@@ -389,7 +421,8 @@ def map_item(item_id: str, tcgplayer_id: int = None,
     offer_pct = session["offer_percentage"]
     offer_price, unit_cost_basis = calc_offer_price(
         market_price, item["quantity"], offer_pct,
-        product_type=item.get("product_type", "raw"))
+        product_type=item.get("product_type", "raw"),
+        bulk_tiers=_session_bulk_tiers(session))
 
     name = product_name if product_name else item["product_name"]
     sname = set_name if set_name else item.get("set_name")
@@ -494,25 +527,69 @@ def update_session_percentages(session_id: str,
     if effective_cash is None:
         effective_cash = session.get("offer_percentage")  # last-resort legacy fallback
     if effective_cash is not None:
-        # Mirror accept_offer's recalc: keep the damaged 0.88 multiplier and
-        # roll unit_cost_basis forward so the per-unit cost stays in sync
-        # with the new offer_price (it's used downstream as the COGS basis).
-        execute("""
-            UPDATE intake_items
-            SET offer_price = market_price * quantity * (
-                CASE WHEN product_type = 'raw' AND market_price < 2.00
-                     THEN 25.0
-                     ELSE %s
-                END / 100.0
-            ) * (CASE WHEN item_status = 'damaged' THEN 0.88 ELSE 1.0 END),
-                unit_cost_basis = market_price * (
-                CASE WHEN product_type = 'raw' AND market_price < 2.00
-                     THEN 25.0
-                     ELSE %s
-                END / 100.0
-            ) * (CASE WHEN item_status = 'damaged' THEN 0.88 ELSE 1.0 END)
-            WHERE session_id = %s
-        """, (effective_cash, effective_cash, session_id))
+        _recalc_session_item_prices(session_id, effective_cash)
+
+    _recalculate_session_totals(session_id)
+    return get_session(session_id)
+
+
+def _recalc_session_item_prices(session_id: str, base_pct: Decimal):
+    """Re-price every active item in the session using `base_pct` and the
+    session's bulk_tiers. Replaces the legacy inline CASE WHEN SQL — with
+    variable tiers a single SQL statement gets gnarly fast, so the loop
+    here mirrors `calc_offer_price` and updates in batch. Honors the
+    damaged 0.88 multiplier; unit_cost_basis tracks per-unit COGS."""
+    session = query_one(
+        "SELECT bulk_tiers FROM intake_sessions WHERE id = %s",
+        (session_id,),
+    )
+    tiers = _session_bulk_tiers(session)
+    rows = query("""
+        SELECT id, product_type, market_price, quantity, item_status
+        FROM intake_items
+        WHERE session_id = %s
+    """, (session_id,))
+    updates = []
+    for r in rows:
+        is_damaged = (r.get("item_status") == "damaged")
+        offer_price, unit_cost = calc_offer_price(
+            r["market_price"], r["quantity"], base_pct,
+            product_type=r.get("product_type", "raw"),
+            is_damaged=is_damaged,
+            bulk_tiers=tiers,
+        )
+        updates.append((offer_price, unit_cost, r["id"]))
+    if updates:
+        execute_many_batch(
+            "UPDATE intake_items SET offer_price = %s, unit_cost_basis = %s WHERE id = %s",
+            updates,
+        )
+
+
+def update_session_bulk_tiers(session_id: str, tiers: list[dict]) -> dict:
+    """Update the per-session pricing tiers and re-price every item.
+    Tiers are normalized (sorted ascending, bad rows dropped, capped at 3).
+    Empty/None resets to the legacy default `[{max:2, pct:25}]`."""
+    import json as _json
+    session = get_session(session_id)
+    if not session:
+        raise ValueError("Session not found")
+    if session["status"] in ("cancelled", "rejected", "received",
+                              "partially_ingested", "ingested", "finalized"):
+        raise ValueError("Cannot change bulk tiers on this session")
+
+    normalized = _normalize_bulk_tiers(tiers)
+    tiers_json = _json.dumps([
+        {"max": float(t["max"]), "pct": float(t["pct"])} for t in normalized
+    ])
+    execute(
+        "UPDATE intake_sessions SET bulk_tiers = %s::jsonb WHERE id = %s",
+        (tiers_json, session_id),
+    )
+
+    effective_cash = session.get("cash_percentage") or session.get("offer_percentage")
+    if effective_cash is not None:
+        _recalc_session_item_prices(session_id, effective_cash)
 
     _recalculate_session_totals(session_id)
     return get_session(session_id)
@@ -540,7 +617,8 @@ def compute_offer_totals(session_id: str) -> dict:
     single-offer flow treated bulk regardless of percentage.
     """
     session = query_one(
-        "SELECT cash_percentage, credit_percentage, offer_percentage FROM intake_sessions WHERE id = %s",
+        "SELECT cash_percentage, credit_percentage, offer_percentage, bulk_tiers "
+        "FROM intake_sessions WHERE id = %s",
         (session_id,),
     )
     if not session:
@@ -548,6 +626,7 @@ def compute_offer_totals(session_id: str) -> dict:
 
     cash_pct = session["cash_percentage"] or session["offer_percentage"] or Decimal("0")
     credit_pct = session["credit_percentage"] or Decimal("0")
+    tiers = _session_bulk_tiers(session)
 
     rows = query("""
         SELECT product_type, quantity, market_price, item_status
@@ -564,13 +643,13 @@ def compute_offer_totals(session_id: str) -> dict:
         cash_offer, _ = calc_offer_price(
             r["market_price"], r["quantity"], cash_pct,
             product_type=r.get("product_type", "raw"),
-            is_damaged=is_damaged)
+            is_damaged=is_damaged, bulk_tiers=tiers)
         cash_total += cash_offer
         if credit_pct > 0:
             credit_offer, _ = calc_offer_price(
                 r["market_price"], r["quantity"], credit_pct,
                 product_type=r.get("product_type", "raw"),
-                is_damaged=is_damaged)
+                is_damaged=is_damaged, bulk_tiers=tiers)
             credit_total += credit_offer
     return {"cash": cash_total, "credit": credit_total}
 
@@ -612,24 +691,9 @@ def accept_offer(session_id: str, offer_type: str,
 
     # Re-price every active item at the accepted percentage so the rest of
     # the pipeline (received_items_snapshot, _finalize_*) sees the right
-    # numbers. Bulk raw rule still applies. unit_cost_basis tracks the
-    # per-unit cost the rest of the pipeline reads as COGS.
-    execute("""
-        UPDATE intake_items
-        SET offer_price = market_price * quantity * (
-            CASE WHEN product_type = 'raw' AND market_price < 2.00
-                 THEN 25.0
-                 ELSE %s
-            END / 100.0
-        ) * (CASE WHEN item_status = 'damaged' THEN 0.88 ELSE 1.0 END),
-            unit_cost_basis = market_price * (
-            CASE WHEN product_type = 'raw' AND market_price < 2.00
-                 THEN 25.0
-                 ELSE %s
-            END / 100.0
-        ) * (CASE WHEN item_status = 'damaged' THEN 0.88 ELSE 1.0 END)
-        WHERE session_id = %s
-    """, (chosen_pct, chosen_pct, session_id))
+    # numbers. Per-session bulk tiers still apply. unit_cost_basis tracks
+    # the per-unit cost the rest of the pipeline reads as COGS.
+    _recalc_session_item_prices(session_id, chosen_pct)
 
     is_walk_in = bool(session.get("is_walk_in"))
     new_status = "received" if is_walk_in else "accepted"
@@ -690,6 +754,7 @@ def update_item_price(item_id: str, new_market_price: Decimal, session_id: str) 
         raise ValueError("Session not found")
 
     offer_pct = session["offer_percentage"]
+    tiers = _session_bulk_tiers(session)
 
     item = query_one("SELECT quantity, product_type FROM intake_items WHERE id = %s", (item_id,))
     if not item:
@@ -697,7 +762,8 @@ def update_item_price(item_id: str, new_market_price: Decimal, session_id: str) 
 
     offer_price, _ = calc_offer_price(
         new_market_price, item["quantity"], offer_pct,
-        product_type=item.get("product_type", "raw"))
+        product_type=item.get("product_type", "raw"),
+        bulk_tiers=tiers)
 
     execute("""
         UPDATE intake_items
@@ -820,19 +886,66 @@ def merge_sessions(target_session_id: str, source_session_id: str) -> dict:
 # ==========================================
 
 DAMAGE_DISCOUNT = Decimal("0.88")  # 88% of offer price for damaged items
-BULK_THRESHOLD = Decimal("2")      # raw cards under $2 market are treated as bulk
-BULK_OFFER_PCT = Decimal("25")     # bulk raw cards get flat 25% of market
+DEFAULT_BULK_TIERS = [{"max": Decimal("2"), "pct": Decimal("25")}]
+# Per-session bulk pricing tiers: an ascending-by-max list of dollar buckets
+# that override the session's per-item percentage for raw cards. The default
+# preserves the legacy "raw < $2 → 25%" rule; sessions can extend it to up to
+# 3 tiers (e.g. 0% under $1, 25% under $2, 50% under $5).
+MAX_BULK_TIERS = 3
+
+
+def _normalize_bulk_tiers(tiers) -> list[dict]:
+    """Coerce a raw tiers payload (from JSON, the DB, or a request) into a
+    sorted list of {"max": Decimal, "pct": Decimal} entries. Drops bad
+    rows silently; caps at MAX_BULK_TIERS; returns the default when input
+    is empty/missing so callers can rely on at least the legacy bucket.
+    """
+    if not tiers:
+        return [dict(t) for t in DEFAULT_BULK_TIERS]
+    out = []
+    for t in tiers:
+        try:
+            mx = Decimal(str(t.get("max")))
+            pc = Decimal(str(t.get("pct")))
+        except (TypeError, ValueError, KeyError, AttributeError):
+            continue
+        if mx <= 0 or pc < 0 or pc > 100:
+            continue
+        out.append({"max": mx, "pct": pc})
+    if not out:
+        return [dict(t) for t in DEFAULT_BULK_TIERS]
+    out.sort(key=lambda x: x["max"])
+    return out[:MAX_BULK_TIERS]
+
+
+def _session_bulk_tiers(session) -> list[dict]:
+    """Pull bulk_tiers off a session dict and normalize. Tolerates rows
+    that predate the column (NULL → default)."""
+    if not session:
+        return [dict(t) for t in DEFAULT_BULK_TIERS]
+    return _normalize_bulk_tiers(session.get("bulk_tiers"))
 
 
 def calc_offer_price(market_price: Decimal, quantity: int, offer_pct: Decimal,
-                     product_type: str = "raw", is_damaged: bool = False) -> tuple:
+                     product_type: str = "raw", is_damaged: bool = False,
+                     bulk_tiers: list[dict] = None) -> tuple:
     """
     Calculate offer_price and unit_cost_basis for an item.
-    Raw cards under $2 market get a flat 25% regardless of session offer %.
+
+    For raw cards, walks `bulk_tiers` (ascending by max) and uses the
+    first tier's pct whose `max` exceeds market_price. Above the top
+    tier, falls back to the session's `offer_pct`. When tiers is None,
+    falls back to DEFAULT_BULK_TIERS (the legacy "<$2 → 25%" rule).
+
     Returns (offer_price, unit_cost_basis).
     """
-    if product_type == "raw" and market_price < BULK_THRESHOLD:
-        effective_pct = BULK_OFFER_PCT
+    if product_type == "raw":
+        tiers = _normalize_bulk_tiers(bulk_tiers)
+        effective_pct = offer_pct
+        for t in tiers:
+            if market_price < t["max"]:
+                effective_pct = t["pct"]
+                break
     else:
         effective_pct = offer_pct
 
@@ -868,7 +981,8 @@ def split_damaged(item_id: str, damaged_qty: int) -> dict:
     per_unit_market = item["market_price"]
     _, per_unit_offer = calc_offer_price(
         per_unit_market, 1, offer_pct,
-        product_type=item.get("product_type", "raw"))
+        product_type=item.get("product_type", "raw"),
+        bulk_tiers=_session_bulk_tiers(session))
     damaged_per_unit_offer = per_unit_offer * DAMAGE_DISCOUNT
 
     if damaged_qty == original_qty:
@@ -977,7 +1091,8 @@ def restore_item(item_id: str) -> dict:
     # Recalculate offer at normal rate
     offer_price, _ = calc_offer_price(
         item["market_price"], item["quantity"], offer_pct,
-        product_type=item.get("product_type", "raw"))
+        product_type=item.get("product_type", "raw"),
+        bulk_tiers=_session_bulk_tiers(session))
 
     execute("""
         UPDATE intake_items 
@@ -1014,7 +1129,8 @@ def clone_item_with_overrides(source_item_id: str, session_id: str,
     offer_price, unit_cost_basis = calc_offer_price(
         market_price, quantity, offer_pct,
         product_type=source.get("product_type", "raw"),
-        is_damaged=is_damaged)
+        is_damaged=is_damaged,
+        bulk_tiers=_session_bulk_tiers(session))
 
     new_id = str(uuid.uuid4())
     execute("""
@@ -1051,7 +1167,8 @@ def override_item_price(item_id: str, new_price: Decimal, note: str, session_id:
     offer_price, _ = calc_offer_price(
         new_price, item["quantity"], offer_pct,
         product_type=item.get("product_type", "raw"),
-        is_damaged=item.get("item_status") == "damaged")
+        is_damaged=item.get("item_status") == "damaged",
+        bulk_tiers=_session_bulk_tiers(session))
 
     execute("""
         UPDATE intake_items
@@ -1096,7 +1213,8 @@ def update_item_quantity(item_id: str, new_qty: int, session_id: str) -> dict:
     offer_price, _ = calc_offer_price(
         item["market_price"], new_qty, offer_pct,
         product_type=item.get("product_type", "raw"),
-        is_damaged=item.get("item_status") == "damaged")
+        is_damaged=item.get("item_status") == "damaged",
+        bulk_tiers=_session_bulk_tiers(session))
 
     execute("""
         UPDATE intake_items

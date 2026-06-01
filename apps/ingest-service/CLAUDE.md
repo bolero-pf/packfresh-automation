@@ -30,6 +30,12 @@ in_progress → cancelled
 - `intake.py` has guard clauses that block modifications (offer %, adding items) based on session status
 - `list_sessions()` accepts comma-separated status strings for flexible filtering
 
+## Per-session bulk pricing tiers
+- `intake_sessions.bulk_tiers JSONB` holds up to 3 ascending `{max, pct}` brackets that override the session % for raw cards (default `[{"max":2,"pct":25}]` preserves the legacy "<$2 → 25%" rule).
+- `calc_offer_price(..., bulk_tiers=...)` walks the list ascending by `max` and uses the first matching pct; above the top tier the session pct applies. `_session_bulk_tiers(session)` normalizes/defaults; pass it to every raw-card calc.
+- `_recalc_session_item_prices(session_id, base_pct)` is the one Python-side recalc used by both `update_session_percentages` and `accept_offer`. Don't reintroduce inline `CASE WHEN market_price < 2.0` SQL — it can't express variable tiers.
+- JS mirror: `_computeOfferBreakdown` (intake_dashboard.js) reads tiers off `window._sessionMeta.bulk_tiers`; the New Intake form + session-detail editor both round-trip through `/api/intake/session/<id>/bulk-tiers`.
+
 ## Pricing: ALWAYS Scrydex-first, PPT fallback
 PPT graded data is unreliable (often 3× off from market). Scrydex has holes (Japanese,
 Scrydex-only cards) so PPT stays as a fallback — **never** as the primary source. All

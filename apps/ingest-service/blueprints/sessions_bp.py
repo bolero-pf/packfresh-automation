@@ -54,6 +54,20 @@ from generic_csv_parser import parse_generic_csv, detect_csv_columns
 import io, csv
 
 
+def _parse_bulk_tiers(raw):
+    """Accept tiers as a JSON string (multipart form) or a list (JSON body).
+    Returns a list[dict] or None; the model layer normalizes from there."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, list):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else None
+    except (ValueError, TypeError):
+        return None
+
+
 
 @bp.route("/api/intake/upload-collectr", methods=["POST"])
 @enforce_offer_caps
@@ -76,6 +90,7 @@ def upload_collectr():
     except InvalidOperation:
         return jsonify({"error": "Invalid percentage"}), 400
     force_product_type = request.form.get("force_product_type")  # 'raw' or 'sealed' or None
+    bulk_tiers = _parse_bulk_tiers(request.form.get("bulk_tiers"))
 
     # Read file
     try:
@@ -119,7 +134,9 @@ def upload_collectr():
         is_walk_in=False,
         file_name=file.filename,
         file_hash=result.file_hash,
+        bulk_tiers=bulk_tiers,
     )
+    session_tiers = intake._session_bulk_tiers(session)
 
     # Set distribution flag if provided
     if request.form.get("is_distribution") == "1":
@@ -131,7 +148,8 @@ def upload_collectr():
     for item in result.items:
         product_type = effective_product_type or item.product_type
         offer_price, unit_cost = intake.calc_offer_price(
-            item.market_price, item.quantity, offer_pct, product_type=product_type)
+            item.market_price, item.quantity, offer_pct,
+            product_type=product_type, bulk_tiers=session_tiers)
 
         # Check for cached tcgplayer_id mapping and/or shopify link
         item_variance = getattr(item, "variance", "") or ""
@@ -211,6 +229,7 @@ def upload_collectr_html():
         offer_pct = cash_pct  # item math stays cash-denominated
     except InvalidOperation:
         return jsonify({"error": "Invalid percentage"}), 400
+    bulk_tiers = _parse_bulk_tiers(data.get("bulk_tiers"))
 
     if not html_content:
         return jsonify({"error": "No HTML content provided"}), 400
@@ -256,7 +275,9 @@ def upload_collectr_html():
             is_walk_in=False,
             file_name="collectr_html_paste",
             file_hash=result.file_hash,
+            bulk_tiers=bulk_tiers,
         )
+    session_tiers = intake._session_bulk_tiers(session)
 
     # Set distribution flag if provided
     if data.get("is_distribution"):
@@ -288,7 +309,8 @@ def upload_collectr_html():
     for item in result.items:
         product_type = effective_product_type or item.product_type
         offer_price, unit_cost = intake.calc_offer_price(
-            item.market_price, item.quantity, offer_pct, product_type=product_type)
+            item.market_price, item.quantity, offer_pct,
+            product_type=product_type, bulk_tiers=session_tiers)
 
         item_variance = getattr(item, "variance", "") or ""
         tcgplayer_id = intake.get_cached_mapping(
@@ -396,6 +418,7 @@ def upload_generic_csv():
     except InvalidOperation:
         return jsonify({"error": "Invalid percentage"}), 400
     force_product_type = request.form.get("force_product_type")  # 'raw' or 'sealed' or None
+    bulk_tiers = _parse_bulk_tiers(request.form.get("bulk_tiers"))
 
     # Get column overrides from form (JSON string)
     column_overrides = None
@@ -451,7 +474,9 @@ def upload_generic_csv():
         is_walk_in=False,
         file_name=file.filename,
         file_hash=result.file_hash,
+        bulk_tiers=bulk_tiers,
     )
+    session_tiers = intake._session_bulk_tiers(session)
 
     # Set distribution flag if provided
     if request.form.get("is_distribution") == "1":
@@ -463,7 +488,8 @@ def upload_generic_csv():
     for item in result.items:
         product_type = effective_product_type or item.product_type
         offer_price, unit_cost = intake.calc_offer_price(
-            item.market_price, item.quantity, offer_pct, product_type=product_type)
+            item.market_price, item.quantity, offer_pct,
+            product_type=product_type, bulk_tiers=session_tiers)
 
         # Check for cached tcgplayer_id mapping (or use the one from CSV)
         item_variance = getattr(item, "variance", "") or ""
@@ -559,6 +585,7 @@ def create_session():
         is_walk_in=bool(is_walk_in),
         employee_id=data.get("employee_id"),
         notes=data.get("notes"),
+        bulk_tiers=_parse_bulk_tiers(data.get("bulk_tiers")),
     )
     # Set distribution flag if provided
     if data.get("is_distribution"):

@@ -56,6 +56,10 @@ CREATE TABLE intake_sessions (
                                        -- accepting jumps status straight to
                                        -- 'received' (skip pickup/mail wait)
     total_offer_amount DECIMAL(10, 2),
+    bulk_tiers JSONB DEFAULT '[{"max": 2, "pct": 25}]'::jsonb,
+    -- Per-session price-bracket overrides for raw cards. First match wins
+    -- (sorted ascending by max); above the top tier, the session's cash/credit
+    -- pct applies. Default mirrors the legacy "<$2 → 25%" hardcode. Max 3 tiers.
     
     -- Metadata
     notes TEXT,
@@ -261,6 +265,7 @@ SELECT
     s.accepted_offer_type,
     s.is_walk_in,
     s.total_offer_amount,
+    s.bulk_tiers,
     s.created_at,
     s.finalized_at,
     s.is_distribution,

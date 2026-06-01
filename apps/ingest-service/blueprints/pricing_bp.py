@@ -177,6 +177,24 @@ def update_offer_percentage(session_id):
 
 
 
+@bp.route("/api/intake/session/<session_id>/bulk-tiers", methods=["POST"])
+def update_bulk_tiers(session_id):
+    """Replace the session's per-dollar bracket overrides and re-price every
+    item. Body: `{"tiers": [{"max": 2, "pct": 25}, ...]}` (max 3 entries,
+    sorted ascending; bad rows dropped). An empty list resets to the
+    legacy default."""
+    data = request.json or {}
+    raw = data.get("tiers")
+    if raw is None or not isinstance(raw, list):
+        return jsonify({"error": "tiers must be a list"}), 400
+    try:
+        session = intake.update_session_bulk_tiers(session_id, raw)
+        return jsonify({"success": True, "session": _serialize(session)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+
 @bp.route("/api/intake/session/<session_id>/refresh-prices", methods=["POST"])
 def refresh_session_prices(session_id):
     """
@@ -445,7 +463,7 @@ def accept_price_no_link(item_id):
         return jsonify({"error": "Item not found"}), 404
 
     session = db.query_one(
-        "SELECT offer_percentage FROM intake_sessions WHERE id = %s",
+        "SELECT offer_percentage, bulk_tiers FROM intake_sessions WHERE id = %s",
         (item["session_id"],)
     )
     if not session:
@@ -455,7 +473,8 @@ def accept_price_no_link(item_id):
     offer_pct = session["offer_percentage"]
     offer_price, unit_cost_basis = intake.calc_offer_price(
         market_price, item["quantity"], offer_pct,
-        product_type=item.get("product_type", "raw"))
+        product_type=item.get("product_type", "raw"),
+        bulk_tiers=intake._session_bulk_tiers(session))
 
     updated = db.execute_returning("""
         UPDATE intake_items

@@ -626,12 +626,87 @@ function _applyIntakeRoleLock() { _applyAllEntryRoleLocks(); }
     setTimeout(_go, 750);
 })();
 
+// ── Bulk pricing tiers (raw-card $ → % overrides on the session) ──────────
+const DEFAULT_BULK_TIERS = [{ max: 2, pct: 25 }];
+const MAX_BULK_TIERS = 3;
+let _intakeTiers = DEFAULT_BULK_TIERS.map(t => ({ ...t }));
+
+function _renderTierRows(rows, containerId, addBtnId, onChange) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    c.innerHTML = '';
+    rows.forEach((t, idx) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; align-items:center; gap:8px;';
+        row.innerHTML =
+            `<span style="color:var(--text-dim); font-size:0.85rem; width:48px;">Under $</span>` +
+            `<input type="number" min="0.01" step="0.01" value="${Number(t.max).toFixed(2)}" style="width:80px; padding:4px 6px; font-size:0.9rem;" data-tier-field="max" data-tier-idx="${idx}">` +
+            `<span style="color:var(--text-dim); font-size:0.85rem;">pay</span>` +
+            `<input type="number" min="0" max="100" step="0.5" value="${Number(t.pct)}" style="width:70px; padding:4px 6px; font-size:0.9rem;" data-tier-field="pct" data-tier-idx="${idx}">` +
+            `<span style="color:var(--text-dim); font-size:0.85rem;">%</span>` +
+            (rows.length > 1
+                ? `<button type="button" class="btn btn-sm btn-secondary" data-tier-remove="${idx}" style="font-size:0.7rem; padding:2px 7px;" title="Remove tier">×</button>`
+                : '');
+        c.appendChild(row);
+    });
+    c.querySelectorAll('input[data-tier-field]').forEach(el => {
+        el.addEventListener('input', () => {
+            const i = Number(el.dataset.tierIdx);
+            const f = el.dataset.tierField;
+            const v = parseFloat(el.value);
+            if (!isNaN(v)) rows[i][f] = v;
+            if (onChange) onChange();
+        });
+    });
+    c.querySelectorAll('button[data-tier-remove]').forEach(b => {
+        b.addEventListener('click', () => {
+            const i = Number(b.dataset.tierRemove);
+            rows.splice(i, 1);
+            _renderTierRows(rows, containerId, addBtnId, onChange);
+            if (onChange) onChange();
+        });
+    });
+    const addBtn = document.getElementById(addBtnId);
+    if (addBtn) addBtn.disabled = rows.length >= MAX_BULK_TIERS;
+}
+
+function _renderIntakeTiers() {
+    _renderTierRows(_intakeTiers, 'intake-tier-rows', 'intake-tier-add');
+}
+
+function addIntakeTier() {
+    if (_intakeTiers.length >= MAX_BULK_TIERS) return;
+    const last = _intakeTiers[_intakeTiers.length - 1] || { max: 1, pct: 0 };
+    _intakeTiers.push({ max: Number(last.max) * 2 || 5, pct: Number(last.pct) });
+    _renderIntakeTiers();
+}
+
+function _normalizeTiersForSubmit(rows) {
+    return rows
+        .map(t => ({ max: Number(t.max), pct: Number(t.pct) }))
+        .filter(t => !isNaN(t.max) && !isNaN(t.pct) && t.max > 0 && t.pct >= 0 && t.pct <= 100)
+        .sort((a, b) => a.max - b.max)
+        .slice(0, MAX_BULK_TIERS);
+}
+
+// Render the default tier row as soon as the dashboard JS loads so the
+// New Intake form is never blank.
+(function _initIntakeTiers() {
+    const _go = () => _renderIntakeTiers();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', _go);
+    } else {
+        _go();
+    }
+})();
+
 async function createIntakeSession() {
     const customer = document.getElementById('intake-customer').value || 'Walk-in';
     const cashPct = parseFloat(document.getElementById('intake-cash-pct').value) || 65;
     const creditPct = parseFloat(document.getElementById('intake-credit-pct').value) || 75;
     const isDist = document.getElementById('intake-distribution').checked;
     const isWalkIn = document.getElementById('intake-walkin').checked;
+    const tiers = _normalizeTiersForSubmit(_intakeTiers);
 
     // Frontend cap check — server is the authority but we want fast UX
     // feedback before kicking off the request.
@@ -651,6 +726,7 @@ async function createIntakeSession() {
             credit_percentage: creditPct,
             is_walk_in: isWalkIn,
             is_distribution: isDist,
+            bulk_tiers: tiers,
         };
         if (_intakeSetupOverride && _intakeSetupOverride.token) {
             body.override_token = _intakeSetupOverride.token;
@@ -1311,6 +1387,17 @@ async function viewSession(sessionId, _preserveScroll) {
                             <button class="btn btn-sm btn-secondary" style="font-size:0.75rem; padding:3px 8px;" onclick="cancelPctEdit()">Cancel</button>
                             <span id="pct-override-status" style="color:var(--text-dim);"></span>
                         </div>` : ''}
+                        ${editable && !_accepted ? `<div style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border);">
+                            <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:6px;">
+                                <span style="font-size:0.78rem; color:var(--text-dim); font-weight:600;">BULK TIERS</span>
+                                <button type="button" class="btn btn-sm btn-secondary" id="sess-tier-add" onclick="addSessionTier('${sessionId}')" style="font-size:0.7rem; padding:2px 6px;">+ Tier</button>
+                            </div>
+                            <div id="sess-tier-rows" style="display:flex; flex-direction:column; gap:4px;"></div>
+                            <div id="sess-tier-controls" style="display:none; margin-top:6px; gap:6px; align-items:center;">
+                                <button class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 8px;" onclick="saveSessionTiers('${sessionId}')">Save Tiers</button>
+                                <button class="btn btn-sm btn-secondary" style="font-size:0.7rem; padding:2px 8px;" onclick="cancelSessionTiers('${sessionId}')">Cancel</button>
+                            </div>
+                        </div>` : ''}
                     </div>
                 </div>
             </div>${_renderRoleLockBanner(sessionId, s)}
@@ -1693,6 +1780,9 @@ async function viewSession(sessionId, _preserveScroll) {
         // Restore the user's "Sealed Product" vs "Individual Card" choice
         // so adding card after card doesn't keep flipping back to sealed
         _restoreSessionAddType();
+        // Tier editor (only when the offer block is editable). Seed from
+        // the session row, render rows, and reset the dirty/control state.
+        if (editable && !_accepted) _initSessionTierEditor(sessionId);
     } catch(err) {
         body.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
     }
@@ -5620,6 +5710,62 @@ function _renderRoleLockBanner(sessionId, s) {
     </div>`;
 }
 
+// ── Session-detail bulk tier editor ──────────────────────────────────────
+let _sessTiersWorking = [];
+let _sessTiersOriginal = '[]';
+
+function _initSessionTierEditor(sessionId) {
+    const meta = window._sessionMeta || {};
+    const raw = Array.isArray(meta.bulk_tiers) && meta.bulk_tiers.length
+        ? meta.bulk_tiers : DEFAULT_BULK_TIERS;
+    _sessTiersWorking = raw.map(t => ({ max: Number(t.max), pct: Number(t.pct) }));
+    _sessTiersOriginal = JSON.stringify(_normalizeTiersForSubmit(_sessTiersWorking));
+    _renderTierRows(_sessTiersWorking, 'sess-tier-rows', 'sess-tier-add', _refreshSessTierControls);
+    _refreshSessTierControls();
+}
+
+function addSessionTier(sessionId) {
+    if (_sessTiersWorking.length >= MAX_BULK_TIERS) return;
+    const last = _sessTiersWorking[_sessTiersWorking.length - 1] || { max: 1, pct: 0 };
+    _sessTiersWorking.push({ max: Number(last.max) * 2 || 5, pct: Number(last.pct) });
+    _renderTierRows(_sessTiersWorking, 'sess-tier-rows', 'sess-tier-add', _refreshSessTierControls);
+    _refreshSessTierControls();
+}
+
+function _refreshSessTierControls() {
+    const ctrls = document.getElementById('sess-tier-controls');
+    if (!ctrls) return;
+    const current = JSON.stringify(_normalizeTiersForSubmit(_sessTiersWorking));
+    ctrls.style.display = (current === _sessTiersOriginal) ? 'none' : 'inline-flex';
+}
+
+function cancelSessionTiers(sessionId) {
+    _initSessionTierEditor(sessionId);
+}
+
+async function saveSessionTiers(sessionId) {
+    const tiers = _normalizeTiersForSubmit(_sessTiersWorking);
+    try {
+        const r = await fetch(`/api/intake/session/${sessionId}/bulk-tiers`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tiers }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            if (window.pfBlock) pfBlock('Cannot Save Tiers', d.error || 'Unknown error', { error: true, sound: 'error' });
+            else alert(d.error || 'Failed to save tiers');
+            return;
+        }
+        if (window.pfToast) pfToast('Bulk tiers saved');
+        // Refresh the whole session view so item rows reflect new prices
+        viewSession(sessionId, true);
+    } catch (err) {
+        if (window.pfBlock) pfBlock('Save Failed', err.message, { error: true, sound: 'error' });
+        else alert(err.message);
+    }
+}
+
 // Refreshes Save/Cancel control visibility based on whether either
 // percentage input differs from its stored original.
 function _refreshPctControls() {
@@ -5631,14 +5777,30 @@ function _refreshPctControls() {
     ctrls.style.display = dirty ? 'inline-flex' : 'none';
 }
 
-// Mirrors backend calc_offer_price: raw cards under $2 pay a flat 25%
-// regardless of session %, damaged items pay 0.88×. Returns the two
-// fixed quantities the % ↔ $ calculator needs: the locked bulk subtotal
-// (which a session-% change can't move) and the non-bulk base that the
-// session % gets applied to. Reads from window._sessionItems (populated
-// by viewSession).
+// Pulls the active session's bulk_tiers off window._sessionMeta and
+// normalizes for the JS calculator. Falls back to the legacy <$2 → 25%
+// rule when the meta has no tiers (older session rows, mid-deploy).
+function _sessionBulkTiers() {
+    const raw = window._sessionMeta && window._sessionMeta.bulk_tiers;
+    if (!Array.isArray(raw) || raw.length === 0) {
+        return DEFAULT_BULK_TIERS.map(t => ({ ...t }));
+    }
+    return raw
+        .map(t => ({ max: Number(t.max), pct: Number(t.pct) }))
+        .filter(t => !isNaN(t.max) && !isNaN(t.pct) && t.max > 0)
+        .sort((a, b) => a.max - b.max);
+}
+
+// Mirrors backend calc_offer_price: for each raw card, walks the
+// session's bulk_tiers (ascending by max) and uses the first matching
+// pct in place of the session %. Above the top tier, the session %
+// applies. Returns the locked bulk subtotal (sum of items priced by a
+// tier — independent of the session %) and the non-bulk base (sum of
+// market×qty×damage, to which the session % gets applied). Used by the
+// % ↔ $ live calculator in the session detail.
 function _computeOfferBreakdown() {
     const items = Array.isArray(window._sessionItems) ? window._sessionItems : [];
+    const tiers = _sessionBulkTiers();
     let bulkOffer = 0;
     let nonBulkBase = 0;
     for (const it of items) {
@@ -5648,9 +5810,14 @@ function _computeOfferBreakdown() {
         const qty = Number(it.quantity || 0);
         if (market <= 0 || qty <= 0) continue;
         const dmg = status === 'damaged' ? 0.88 : 1;
-        const isBulk = (it.product_type === 'raw') && market < 2;
-        if (isBulk) {
-            bulkOffer += market * qty * 0.25 * dmg;
+        let tierPct = null;
+        if (it.product_type === 'raw') {
+            for (const t of tiers) {
+                if (market < t.max) { tierPct = t.pct; break; }
+            }
+        }
+        if (tierPct != null) {
+            bulkOffer += market * qty * (tierPct / 100) * dmg;
         } else {
             nonBulkBase += market * qty * dmg;
         }

@@ -73,6 +73,18 @@
                             </div>
                         </div>
                         <div id="intake-pct-override-bar" style="display:none; padding:8px 12px; margin-bottom:8px; background:var(--surface-2); border:1px solid var(--border); border-radius:6px; font-size:0.85rem; color:var(--text-dim);"></div>
+
+                        <div style="margin:8px 0 12px; padding:10px 12px; background:var(--surface-2); border:1px solid var(--border); border-radius:6px;">
+                            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+                                <div>
+                                    <strong style="font-size:0.85rem;">Bulk Pricing Tiers</strong>
+                                    <span style="color:var(--text-dim); font-size:0.75rem; margin-left:8px;">Raw cards under each $ pay the tier % instead of the session %</span>
+                                </div>
+                                <button type="button" class="btn btn-sm btn-secondary" id="intake-tier-add" onclick="addIntakeTier()" style="font-size:0.75rem; padding:3px 8px;">+ Add tier</button>
+                            </div>
+                            <div id="intake-tier-rows" style="display:flex; flex-direction:column; gap:6px;"></div>
+                        </div>
+
                         <button class="btn btn-primary" onclick="createIntakeSession()">Start Intake Session</button>
                     </div>
 
