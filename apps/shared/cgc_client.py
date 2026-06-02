@@ -47,8 +47,26 @@ logger = logging.getLogger(__name__)
 # but is reliably reachable from US-Railway egress IPs (verified 2026-05-31).
 CGC_CERT_URL_TPL = "https://www.cgctradingcards.com/certlookup/{cert}/"
 
-# How long to wait for the cert result DOM to populate after CF clears
-CGC_DOM_TIMEOUT = 25
+# Timeouts are split so the happy path stays fast (we poll and return the
+# moment the DOM is ready) while failures get a generous budget. On a
+# memory-constrained Railway container the Cloudflare JS challenge alone can
+# eat 10-20s before the Angular SPA even boots and fires its cert XHR, so the
+# old single 25s budget was almost certainly too short.
+CGC_PAGE_LOAD_TIMEOUT = 45   # driver.get() hard cap (CF can hang the load event)
+CGC_CF_TIMEOUT        = 35   # max wait for the Cloudflare challenge to clear
+CGC_DOM_TIMEOUT       = 25   # max wait for cert result DOM *after* CF clears
+
+# Cloudflare interstitial markers — while any of these are present the real
+# page hasn't rendered yet.
+_CF_MARKERS = (
+    "just a moment",
+    "verify you are human",
+    "checking your browser",
+    "challenge-platform",
+    "cf-chl",
+    "/cdn-cgi/challenge",
+    "enable javascript and cookies",
+)
 
 # Reuse cache shape from psa_client — preview + push share a single scrape
 _cgc_cert_cache:   dict[str, dict] = {}
@@ -95,15 +113,27 @@ def _build_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-extensions")
+    # Headless-rendering stability flags — mirror price_updater/dailyrunner.py,
+    # which reliably clears the same Cloudflare challenge on this egress.
+    options.add_argument("--disable-features=VizDisplayCompositor")
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-renderer-backgrounding")
     options.add_argument("--window-size=1280,1024")
     options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     )
+
+    # Capture network traffic so a failed scrape can log the request URLs the
+    # SPA fired — that reveals CGC's internal cert JSON endpoint, which is a
+    # far more robust data source than scraping rendered Angular markup.
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
     service = Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"))
     return webdriver.Chrome(service=service, options=options)
@@ -173,9 +203,7 @@ def get_cgc_images(cert_number: str) -> list[str]:
 
 def _scrape_cert(cert_number: str) -> tuple[dict, list[str]]:
     """Launch Chromium, load the cert URL, parse DOM. Best-effort."""
-    from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
     from selenium.common.exceptions import TimeoutException
 
     url = CGC_CERT_URL_TPL.format(cert=cert_number)
@@ -183,34 +211,94 @@ def _scrape_cert(cert_number: str) -> tuple[dict, list[str]]:
     with _driver_lock:
         driver = None
         try:
+            logger.info(f"CGC scrape start cert={cert_number} url={url}")
             driver = _build_driver()
-            driver.get(url)
+            try:
+                driver.set_page_load_timeout(CGC_PAGE_LOAD_TIMEOUT)
+            except Exception:
+                pass
+            try:
+                driver.get(url)
+            except TimeoutException:
+                # CF sometimes blocks the load event indefinitely; keep going
+                # and work with whatever has rendered so far.
+                logger.warning(
+                    f"CGC page load timed out (continuing anyway) cert={cert_number}"
+                )
 
-            # Wait for either a cert result section or a "not found" error.
-            # Angular populates the result panel after CF challenge clears +
-            # the cert XHR resolves. We poll for any of the known label
-            # words; once any of them appears the page is ready.
+            # Phase 1 — wait for the Cloudflare JS challenge to clear. Until it
+            # does, page_source is just the "Just a moment..." interstitial.
+            cf_cleared = _wait_past_cloudflare(driver, cert_number)
+
+            # Phase 2 — wait for the Angular cert result panel (or a real
+            # "not found") to render after the cert XHR resolves.
             try:
                 WebDriverWait(driver, CGC_DOM_TIMEOUT).until(
-                    lambda d: _page_ready(d.page_source)
+                    lambda d: _page_ready(d.page_source, cert_number)
                 )
             except TimeoutException:
+                _log_scrape_diagnostics(
+                    driver, cert_number,
+                    reason="cloudflare-stuck" if not cf_cleared else "dom-timeout",
+                )
                 src = (driver.page_source or "").lower()
                 if "cannot be found" in src or "not found" in src:
                     raise CGCNotFound(f"CGC cert {cert_number} not found")
+                if not cf_cleared:
+                    raise CGCScrapeFailed(
+                        f"CGC blocked by Cloudflare for cert {cert_number} "
+                        f"(challenge never cleared)"
+                    )
                 raise CGCScrapeFailed(
                     f"CGC page never populated for cert {cert_number} (timeout)"
                 )
 
             html = driver.page_source
-            return _parse_cert_html(html, cert_number)
+            data, image_urls = _parse_cert_html(html, cert_number)
+
+            # The page rendered but our selectors found nothing useful — this
+            # is the "markup differs from our guesses" case. Dump diagnostics
+            # so we can correct the parser without another blind round-trip.
+            if not data.get("Subject") and not data.get("CardGrade"):
+                _log_scrape_diagnostics(driver, cert_number, reason="empty-parse")
+
+            return data, image_urls
         finally:
             if driver is not None:
                 try: driver.quit()
                 except Exception: pass
 
 
-def _page_ready(html: str) -> bool:
+def _wait_past_cloudflare(driver, cert_number: str) -> bool:
+    """Poll until the Cloudflare interstitial is gone. Returns True if it
+    cleared, False if we hit the budget while still challenged.
+
+    Returns immediately once the challenge markers disappear so a fast clear
+    doesn't pay the full budget.
+    """
+    deadline = CGC_CF_TIMEOUT
+    waited = 0.0
+    step = 0.5
+    while waited < deadline:
+        try:
+            src = (driver.page_source or "").lower()
+        except Exception:
+            src = ""
+        if src and not any(m in src for m in _CF_MARKERS):
+            if waited:
+                logger.info(
+                    f"CGC Cloudflare cleared after ~{waited:.0f}s cert={cert_number}"
+                )
+            return True
+        time.sleep(step)
+        waited += step
+    logger.warning(
+        f"CGC Cloudflare still challenging after {deadline}s cert={cert_number}"
+    )
+    return False
+
+
+def _page_ready(html: str, cert_number: str = "") -> bool:
     """Heuristic: page is ready when any cert-result label is present.
 
     We're not picky about the exact selector because CGC's SPA varies its
@@ -220,16 +308,104 @@ def _page_ready(html: str) -> bool:
     if not html:
         return False
     h = html.lower()
+    # Don't declare ready while Cloudflare is still challenging.
+    if any(m in h for m in _CF_MARKERS):
+        return False
     if "cannot be found" in h or "not found" in h:
         return True
-    # Look for a few specific labels that only appear in the result panel
+    # Look for labels / signals that only appear once the result panel renders.
     return any(needle in h for needle in (
         "population at this grade",
+        "population",
         "cgc grade",
         "final grade",
+        "card grade",
+        "grade date",
         "card name",
         "set name",
+        "certification number",
+        "view label",
+        "label image",
     ))
+
+
+def _collect_request_urls(driver) -> list[str]:
+    """Pull the SPA's network request URLs out of Chrome's performance log.
+
+    We filter to CGC hosts and drop static assets so the cert data XHR — the
+    endpoint we actually want to call directly — stands out.
+    """
+    import json as _json
+    urls: list[str] = []
+    try:
+        for entry in driver.get_log("performance"):
+            try:
+                msg = _json.loads(entry.get("message", "{}")).get("message", {})
+            except Exception:
+                continue
+            if msg.get("method") not in ("Network.requestWillBeSent",
+                                         "Network.responseReceived"):
+                continue
+            params = msg.get("params", {})
+            req = params.get("request") or params.get("response") or {}
+            u = req.get("url", "")
+            if not u or u.startswith("data:"):
+                continue
+            ul = u.lower()
+            if "cgc" not in ul:
+                continue
+            if any(ul.endswith(ext) for ext in
+                   (".js", ".css", ".png", ".jpg", ".jpeg", ".gif",
+                    ".svg", ".woff", ".woff2", ".ico", ".map")):
+                continue
+            if u not in urls:
+                urls.append(u)
+    except Exception as e:
+        logger.debug(f"CGC perf-log collection failed: {e}")
+    return urls[:25]
+
+
+def _log_scrape_diagnostics(driver, cert_number: str, reason: str) -> None:
+    """Emit everything we know about a failed/empty scrape to the logs.
+
+    This is the difference between 'nothing in the backend logs' and being
+    able to fix the selectors (or switch to the JSON endpoint) on the next
+    real lookup. Best-effort — never raises.
+    """
+    try:
+        title = driver.title
+    except Exception:
+        title = "<unavailable>"
+    try:
+        cur_url = driver.current_url
+    except Exception:
+        cur_url = "<unavailable>"
+    try:
+        html = driver.page_source or ""
+    except Exception:
+        html = ""
+
+    hl = html.lower()
+    cf_present = any(m in hl for m in _CF_MARKERS)
+
+    # Visible-text snippet (tags stripped) so we can read what actually rendered.
+    snippet = ""
+    try:
+        from bs4 import BeautifulSoup
+        text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+        snippet = text[:1000]
+    except Exception:
+        snippet = html[:1000]
+
+    req_urls = _collect_request_urls(driver)
+
+    logger.warning(
+        "CGC scrape FAILED cert=%s reason=%s\n"
+        "  title=%r\n  url=%r\n  html_len=%d  cloudflare_present=%s\n"
+        "  request_urls=%s\n  visible_text_snippet=%r",
+        cert_number, reason, title, cur_url, len(html), cf_present,
+        req_urls or "<none captured>", snippet,
+    )
 
 
 def _parse_cert_html(html: str, cert_number: str) -> tuple[dict, list[str]]:

@@ -2883,6 +2883,7 @@ def preview_graded_item(item_id):
         except cgc_client.CGCNotFound:
             return jsonify({"error": f"CGC cert {cert_number} not found"}), 404
         except cgc_client.CGCScrapeFailed as e:
+            logger.warning(f"CGC scrape failed for cert {cert_number}: {e}")
             return jsonify({"error": f"CGC lookup failed: {e}"}), 502
         except Exception as e:
             logger.exception(f"CGC preview failed for cert {cert_number}: {e}")
