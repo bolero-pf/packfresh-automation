@@ -4,12 +4,13 @@ WORKDIR /app
 
 # Chromium + chromedriver power the CGC cert-lookup scraper in
 # shared/cgc_client.py. CGC has no developer API and its cert page is
-# behind a Cloudflare JS challenge, so a real headless browser is the
-# only reliable path (same approach as apps/price_updater).
+# behind a Cloudflare *managed* challenge that detects headless Chrome, so
+# we run undetected-chromedriver headful under Xvfb (the virtual display).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
     fonts-dejavu-core \
     chromium chromium-driver \
+    xvfb \
     libnss3 libxss1 libasound2 libx11-xcb1 libxcomposite1 \
     libxcursor1 libxdamage1 libxi6 libxtst6 libxrandr2 \
     libatk-bridge2.0-0 libgtk-3-0 \

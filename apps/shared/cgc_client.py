@@ -105,11 +105,78 @@ def _cgc_cache_valid(cert_number: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_driver():
-    """Return a configured headless Chromium driver.
+    """Return a configured Chromium driver that can clear CGC's Cloudflare.
 
-    Mirrors the options stack proven in apps/price_updater/dailyrunner.py —
-    same Cloudflare-defeating UA + automation flags. Caller is responsible
-    for `driver.quit()`.
+    Preferred path: undetected-chromedriver running **headful** under a virtual
+    display (Xvfb). CGC's /certlookup/ path serves a *managed* CF challenge
+    that solves the JS test then re-fingerprints the browser; plain headless
+    Chrome (even with --disable-blink-features + JS stealth) is detected at
+    that recheck and stalls forever on "Verification successful. Waiting for
+    www.cgccards.com to respond". uc patches the chromedriver binary tells
+    ($cdc_ props) that JS can't reach, and headful-under-Xvfb passes the
+    recheck where headless does not.
+
+    Falls back to plain headless Selenium if uc / pyvirtualdisplay aren't
+    installed, so a deploy that lands before the image rebuild degrades to the
+    old behavior instead of hard-failing the whole service.
+
+    Returns a driver with a `_pf_display` attribute (the Xvfb handle or None);
+    the caller must `driver.quit()` and then stop `_pf_display` if present.
+    Caller is responsible for cleanup.
+    """
+    display = None
+    try:
+        import undetected_chromedriver as uc
+        from pyvirtualdisplay import Display
+
+        display = Display(visible=False, size=(1280, 1024))
+        display.start()
+
+        opts = uc.ChromeOptions()
+        opts.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
+        # NB: no --headless — that's the whole point. Keep only the sandbox /
+        # shared-memory flags needed to run Chromium as root in a container.
+        for arg in (
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--window-size=1280,1024",
+            "--lang=en-US",
+        ):
+            opts.add_argument(arg)
+        opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+
+        driver = uc.Chrome(
+            options=opts,
+            browser_executable_path=os.environ.get("CHROME_BIN", "/usr/bin/chromium"),
+            driver_executable_path=os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"),
+            headless=False,
+            use_subprocess=True,
+        )
+        driver._pf_display = display
+        _apply_stealth(driver)
+        logger.info("CGC: using undetected-chromedriver (headful under Xvfb)")
+        return driver
+    except Exception as e:
+        logger.warning(
+            f"CGC: undetected-chromedriver/Xvfb unavailable, falling back to "
+            f"headless Selenium (CF may block): {e}"
+        )
+        if display is not None:
+            try: display.stop()
+            except Exception: pass
+
+    return _build_headless_driver()
+
+
+def _build_headless_driver():
+    """Fallback: plain headless Chromium. Mirrors price_updater/dailyrunner.py.
+
+    Known to be detected by CGC's managed CF challenge — kept only so the
+    service still runs (for PSA + non-CGC paths) if the uc/Xvfb deps are
+    missing from the image.
     """
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
@@ -156,6 +223,7 @@ def _build_driver():
 
     service = Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"))
     driver = webdriver.Chrome(service=service, options=options)
+    driver._pf_display = None
     _apply_stealth(driver)
     return driver
 
@@ -192,19 +260,41 @@ def _apply_stealth(driver) -> None:
 # Cert scrape
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Label patterns observed on PSA-style cert pages. For each conceptual field
-# we try several human-readable labels — CGC uses different capitalization
-# and word choice across product lines (sports vs TCG vs comics).
-_LABEL_PATTERNS = {
-    "Subject":         [r"item", r"description", r"subject", r"card name", r"title"],
-    "Brand":           [r"set name", r"\bset\b", r"series", r"game", r"brand"],
-    "Year":            [r"year", r"date"],
-    "CardNumber":      [r"card\s*number", r"card\s*#", r"card no\.?", r"number"],
-    "CardGrade":       [r"grade", r"final grade"],
-    "Variety":         [r"variety", r"variant", r"feature"],
-    "TotalPopulation": [r"population at this grade", r"pop at this grade", r"population\s*$"],
-    "PopulationHigher": [r"higher", r"population higher"],
-}
+# The cert page server-renders the cert→collectible mapping into the Angular
+# bootstrap, e.g.  ng-init="$popctrl.init('00519309', '9', 'G')"
+#   → (collectibleID, grade, gradeType)
+# This is the ONLY place the collectibleID exists (CGC resolves cert→card
+# server-side; there's no public cert endpoint), so we must fetch this one
+# CF-gated page — but everything else then comes from the open JSON API below.
+_INIT_RE = re.compile(
+    r"\$popctrl\.init\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)"
+)
+
+# Open, un-gated JSON population API (no Cloudflare). Keyed by collectibleID.
+CGC_POP_API_TPL = (
+    "https://production.api.aws.ccg-ops.com"
+    "/api/cards/research/trading-cards/population/collectible/{cid}"
+)
+
+# CGC grade ladder, lowest → highest, mapping a grade to its population_* JSON
+# field. Lets us report "population at this grade" and sum everything above it
+# for "population higher".
+_GRADE_LADDER = [
+    ("Authentic Altered", "population_AA"),
+    ("Authentic",         "population_AU"),
+    ("1.0", "population_1_0"), ("1.5", "population_1_5"),
+    ("2.0", "population_2_0"), ("2.5", "population_2_5"),
+    ("3.0", "population_3_0"), ("3.5", "population_3_5"),
+    ("4.0", "population_4_0"), ("4.5", "population_4_5"),
+    ("5.0", "population_5_0"), ("5.5", "population_5_5"),
+    ("6.0", "population_6_0"), ("6.5", "population_6_5"),
+    ("7.0", "population_7_0"), ("7.5", "population_7_5"),
+    ("8.0", "population_8_0"), ("8.5", "population_8_5"),
+    ("9.0", "population_9_0"), ("9.5", "population_9_5"),
+    ("Gem Mint 10", "population_GemMint10"),
+    ("Pristine 10", "population_Pristine10"),
+    ("Perfect 10",  "population_Perfect10"),
+]
 
 
 def get_cgc_data(cert_number: str) -> dict:
@@ -267,9 +357,10 @@ def _scrape_cert(cert_number: str) -> tuple[dict, list[str]]:
             except Exception:
                 pass
 
-            # Warm up CF on the homepage first — it clears the challenge
-            # normally and the cf_clearance cookie carries to the cert page,
-            # letting it skip the managed challenge that stalls headless.
+            # Warm up on the homepage first. The cf_clearance cookie does NOT
+            # exempt the /certlookup/ path (it has its own managed challenge),
+            # but establishing a normal session + cookies first makes the cert
+            # page's challenge less suspicious. Cheap, so keep it.
             try:
                 driver.get(CGC_HOME_URL)
                 _wait_past_cloudflare(driver, f"{cert_number}/warmup")
@@ -313,19 +404,21 @@ def _scrape_cert(cert_number: str) -> tuple[dict, list[str]]:
                 )
 
             html = driver.page_source
-            data, image_urls = _parse_cert_html(html, cert_number)
-
-            # The page rendered but our selectors found nothing useful — this
-            # is the "markup differs from our guesses" case. Dump diagnostics
-            # so we can correct the parser without another blind round-trip.
-            if not data.get("Subject") and not data.get("CardGrade"):
-                _log_scrape_diagnostics(driver, cert_number, reason="empty-parse")
-
-            return data, image_urls
+            try:
+                return _build_cert_data(html, cert_number)
+            except CGCScrapeFailed:
+                # We got past CF but couldn't find $popctrl.init() — dump the
+                # page so we can see what rendered instead.
+                _log_scrape_diagnostics(driver, cert_number, reason="no-init")
+                raise
         finally:
             if driver is not None:
+                disp = getattr(driver, "_pf_display", None)
                 try: driver.quit()
                 except Exception: pass
+                if disp is not None:
+                    try: disp.stop()
+                    except Exception: pass
 
 
 def _wait_past_cloudflare(driver, cert_number: str) -> bool:
@@ -358,11 +451,11 @@ def _wait_past_cloudflare(driver, cert_number: str) -> bool:
 
 
 def _page_ready(html: str, cert_number: str = "") -> bool:
-    """Heuristic: page is ready when any cert-result label is present.
+    """Page is ready once the cert result has server-rendered.
 
-    We're not picky about the exact selector because CGC's SPA varies its
-    markup per category — if any of our recognized label words appears we
-    treat the result panel as rendered and let the parser take a swing.
+    The precise, reliable signal is the Angular bootstrap that carries the
+    collectibleID — `$popctrl.init(...)` / the `certlookup-stats` container.
+    A "cannot be found" message is also terminal (invalid cert).
     """
     if not html:
         return False
@@ -370,22 +463,11 @@ def _page_ready(html: str, cert_number: str = "") -> bool:
     # Don't declare ready while Cloudflare is still challenging.
     if any(m in h for m in _CF_MARKERS):
         return False
-    if "cannot be found" in h or "not found" in h:
+    if "$popctrl.init(" in h or "certlookup-stats" in h:
         return True
-    # Look for labels / signals that only appear once the result panel renders.
-    return any(needle in h for needle in (
-        "population at this grade",
-        "population",
-        "cgc grade",
-        "final grade",
-        "card grade",
-        "grade date",
-        "card name",
-        "set name",
-        "certification number",
-        "view label",
-        "label image",
-    ))
+    if "cannot be found" in h or "not found" in h or "is not valid" in h:
+        return True
+    return False
 
 
 def _collect_request_urls(driver) -> list[str]:
@@ -467,22 +549,89 @@ def _log_scrape_diagnostics(driver, cert_number: str, reason: str) -> None:
     )
 
 
-def _parse_cert_html(html: str, cert_number: str) -> tuple[dict, list[str]]:
-    """Pull PSA-shaped fields out of a rendered CGC cert page.
+def _extract_init(html: str) -> Optional[tuple[str, str, str]]:
+    """Pull (collectibleID, grade, gradeType) from the cert page's
+    `$popctrl.init('00519309', '9', 'G')` Angular bootstrap. None if absent."""
+    if not html:
+        return None
+    m = _INIT_RE.search(html)
+    if not m:
+        return None
+    return m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
 
-    CGC presents most fields as <dt>label</dt><dd>value</dd> pairs or as
-    <td>label</td><td>value</td>. We grep the rendered HTML for known
-    labels (case-insensitive) and capture the next adjacent text node.
+
+def _grade_ladder_index(grade: str, grade_type: str) -> Optional[int]:
+    """Map a CGC grade (+ optional designation) to its `_GRADE_LADDER` index."""
+    g = (grade or "").strip().lower()
+    if not g:
+        return None
+    m = re.search(r"\d+(?:\.\d)?", g)
+    num = m.group(0) if m else ""
+    is_ten = num in ("10", "10.0") or "pristine" in g or "perfect" in g or "gem mint" in g
+    if is_ten:
+        # 10s split into Gem Mint / Pristine / Perfect. Designation word wins;
+        # default to the common Gem Mint 10 (also the plain "10" case).
+        if "perfect" in g:
+            field = "population_Perfect10"
+        elif "pristine" in g:
+            field = "population_Pristine10"
+        else:
+            field = "population_GemMint10"
+    elif g.startswith("auth"):
+        field = "population_AU"
+    elif num:
+        if "." not in num:
+            num += ".0"
+        field = "population_" + num.replace(".", "_")
+    else:
+        return None
+    for i, (_lbl, f) in enumerate(_GRADE_LADDER):
+        if f == field:
+            return i
+    return None
+
+
+def _fetch_population(collectible_id: str) -> Optional[dict]:
+    """Call the open ccg-ops population API for a collectibleID. None on error."""
+    if not collectible_id:
+        return None
+    url = CGC_POP_API_TPL.format(cid=collectible_id)
+    try:
+        resp = requests.get(url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.cgccards.com",
+            "Referer": "https://www.cgccards.com/",
+        })
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.warning(f"CGC population API failed cid={collectible_id}: {e}")
+        return None
+
+
+def _build_cert_data(html: str, cert_number: str) -> tuple[dict, list[str]]:
+    """Build a PSACert-shaped dict from the cert page + open population API.
+
+    1. Regex the collectibleID/grade out of the page's `$popctrl.init(...)`.
+    2. Fetch the un-gated JSON population API for the rich card data.
+    3. Map the grade to "population at this grade" / "higher".
     """
     from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html, "html.parser")
-
-    if "cannot be found" in html.lower() or "not found" in html.lower():
-        # Distinguish empty SPA shell from real "not found" — only treat
-        # as not-found if no result section rendered at all.
-        if not soup.find(string=re.compile(r"(?i)grade|population|card name")):
+    init = _extract_init(html)
+    if not init:
+        hl = (html or "").lower()
+        if "cannot be found" in hl or "not found" in hl or "is not valid" in hl:
             raise CGCNotFound(f"CGC cert {cert_number} not found")
+        raise CGCScrapeFailed(
+            f"CGC cert page for {cert_number} had no $popctrl.init() "
+            f"(layout changed or result didn't render)"
+        )
+
+    collectible_id, grade, grade_type = init
 
     fields: dict[str, str] = {
         "CertNumber": cert_number,
@@ -490,92 +639,55 @@ def _parse_cert_html(html: str, cert_number: str) -> tuple[dict, list[str]]:
         "Brand":      "",
         "Year":       "",
         "CardNumber": "",
-        "CardGrade":  "",
+        "CardGrade":  grade,
         "GradeDescription": "",
         "Variety":    "",
     }
     populations: dict[str, Optional[int]] = {
         "TotalPopulation":  None,
         "PopulationHigher": None,
+        "PopulationAtGrade": None,
     }
 
-    # Walk every text-bearing element looking for label words and grab the
-    # next sibling / cell as the value.
-    for el in soup.find_all(string=True):
-        label_text = (el or "").strip()
-        if not label_text or len(label_text) > 60:
-            continue
-        lt = label_text.lower().rstrip(":").strip()
+    pop = _fetch_population(collectible_id)
+    if pop:
+        fields["Subject"]    = (pop.get("name") or "").strip()
+        fields["Variety"]    = (pop.get("variant") or "").strip()
+        fields["CardNumber"] = (pop.get("cardNumber") or "").strip()
+        fields["Year"]       = str(pop.get("cardYear") or "").strip()
+        fields["Brand"]      = ((pop.get("group") or {}).get("name") or "").strip()
+        total = pop.get("population_Total")
+        populations["TotalPopulation"] = total if isinstance(total, int) else None
 
-        for key, patterns in _LABEL_PATTERNS.items():
-            if fields.get(key) or populations.get(key) is not None:
-                continue
-            for pat in patterns:
-                if re.fullmatch(pat, lt):
-                    value = _value_near(el)
-                    if not value:
-                        break
-                    if key in populations:
-                        populations[key] = _parse_int(value)
-                    else:
-                        fields[key] = value.strip()
-                    break
+        idx = _grade_ladder_index(grade, grade_type)
+        if idx is not None:
+            label, field = _GRADE_LADDER[idx]
+            at = pop.get(field)
+            populations["PopulationAtGrade"] = at if isinstance(at, int) else None
+            higher = 0
+            for j in range(idx + 1, len(_GRADE_LADDER)):
+                v = pop.get(_GRADE_LADDER[j][1])
+                if isinstance(v, int):
+                    higher += v
+            populations["PopulationHigher"] = higher
+            fields["GradeDescription"] = f"CGC {label}"
 
-    # CGC's grade label is "9.5" / "10 Pristine" / "9.0 Mint" — extract the
-    # numeric grade for CardGrade and keep the full string in GradeDescription.
-    if fields["CardGrade"]:
-        full = fields["CardGrade"]
-        fields["GradeDescription"] = full
-        m = re.search(r"\d+(\.\d+)?", full)
-        if m:
-            fields["CardGrade"] = m.group(0)
+    if not fields["GradeDescription"]:
+        fields["GradeDescription"] = f"CGC {grade}".strip()
 
-    # Images — the cert page embeds front + back slab scans. CGC hosts them
-    # under cdn.cgccards.com or cgctradingcards.com /resources/cert-images/.
-    image_urls = _extract_images(soup, cert_number)
+    # Slab front/back images still come from the rendered page, if present.
+    image_urls = _extract_images(BeautifulSoup(html, "html.parser"), cert_number)
 
     out = {**fields, **populations}
     logger.info(
-        f"CGC scrape parsed cert={cert_number}: "
-        f"subject={fields['Subject']!r} brand={fields['Brand']!r} "
+        f"CGC cert={cert_number} cid={collectible_id} grade={grade!r} "
+        f"subject={fields['Subject']!r} set={fields['Brand']!r} "
         f"year={fields['Year']!r} card_no={fields['CardNumber']!r} "
-        f"grade={fields['CardGrade']!r} pop={populations['TotalPopulation']!r} "
-        f"images={len(image_urls)}"
+        f"total_pop={populations['TotalPopulation']!r} "
+        f"at_grade={populations['PopulationAtGrade']!r} "
+        f"higher={populations['PopulationHigher']!r} images={len(image_urls)}"
     )
     return out, image_urls
-
-
-def _value_near(label_el) -> str:
-    """Find the value text adjacent to a label element.
-
-    Tries (in order) the next sibling, the next <dd> after a <dt>, the
-    next <td> after a label <td>, and the parent's next sibling. Returns
-    a stripped string or "".
-    """
-    parent = label_el.parent if hasattr(label_el, "parent") else None
-    if parent is None:
-        return ""
-
-    # <dt>Label</dt><dd>Value</dd>
-    if parent.name == "dt":
-        dd = parent.find_next_sibling("dd")
-        if dd:
-            return dd.get_text(" ", strip=True)
-
-    # <td>Label</td><td>Value</td>
-    if parent.name == "td":
-        nxt = parent.find_next_sibling("td")
-        if nxt:
-            return nxt.get_text(" ", strip=True)
-
-    # <span class="label">Label</span><span class="value">Value</span>
-    nxt = parent.find_next_sibling()
-    if nxt:
-        txt = nxt.get_text(" ", strip=True)
-        if txt:
-            return txt
-
-    return ""
 
 
 def _parse_int(s: str) -> Optional[int]:
