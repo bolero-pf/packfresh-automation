@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sell-to-Us Submissions · Pack Fresh</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📨</text></svg>">
+    <link rel="stylesheet" href="/pf-static/pf_theme.css">
+    <script src="/pf-static/pf_ui.js"></script>
+    <style>
+        .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
+        .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+        .topbar .logo { font-size: 1.3rem; font-weight: 800; letter-spacing: -0.02em; }
+        .topbar .logo span { color: var(--accent); }
+        .topbar h1 { font-size: 1rem; font-weight: 600; color: var(--text-dim); }
+        .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+        .filters .chip {
+            background: var(--surface-2); border: 1px solid var(--border); color: var(--text-dim);
+            padding: 6px 14px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+        }
+        .filters .chip.active { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+        .filters .chip .n { opacity: 0.7; margin-left: 4px; }
+        .sub { display: flex; flex-direction: column; gap: 4px; }
+        .sub .who { font-weight: 700; font-size: 0.95rem; }
+        .sub .contact a { color: var(--accent); }
+        .sub .contact { color: var(--text-dim); font-size: 0.82rem; }
+        .sub .msg { color: var(--text-dim); font-size: 0.82rem; white-space: pre-wrap; margin-top: 2px; }
+        .links { display: flex; flex-direction: column; gap: 6px; }
+        .pill-link {
+            display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem;
+            background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+            padding: 5px 10px; color: var(--text); width: fit-content; max-width: 320px;
+        }
+        .pill-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pill-link:hover { text-decoration: none; border-color: var(--accent); }
+        .when { color: var(--text-dim); font-size: 0.78rem; white-space: nowrap; }
+        select.status-sel { padding: 5px 8px; font-size: 0.8rem; }
+        .empty { text-align: center; color: var(--text-dim); padding: 60px 20px; }
+        td.col-actions { white-space: nowrap; }
+        .none-yet { color: var(--text-dim); font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <div class="topbar">
+            <div class="logo">Pack <span>Fresh</span></div>
+            <h1>Sell-to-Us Submissions</h1>
+            <button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="load()">↻ Refresh</button>
+        </div>
+
+        <div class="filters" id="filters"></div>
+
+        <div class="card" style="padding:0;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>From</th>
+                        <th>Collection</th>
+                        <th>Received</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="rows">
+                    <tr><td colspan="4" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+    const STATUSES = ["new", "contacted", "converted", "archived"];
+    const STATUS_LABEL = { new: "New", contacted: "Contacted", converted: "Converted", archived: "Archived" };
+    let activeFilter = "all";
+
+    function esc(s) {
+        return (s == null ? "" : String(s)).replace(/[&<>"']/g, c => (
+            { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+    function fmtSize(n) {
+        if (!n) return "";
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return (n / 1024).toFixed(0) + " KB";
+        return (n / 1024 / 1024).toFixed(1) + " MB";
+    }
+    function fmtWhen(iso) {
+        if (!iso) return "";
+        const d = new Date(iso);
+        return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    }
+
+    async function load() {
+        const url = "/api/sell-to-us/list" + (activeFilter !== "all" ? "?status=" + activeFilter : "");
+        let data;
+        try {
+            const r = await fetch(url);
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            data = await r.json();
+        } catch (e) {
+            document.getElementById("rows").innerHTML =
+                '<tr><td colspan="4" class="empty">Failed to load — ' + esc(e.message) + '</td></tr>';
+            return;
+        }
+        renderFilters(data.counts || {});
+        renderRows(data.submissions || []);
+    }
+
+    function renderFilters(counts) {
+        const tabs = ["all", ...STATUSES];
+        document.getElementById("filters").innerHTML = tabs.map(t => {
+            const label = t === "all" ? "All" : STATUS_LABEL[t];
+            const n = counts[t] || 0;
+            return '<div class="chip ' + (t === activeFilter ? "active" : "") + '" onclick="setFilter(\'' + t + '\')">' +
+                   esc(label) + '<span class="n">' + n + '</span></div>';
+        }).join("");
+    }
+
+    function setFilter(t) { activeFilter = t; load(); }
+
+    function renderRows(subs) {
+        const tb = document.getElementById("rows");
+        if (!subs.length) {
+            tb.innerHTML = '<tr><td colspan="4" class="empty">No submissions' +
+                (activeFilter !== "all" ? " in this status" : " yet") + '.</td></tr>';
+            return;
+        }
+        tb.innerHTML = subs.map(s => {
+            const phone = s.phone ? ' · <a href="tel:' + esc(s.phone) + '">' + esc(s.phone) + '</a>' : "";
+            const msg = s.message ? '<div class="msg">' + esc(s.message) + '</div>' : "";
+
+            let coll = "";
+            if (s.collectr_link) {
+                coll += '<a class="pill-link" href="' + esc(s.collectr_link) + '" target="_blank" rel="noopener">' +
+                        '🔗 <span>' + esc(s.collectr_link) + '</span></a>';
+            }
+            if (s.has_file) {
+                coll += '<a class="pill-link" href="/api/sell-to-us/' + esc(s.id) + '/file">' +
+                        '📄 <span>' + esc(s.file_name) + '</span> ' +
+                        '<span style="opacity:.6;">' + fmtSize(s.file_size) + '</span></a>';
+            }
+            if (!coll) coll = '<span class="none-yet">—</span>';
+
+            const opts = STATUSES.map(st =>
+                '<option value="' + st + '"' + (st === s.status ? " selected" : "") + '>' +
+                STATUS_LABEL[st] + '</option>').join("");
+
+            return '<tr>' +
+                '<td><div class="sub">' +
+                    '<div class="who">' + esc(s.name) + '</div>' +
+                    '<div class="contact"><a href="mailto:' + esc(s.email) + '">' + esc(s.email) + '</a>' + phone + '</div>' +
+                    msg +
+                '</div></td>' +
+                '<td><div class="links">' + coll + '</div></td>' +
+                '<td class="when">' + fmtWhen(s.created_at) + '</td>' +
+                '<td class="col-actions">' +
+                    '<select class="status-sel" onchange="setStatus(\'' + s.id + '\', this.value)">' + opts + '</select>' +
+                '</td>' +
+            '</tr>';
+        }).join("");
+    }
+
+    async function setStatus(id, status) {
+        try {
+            const r = await fetch("/api/sell-to-us/" + id + "/status", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status })
+            });
+            if (!r.ok) throw new Error();
+            if (window.toast) toast("Marked " + STATUS_LABEL[status]);
+            // Reload so counts + active filter stay accurate.
+            load();
+        } catch (e) {
+            if (window.toast) toast("Failed to update", "error");
+        }
+    }
+
+    load();
+    </script>
+</body>
+</html>

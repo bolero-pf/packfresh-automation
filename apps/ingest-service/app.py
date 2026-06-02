@@ -71,7 +71,10 @@ INGEST_INTERNAL_URL = os.getenv("INGEST_INTERNAL_URL", "").rstrip("/")
 # Manager-only actions are gated per-route via the manager-override token
 # mechanism (see helpers._validate_offer_caps).
 from auth import register_auth_hooks
-register_auth_hooks(app)
+# /api/sell-to-us is the only public entry — it's the Shopify storefront's
+# "sell to us" form POST. The staff review page (/submissions) and the
+# /api/sell-to-us/<id>/... endpoints are longer paths, so they stay gated.
+register_auth_hooks(app, public_paths=('/health', '/ping', '/favicon.ico', '/api/sell-to-us'))
 
 from breakdown_routes import create_breakdown_blueprint
 app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: pricing))
@@ -79,7 +82,7 @@ app.register_blueprint(create_breakdown_blueprint(db, ppt_getter=lambda: pricing
 # ──────────────────────────────────────────────────────────────────────
 # Intake blueprints
 # ──────────────────────────────────────────────────────────────────────
-from blueprints import sessions_bp, items_bp, pricing_bp, lookup_bp, admin_bp
+from blueprints import sessions_bp, items_bp, pricing_bp, lookup_bp, admin_bp, submissions_bp
 
 _common = dict(
     _pricing=pricing,
@@ -99,6 +102,10 @@ app.register_blueprint(pricing_bp.bp)
 app.register_blueprint(items_bp.bp)
 app.register_blueprint(lookup_bp.bp)
 app.register_blueprint(admin_bp.bp)
+
+# Sell-to-us submissions (public form POST + staff review). No configure()
+# needed — it only touches the shared db module.
+app.register_blueprint(submissions_bp.bp)
 
 
 # ──────────────────────────────────────────────────────────────────────

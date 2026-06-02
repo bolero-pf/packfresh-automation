@@ -113,6 +113,41 @@ CREATE INDEX idx_intake_items_session ON intake_items(session_id);
 CREATE INDEX idx_intake_items_unmapped ON intake_items(is_mapped) WHERE is_mapped = FALSE;
 
 -- ==========================================
+-- SELL-TO-US SUBMISSIONS
+-- Public "sell to us" web-form leads. The Shopify page (/pages/sell-to-us)
+-- posts here; staff triage them at offers.pack-fresh.com/submissions and
+-- create the intake session manually (paste the Collectr link / CSV into
+-- New Intake). Uploaded spreadsheets are stored inline (small files only).
+-- ==========================================
+CREATE TABLE sell_submissions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    name          VARCHAR(200) NOT NULL,
+    email         VARCHAR(320) NOT NULL,
+    phone         VARCHAR(50),
+    collectr_link TEXT,
+    message       TEXT,
+
+    -- Optional uploaded spreadsheet (CSV/Excel), stored inline
+    file_name     VARCHAR(300),
+    file_mime     VARCHAR(150),
+    file_size     INTEGER,
+    file_bytes    BYTEA,
+
+    -- Triage
+    status        VARCHAR(20) NOT NULL DEFAULT 'new', -- new | contacted | converted | archived
+    staff_notes   TEXT,
+
+    -- Provenance
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_ip    INET,
+    user_agent    TEXT
+);
+
+CREATE INDEX idx_sell_submissions_status ON sell_submissions(status);
+CREATE INDEX idx_sell_submissions_created ON sell_submissions(created_at DESC);
+
+-- ==========================================
 -- BOXES (Physical Storage)
 -- For raw card organization
 -- ==========================================

@@ -1,0 +1,188 @@
+{% comment %}
+  Sell-to-Us form section.
+
+  Paste into your Shopify theme at:  sections/sell-to-us.liquid
+  Referenced from:                   templates/page.sell-to-us.json  (see page.sell-to-us.json)
+
+  Then in Shopify admin: Online Store → Pages → Add page → title "Sell to Us"
+  → Theme template: "sell-to-us". The page lives at /pages/sell-to-us.
+
+  The form POSTs (multipart) to the intake service at
+  offers.pack-fresh.com/api/sell-to-us, which stores it in sell_submissions.
+  Staff review at offers.pack-fresh.com/submissions.
+{% endcomment %}
+
+<div class="sellus" id="sellus">
+  <style>
+    .sellus { max-width: 680px !important; margin: 56px auto !important; padding: 0 20px !important; }
+    .sellus * { box-sizing: border-box !important; }
+    .sellus .su-card {
+      background: #1a1b23 !important; border: 1px solid #2a2b35 !important;
+      border-radius: 18px !important; padding: 40px !important;
+    }
+    .sellus .su-heading {
+      color: #e4e4e7 !important; font-size: 30px !important; font-weight: 700 !important;
+      margin: 0 0 10px !important; line-height: 1.2 !important;
+    }
+    .sellus .su-intro { color: #a1a1aa !important; font-size: 16px !important; line-height: 1.6 !important; margin: 0 0 28px !important; }
+    .sellus .su-field { margin-bottom: 18px !important; }
+    .sellus .su-label {
+      display: block !important; color: #e4e4e7 !important; font-size: 14px !important;
+      font-weight: 600 !important; margin-bottom: 7px !important;
+    }
+    .sellus .su-label .su-opt { color: #71717a !important; font-weight: 400 !important; }
+    .sellus .su-hint { color: #71717a !important; font-size: 13px !important; margin-top: 6px !important; line-height: 1.5 !important; }
+    .sellus input[type="text"],
+    .sellus input[type="email"],
+    .sellus input[type="tel"],
+    .sellus input[type="url"],
+    .sellus textarea,
+    .sellus input[type="file"] {
+      width: 100% !important; background: #0f1014 !important; border: 1px solid #2a2b35 !important;
+      color: #e4e4e7 !important; font-size: 16px !important; padding: 12px 14px !important;
+      border-radius: 10px !important; outline: none !important; font-family: inherit !important;
+    }
+    .sellus input:focus, .sellus textarea:focus { border-color: #5b7cfa !important; }
+    .sellus textarea { min-height: 90px !important; resize: vertical !important; }
+    .sellus input[type="file"] { padding: 10px !important; cursor: pointer !important; }
+    .sellus .su-or {
+      display: flex !important; align-items: center !important; gap: 14px !important;
+      color: #71717a !important; font-size: 13px !important; text-transform: uppercase !important;
+      letter-spacing: 0.08em !important; margin: 4px 0 18px !important;
+    }
+    .sellus .su-or::before, .sellus .su-or::after { content: "" !important; flex: 1 !important; height: 1px !important; background: #2a2b35 !important; }
+    .sellus .su-hp { position: absolute !important; left: -9999px !important; width: 1px !important; height: 1px !important; overflow: hidden !important; }
+    .sellus .su-btn {
+      width: 100% !important; background: #5b7cfa !important; color: #fff !important;
+      font-size: 17px !important; font-weight: 600 !important; padding: 15px !important;
+      border: none !important; border-radius: 12px !important; cursor: pointer !important;
+      transition: background 0.15s !important; margin-top: 6px !important;
+    }
+    .sellus .su-btn:hover { background: #4a6af0 !important; }
+    .sellus .su-btn:disabled { opacity: 0.55 !important; cursor: not-allowed !important; }
+    .sellus .su-msg { border-radius: 12px !important; padding: 16px 18px !important; font-size: 15px !important; line-height: 1.5 !important; margin-bottom: 22px !important; display: none !important; }
+    .sellus .su-msg.show { display: block !important; }
+    .sellus .su-msg.ok { background: rgba(34,197,94,0.1) !important; border: 1px solid rgba(34,197,94,0.3) !important; color: #22c55e !important; }
+    .sellus .su-msg.err { background: rgba(239,68,68,0.1) !important; border: 1px solid rgba(239,68,68,0.3) !important; color: #ef4444 !important; }
+    @media (max-width: 600px) {
+      .sellus { margin: 28px auto !important; }
+      .sellus .su-card { padding: 28px 20px !important; }
+      .sellus .su-heading { font-size: 25px !important; }
+    }
+  </style>
+
+  <div class="su-card">
+    <h1 class="su-heading">{{ section.settings.heading | escape }}</h1>
+    <div class="su-intro">{{ section.settings.intro }}</div>
+
+    <div class="su-msg" id="su-msg"></div>
+
+    <form id="su-form" novalidate>
+      <div class="su-field">
+        <label class="su-label" for="su-name">Name</label>
+        <input type="text" id="su-name" name="name" autocomplete="name" required>
+      </div>
+
+      <div class="su-field">
+        <label class="su-label" for="su-email">Email</label>
+        <input type="email" id="su-email" name="email" autocomplete="email" required>
+      </div>
+
+      <div class="su-field">
+        <label class="su-label" for="su-phone">Phone <span class="su-opt">(optional)</span></label>
+        <input type="tel" id="su-phone" name="phone" autocomplete="tel">
+      </div>
+
+      <div class="su-field">
+        <label class="su-label" for="su-collectr">Collectr link</label>
+        <input type="url" id="su-collectr" name="collectr_link" placeholder="https://app.getcollectr.com/showcase/...">
+        <div class="su-hint">Share your public Collectr showcase link so we can see your collection.</div>
+      </div>
+
+      <div class="su-or">or</div>
+
+      <div class="su-field">
+        <label class="su-label" for="su-file">Upload a spreadsheet <span class="su-opt">(optional)</span></label>
+        <input type="file" id="su-file" name="file" accept=".csv,.tsv,.txt,.xlsx,.xls,.numbers,.ods">
+        <div class="su-hint">CSV or Excel export of your list. Include name / set / quantity / condition if you can.</div>
+      </div>
+
+      <div class="su-field">
+        <label class="su-label" for="su-message">Anything else? <span class="su-opt">(optional)</span></label>
+        <textarea id="su-message" name="message" placeholder="Roughly what you have, how you'd like to be paid, etc."></textarea>
+      </div>
+
+      <!-- Honeypot — humans never see/fill this -->
+      <div class="su-hp" aria-hidden="true">
+        <label>Website<input type="text" name="website" tabindex="-1" autocomplete="off"></label>
+      </div>
+
+      <button type="submit" class="su-btn" id="su-btn">{{ section.settings.button_label | escape }}</button>
+    </form>
+  </div>
+</div>
+
+<script>
+(function () {
+  var ENDPOINT = "https://offers.pack-fresh.com/api/sell-to-us";
+  var form = document.getElementById("su-form");
+  var btn = document.getElementById("su-btn");
+  var msg = document.getElementById("su-msg");
+  var btnLabel = btn.textContent;
+  var successText = {{ section.settings.success_message | json }};
+
+  function show(kind, text) {
+    msg.className = "su-msg show " + kind;
+    msg.textContent = text;
+    msg.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    msg.className = "su-msg";
+
+    var name = form.name.value.trim();
+    var email = form.email.value.trim();
+    var link = form.collectr_link.value.trim();
+    var hasFile = form.file.files && form.file.files.length > 0;
+
+    if (!name || !email) { show("err", "Please enter your name and email."); return; }
+    if (!link && !hasFile) { show("err", "Add a Collectr link or upload a spreadsheet so we can review your collection."); return; }
+
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+
+    fetch(ENDPOINT, { method: "POST", body: new FormData(form) })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        if (res.ok && res.d.success) {
+          form.reset();
+          show("ok", successText);
+          btn.style.display = "none";
+        } else {
+          show("err", (res.d && res.d.error) || "Something went wrong. Please try again.");
+          btn.disabled = false;
+          btn.textContent = btnLabel;
+        }
+      })
+      .catch(function () {
+        show("err", "Could not reach us — check your connection and try again.");
+        btn.disabled = false;
+        btn.textContent = btnLabel;
+      });
+  });
+})();
+</script>
+
+{% schema %}
+{
+  "name": "Sell to Us",
+  "settings": [
+    { "type": "text", "id": "heading", "label": "Heading", "default": "Sell Your Collection to Us" },
+    { "type": "richtext", "id": "intro", "label": "Intro text", "default": "<p>Tell us what you have and we'll get back to you with an offer. Share a Collectr link or upload a spreadsheet of your list.</p>" },
+    { "type": "text", "id": "button_label", "label": "Button label", "default": "Submit" },
+    { "type": "text", "id": "success_message", "label": "Success message", "default": "Thanks! We got your submission and will reach out shortly." }
+  ],
+  "presets": [{ "name": "Sell to Us" }]
+}
+{% endschema %}

@@ -1,0 +1,9 @@
+{
+  "comment": "Paste into your Shopify theme at templates/page.sell-to-us.json. Pairs with section.sell-to-us.liquid (saved in the theme as sections/sell-to-us.liquid). Then create a Page titled 'Sell to Us' and assign the 'sell-to-us' template; it serves at /pages/sell-to-us.",
+  "sections": {
+    "main": {
+      "type": "sell-to-us"
+    }
+  },
+  "order": ["main"]
+}
