@@ -2705,6 +2705,8 @@ def sell_active_listings():
                     db.execute("""
                         UPDATE raw_cards
                         SET state = 'SOLD', current_hold_id = NULL,
+                            removal_reason = 'SOLD',
+                            removal_date = CURRENT_TIMESTAMP,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s
                     """, (str(r["id"]),))
@@ -2716,6 +2718,8 @@ def sell_active_listings():
                 db.execute("""
                     UPDATE raw_cards
                     SET state = 'SOLD', current_hold_id = NULL,
+                        removal_reason = 'SOLD',
+                        removal_date = CURRENT_TIMESTAMP,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                 """, (str(r["id"]),))

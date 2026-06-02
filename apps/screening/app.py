@@ -907,9 +907,12 @@ def api_raw_card_pull_missing(hold_item_id):
                    current_hold_id = NULL,
                    shopify_product_id = NULL,
                    shopify_variant_id = NULL,
+                   removal_reason = 'SOLD',
+                   removal_date = CURRENT_TIMESTAMP,
+                   sale_price = (SELECT sale_price FROM raw_cards WHERE id = %s),
                    updated_at = CURRENT_TIMESTAMP
              WHERE id = %s
-        """, (str(sub["id"]),))
+        """, (row["raw_card_id"], str(sub["id"]),))
         db.execute("""
             UPDATE hold_items
                SET raw_card_id = %s,

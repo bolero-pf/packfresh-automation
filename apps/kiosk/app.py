@@ -2844,6 +2844,21 @@ def webhook_order_paid():
     logger.info(f"order-paid webhook: order={order_name}, {len(line_items)} line items, "
                 f"skus={[i.get('sku') for i in line_items]}")
 
+    # Real paid price per item, keyed both ways so we can stamp raw_cards.sale_price
+    # whether we match by barcode (POS) or by variant_id (Champion checkout).
+    price_by_sku: dict[str, str] = {}
+    price_by_variant: dict[str, str] = {}
+    for _it in line_items:
+        _p = _it.get("price")
+        if _p is None:
+            continue
+        _sku = (_it.get("sku") or "").strip()
+        if _sku:
+            price_by_sku[_sku] = _p
+        _vid = _it.get("variant_id")
+        if _vid:
+            price_by_variant[str(_vid)] = _p
+
     # ── 1. Champion raw checkout: match by variant_id (existing path) ────────
     hold_ids = set()
     for item in line_items:
@@ -2871,6 +2886,18 @@ def webhook_order_paid():
                 SET state = 'PENDING_SALE', updated_at = CURRENT_TIMESTAMP
                 WHERE current_hold_id = %s AND state IN ('STORED','DISPLAY')
             """, (hid,))
+            # Capture the real paid price now, while we hold the order. State stays
+            # PENDING_SALE until card_manager finalizes, but sale_price is recorded
+            # up front so it survives the finalize (which has no order context).
+            for vid, price in price_by_variant.items():
+                db.execute("""
+                    UPDATE raw_cards rc
+                       SET sale_price = %s
+                      FROM hold_items hi
+                     WHERE hi.raw_card_id = rc.id
+                       AND hi.shopify_variant_id = %s
+                       AND rc.current_hold_id = %s
+                """, (price, vid, hid))
         except Exception as e:
             logger.warning(f"Champion lifecycle flip failed for hold {hid}: {e}")
 
@@ -2906,12 +2933,22 @@ def webhook_order_paid():
                 cur.execute(f"""
                     UPDATE raw_cards
                     SET state = 'SOLD', current_hold_id = NULL,
+                        removal_reason = 'SOLD',
+                        removal_date = CURRENT_TIMESTAMP,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE barcode IN ({ph})
                       AND state = 'PENDING_SALE'
                     RETURNING id, barcode, shopify_product_id, shopify_variant_id
                 """, tuple(order_skus))
                 sold_raw = cur.fetchall()
+                # Stamp the real paid price per card from its line item.
+                for card in (sold_raw or []):
+                    price = price_by_sku.get(card["barcode"])
+                    if price is not None:
+                        cur.execute(
+                            "UPDATE raw_cards SET sale_price = %s WHERE id = %s",
+                            (price, str(card["id"])),
+                        )
             for card in (sold_raw or []):
                 pid = card.get("shopify_product_id")
                 if pid:
