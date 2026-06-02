@@ -356,7 +356,18 @@ def dashboard():
         name=payload["name"],
         role=payload["role"],
     )
-    resp = make_response(render_template("dashboard.html", user=payload))
+    # Untriaged "sell to us" submissions — surfaced as a badge on the tile so
+    # staff notice new leads without an email/Slack ping. Guarded so a DB hiccup
+    # or missing table never takes down the console.
+    new_submissions = 0
+    try:
+        row = db.query_one("SELECT COUNT(*) AS n FROM sell_submissions WHERE status = 'new'")
+        new_submissions = (row or {}).get("n", 0) or 0
+    except Exception:
+        new_submissions = 0
+
+    resp = make_response(render_template(
+        "dashboard.html", user=payload, new_submissions=new_submissions))
     set_auth_cookie(resp, token)
     return resp
 
