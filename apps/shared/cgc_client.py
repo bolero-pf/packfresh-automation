@@ -2,7 +2,7 @@
 cgc_client.py — CGC cert lookup via headless Chromium scrape.
 
 CGC does not publish a developer API for cert lookups. The official cert
-verification page (https://www.cgctradingcards.com/certlookup/<cert>/) is
+verification page (https://www.cgccards.com/certlookup/<cert>/) is
 an Angular SPA gated behind Cloudflare's "Just a moment..." JS challenge,
 so a plain HTTP fetch returns the CF challenge page, not cert data. We
 mirror the proven approach in apps/price_updater/dailyrunner.py: spawn a
@@ -43,9 +43,11 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Cert URL — trading-cards subdomain renders the same SPA as cgccards.com
-# but is reliably reachable from US-Railway egress IPs (verified 2026-05-31).
-CGC_CERT_URL_TPL = "https://www.cgctradingcards.com/certlookup/{cert}/"
+# Cert URL — MUST be cgccards.com. The cgctradingcards.com/certlookup/<cert>/
+# path 302-redirects cross-host to cgccomics.com/grading/trading-cards/ (a
+# marketing page) and drops the cert entirely, so we'd only ever scrape site
+# chrome. cgccards.com/certlookup/<cert>/ is the real cert page (CF-gated).
+CGC_CERT_URL_TPL = "https://www.cgccards.com/certlookup/{cert}/"
 
 # Timeouts are split so the happy path stays fast (we poll and return the
 # moment the DOM is ready) while failures get a generous budget. On a
@@ -549,7 +551,7 @@ def _extract_images(soup, cert_number: str) -> list[str]:
         if src.startswith("//"):
             src = "https:" + src
         elif src.startswith("/"):
-            src = "https://www.cgctradingcards.com" + src
+            src = "https://www.cgccards.com" + src
 
         sl = src.lower()
         if cert_in_url.search(src) or (
