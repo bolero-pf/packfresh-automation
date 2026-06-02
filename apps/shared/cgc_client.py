@@ -146,7 +146,10 @@ def _build_driver():
             "--lang=en-US",
         ):
             opts.add_argument(arg)
-        opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+        # NB: deliberately NO goog:loggingPrefs here. Performance logging keeps
+        # the CDP Network domain attached, which CF's managed-challenge recheck
+        # treats as automation and stalls on. uc also installs its own stealth,
+        # so we don't call _apply_stealth (another CDP command) either.
 
         driver = uc.Chrome(
             options=opts,
@@ -156,7 +159,6 @@ def _build_driver():
             use_subprocess=True,
         )
         driver._pf_display = display
-        _apply_stealth(driver)
         logger.info("CGC: using undetected-chromedriver (headful under Xvfb)")
         return driver
     except Exception as e:
@@ -357,15 +359,15 @@ def _scrape_cert(cert_number: str) -> tuple[dict, list[str]]:
             except Exception:
                 pass
 
-            # Warm up on the homepage first. The cf_clearance cookie does NOT
-            # exempt the /certlookup/ path (it has its own managed challenge),
-            # but establishing a normal session + cookies first makes the cert
-            # page's challenge less suspicious. Cheap, so keep it.
-            try:
-                driver.get(CGC_HOME_URL)
-                _wait_past_cloudflare(driver, f"{cert_number}/warmup")
-            except Exception as e:
-                logger.debug(f"CGC homepage warm-up failed (continuing): {e}")
+            # Only the headless fallback warms up on the homepage. uc is built
+            # to hit the challenged page directly; an extra navigation just adds
+            # CDP chatter that the managed-challenge recheck can flag.
+            if getattr(driver, "_pf_display", None) is None:
+                try:
+                    driver.get(CGC_HOME_URL)
+                    _wait_past_cloudflare(driver, f"{cert_number}/warmup")
+                except Exception as e:
+                    logger.debug(f"CGC homepage warm-up failed (continuing): {e}")
 
             try:
                 driver.get(url)
@@ -428,19 +430,22 @@ def _wait_past_cloudflare(driver, cert_number: str) -> bool:
     Returns immediately once the challenge markers disappear so a fast clear
     doesn't pay the full budget.
     """
+    # Poll gently. Reading page_source is a CDP round-trip; doing it in a tight
+    # 0.5s loop during the challenge is itself an automation signal, so we let
+    # the challenge breathe (3s steps) and give it an initial head start.
     deadline = CGC_CF_TIMEOUT
-    waited = 0.0
-    step = 0.5
+    step = 3.0
+    time.sleep(step)
+    waited = step
     while waited < deadline:
         try:
             src = (driver.page_source or "").lower()
         except Exception:
             src = ""
         if src and not any(m in src for m in _CF_MARKERS):
-            if waited:
-                logger.info(
-                    f"CGC Cloudflare cleared after ~{waited:.0f}s cert={cert_number}"
-                )
+            logger.info(
+                f"CGC Cloudflare cleared after ~{waited:.0f}s cert={cert_number}"
+            )
             return True
         time.sleep(step)
         waited += step
