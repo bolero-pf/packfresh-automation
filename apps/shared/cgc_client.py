@@ -49,6 +49,12 @@ logger = logging.getLogger(__name__)
 # chrome. cgccards.com/certlookup/<cert>/ is the real cert page (CF-gated).
 CGC_CERT_URL_TPL = "https://www.cgccards.com/certlookup/{cert}/"
 
+# Homepage warm-up target. The cert deep-link triggers a *managed* CF
+# challenge that the post-verification recheck stalls on in headless; the
+# homepage clears CF normally and the resulting cf_clearance cookie (scoped
+# to www.cgccards.com) lets the cert page skip the managed challenge.
+CGC_HOME_URL = "https://www.cgccards.com/"
+
 # Timeouts are split so the happy path stays fast (we poll and return the
 # moment the DOM is ready) while failures get a generous budget. On a
 # memory-constrained Railway container the Cloudflare JS challenge alone can
@@ -127,10 +133,21 @@ def _build_driver():
     options.add_argument("--disable-background-timer-throttling")
     options.add_argument("--disable-renderer-backgrounding")
     options.add_argument("--window-size=1280,1024")
+    options.add_argument("--lang=en-US")
     options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     )
+
+    # Cloudflare's *post-challenge* recheck re-fingerprints the browser and
+    # silently refuses to hand off to the origin if it still smells automation
+    # (observed: page sits on "Verification successful. Waiting for ... to
+    # respond" forever). Strip the obvious tells.
+    try:
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+    except Exception:
+        pass
 
     # Capture network traffic so a failed scrape can log the request URLs the
     # SPA fired — that reveals CGC's internal cert JSON endpoint, which is a
@@ -138,7 +155,37 @@ def _build_driver():
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
     service = Service(os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver"))
-    return webdriver.Chrome(service=service, options=options)
+    driver = webdriver.Chrome(service=service, options=options)
+    _apply_stealth(driver)
+    return driver
+
+
+# JS injected before every document loads — hides the headless/automation
+# fingerprints Cloudflare's post-challenge recheck looks for.
+_STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+window.chrome = window.chrome || { runtime: {} };
+const _origQuery = window.navigator.permissions && window.navigator.permissions.query;
+if (_origQuery) {
+  window.navigator.permissions.query = (p) => (
+    p && p.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission })
+      : _origQuery(p)
+  );
+}
+"""
+
+
+def _apply_stealth(driver) -> None:
+    """Install the stealth script via CDP so it runs before page scripts."""
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument", {"source": _STEALTH_JS}
+        )
+    except Exception as e:
+        logger.debug(f"CGC stealth injection failed (continuing): {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -219,6 +266,16 @@ def _scrape_cert(cert_number: str) -> tuple[dict, list[str]]:
                 driver.set_page_load_timeout(CGC_PAGE_LOAD_TIMEOUT)
             except Exception:
                 pass
+
+            # Warm up CF on the homepage first — it clears the challenge
+            # normally and the cf_clearance cookie carries to the cert page,
+            # letting it skip the managed challenge that stalls headless.
+            try:
+                driver.get(CGC_HOME_URL)
+                _wait_past_cloudflare(driver, f"{cert_number}/warmup")
+            except Exception as e:
+                logger.debug(f"CGC homepage warm-up failed (continuing): {e}")
+
             try:
                 driver.get(url)
             except TimeoutException:
