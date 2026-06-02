@@ -1,16 +1,15 @@
 {% comment %}
-  Sell-to-Us page.
+  Sell-to-Us form (OS 2.0 section).
 
-  1. In your theme code editor: Add a new template →
-     Online Store → Themes → ⋯ → Edit code → templates → Add a new template
-     → choose "page" → name it "sell-to-us" → it creates templates/page.sell-to-us.liquid
-  2. Delete whatever boilerplate it generates and paste THIS entire file.
-  3. Online Store → Pages → Add page → title "Sell to Us"
-     → right sidebar "Theme template" → choose "sell-to-us" → Save.
-  → The page serves at /pages/sell-to-us.
+  Paste into your theme at:  sections/sell-to-us.liquid
+  Referenced from:           templates/page.sell-to-us.json (see template.page.sell-to-us.json)
 
-  Submits (multipart) to offers.pack-fresh.com/api/sell-to-us. Staff review
-  at offers.pack-fresh.com/submissions.
+  Then: Online Store → Pages → Add page → title "Sell to Us"
+  → right sidebar "Theme template" → choose "sell-to-us" → Save.
+  Serves at /pages/sell-to-us.
+
+  Posts (multipart) to offers.pack-fresh.com/api/sell-to-us.
+  Staff review at offers.pack-fresh.com/submissions.
 {% endcomment %}
 
 <div class="sellus" id="sellus">
@@ -73,8 +72,8 @@
   </style>
 
   <div class="su-card">
-    <h1 class="su-heading">Sell Your Collection to Us</h1>
-    <div class="su-intro">Tell us what you have and we&rsquo;ll get back to you with an offer. Share a Collectr link or upload a spreadsheet of your list.</div>
+    <h1 class="su-heading">{{ section.settings.heading | escape }}</h1>
+    <div class="su-intro">{{ section.settings.intro }}</div>
 
     <div class="su-msg" id="su-msg"></div>
 
@@ -118,7 +117,7 @@
         <label>Website<input type="text" name="website" tabindex="-1" autocomplete="off"></label>
       </div>
 
-      <button type="submit" class="su-btn" id="su-btn">Submit</button>
+      <button type="submit" class="su-btn" id="su-btn">{{ section.settings.button_label | escape }}</button>
     </form>
   </div>
 </div>
@@ -126,11 +125,11 @@
 <script>
 (function () {
   var ENDPOINT = "https://offers.pack-fresh.com/api/sell-to-us";
-  var SUCCESS_TEXT = "Thanks! We got your submission and will reach out shortly.";
   var form = document.getElementById("su-form");
   var btn = document.getElementById("su-btn");
   var msg = document.getElementById("su-msg");
   var btnLabel = btn.textContent;
+  var successText = {{ section.settings.success_message | json }};
 
   function show(kind, text) {
     msg.className = "su-msg show " + kind;
@@ -158,7 +157,7 @@
       .then(function (res) {
         if (res.ok && res.d.success) {
           form.reset();
-          show("ok", SUCCESS_TEXT);
+          show("ok", successText);
           btn.style.display = "none";
         } else {
           show("err", (res.d && res.d.error) || "Something went wrong. Please try again.");
@@ -174,3 +173,16 @@
   });
 })();
 </script>
+
+{% schema %}
+{
+  "name": "Sell to Us",
+  "settings": [
+    { "type": "text", "id": "heading", "label": "Heading", "default": "Sell Your Collection to Us" },
+    { "type": "richtext", "id": "intro", "label": "Intro text", "default": "<p>Tell us what you have and we'll get back to you with an offer. Share a Collectr link or upload a spreadsheet of your list.</p>" },
+    { "type": "text", "id": "button_label", "label": "Button label", "default": "Submit" },
+    { "type": "text", "id": "success_message", "label": "Success message", "default": "Thanks! We got your submission and will reach out shortly." }
+  ],
+  "presets": [{ "name": "Sell to Us" }]
+}
+{% endschema %}

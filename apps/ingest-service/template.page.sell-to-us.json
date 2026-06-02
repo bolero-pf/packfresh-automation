@@ -1,0 +1,9 @@
+{
+  "sections": {
+    "main": {
+      "type": "sell-to-us",
+      "settings": {}
+    }
+  },
+  "order": ["main"]
+}
