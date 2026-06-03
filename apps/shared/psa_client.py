@@ -568,6 +568,11 @@ def create_graded_listing(
                 "inventory_management": "shopify",
                 "inventory_quantity": 1,
                 "requires_shipping": True,
+                # Graded card in a hard slab + case — heavier than a raw single
+                # but still small. Explicit 3 oz so Shopify does not over-charge
+                # shipping with its default weight.
+                "weight": 3,
+                "weight_unit": "oz",
             }],
             # Store tcgplayer_id as metafield so cache can key on it later
             "metafields": [
