@@ -2797,6 +2797,9 @@ def preview_graded_item(item_id):
     """
     data = request.get_json(silent=True) or {}
     cert_number = (data.get("cert_number") or "").strip()
+    # CGC: the operator's browser clears Cloudflare and they paste the
+    # collectibleID (or init string / API URL — cgc_client parses any of them).
+    collectible_id = (data.get("collectible_id") or "").strip()
     # slab_idx lets the preview surface back the saved listing price for that
     # exact row so a refresh-and-resume cycle prefers what the operator chose.
     try:
@@ -2865,9 +2868,18 @@ def preview_graded_item(item_id):
             logger.exception(f"PSA preview failed for cert {cert_number}: {e}")
             return jsonify({"error": f"PSA lookup failed: {e}"}), 500
     elif company == "CGC":
+        import cgc_client
+        if not collectible_id:
+            # No card ID yet — hand the operator the (CF-gated) cert page to grab it.
+            return jsonify({
+                "error": "Enter the CGC card ID from the cert page to look up this slab",
+                "needs_cgc_id": True,
+                "cgc_lookup_url": f"https://www.cgccards.com/certlookup/{cert_number}/",
+            }), 422
         try:
-            import cgc_client
-            cgc_cert = cgc_client.get_cgc_data(cert_number)
+            cgc_cert = cgc_client.get_cgc_data_by_collectible(
+                collectible_id, grade, cert_number=cert_number,
+            )
             result["psa"] = {
                 "year":                cgc_cert.get("Year"),
                 "subject":              cgc_cert.get("Subject"),
@@ -2883,7 +2895,7 @@ def preview_graded_item(item_id):
         except cgc_client.CGCNotFound:
             return jsonify({"error": f"CGC cert {cert_number} not found"}), 404
         except cgc_client.CGCScrapeFailed as e:
-            logger.warning(f"CGC scrape failed for cert {cert_number}: {e}")
+            logger.warning(f"CGC lookup failed cert={cert_number} cid={collectible_id}: {e}")
             return jsonify({"error": f"CGC lookup failed: {e}"}), 502
         except Exception as e:
             logger.exception(f"CGC preview failed for cert {cert_number}: {e}")
@@ -2974,6 +2986,7 @@ def push_graded_item(item_id):
 
     data        = request.get_json(silent=True) or {}
     cert_number = (data.get("cert_number") or "").strip()
+    collectible_id = (data.get("collectible_id") or "").strip()  # CGC only
     session_id  = data.get("session_id")
     price_override = data.get("price")  # From preview panel — user's chosen listing price
     # slab_idx = position in parent's pending_certs array; used to splice the
@@ -2997,6 +3010,17 @@ def push_graded_item(item_id):
         return jsonify({"error": "Item not found"}), 404
     if item.get("pushed_at"):
         return jsonify({"error": "Item already pushed"}), 400
+
+    # CGC card ID: prefer the request, else the one saved on this slab row.
+    if not collectible_id and slab_idx is not None:
+        arr = item.get("pending_certs") or []
+        if isinstance(arr, str):
+            try: arr = json.loads(arr)
+            except Exception: arr = []
+        if isinstance(arr, list) and 0 <= slab_idx < len(arr):
+            entry = arr[slab_idx]
+            if isinstance(entry, dict):
+                collectible_id = (entry.get("collectible_id") or "").strip()
 
     # If qty > 1, peel off one slab so each cert gets its own Shopify product
     if (item.get("quantity") or 1) > 1:
@@ -3041,6 +3065,7 @@ def push_graded_item(item_id):
             shopify_domain=shopify.store,
             shopify_token=shopify.token,
             db=db,
+            cgc_collectible_id=collectible_id or None,
         )
     except PSAQuotaHit as e:
         return jsonify({"error": f"PSA API quota hit — try again tomorrow: {e}"}), 429
@@ -3139,6 +3164,7 @@ def save_pending_cert(item_id):
         return jsonify({"error": "slab_idx out of range"}), 400
 
     cert_number = (data.get("cert_number") or "").strip() or None
+    collectible_id = (data.get("collectible_id") or "").strip() or None  # CGC
     price_raw   = data.get("price")
     price       = None
     if price_raw not in (None, ""):
@@ -3167,13 +3193,15 @@ def save_pending_cert(item_id):
     while len(arr) <= slab_idx:
         arr.append(None)
 
-    if cert_number is None and price is None:
+    if cert_number is None and price is None and collectible_id is None:
         arr[slab_idx] = None
     else:
         existing = arr[slab_idx] if isinstance(arr[slab_idx], dict) else {}
         entry = dict(existing)
         if cert_number is not None:
             entry["cert"] = cert_number
+        if collectible_id is not None:
+            entry["collectible_id"] = collectible_id
         if price is not None:
             entry["price"] = price
         arr[slab_idx] = entry

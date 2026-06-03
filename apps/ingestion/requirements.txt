@@ -8,10 +8,3 @@ rembg
 onnxruntime>=1.16
 PyJWT==2.10.1
 anthropic>=0.40.0
-selenium==4.25.0
-beautifulsoup4==4.12.3
-undetected-chromedriver==3.5.5
-pyvirtualdisplay==3.0
-# Py3.12 removed stdlib distutils; uc 3.5.5 still imports it. setuptools
-# (<81 still ships the distutils shim via distutils-precedence.pth) restores it.
-setuptools==70.3.0

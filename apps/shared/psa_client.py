@@ -682,6 +682,7 @@ def push_graded_slab(
     shopify_domain: str,
     shopify_token: str,
     db,
+    cgc_collectible_id: Optional[str] = None,
 ) -> dict:
     """
     Full push flow for a graded slab:
@@ -719,15 +720,21 @@ def push_graded_slab(
             raise  # bubble up — caller should halt the batch
         except Exception as e:
             logger.warning(f"PSA fetch failed for {cert_number}: {e} — proceeding without")
-    elif company == "CGC" and cert_number:
+    elif company == "CGC":
+        # CGC data comes from the open ccg-ops API, keyed by the operator-
+        # supplied collectibleID (see shared/cgc_client.py). Best-effort: if it's
+        # missing we still build the title from the TCGplayer card name.
         try:
             import cgc_client
-            psa_cert   = cgc_client.get_cgc_data(cert_number)
+            if cgc_collectible_id:
+                psa_cert = cgc_client.get_cgc_data_by_collectible(
+                    cgc_collectible_id, grade_value, cert_number=cert_number,
+                )
+            else:
+                psa_cert = cgc_client.get_cgc_data(cert_number)  # cache from preview
             image_urls = cgc_client.get_cgc_images(cert_number)
-            logger.info(f"CGC data scraped for cert {cert_number}")
+            logger.info(f"CGC data fetched for cert {cert_number}")
         except Exception as e:
-            # CGC scrape is best-effort — log + push the slab without enriched
-            # fields rather than block the operator's listing on a flaky scrape.
             logger.warning(f"CGC fetch failed for {cert_number}: {e} — proceeding without")
 
     # ── 2. Build title + description ────────────────────────────────────────

@@ -6761,6 +6761,26 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
             // (or Railway redeploy) doesn't lose the operator's typed cert/price.
             const pending = (item.pending_certs && item.pending_certs[idx]) || {};
             const certVal = (pending.cert || '').toString().replace(/"/g, '&quot;');
+            const cgcIdVal = (pending.collectible_id || '').toString().replace(/"/g, '&quot;');
+            const isCgc = (item.company || '').toUpperCase() === 'CGC';
+            // CGC slabs: CGC's cert page is behind Cloudflare, which the operator's
+            // browser clears in one click. They grab the "CGC card ID" off that
+            // page and paste it; the server then uses CGC's open population API.
+            const cgcHelper = isCgc ? `
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding:8px;background:rgba(124,58,237,0.10);border-radius:6px;">
+                    <button class="btn btn-secondary btn-sm" type="button"
+                        onclick="_openCgcCertPage('${item.id}',${idx})"
+                        style="font-size:0.72rem;white-space:nowrap;">↗ Open CGC page</button>
+                    <input type="text" id="cgcid-input-${rowId}" placeholder="CGC card ID (e.g. 00519309)" value="${cgcIdVal}"
+                        style="width:185px;font-size:0.82rem;"
+                        onblur="_savePendingCert('${item.id}',${idx})"
+                        onkeydown="if(event.key==='Enter') previewGradedSlab('${item.id}','${sessionId}',${idx})">
+                    <span style="font-size:0.7rem;color:var(--text-dim);max-width:340px;">
+                        On the CGC page (after the Cloudflare check) press F12 → Console, paste &amp; Enter:
+                        <code style="user-select:all;cursor:text;background:var(--surface-3,#222);padding:1px 4px;border-radius:3px;">copy(document.querySelector('.certlookup-stats').getAttribute('ng-init').split("'")[1])</code>
+                        — that copies the ID; paste it here.
+                    </span>
+                </div>` : '';
             return `
             <div id="graded-row-${rowId}" data-item-id="${item.id}" data-slab-idx="${idx}"
                  style="padding:10px;background:var(--surface-2);border-radius:8px;margin-bottom:8px;">
@@ -6780,6 +6800,7 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
                     </button>
                     <div id="cert-result-${rowId}" style="font-size:0.8rem;min-width:100px;"></div>
                 </div>
+                ${cgcHelper}
                 <div id="cert-preview-${rowId}" style="display:none;margin-top:10px;"></div>
             </div>`;
         }).join('');
@@ -6822,12 +6843,26 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
 
 // Debounced persist of the typed cert # + price for one slab row. Fires on
 // blur of either input so the operator only loses keystrokes mid-word.
+// Open CGC's cert page so the operator can clear Cloudflare and grab the card ID.
+function _openCgcCertPage(itemId, slabIdx) {
+    const rowId    = `${itemId}-${slabIdx}`;
+    const cert     = (document.getElementById(`cert-input-${rowId}`)?.value || '').trim();
+    const resultEl = document.getElementById(`cert-result-${rowId}`);
+    if (!cert) {
+        if (resultEl) resultEl.innerHTML = '<span style="color:var(--red);">Enter cert # first</span>';
+        return;
+    }
+    window.open(`https://www.cgccards.com/certlookup/${encodeURIComponent(cert)}/`, '_blank', 'noopener');
+}
+
 async function _savePendingCert(itemId, slabIdx) {
     const rowId      = `${itemId}-${slabIdx}`;
     const certInput  = document.getElementById(`cert-input-${rowId}`);
     const priceInput = document.getElementById(`price-input-${rowId}`);
+    const cgcIdInput = document.getElementById(`cgcid-input-${rowId}`);
     const cert  = (certInput?.value || '').trim();
     const price = (priceInput?.value || '').trim();
+    const cgcId = (cgcIdInput?.value || '').trim();
     try {
         await fetch(`/api/ingest/item/${itemId}/save-pending-cert`, {
             method: 'POST',
@@ -6835,6 +6870,7 @@ async function _savePendingCert(itemId, slabIdx) {
             body: JSON.stringify({
                 slab_idx: slabIdx,
                 cert_number: cert || null,
+                collectible_id: cgcId || null,
                 price: price === '' ? null : Number(price),
             }),
         });
@@ -6849,10 +6885,12 @@ async function previewGradedSlab(itemId, sessionId, slabIdx) {
     if (slabIdx === undefined) slabIdx = 0;
     const rowId     = `${itemId}-${slabIdx}`;
     const certInput = document.getElementById(`cert-input-${rowId}`);
+    const cgcIdInput = document.getElementById(`cgcid-input-${rowId}`);
     const btn       = document.getElementById(`preview-btn-${rowId}`);
     const resultEl  = document.getElementById(`cert-result-${rowId}`);
     const previewEl = document.getElementById(`cert-preview-${rowId}`);
     const cert      = (certInput?.value || '').trim();
+    const cgcId     = (cgcIdInput?.value || '').trim();
 
     if (!cert) { resultEl.innerHTML = '<span style="color:var(--red);">Enter cert #</span>'; return; }
 
@@ -6864,7 +6902,7 @@ async function previewGradedSlab(itemId, sessionId, slabIdx) {
         const r = await fetch(`/api/ingest/item/${itemId}/preview-graded`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cert_number: cert, slab_idx: slabIdx }),
+            body: JSON.stringify({ cert_number: cert, slab_idx: slabIdx, collectible_id: cgcId || undefined }),
         });
         const d = await r.json();
         if (!r.ok) {
@@ -7071,9 +7109,11 @@ async function pushGradedSlab(itemId, sessionId, slabIdx) {
     const rowId     = `${itemId}-${slabIdx}`;
     const certInput = document.getElementById(`cert-input-${rowId}`);
     const priceInput = document.getElementById(`price-input-${rowId}`);
+    const cgcIdInput = document.getElementById(`cgcid-input-${rowId}`);
     const pushBtn   = document.getElementById(`push-btn-${rowId}`);
     const resultEl  = document.getElementById(`cert-result-${rowId}`);
     const cert      = (certInput?.value || '').trim();
+    const cgcId     = (cgcIdInput?.value || '').trim();
     const priceStr  = (priceInput?.value || '').trim();
 
     if (!cert) { resultEl.innerHTML = '<span style="color:var(--red);">Enter cert #</span>'; return; }
@@ -7095,7 +7135,7 @@ async function pushGradedSlab(itemId, sessionId, slabIdx) {
         const r = await fetch(`/api/ingest/item/${itemId}/push-graded`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cert_number: cert, session_id: sessionId, price, slab_idx: slabIdx }),
+            body: JSON.stringify({ cert_number: cert, session_id: sessionId, price, slab_idx: slabIdx, collectible_id: cgcId || undefined }),
         });
         const d = await r.json();
         if (!r.ok) {
