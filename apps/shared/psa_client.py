@@ -683,6 +683,7 @@ def push_graded_slab(
     shopify_token: str,
     db,
     cgc_collectible_id: Optional[str] = None,
+    cgc_image_urls: Optional[list] = None,
 ) -> dict:
     """
     Full push flow for a graded slab:
@@ -729,10 +730,11 @@ def push_graded_slab(
             if cgc_collectible_id:
                 psa_cert = cgc_client.get_cgc_data_by_collectible(
                     cgc_collectible_id, grade_value, cert_number=cert_number,
+                    image_urls=cgc_image_urls,
                 )
             else:
                 psa_cert = cgc_client.get_cgc_data(cert_number)  # cache from preview
-            image_urls = cgc_client.get_cgc_images(cert_number)
+            image_urls = cgc_image_urls or cgc_client.get_cgc_images(cert_number)
             logger.info(f"CGC data fetched for cert {cert_number}")
         except Exception as e:
             logger.warning(f"CGC fetch failed for {cert_number}: {e} — proceeding without")

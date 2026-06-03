@@ -2798,8 +2798,12 @@ def preview_graded_item(item_id):
     data = request.get_json(silent=True) or {}
     cert_number = (data.get("cert_number") or "").strip()
     # CGC: the operator's browser clears Cloudflare and they paste the
-    # collectibleID (or init string / API URL — cgc_client parses any of them).
+    # collectibleID (or init string / API URL — cgc_client parses any of them)
+    # plus the slab scan URLs grabbed off the same page.
     collectible_id = (data.get("collectible_id") or "").strip()
+    cgc_images = data.get("cgc_images") or []
+    if not isinstance(cgc_images, list):
+        cgc_images = []
     # slab_idx lets the preview surface back the saved listing price for that
     # exact row so a refresh-and-resume cycle prefers what the operator chose.
     try:
@@ -2879,6 +2883,7 @@ def preview_graded_item(item_id):
         try:
             cgc_cert = cgc_client.get_cgc_data_by_collectible(
                 collectible_id, grade, cert_number=cert_number,
+                image_urls=cgc_images,
             )
             result["psa"] = {
                 "year":                cgc_cert.get("Year"),
@@ -2987,6 +2992,9 @@ def push_graded_item(item_id):
     data        = request.get_json(silent=True) or {}
     cert_number = (data.get("cert_number") or "").strip()
     collectible_id = (data.get("collectible_id") or "").strip()  # CGC only
+    cgc_images = data.get("cgc_images") or []                    # CGC slab scans
+    if not isinstance(cgc_images, list):
+        cgc_images = []
     session_id  = data.get("session_id")
     price_override = data.get("price")  # From preview panel — user's chosen listing price
     # slab_idx = position in parent's pending_certs array; used to splice the
@@ -3021,6 +3029,8 @@ def push_graded_item(item_id):
             entry = arr[slab_idx]
             if isinstance(entry, dict):
                 collectible_id = (entry.get("collectible_id") or "").strip()
+                if not cgc_images and isinstance(entry.get("images"), list):
+                    cgc_images = entry["images"]
 
     # If qty > 1, peel off one slab so each cert gets its own Shopify product
     if (item.get("quantity") or 1) > 1:
@@ -3066,6 +3076,7 @@ def push_graded_item(item_id):
             shopify_token=shopify.token,
             db=db,
             cgc_collectible_id=collectible_id or None,
+            cgc_image_urls=cgc_images or None,
         )
     except PSAQuotaHit as e:
         return jsonify({"error": f"PSA API quota hit — try again tomorrow: {e}"}), 429
@@ -3165,6 +3176,9 @@ def save_pending_cert(item_id):
 
     cert_number = (data.get("cert_number") or "").strip() or None
     collectible_id = (data.get("collectible_id") or "").strip() or None  # CGC
+    cgc_images  = data.get("cgc_images")  # CGC slab scans; list or None
+    if cgc_images is not None and not isinstance(cgc_images, list):
+        cgc_images = None
     price_raw   = data.get("price")
     price       = None
     if price_raw not in (None, ""):
@@ -3193,7 +3207,8 @@ def save_pending_cert(item_id):
     while len(arr) <= slab_idx:
         arr.append(None)
 
-    if cert_number is None and price is None and collectible_id is None:
+    if (cert_number is None and price is None and collectible_id is None
+            and not cgc_images):
         arr[slab_idx] = None
     else:
         existing = arr[slab_idx] if isinstance(arr[slab_idx], dict) else {}
@@ -3202,6 +3217,8 @@ def save_pending_cert(item_id):
             entry["cert"] = cert_number
         if collectible_id is not None:
             entry["collectible_id"] = collectible_id
+        if cgc_images:
+            entry["images"] = cgc_images
         if price is not None:
             entry["price"] = price
         arr[slab_idx] = entry

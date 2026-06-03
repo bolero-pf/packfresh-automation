@@ -234,18 +234,54 @@ def _build_cert_data(pop: dict, grade: str, cert_number: str) -> dict:
 # Public API
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _select_slab_images(urls) -> list[str]:
+    """Dedupe operator-supplied slab image URLs to the best front + back.
+
+    CGC's S3 imaging URLs look like `.../CGC3865158-003_OBV@300x501.jpg`. We
+    group by side (OBV/front, REV/back) and keep the largest `@WxH` per side,
+    front first.
+    """
+    best: dict[str, tuple] = {}      # side -> (area, url)
+    order: list[str] = []
+    for u in urls or []:
+        if not u or not isinstance(u, str):
+            continue
+        ul = u.lower()
+        if not ul.startswith("http"):
+            continue
+        if "obv" in ul or "front" in ul:
+            side = "obv"
+        elif "rev" in ul or "back" in ul:
+            side = "rev"
+        else:
+            side = u  # unknown side — keep distinct
+        m = re.search(r"@(\d+)x(\d+)", u)
+        area = int(m.group(1)) * int(m.group(2)) if m else 0
+        if side not in best:
+            order.append(side)
+        if side not in best or area > best[side][0]:
+            best[side] = (area, u)
+    rank = {"obv": 0, "rev": 1}
+    order.sort(key=lambda s: rank.get(s, 2))
+    return [best[s][1] for s in order][:3]
+
+
 def get_cgc_data_by_collectible(collectible_id: str, grade: str,
-                                cert_number: str = "") -> dict:
+                                cert_number: str = "",
+                                image_urls=None) -> dict:
     """Fetch + build CGC cert data from an operator-supplied collectibleID.
 
-    `grade` comes from intake (the operator graded the slab on entry). Caches
-    under both the collectibleID and cert_number (when given) so push's
-    `get_cgc_data(cert_number)` lookup hits without re-calling the API.
+    `grade` comes from intake (the operator graded the slab on entry).
+    `image_urls` are slab scans the operator grabbed off the cert page (CGC's
+    open API doesn't return them). Caches under both the collectibleID and
+    cert_number (when given) so push's `get_cgc_data(cert_number)` /
+    `get_cgc_images(cert_number)` lookups hit without re-calling the API.
     Raises CGCScrapeFailed if the id is unusable or the API returns nothing.
     """
     cid = normalize_collectible_id(collectible_id)
     if not cid:
         raise CGCScrapeFailed("CGC card ID is empty or unrecognizable")
+    imgs = _select_slab_images(image_urls)
 
     cid_key = f"cid:{cid}"
     if cid_key in _cgc_cert_cache and _cgc_cache_valid(cid_key):
@@ -257,17 +293,22 @@ def get_cgc_data_by_collectible(collectible_id: str, grade: str,
                 f"CGC population API returned nothing for card ID {cid}"
             )
         data = _build_cert_data(pop, grade, cert_number)
-        _store(cid_key, data)
+    _store(cid_key, data, imgs)
 
     # Re-key under the cert so the push path (which only knows the cert) finds it.
     if cert_number:
-        _store(cert_number, {**data, "CertNumber": cert_number})
-    return _cgc_cert_cache.get(cert_number) if cert_number else data
+        _store(cert_number, {**data, "CertNumber": cert_number}, imgs)
+        return _cgc_cert_cache[cert_number]
+    return data
 
 
-def _store(key: str, data: dict) -> None:
+def _store(key: str, data: dict, images=None) -> None:
     _cgc_cert_cache[key]  = data
-    _cgc_image_cache[key] = []
+    # Don't clobber previously-cached images with an empty list.
+    if images:
+        _cgc_image_cache[key] = images
+    else:
+        _cgc_image_cache.setdefault(key, [])
     _cgc_cache_times[key] = time.time()
 
 

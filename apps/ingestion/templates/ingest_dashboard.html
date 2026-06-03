@@ -6771,14 +6771,14 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
                     <button class="btn btn-secondary btn-sm" type="button"
                         onclick="_openCgcCertPage('${item.id}',${idx})"
                         style="font-size:0.72rem;white-space:nowrap;">↗ Open CGC page</button>
-                    <input type="text" id="cgcid-input-${rowId}" placeholder="CGC card ID (e.g. 00519309)" value="${cgcIdVal}"
-                        style="width:185px;font-size:0.82rem;"
+                    <input type="text" id="cgcid-input-${rowId}" placeholder="Paste CGC token (or card ID)" value="${cgcIdVal}"
+                        style="width:230px;font-size:0.82rem;"
                         onblur="_savePendingCert('${item.id}',${idx})"
                         onkeydown="if(event.key==='Enter') previewGradedSlab('${item.id}','${sessionId}',${idx})">
-                    <span style="font-size:0.7rem;color:var(--text-dim);max-width:340px;">
+                    <span style="font-size:0.7rem;color:var(--text-dim);max-width:360px;">
                         On the CGC page (after the Cloudflare check) press F12 → Console, paste &amp; Enter:
-                        <code style="user-select:all;cursor:text;background:var(--surface-3,#222);padding:1px 4px;border-radius:3px;">copy(document.querySelector('.certlookup-stats').getAttribute('ng-init').split("'")[1])</code>
-                        — that copies the ID; paste it here.
+                        <code style="user-select:all;cursor:text;background:var(--surface-3,#222);padding:1px 4px;border-radius:3px;">copy(JSON.stringify({id:document.querySelector('.certlookup-stats').getAttribute('ng-init').split("'")[1],imgs:[...document.querySelectorAll('[src*="ccg-imaging"],[data-src*="ccg-imaging"],[href*="ccg-imaging"]')].map(e=>e.getAttribute('src')||e.getAttribute('data-src')||e.getAttribute('href'))}))</code>
+                        — copies card ID + slab photos; paste it here.
                     </span>
                 </div>` : '';
             return `
@@ -6843,6 +6843,22 @@ async function _showGradedCertPanel(sessionId, gradedItemIds, panel, append) {
 
 // Debounced persist of the typed cert # + price for one slab row. Fires on
 // blur of either input so the operator only loses keystrokes mid-word.
+// The CGC "token" is whatever the operator pastes: either the JSON the console
+// snippet copies — {"id":"00519309","imgs":[...]} — or a bare card ID. Returns
+// {id, images}.
+function _parseCgcToken(raw) {
+    raw = (raw || '').trim();
+    if (!raw) return { id: '', images: [] };
+    if (raw[0] === '{') {
+        try {
+            const o = JSON.parse(raw);
+            const imgs = Array.isArray(o.imgs) ? o.imgs : (Array.isArray(o.images) ? o.images : []);
+            return { id: (o.id || '').toString().trim(), images: imgs.filter(Boolean) };
+        } catch (e) { /* fall through to bare-id */ }
+    }
+    return { id: raw, images: [] };
+}
+
 // Open CGC's cert page so the operator can clear Cloudflare and grab the card ID.
 function _openCgcCertPage(itemId, slabIdx) {
     const rowId    = `${itemId}-${slabIdx}`;
@@ -6862,7 +6878,7 @@ async function _savePendingCert(itemId, slabIdx) {
     const cgcIdInput = document.getElementById(`cgcid-input-${rowId}`);
     const cert  = (certInput?.value || '').trim();
     const price = (priceInput?.value || '').trim();
-    const cgcId = (cgcIdInput?.value || '').trim();
+    const tok   = _parseCgcToken(cgcIdInput?.value);
     try {
         await fetch(`/api/ingest/item/${itemId}/save-pending-cert`, {
             method: 'POST',
@@ -6870,7 +6886,8 @@ async function _savePendingCert(itemId, slabIdx) {
             body: JSON.stringify({
                 slab_idx: slabIdx,
                 cert_number: cert || null,
-                collectible_id: cgcId || null,
+                collectible_id: tok.id || null,
+                cgc_images: tok.images.length ? tok.images : null,
                 price: price === '' ? null : Number(price),
             }),
         });
@@ -6890,7 +6907,7 @@ async function previewGradedSlab(itemId, sessionId, slabIdx) {
     const resultEl  = document.getElementById(`cert-result-${rowId}`);
     const previewEl = document.getElementById(`cert-preview-${rowId}`);
     const cert      = (certInput?.value || '').trim();
-    const cgcId     = (cgcIdInput?.value || '').trim();
+    const tok       = _parseCgcToken(cgcIdInput?.value);
 
     if (!cert) { resultEl.innerHTML = '<span style="color:var(--red);">Enter cert #</span>'; return; }
 
@@ -6902,7 +6919,7 @@ async function previewGradedSlab(itemId, sessionId, slabIdx) {
         const r = await fetch(`/api/ingest/item/${itemId}/preview-graded`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cert_number: cert, slab_idx: slabIdx, collectible_id: cgcId || undefined }),
+            body: JSON.stringify({ cert_number: cert, slab_idx: slabIdx, collectible_id: tok.id || undefined, cgc_images: tok.images.length ? tok.images : undefined }),
         });
         const d = await r.json();
         if (!r.ok) {
@@ -7113,7 +7130,7 @@ async function pushGradedSlab(itemId, sessionId, slabIdx) {
     const pushBtn   = document.getElementById(`push-btn-${rowId}`);
     const resultEl  = document.getElementById(`cert-result-${rowId}`);
     const cert      = (certInput?.value || '').trim();
-    const cgcId     = (cgcIdInput?.value || '').trim();
+    const tok       = _parseCgcToken(cgcIdInput?.value);
     const priceStr  = (priceInput?.value || '').trim();
 
     if (!cert) { resultEl.innerHTML = '<span style="color:var(--red);">Enter cert #</span>'; return; }
@@ -7135,7 +7152,7 @@ async function pushGradedSlab(itemId, sessionId, slabIdx) {
         const r = await fetch(`/api/ingest/item/${itemId}/push-graded`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cert_number: cert, session_id: sessionId, price, slab_idx: slabIdx, collectible_id: cgcId || undefined }),
+            body: JSON.stringify({ cert_number: cert, session_id: sessionId, price, slab_idx: slabIdx, collectible_id: tok.id || undefined, cgc_images: tok.images.length ? tok.images : undefined }),
         });
         const d = await r.json();
         if (!r.ok) {
