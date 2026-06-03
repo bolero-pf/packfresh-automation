@@ -2615,6 +2615,10 @@ def _create_kiosk_product(card, hold_id):
                 "inventory_management": "shopify",
                 "inventory_quantity": 1,
                 "requires_shipping": True,
+                # Raw single — explicit 1 oz so Shopify does not apply a default
+                # weight that over-charges shipping on a small card order.
+                "weight": 1,
+                "weight_unit": "oz",
             }],
         }
     }

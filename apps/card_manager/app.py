@@ -1461,6 +1461,11 @@ def _create_raw_listing(item: dict) -> dict:
                 "inventory_management": "shopify",
                 "inventory_quantity":   1,
                 "requires_shipping":    True,
+                # Raw single in a sleeve/top-loader — a stack of these is still a
+                # small box. Without an explicit weight Shopify falls back to a
+                # default that over-charges shipping (e.g. 49 cards rated as lbs).
+                "weight":               1,
+                "weight_unit":          "oz",
             }],
         }
     }
