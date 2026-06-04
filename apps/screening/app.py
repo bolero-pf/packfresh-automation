@@ -268,6 +268,7 @@ def api_held_orders():
                 m = by_sku.get((item.get("sku") or "").strip())
                 if m:
                     item["is_raw"] = True
+                    item["barcode"] = m.get("barcode")
                     item["bin_label"] = m.get("bin_label")
                     item["bin_type"] = m.get("bin_type")
                     item["condition"] = m.get("condition")
@@ -3009,10 +3010,13 @@ function renderCombine(groups) {
           const meta = isRaw && (i.condition || i.variant)
             ? '<span style="font-size:0.72rem;color:var(--dim);margin-left:6px;">' + [i.condition, i.variant].filter(Boolean).join(' · ') + '</span>'
             : '';
+          const bc = isRaw && i.barcode
+            ? '<span style="font-family:monospace;font-size:0.7rem;color:var(--dim);margin-left:6px;">' + i.barcode + '</span>'
+            : '';
           const binPill = isRaw && i.bin_label
             ? '<span style="margin-left:auto;padding:2px 8px;background:rgba(0,180,255,0.12);color:#5cf;border-radius:10px;font-weight:600;font-size:0.72rem;">' + (i.bin_type === 'display' ? '📍 ' : (i.bin_type === 'binder' ? '📒 ' : '📦 ')) + i.bin_label + '</span>'
             : (isRaw ? '<span style="margin-left:auto;color:var(--red);font-size:0.72rem;">⚠ no bin</span>' : '');
-          return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' + (i.image ? '<img src="' + i.image + '" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">' : '') + '<span><strong>' + qty + '</strong> ' + i.title + meta + '</span>' + binPill + '</div>';
+          return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' + (i.image ? '<img src="' + i.image + '" style="width:40px;height:40px;object-fit:cover;border-radius:4px;">' : '') + '<span><strong>' + qty + '</strong> ' + i.title + meta + bc + '</span>' + binPill + '</div>';
         }).join('')}
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
