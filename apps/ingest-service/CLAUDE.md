@@ -15,9 +15,17 @@ the operator picks at link time. `map_item` keys `save_mapping` on the pre-updat
 `setNameEn` ("SWSH09: Brilliant Stars" vs Collectr's "Brilliant Stars") was the
 bug that stranded every relinked raw card on re-import.
 - `get_cached_link()` is the lookup (returns tcgplayer_id + scrydex_id). Raw is
-  two-tier: Tier 1 exact (name+set+number+variance); Tier 2 set-insensitive on
-  name+number+variance, resolving only when all candidates point at one card —
-  same-number reprints abstain so the operator picks. Sealed = name+type only.
+  three-tier, each fallback relaxing exactly ONE field and abstaining (via the
+  `_single_card` guard) if relaxing it would merge two distinct cards:
+  Tier 1 exact (name+set+number+variance); Tier 2 set-insensitive
+  (name+number+variance — Collectr renames sets across exports); Tier 3
+  name-insensitive (set+number+variance — Collectr renames the same card, e.g.
+  "Charizard V" vs "Charizard V (Full Art)" at one number). T2/T3 are
+  number-anchored (skipped when there's no card number). Reprints (same
+  name+number, diff set) and chips (same set+number, diff name — Master Ball vs
+  Poké Ball) trip the guard and stay manual. Sealed = name+type only. Do NOT
+  add name-stripping normalization — the suffix tracks a real printing and the
+  NUMBER already distinguishes regular vs Full Art.
 - `get_cached_mapping()` is a back-compat shim returning just tcgplayer_id.
 - `product_mappings.scrydex_id` lets JP / Scrydex-only links round-trip.
 - `migrate_mapping_scrydex_heal.py` backfills the cache from intake_items history

@@ -50,11 +50,22 @@ def step(label, sql, params=None):
 step("add product_mappings.scrydex_id",
      "ALTER TABLE product_mappings ADD COLUMN IF NOT EXISTS scrydex_id VARCHAR(100)")
 
-# 2. Tier-2 functional index (set-insensitive lookup)
+# 2. Tier-2 functional index (set-insensitive: name + number + variance)
 step("add Tier-2 lookup index", """
     CREATE INDEX IF NOT EXISTS idx_product_mappings_numvar
     ON product_mappings (
         collectr_name, product_type,
+        upper(replace(COALESCE(card_number, ''), ' ', '')),
+        lower(COALESCE(NULLIF(variance, ''), 'normal'))
+    )
+""")
+
+# 2b. Tier-3 functional index (name-insensitive: set + number + variance)
+step("add Tier-3 lookup index", """
+    CREATE INDEX IF NOT EXISTS idx_product_mappings_setnumvar
+    ON product_mappings (
+        product_type,
+        COALESCE(set_name, ''),
         upper(replace(COALESCE(card_number, ''), ' ', '')),
         lower(COALESCE(NULLIF(variance, ''), 'normal'))
     )

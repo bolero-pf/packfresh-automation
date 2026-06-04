@@ -106,14 +106,44 @@ def get_cached_link(collectr_name: str, product_type: str,
         if row:
             _bump_use(collectr_name, "raw", sn, cn, vr)
             return {"tcgplayer_id": row["tcgplayer_id"], "scrydex_id": row.get("scrydex_id")}
-        # Tier 2 — set-insensitive, single-card only.
-        cands = query("""
-            SELECT DISTINCT tcgplayer_id, scrydex_id FROM product_mappings
-            WHERE collectr_name = %s AND product_type = 'raw'
-              AND upper(replace(COALESCE(card_number, ''), ' ', '')) = %s
-              AND lower(COALESCE(NULLIF(variance, ''), 'normal')) = %s
-        """, (collectr_name, _norm_num(cn), _norm_var(vr)))
-        return _single_card(cands)
+
+        # Tiers 2 & 3 are number-anchored — only run them when we actually have
+        # a card number to anchor on (without one, name/set alone is too loose).
+        nnum = _norm_num(cn)
+        nvar = _norm_var(vr)
+        if nnum:
+            # Tier 2 — set-insensitive (Collectr renames the same SET across
+            # exports: 'SV: 151' vs 'Pokémon Card 151'). Anchored on name +
+            # number + variance; abstains if name+number is two different cards
+            # across sets (same-number reprints).
+            cands = query("""
+                SELECT DISTINCT tcgplayer_id, scrydex_id FROM product_mappings
+                WHERE collectr_name = %s AND product_type = 'raw'
+                  AND upper(replace(COALESCE(card_number, ''), ' ', '')) = %s
+                  AND lower(COALESCE(NULLIF(variance, ''), 'normal')) = %s
+            """, (collectr_name, nnum, nvar))
+            chosen = _single_card(cands)
+            if chosen:
+                return chosen
+
+            # Tier 3 — name-insensitive (Collectr renames the same CARD: e.g.
+            # 'Charizard V' vs 'Charizard V (Full Art)' at 153/172, both one
+            # card). Anchored on set + number + variance, so the regular and
+            # Full Art printings stay distinct by NUMBER, and same-number chip
+            # variants (Master Ball vs Poké Ball — same number, different cards)
+            # trip the single-card guard and abstain to the operator.
+            if sn:
+                cands = query("""
+                    SELECT DISTINCT tcgplayer_id, scrydex_id FROM product_mappings
+                    WHERE product_type = 'raw'
+                      AND COALESCE(set_name, '') = %s
+                      AND upper(replace(COALESCE(card_number, ''), ' ', '')) = %s
+                      AND lower(COALESCE(NULLIF(variance, ''), 'normal')) = %s
+                """, (sn, nnum, nvar))
+                chosen = _single_card(cands)
+                if chosen:
+                    return chosen
+        return None
 
     # Sealed, or raw without identifying info — match on name+type only.
     row = query_one("""
