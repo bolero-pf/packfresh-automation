@@ -151,12 +151,14 @@ def upload_collectr():
             item.market_price, item.quantity, offer_pct,
             product_type=product_type, bulk_tiers=session_tiers)
 
-        # Check for cached tcgplayer_id mapping and/or shopify link
+        # Check for cached link (tcgplayer_id and/or scrydex_id) + shopify link
         item_variance = getattr(item, "variance", "") or ""
-        tcgplayer_id = intake.get_cached_mapping(
+        cached = intake.get_cached_link(
             item.product_name, product_type,
             set_name=item.set_name, card_number=item.card_number,
-            variance=item_variance)
+            variance=item_variance) or {}
+        tcgplayer_id = cached.get("tcgplayer_id")
+        scrydex_id = cached.get("scrydex_id")
         shopify_link = intake.get_cached_shopify_link(item.product_name, product_type)
         # If shopify link has a tcgplayer_id that our mapping table missed, use it
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
@@ -175,6 +177,7 @@ def upload_collectr():
             "offer_price": offer_price,
             "unit_cost_basis": unit_cost,
             "tcgplayer_id": tcgplayer_id,
+            "scrydex_id": scrydex_id,
             "is_graded": getattr(item, "is_graded", False),
             "grade_company": getattr(item, "grade_company", "") or None,
             "grade_value": getattr(item, "grade_value", "") or None,
@@ -188,8 +191,8 @@ def upload_collectr():
     # Update session totals
     intake._recalculate_session_totals(session["id"])
 
-    unmapped_count = sum(1 for p in processed if not p["tcgplayer_id"])
-    auto_mapped = sum(1 for p in processed if p["tcgplayer_id"])
+    unmapped_count = sum(1 for p in processed if not (p["tcgplayer_id"] or p.get("scrydex_id")))
+    auto_mapped = sum(1 for p in processed if (p["tcgplayer_id"] or p.get("scrydex_id")))
 
     return jsonify({
         "success": True,
@@ -313,10 +316,12 @@ def upload_collectr_html():
             product_type=product_type, bulk_tiers=session_tiers)
 
         item_variance = getattr(item, "variance", "") or ""
-        tcgplayer_id = intake.get_cached_mapping(
+        cached = intake.get_cached_link(
             item.product_name, product_type,
             set_name=item.set_name, card_number=item.card_number,
-            variance=item_variance)
+            variance=item_variance) or {}
+        tcgplayer_id = cached.get("tcgplayer_id")
+        scrydex_id = cached.get("scrydex_id")
         shopify_link = intake.get_cached_shopify_link(item.product_name, product_type)
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
             tcgplayer_id = shopify_link["tcgplayer_id"]
@@ -345,6 +350,7 @@ def upload_collectr_html():
             "offer_price": offer_price,
             "unit_cost_basis": unit_cost,
             "tcgplayer_id": tcgplayer_id,
+            "scrydex_id": scrydex_id,
             "is_graded": is_graded,
             "grade_company": grade_company,
             "grade_value": grade_value,
@@ -356,8 +362,8 @@ def upload_collectr_html():
     intake.add_items_to_session(session["id"], processed)
     intake._recalculate_session_totals(session["id"])
 
-    unmapped_count = sum(1 for p in processed if not p["tcgplayer_id"])
-    auto_mapped = sum(1 for p in processed if p["tcgplayer_id"])
+    unmapped_count = sum(1 for p in processed if not (p["tcgplayer_id"] or p.get("scrydex_id")))
+    auto_mapped = sum(1 for p in processed if (p["tcgplayer_id"] or p.get("scrydex_id")))
 
     return jsonify({
         "success": True,
@@ -491,12 +497,14 @@ def upload_generic_csv():
             item.market_price, item.quantity, offer_pct,
             product_type=product_type, bulk_tiers=session_tiers)
 
-        # Check for cached tcgplayer_id mapping (or use the one from CSV)
+        # Check for cached link (or use the tcgplayer_id from the CSV)
         item_variance = getattr(item, "variance", "") or ""
-        tcgplayer_id = item.tcgplayer_id or intake.get_cached_mapping(
+        cached = intake.get_cached_link(
             item.product_name, product_type,
             set_name=item.set_name, card_number=item.card_number,
-            variance=item_variance)
+            variance=item_variance) or {}
+        tcgplayer_id = item.tcgplayer_id or cached.get("tcgplayer_id")
+        scrydex_id = cached.get("scrydex_id")
         shopify_link = intake.get_cached_shopify_link(item.product_name, product_type)
         if not tcgplayer_id and shopify_link and shopify_link.get("tcgplayer_id"):
             tcgplayer_id = shopify_link["tcgplayer_id"]
@@ -514,6 +522,7 @@ def upload_generic_csv():
             "offer_price": offer_price,
             "unit_cost_basis": unit_cost,
             "tcgplayer_id": tcgplayer_id,
+            "scrydex_id": scrydex_id,
             "is_graded": getattr(item, "is_graded", False),
             "grade_company": getattr(item, "grade_company", "") or None,
             "grade_value": getattr(item, "grade_value", "") or None,
@@ -525,8 +534,8 @@ def upload_generic_csv():
     intake.add_items_to_session(session["id"], processed)
     intake._recalculate_session_totals(session["id"])
 
-    unmapped_count = sum(1 for p in processed if not p["tcgplayer_id"])
-    auto_mapped = sum(1 for p in processed if p["tcgplayer_id"])
+    unmapped_count = sum(1 for p in processed if not (p["tcgplayer_id"] or p.get("scrydex_id")))
+    auto_mapped = sum(1 for p in processed if (p["tcgplayer_id"] or p.get("scrydex_id")))
 
     return jsonify({
         "success": True,

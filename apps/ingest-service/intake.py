@@ -24,74 +24,149 @@ logger = logging.getLogger(__name__)
 # PRODUCT MAPPING (collectr_name <-> tcgplayer_id)
 # ==========================================
 
-def get_cached_mapping(collectr_name: str, product_type: str,
-                       set_name: str = None, card_number: str = None,
-                       variance: str = None) -> Optional[int]:
-    """Check if we have a saved mapping for this Collectr product.
+def _norm_num(card_number: str) -> str:
+    """Canonical card-number form for set-insensitive matching: upper, no spaces.
+    '079/73' stays '079/73'; 'SWSH 260' -> 'SWSH260'; '92a/145' -> '92A/145'."""
+    return (card_number or "").strip().upper().replace(" ", "")
 
-    For raw cards, requires name + set_name + card_number + variance to all match
-    (prevents "Charizard ex" from SV:151 linking to one from Brilliant Stars,
-     and "1st Edition Holofoil" from linking to "Unlimited Holofoil").
-    For sealed products, name + type is sufficient.
-    """
+
+def _norm_var(variance: str) -> str:
+    """Canonical variance: case-folded, empty -> 'normal' (HTML imports leave it
+    blank where CSV writes 'Normal'; both must compare equal)."""
+    v = (variance or "").strip().lower()
+    return v or "normal"
+
+
+def _single_card(rows) -> Optional[dict]:
+    """Given candidate mapping rows, return the one card they all point at, or
+    None if they point at two or more distinct cards (genuine same-number
+    reprints — e.g. Charizard 4 in Base vs Base Set 2). A card is identified by
+    tcgplayer_id when present, else by scrydex_id."""
+    cards: dict = {}
+    for r in rows:
+        tcg = r.get("tcgplayer_id")
+        sx = r.get("scrydex_id")
+        if tcg is not None:
+            key = ("T", tcg)
+        elif sx:
+            key = ("S", sx)
+        else:
+            continue
+        cur = cards.get(key)
+        # Keep the richest row for the card (one carrying both ids).
+        if cur is None or (sx and not cur.get("scrydex_id")):
+            cards[key] = {"tcgplayer_id": tcg, "scrydex_id": sx}
+    if len(cards) == 1:
+        return next(iter(cards.values()))
+    return None
+
+
+def _bump_use(collectr_name: str, product_type: str, sn: str, cn: str, vr: str):
+    execute("""
+        UPDATE product_mappings
+        SET use_count = use_count + 1, last_used = CURRENT_TIMESTAMP
+        WHERE collectr_name = %s AND product_type = %s
+          AND COALESCE(set_name, '') = %s
+          AND COALESCE(card_number, '') = %s
+          AND COALESCE(variance, '') = %s
+    """, (collectr_name, product_type, sn, cn, vr))
+
+
+def get_cached_link(collectr_name: str, product_type: str,
+                    set_name: str = None, card_number: str = None,
+                    variance: str = None) -> Optional[dict]:
+    """Return {'tcgplayer_id': ..., 'scrydex_id': ...} for a previously-linked
+    Collectr product, or None.
+
+    Raw matching is two-tier:
+      1. Exact (name, set, number, variance). The cache is keyed on the exact
+         parser output (see map_item), so re-importing the same file round-trips
+         100% — every card you just linked comes back linked.
+      2. Set-insensitive fallback on name + number + variance, for cards whose
+         Collectr set *spelling* drifted between exports ('SV: 151' vs
+         'Pokémon Card 151', 'Crown Zenith: Galarian Gallery' vs no colon). It
+         resolves only when every candidate points at a single card; if the same
+         name+number maps to two different cards (~1% — true same-number
+         reprints), it abstains so the operator picks. Set still decides there.
+
+    Sealed matches on name+type only (sealed lacks set/number identity)."""
     sn = set_name or ""
     cn = card_number or ""
     vr = variance or ""
 
     if product_type == "raw" and (sn or cn or vr):
-        # Raw card with identifying info: require exact match
+        # Tier 1 — exact key.
         row = query_one("""
-            SELECT tcgplayer_id FROM product_mappings
-            WHERE collectr_name = %s AND product_type = %s
+            SELECT tcgplayer_id, scrydex_id FROM product_mappings
+            WHERE collectr_name = %s AND product_type = 'raw'
               AND COALESCE(set_name, '') = %s
               AND COALESCE(card_number, '') = %s
               AND COALESCE(variance, '') = %s
-        """, (collectr_name, product_type, sn, cn, vr))
-    else:
-        # Sealed, or raw without identifying info — match on name+type only
-        row = query_one("""
-            SELECT tcgplayer_id FROM product_mappings
-            WHERE collectr_name = %s AND product_type = %s
-        """, (collectr_name, product_type))
+        """, (collectr_name, sn, cn, vr))
+        if row:
+            _bump_use(collectr_name, "raw", sn, cn, vr)
+            return {"tcgplayer_id": row["tcgplayer_id"], "scrydex_id": row.get("scrydex_id")}
+        # Tier 2 — set-insensitive, single-card only.
+        cands = query("""
+            SELECT DISTINCT tcgplayer_id, scrydex_id FROM product_mappings
+            WHERE collectr_name = %s AND product_type = 'raw'
+              AND upper(replace(COALESCE(card_number, ''), ' ', '')) = %s
+              AND lower(COALESCE(NULLIF(variance, ''), 'normal')) = %s
+        """, (collectr_name, _norm_num(cn), _norm_var(vr)))
+        return _single_card(cands)
 
+    # Sealed, or raw without identifying info — match on name+type only.
+    row = query_one("""
+        SELECT tcgplayer_id, scrydex_id FROM product_mappings
+        WHERE collectr_name = %s AND product_type = %s
+    """, (collectr_name, product_type))
     if row:
-        execute("""
-            UPDATE product_mappings
-            SET use_count = use_count + 1, last_used = CURRENT_TIMESTAMP
-            WHERE collectr_name = %s AND product_type = %s
-              AND COALESCE(set_name, '') = %s
-              AND COALESCE(card_number, '') = %s
-              AND COALESCE(variance, '') = %s
-        """, (collectr_name, product_type, sn, cn, vr))
-        return row["tcgplayer_id"]
+        return {"tcgplayer_id": row["tcgplayer_id"], "scrydex_id": row.get("scrydex_id")}
     return None
+
+
+def get_cached_mapping(collectr_name: str, product_type: str,
+                       set_name: str = None, card_number: str = None,
+                       variance: str = None) -> Optional[int]:
+    """Back-compat shim — returns just the tcgplayer_id. New callers should use
+    get_cached_link() so they also recover the scrydex_id (JP / Scrydex-only)."""
+    link = get_cached_link(collectr_name, product_type,
+                           set_name=set_name, card_number=card_number,
+                           variance=variance)
+    return link["tcgplayer_id"] if link else None
 
 
 def save_mapping(collectr_name: str, tcgplayer_id: Optional[int], product_type: str,
                  set_name: str = None, card_number: str = None, variance: str = None,
+                 scrydex_id: str = None,
                  shopify_product_id: int = None, shopify_product_name: str = None):
     """Save or update a product mapping for future imports.
-    tcgplayer_id may be None when linking directly to a Shopify product with no PPT match.
+    tcgplayer_id may be None when linking a Scrydex-only product (JP, no TCG
+    marketplace mapping) — scrydex_id carries it instead.
 
-    Uses (collectr_name, product_type, set_name, card_number, variance) as the composite key
-    so that different cards/printings each get their own mapping.
+    Uses (collectr_name, product_type, set_name, card_number, variance) as the
+    composite key. For raw cards this MUST be keyed on the Collectr-parsed
+    identity (what the parser emits), never the Scrydex display values — see
+    map_item — or the next import of the same file won't find it.
     """
     sn = set_name or ""
     cn = card_number or ""
     vr = variance or ""
+    sx = (scrydex_id or "").strip() or None
     execute("""
         INSERT INTO product_mappings
-            (collectr_name, tcgplayer_id, product_type, set_name, card_number, variance,
+            (collectr_name, tcgplayer_id, scrydex_id, product_type, set_name, card_number, variance,
              shopify_product_id, shopify_product_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (collectr_name, product_type, COALESCE(set_name, ''), COALESCE(card_number, ''), COALESCE(variance, ''))
         DO UPDATE SET
             tcgplayer_id = COALESCE(EXCLUDED.tcgplayer_id, product_mappings.tcgplayer_id),
+            scrydex_id = COALESCE(EXCLUDED.scrydex_id, product_mappings.scrydex_id),
             shopify_product_id = COALESCE(EXCLUDED.shopify_product_id, product_mappings.shopify_product_id),
             shopify_product_name = COALESCE(EXCLUDED.shopify_product_name, product_mappings.shopify_product_name),
             last_used = CURRENT_TIMESTAMP,
             use_count = product_mappings.use_count + 1
-    """, (collectr_name, tcgplayer_id, product_type, sn, cn, vr,
+    """, (collectr_name, tcgplayer_id, sx, product_type, sn, cn, vr,
           shopify_product_id, shopify_product_name))
 
 
@@ -278,18 +353,19 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
 
     sql = """
         INSERT INTO intake_items
-            (session_id, product_name, tcgplayer_id, product_type,
+            (session_id, product_name, tcgplayer_id, scrydex_id, product_type,
              set_name, card_number, condition, rarity, variance,
              quantity, market_price, offer_price, unit_cost_basis, is_mapped,
              is_graded, grade_company, grade_value, slab_uuid,
              shopify_product_id, shopify_product_name, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params_list = [
         (
             session_id,
             item["product_name"],
             item.get("tcgplayer_id"),
+            (item.get("scrydex_id") or None),
             item["product_type"],
             item.get("set_name"),
             item.get("card_number"),
@@ -300,8 +376,10 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             item["market_price"],
             item["offer_price"],
             item["unit_cost_basis"],
-            # is_mapped: true if we have TCGPlayer ID OR a shopify link
-            (item.get("tcgplayer_id") is not None or item.get("shopify_product_id") is not None),
+            # is_mapped: true if we have a TCGplayer ID, a Scrydex-only link, or a shopify link
+            (item.get("tcgplayer_id") is not None
+             or bool(item.get("scrydex_id"))
+             or item.get("shopify_product_id") is not None),
             item.get("is_graded", False),
             item.get("grade_company") or None,
             item.get("grade_value") or None,
@@ -446,10 +524,28 @@ def map_item(item_id: str, tcgplayer_id: int = None,
     # Cache the mapping for future imports. tcgplayer_id may be None for
     # Scrydex-only links (sealed JP, older JP cards) — save_mapping accepts
     # NULL and the row still helps next time the same Collectr name appears.
-    save_mapping(
-        name, tcgplayer_id, item["product_type"],
-        sname, cnum, variance=var
-    )
+    #
+    # CRITICAL: for raw cards the cache key must be the ORIGINAL Collectr-parsed
+    # identity (`item[...]`, the pre-update row = exactly what the parser emits),
+    # NOT the Scrydex display values the operator just picked (`name`/`sname`/
+    # `cnum`/`var`). Re-importing the same file reproduces the parser identity,
+    # so keying on it is what makes a re-import come back 100% linked. Keying on
+    # the Scrydex set name ('SWSH09: Brilliant Stars') instead of Collectr's
+    # ('Brilliant Stars') was the bug that stranded every relinked raw card.
+    # Sealed keeps the existing behavior (name-only match, already reliable).
+    link_sx = scrydex_id or item.get("scrydex_id")
+    if item["product_type"] == "raw":
+        save_mapping(
+            item["product_name"], tcgplayer_id, "raw",
+            item.get("set_name"), item.get("card_number"),
+            variance=item.get("variance") or "",
+            scrydex_id=link_sx,
+        )
+    else:
+        save_mapping(
+            name, tcgplayer_id, item["product_type"],
+            sname, cnum, variance=var, scrydex_id=link_sx,
+        )
 
     # Recalculate session totals
     _recalculate_session_totals(item["session_id"])

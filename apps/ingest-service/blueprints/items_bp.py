@@ -167,6 +167,8 @@ def map_item():
                         set_name=data.get("set_name"),
                         card_number=data.get("card_number"),
                         rarity=data.get("rarity"),
+                        variance=data.get("variance"),
+                        scrydex_id=scrydex_id,
                     )
                     siblings_updated += 1
                 except Exception:
