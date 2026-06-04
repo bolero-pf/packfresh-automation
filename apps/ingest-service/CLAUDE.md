@@ -7,6 +7,23 @@
 - **schema.sql** — DB schema
 - **templates/intake_dashboard.html** — Main dashboard UI (single-page app with tabs)
 
+## Re-link cache (product_mappings) — keying invariant
+The Collectr→link cache must be keyed on the **Collectr-parsed identity** (what
+the parser emits and a re-import reproduces), NEVER the Scrydex display values
+the operator picks at link time. `map_item` keys `save_mapping` on the pre-update
+`intake_items` row for raw cards for exactly this reason — keying on Scrydex
+`setNameEn` ("SWSH09: Brilliant Stars" vs Collectr's "Brilliant Stars") was the
+bug that stranded every relinked raw card on re-import.
+- `get_cached_link()` is the lookup (returns tcgplayer_id + scrydex_id). Raw is
+  two-tier: Tier 1 exact (name+set+number+variance); Tier 2 set-insensitive on
+  name+number+variance, resolving only when all candidates point at one card —
+  same-number reprints abstain so the operator picks. Sealed = name+type only.
+- `get_cached_mapping()` is a back-compat shim returning just tcgplayer_id.
+- `product_mappings.scrydex_id` lets JP / Scrydex-only links round-trip.
+- `migrate_mapping_scrydex_heal.py` backfills the cache from intake_items history
+  (additive/idempotent). Residual re-link misses are Collectr name-suffix drift
+  ("(Full Art)", "(Secret)", "ex" vs "EX") — a future name-normalization job.
+
 ## Session Status Flow
 ```
 in_progress → offered → accepted → received → partially_ingested → ingested → finalized
