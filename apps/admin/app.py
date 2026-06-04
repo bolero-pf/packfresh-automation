@@ -43,6 +43,7 @@ CORS(
             "https://drops.pack-fresh.com",
             "https://analytics.pack-fresh.com",
             "https://kiosk.pack-fresh.com",
+            "https://rules.pack-fresh.com",
             "https://admin.pack-fresh.com",
         ],
         "supports_credentials": True,
