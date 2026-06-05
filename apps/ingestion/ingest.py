@@ -265,7 +265,11 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
         if comp_type in ("promo", "raw"):
             child_product_type = "raw"
         elif comp_type == "sealed":
-            child_product_type = "sealed"
+            # A 'sealed'-typed component whose name is clearly a single card
+            # (no sealed keyword — e.g. a promo "Eevee VMAX") was mis-tagged in
+            # the recipe. Route it as raw so breakdown never spawns a phantom
+            # sealed product from a single card.
+            child_product_type = "sealed" if not _looks_like_single_card(comp_name) else "raw"
         else:
             # component_type not set — detect from name
             child_product_type = "raw" if _looks_like_single_card(comp_name) else "sealed"
@@ -2405,7 +2409,8 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
         sph = ",".join(["%s"] * len(all_store_ids))
         store_rows = query(
             f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM inventory_product_cache "
-            f"WHERE tcgplayer_id IN ({sph}) AND is_damaged = FALSE",
+            f"WHERE tcgplayer_id IN ({sph}) AND is_damaged = FALSE "
+            f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
             tuple(all_store_ids)
         )
         store_map = {r["tcgplayer_id"]: r for r in store_rows}
@@ -2461,7 +2466,8 @@ def get_breakdown_summary_for_items(tcg_ids: list[int], ppt=None) -> dict:
                 if gc_ids:
                     gcp = ",".join(["%s"] * len(gc_ids))
                     gc_sp = query(
-                        f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE",
+                        f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE "
+                        f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
                         tuple(gc_ids))
                     gc_store = {r["tcgplayer_id"]: float(r["shopify_price"] or 0) for r in gc_sp}
                 _gc_by_child = {}

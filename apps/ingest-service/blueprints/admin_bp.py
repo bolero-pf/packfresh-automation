@@ -434,7 +434,8 @@ def shopify_session_store_check(session_id):
                        sbv.id AS variant_id, sbv.variant_name, sbv.notes,
                        sbv.total_component_market, sbv.component_count,
                        sbco.tcgplayer_id AS comp_tcg_id, sbco.product_name AS comp_name,
-                       sbco.quantity_per_parent, sbco.market_price AS comp_price
+                       sbco.quantity_per_parent, sbco.market_price AS comp_price,
+                       COALESCE(sbco.component_type, 'sealed') AS component_type
                 FROM sealed_breakdown_cache sbc
                 JOIN sealed_breakdown_variants sbv ON sbv.breakdown_id = sbc.id
                     AND sbv.total_component_market = sbc.best_variant_market
@@ -449,7 +450,8 @@ def shopify_session_store_check(session_id):
             if comp_tcg_ids:
                 cp = ",".join(["%s"] * len(comp_tcg_ids))
                 comp_rows = db.query(
-                    f"SELECT tcgplayer_id, shopify_qty, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({cp}) AND is_damaged = FALSE",
+                    f"SELECT tcgplayer_id, shopify_qty, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({cp}) AND is_damaged = FALSE "
+                    f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
                     tuple(comp_tcg_ids)
                 )
                 for cr in comp_rows:
@@ -507,7 +509,8 @@ def shopify_session_store_check(session_id):
                         if gc_ids:
                             gcp = ",".join(["%s"] * len(gc_ids))
                             gc_store_rows = db.query(
-                                f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE",
+                                f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE "
+                                f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
                                 tuple(gc_ids))
                             gc_store = {r["tcgplayer_id"]: float(r["shopify_price"] or 0) for r in gc_store_rows}
                         # Compute store total per child recipe
@@ -542,9 +545,16 @@ def shopify_session_store_check(session_id):
                         "components_in_store_count": 0,
                     }
                 if row["comp_name"]:
-                    cs = comp_store_map.get(row["comp_tcg_id"])
-                    in_store = cs is not None and (cs.get("shopify_qty") or 0) > 0
-                    store_price = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else None
+                    comp_market = float(row["comp_price"] or 0)
+                    if row.get("component_type") == "promo":
+                        # Promos have no sealed listing — value them at NM market
+                        # price, never a store lookup (a slab shares the tcg id).
+                        in_store = True
+                        store_price = comp_market
+                    else:
+                        cs = comp_store_map.get(row["comp_tcg_id"])
+                        in_store = cs is not None and (cs.get("shopify_qty") or 0) > 0
+                        store_price = float(cs["shopify_price"]) if cs and cs.get("shopify_price") else None
                     child_bd_val = child_bd_map.get(row["comp_tcg_id"], 0)
                     breakdown_data[pid]["components"].append({
                         "tcgplayer_id": row["comp_tcg_id"],

@@ -174,6 +174,7 @@ def _build_recommendations(in_stock_only=True):
                 SELECT tcgplayer_id, shopify_qty, shopify_price, title
                 FROM inventory_product_cache
                 WHERE tcgplayer_id IN ({cph}) AND is_damaged = FALSE
+                  AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')
             """, tuple(comp_tcg_ids))
             for cr in child_rows:
                 child_qty_map[int(cr["tcgplayer_id"])] = dict(cr)
@@ -225,7 +226,8 @@ def _build_recommendations(in_stock_only=True):
                     if gc_ids:
                         gcp = ",".join(["%s"] * len(gc_ids))
                         gc_sp = db.query(
-                            f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE",
+                            f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE "
+                            f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
                             tuple(gc_ids))
                         gc_store = {r["tcgplayer_id"]: float(r["shopify_price"] or 0) for r in gc_sp}
                     _gc_by_child = {}
@@ -506,6 +508,7 @@ def execute_breakdown():
         FROM sealed_breakdown_components sbc
         LEFT JOIN inventory_product_cache ipc
                ON ipc.tcgplayer_id = sbc.tcgplayer_id AND ipc.is_damaged = FALSE
+              AND (ipc.tags IS NULL OR ipc.tags NOT ILIKE '%%slab%%')
         WHERE sbc.variant_id = %s
     """, (variant_id,))
 
@@ -555,6 +558,13 @@ def execute_breakdown():
 
     # Increment children
     for comp in components:
+        # Promos/raw singles aren't incremented into store inventory — they're
+        # routed to ingest for barcoding below (_create_promo_routing_session).
+        # Skipping them also prevents the old bug where a promo's tcgplayer_id
+        # matched a graded slab listing and incremented the SLAB's qty/COGS.
+        if comp.get("component_type") == "promo":
+            continue
+
         add_qty = int(comp["quantity_per_parent"]) * qty_to_break
         child_vid    = comp["child_variant_id"]
         child_inv_id = comp["child_inv_item_id"]
@@ -762,7 +772,8 @@ def variant_values(tcg_id):
     if comp_ids:
         cph = ",".join(["%s"] * len(comp_ids))
         rows = db.query(
-            f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({cph}) AND is_damaged = FALSE",
+            f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({cph}) AND is_damaged = FALSE "
+            f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
             tuple(comp_ids)
         )
         store_map = {int(r["tcgplayer_id"]): float(r["shopify_price"] or 0) for r in rows}
@@ -795,7 +806,8 @@ def variant_values(tcg_id):
             if gc_ids:
                 gcp = ",".join(["%s"] * len(gc_ids))
                 gc_sp = db.query(
-                    f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE",
+                    f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE "
+                    f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
                     tuple(gc_ids))
                 gc_store = {int(r["tcgplayer_id"]): float(r["shopify_price"] or 0) for r in gc_sp}
             _gc_by_child = {}

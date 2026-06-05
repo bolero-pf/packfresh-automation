@@ -434,7 +434,11 @@
 
         // Store + Qty + Velocity (before Market when store data available)
         if (hasStore) {
-            var sp = c.tcgplayer_id ? _storePrices[c.tcgplayer_id] : null;
+            // Promos have no sealed store listing — their store value IS the NM
+            // market price (mirrors the summary). Never look up _storePrices for
+            // a promo: a graded slab is listed under the same tcgplayer_id and
+            // would show a 10x comp here.
+            var sp = (c.component_type !== 'promo' && c.tcgplayer_id) ? _storePrices[c.tcgplayer_id] : null;
             html += '<td style="white-space:nowrap;">';
             if (sp && sp.shopify_price) {
                 var storePrice = parseFloat(sp.shopify_price);
@@ -454,7 +458,10 @@
                     html += ' <span style="color:' + velColor + ';font-size:10px;">' + Math.round(days) + 'd stock</span>';
                 }
             } else if (c.component_type === 'promo') {
-                html += '<span class="bd-no-store">&mdash;</span>';
+                // Promo store value = NM market price (matches summary total).
+                var promoStore = parseFloat(c.market_price || 0);
+                html += '<span class="bd-store-price">$' + promoStore.toFixed(2) + '</span>';
+                html += ' <span style="color:var(--text-dim,#888);font-size:10px;">NM</span>';
             } else {
                 html += '<span class="bd-no-store">not listed</span>';
             }

@@ -258,7 +258,8 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
         sph = ",".join(["%s"] * len(all_store_ids))
         store_rows = db.query(
             f"SELECT tcgplayer_id, shopify_price, shopify_qty FROM inventory_product_cache "
-            f"WHERE tcgplayer_id IN ({sph}) AND is_damaged = FALSE",
+            f"WHERE tcgplayer_id IN ({sph}) AND is_damaged = FALSE "
+            f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
             tuple(all_store_ids)
         )
         store_map = {r["tcgplayer_id"]: r for r in store_rows}
@@ -318,7 +319,8 @@ def get_breakdown_summary_for_items(tcg_ids: list, db, ppt=None, max_age_hours=4
                 if gc_ids:
                     gcp = ",".join(["%s"] * len(gc_ids))
                     gc_sp = db.query(
-                        f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE",
+                        f"SELECT tcgplayer_id, shopify_price FROM inventory_product_cache WHERE tcgplayer_id IN ({gcp}) AND is_damaged = FALSE "
+                        f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
                         tuple(gc_ids))
                     gc_store = {r["tcgplayer_id"]: float(r["shopify_price"] or 0) for r in gc_sp}
                 _gc_by_child = {}
@@ -572,13 +574,21 @@ def pick_offer_value(summary: dict, claimed_variant_id: Optional[str] = None,
 
 
 def get_store_prices(tcg_ids: list, db) -> dict:
-    """Look up inventory_product_cache prices for a list of tcgplayer_ids."""
+    """Look up inventory_product_cache prices for a list of tcgplayer_ids.
+
+    Graded slabs are listed under the SAME tcgplayer_id as the raw card, so a
+    raw breakdown component (e.g. a promo) would otherwise match the slab's
+    listing price (a PSA 10 at 10x the raw value). Breakdown components are
+    never slabs — exclude slab-tagged listings so a component never inherits a
+    graded comp.
+    """
     if not tcg_ids:
         return {}
     ph = ",".join(["%s"] * len(tcg_ids))
     rows = db.query(
         f"SELECT tcgplayer_id, shopify_product_id, shopify_variant_id, shopify_price, shopify_qty, handle, title "
-        f"FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE",
+        f"FROM inventory_product_cache WHERE tcgplayer_id IN ({ph}) AND is_damaged = FALSE "
+        f"AND (tags IS NULL OR tags NOT ILIKE '%%slab%%')",
         tuple(tcg_ids)
     )
     return {r["tcgplayer_id"]: dict(r) for r in rows}
