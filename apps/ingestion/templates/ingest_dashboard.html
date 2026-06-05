@@ -712,6 +712,29 @@ function setPushViewMode(mode) {
     _rerenderStage();
 }
 
+// 'Keep' — cosmetic, Breakdown-stage-only review tracking. When the operator
+// has decided NOT to break an item down (keep it sealed), Keep hides the row
+// from the working view so large collections stay manageable and you can see
+// what's still undecided. Keeping a broken-down parent collapses its whole
+// subtree. This NEVER touches the DB or the push flow — pure view state.
+// Persisted to localStorage (item ids are globally unique) so a mid-review
+// refresh doesn't lose progress.
+let _keptItemIds = new Set();
+try {
+    const _kept0 = JSON.parse(localStorage.getItem('pf_bd_kept') || '[]');
+    if (Array.isArray(_kept0)) _keptItemIds = new Set(_kept0.map(String));
+} catch(e) {}
+function _persistKept() {
+    try { localStorage.setItem('pf_bd_kept', JSON.stringify([..._keptItemIds])); } catch(e) {}
+}
+function keepItem(itemId) { _keptItemIds.add(String(itemId)); _persistKept(); _rerenderStage(); }
+function unkeepItem(itemId) { _keptItemIds.delete(String(itemId)); _persistKept(); _rerenderStage(); }
+function _unkeepAllVisible() {
+    (_currentSessionData?.items || []).forEach(i => _keptItemIds.delete(String(i.id)));
+    _persistKept();
+    _rerenderStage();
+}
+
 function _classifyProductType(item) {
     // Product type first
     const ptype = (item.product_type || '').toLowerCase();
@@ -2235,6 +2258,21 @@ function _renderBreakdownContent(data) {
     const sorted = _sortItems(topLevel);
     const groups = _groupItems(sorted);
 
+    // 'Keep' review tracking (cosmetic). An item is hidden from the working
+    // view when it — or any of its breakdown ancestors — has been kept, so
+    // keeping a parent collapses its whole subtree.
+    const _byId = {};
+    items.forEach(i => { _byId[i.id] = i; });
+    const _isHiddenByKeep = (i) => {
+        let cur = i, guard = 0;
+        while (cur && guard++ < 12) {
+            if (_keptItemIds.has(String(cur.id))) return true;
+            cur = cur.parent_item_id ? _byId[cur.parent_item_id] : null;
+        }
+        return false;
+    };
+    const keptItems = activeItems.filter(i => _keptItemIds.has(String(i.id)));
+
     const _bdPct = _renderOfferPctCompact(s);
     let html = `<div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
@@ -2242,7 +2280,7 @@ function _renderBreakdownContent(data) {
                 <h2 style="margin:0;">Breakdown Decisions</h2>
                 ${_bdPct ? `<span style="font-size:0.78rem; color:var(--text-dim);">${_bdPct}</span>` : ''}
             </div>
-            <span style="color:var(--text-dim); font-size:0.82rem;">Break down what you want, skip the rest</span>
+            <span style="color:var(--text-dim); font-size:0.82rem;">Break down what you want, keep the rest</span>
         </div>
         ${_renderSortToolbar()}
         <div style="overflow-x:auto;">
@@ -2252,26 +2290,60 @@ function _renderBreakdownContent(data) {
             </tr></thead>
             <tbody>`;
 
+    let _visibleRows = 0;
     for (const group of groups) {
-        if (group.label) {
-            html += `<tr><td colspan="6" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
-        }
+        let groupRows = '';
         for (const item of group.items) {
-            html += renderItemRow(item, true, sessionId, false);
+            if (_isHiddenByKeep(item)) continue;
+            groupRows += renderItemRow(item, true, sessionId, false);
             // Render children
             const kids = childrenOf[item.id] || [];
             for (const kid of kids) {
-                html += renderItemRow(kid, true, sessionId, true);
+                if (_isHiddenByKeep(kid)) continue;
+                groupRows += renderItemRow(kid, true, sessionId, true);
                 // Nested children
                 const grandkids = childrenOf[kid.id] || [];
                 for (const gk of grandkids) {
-                    html += renderItemRow(gk, true, sessionId, true);
+                    if (_isHiddenByKeep(gk)) continue;
+                    groupRows += renderItemRow(gk, true, sessionId, true);
                 }
             }
         }
+        if (!groupRows) continue;  // whole group kept — drop its label too
+        if (group.label) {
+            html += `<tr><td colspan="6" style="font-weight:700;font-size:0.85rem;background:var(--surface-2);padding:6px 10px;border-bottom:2px solid var(--border);">${group.label}</td></tr>`;
+        }
+        html += groupRows;
+        _visibleRows++;
     }
 
-    html += `</tbody></table></div></div>`;
+    if (_visibleRows === 0) {
+        html += `<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--green); font-weight:600;">✓ All items reviewed — nothing left to decide</td></tr>`;
+    }
+
+    html += `</tbody></table></div>`;
+
+    // Kept drawer — collapsible, mirrors the Verify stage's "Verified" drawer.
+    // Cosmetic only: lets the operator review or restore anything they hid.
+    if (keptItems.length > 0) {
+        html += `<details style="margin-top:12px;">
+            <summary style="cursor:pointer; font-weight:600; font-size:0.9rem; color:var(--green); padding:8px 0; user-select:none;">
+                ✓ Kept (${keptItems.length}) — click to review
+            </summary>
+            <div style="padding:6px 0;">
+                <button class="btn btn-sm btn-secondary" style="font-size:0.72rem;" onclick="_unkeepAllVisible()">↩ Un-keep all</button>
+            </div>
+            <div style="overflow-x:auto;">
+            <table class="responsive-cards">
+                <thead><tr><th>Product</th><th>Qty</th><th>Status</th><th>Price</th><th>COGS</th><th></th></tr></thead>
+                <tbody>`;
+        for (const item of _sortItems(keptItems)) {
+            html += _renderKeptRow(item, sessionId);
+        }
+        html += `</tbody></table></div></details>`;
+    }
+
+    html += `</div>`;  // close card
 
     // Complete button — show unless already past breakdown or ingested
     if (['received', 'verified'].includes(s.status)) {
@@ -2281,6 +2353,24 @@ function _renderBreakdownContent(data) {
     }
 
     return html;
+}
+
+// Compact row for the Kept drawer — name + an Un-keep button. Intentionally
+// has no break-down/qty/delete actions; the drawer is just review + restore.
+function _renderKeptRow(item, sessionId) {
+    const st = item.item_status || 'good';
+    const isBroken = st === 'broken_down';
+    const isDamaged = st === 'damaged';
+    const name = item.product_name || 'Unknown';
+    const badge = isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green';
+    return `<tr style="opacity:0.75;" data-item-id="${item.id}">
+        <td class="name-cell" data-label=""><span style="font-weight:600;">${name}</span></td>
+        <td data-label="Qty">${item.quantity || 1}</td>
+        <td data-label="Status"><span class="badge ${badge}">${st}</span></td>
+        <td data-label="Store">${item.store_price != null ? `$${item.store_price.toFixed(2)}` : `$${(item.market_price || 0).toFixed(2)}`}</td>
+        <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}</td>
+        <td data-label=""><button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;" onclick="unkeepItem('${item.id}')" title="Bring back to the list">↩ Un-keep</button></td>
+    </tr>`;
 }
 
 async function completeBreakdown(sessionId) {
@@ -4543,6 +4633,12 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
         </div>`;
     }
 
+    // 'Keep' button — cosmetic review marker (Breakdown stage only). Hides this
+    // row, and its breakdown subtree, from the working view. No backend effect.
+    const keepBtn = (isReceived && !isPushed)
+        ? `<button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 8px;color:var(--green);border-color:var(--green);" onclick="keepItem('${item.id}')" title="Reviewed — hide from the list">✓ Keep</button>`
+        : '';
+
     const approvedStyle = '';
     const isRaw = (item.product_type || 'sealed') === 'raw';
     const thumb = isRaw ? pfCardThumb(item.image_url) : '';
@@ -4587,7 +4683,7 @@ function renderItemRow(item, isReceived, sessionId, isChild = false) {
         <td data-label="Status"><span class="badge ${isDamaged ? 'badge-amber' : isBroken ? 'badge-dim' : 'badge-green'}">${st}</span></td>
         <td data-label="Store">${item.store_price != null ? `$${item.store_price.toFixed(2)}` : `<span style="color:var(--text-dim);" title="Market price (not in store)">$${(item.market_price || 0).toFixed(2)} <small>mkt</small></span>`}</td>
         <td data-label="COGS">$${(item.offer_price || 0).toFixed(2)}${(item.quantity || 1) > 1 ? '<br><small style="color:var(--text-dim);">$' + ((item.offer_price || 0) / (item.quantity || 1)).toFixed(2) + '/ea</small>' : ''}</td>
-        ${isReceived ? '<td data-label="">' + actionCell + '</td>' : ''}
+        ${isReceived ? `<td data-label=""><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">${actionCell}${keepBtn}</div></td>` : ''}
     </tr>`;
 }
 
