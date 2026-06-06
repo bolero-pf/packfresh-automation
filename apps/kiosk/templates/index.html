@@ -1344,13 +1344,40 @@ function setProdSort(sort) {
 }
 
 // ── Game pills (top strip) — single-select, fires search immediately ─────────
+// Build the filter params that should shape the game-pill counts. Agnostic
+// filters (recency/condition/price/search) always go; game-specific ones
+// (colors/types/rarity/era/set) only when a game is active — the backend
+// applies them to that game alone so the active pill mirrors the grid.
+function _gameCountParams() {
+  const f = _filters;
+  const p = new URLSearchParams();
+  if (f.game) p.set('game', f.game);
+  if (f.game && f.colors && f.colors.size) {
+    p.set('colors', [...f.colors].join(','));
+    if (f.colorMode && f.colorMode !== 'any') p.set('color_mode', f.colorMode);
+  }
+  if (f.game && f.cardTypes && f.cardTypes.size) p.set('card_type',   [...f.cardTypes].join(','));
+  if (f.game && f.rarities  && f.rarities.size)  p.set('card_rarity', [...f.rarities].join(','));
+  if (f.game && f.era) p.set('era', f.era);
+  if (f.game && f.set) p.set('set', f.set);
+  if (f.addedDays) p.set('added_days', String(f.addedDays));
+  if (f.conds && f.conds.size && f.conds.size !== 5) p.set('condition', [...f.conds].join(','));
+  if (f.minP) p.set('min_price', f.minP);
+  if (f.maxP) p.set('max_price', f.maxP);
+  const q = (document.getElementById('q')?.value || '').trim();
+  if (q) p.set('q', q);
+  return p;
+}
+
 async function loadGames() {
   try {
-    const d = await get('/api/games');
+    const d = await get('/api/games?' + _gameCountParams().toString());
     _gameCache = d.games || [];
+    _allGamesQty = (typeof d.all_qty === 'number')
+      ? d.all_qty
+      : _gameCache.reduce((s, g) => s + (g.qty || 0), 0);
     const strip = document.getElementById('game-pills');
-    const totalQty = _gameCache.reduce((s, g) => s + (g.qty || 0), 0);
-    const items = [{ code: '', label: 'All', qty: totalQty }, ..._gameCache];
+    const items = [{ code: '', label: 'All', qty: _allGamesQty }, ..._gameCache];
     strip.innerHTML = items.map(g =>
       `<span class="game-pill${_filters.game === g.code ? ' active' : ''}" data-game="${esc(g.code)}">
         ${esc(g.label)}<span class="qty">${g.qty}</span>
@@ -1391,6 +1418,7 @@ async function loadGames() {
 
 // ── Bottom sheet: open / close / draft / apply ───────────────────────────────
 let _gameCache = []; // populated by loadGames(), reused inside the sheet
+let _allGamesQty = 0; // faceted "All" total from /api/games (not a plain sum)
 
 function openFilterSheet() {
   // Snapshot current filters into a draft so Cancel just closes
@@ -1516,8 +1544,7 @@ function _refreshSheetEraVisibility() {
 function renderGameChips() {
   const wrap = document.getElementById('sheet-games');
   if (!wrap) return;
-  const totalQty = _gameCache.reduce((s, g) => s + (g.qty || 0), 0);
-  const items = [{ code: '', label: 'All', qty: totalQty }, ..._gameCache];
+  const items = [{ code: '', label: 'All', qty: _allGamesQty }, ..._gameCache];
   wrap.innerHTML = items.map(g => {
     const active = (_draft ? _draft.game : _filters.game) === g.code;
     return `<span class="chip${active ? ' on' : ''}" data-game="${esc(g.code)}">${esc(g.label)} <span class="qty">${g.qty}</span></span>`;
@@ -2357,7 +2384,7 @@ async function loadEras() {
 // ── Search ────────────────────────────────────────────────────────────────────
 function debounce() {
   clearTimeout(_timer);
-  _timer = setTimeout(() => doSearch(), 400);
+  _timer = setTimeout(() => { loadGames(); doSearch(); }, 400);
 }
 
 function _toggleSearchClear() {
@@ -2373,6 +2400,7 @@ function clearSearch() {
   q.value = '';
   _toggleSearchClear();
   clearTimeout(_timer);
+  loadGames();
   doSearch();
   q.focus();
 }

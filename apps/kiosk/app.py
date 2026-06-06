@@ -1520,21 +1520,110 @@ def list_games():
     on the next screen, not 410 (which would be the per-row count where
     the same card with NM + LP copies counts twice). Tile fold rule mirrors
     /api/browse: variant of NULL/normal/holofoil collapses to one bucket.
+
+    Faceted: pill counts reflect the caller's current filters so a pill
+    matches the grid it leads to. Game-AGNOSTIC filters (recency / condition /
+    price / search) apply to every game's count and to the All total — these
+    survive a game switch in the UI, so each pill honestly previews "how many
+    if you switch here". Game-SPECIFIC filters (colors / card_type / rarity /
+    era / set) bind ONLY to the active game, since switching clears them; that
+    keeps the active pill equal to the grid while leaving the others as a
+    clean cross-game preview.
     """
-    rows = db.query("""
+    tile = ("card_name, set_name, tcgplayer_id, "
+            "CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') "
+            "THEN '' ELSE variant END")
+
+    # Canonical in-stock game list (unfiltered) so a pill never vanishes when
+    # a filter zeroes it out — it just reads (0) and stays clickable.
+    base_rows = db.query(f"""
         SELECT COALESCE(game, 'pokemon') AS game,
-               COUNT(DISTINCT (
-                   card_name,
-                   set_name,
-                   tcgplayer_id,
-                   CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil')
-                        THEN '' ELSE variant END
-               )) AS qty
+               COUNT(DISTINCT ({tile})) AS qty
         FROM raw_cards
         WHERE state IN ('STORED', 'DISPLAY') AND current_hold_id IS NULL
         GROUP BY COALESCE(game, 'pokemon')
         ORDER BY qty DESC
     """)
+    game_order = [r["game"] for r in base_rows]
+
+    # ── Game-agnostic filters (apply to every game + the All total) ─────────
+    agn = ["state IN ('STORED', 'DISPLAY')", "current_hold_id IS NULL"]
+    agn_p: list = []
+    q = (request.args.get("q") or "").strip()
+    if q:
+        agn.append("(card_name ILIKE %s OR set_name ILIKE %s OR card_number ILIKE %s)")
+        agn_p += [f"%{q}%", f"%{q}%", f"%{q}%"]
+    conditions = [c.strip().upper() for c in (request.args.get("condition") or "").split(",") if c.strip()]
+    valid = [c for c in conditions if c in ("NM", "LP", "MP", "HP", "DMG")]
+    if valid:
+        agn.append(f"condition IN ({','.join(['%s'] * len(valid))})")
+        agn_p += valid
+    min_price = request.args.get("min_price", type=float)
+    max_price = request.args.get("max_price", type=float)
+    if min_price is not None:
+        agn.append("current_price >= %s"); agn_p.append(min_price)
+    if max_price is not None:
+        agn.append("current_price <= %s"); agn_p.append(max_price)
+    added_days = request.args.get("added_days", type=int)
+    if added_days is not None and 0 < added_days <= 365:
+        agn.append("created_at >= NOW() - %s::interval")
+        agn_p.append(f"{added_days} days")
+    agn_where = " AND ".join(agn)
+
+    rows = db.query(f"""
+        SELECT COALESCE(game, 'pokemon') AS game,
+               COUNT(DISTINCT ({tile})) AS qty
+        FROM raw_cards
+        WHERE {agn_where}
+        GROUP BY COALESCE(game, 'pokemon')
+    """, tuple(agn_p))
+    counts = {r["game"]: int(r["qty"]) for r in rows}
+
+    all_row = db.query_one(f"""
+        SELECT COUNT(DISTINCT ({tile})) AS qty
+        FROM raw_cards WHERE {agn_where}
+    """, tuple(agn_p))
+    all_qty = int((all_row or {}).get("qty") or 0)
+
+    # ── Active game also narrows by its game-specific filters → matches grid ─
+    active_game = (request.args.get("game") or "").strip().lower()
+    if active_game:
+        colors     = _multi_param("colors")
+        color_mode = (request.args.get("color_mode") or "any").strip().lower()
+        if color_mode not in ("any", "within", "exactly"):
+            color_mode = "any"
+        card_types = _multi_param("card_type")
+        rarities   = _multi_param("card_rarity")
+        era        = (request.args.get("era") or "").strip()
+        set_name   = (request.args.get("set") or "").strip()
+
+        gw = list(agn) + ["game = %s"]
+        gp = list(agn_p) + [active_game]
+        if set_name:
+            gw.append("set_name = %s"); gp.append(set_name)
+        if era:
+            all_sets = db.query(
+                "SELECT DISTINCT set_name FROM raw_cards "
+                "WHERE state IN ('STORED','DISPLAY') AND set_name IS NOT NULL AND game = %s",
+                (active_game,))
+            era_sets = [r["set_name"] for r in all_sets if _classify_era(r["set_name"]) == era]
+            if era_sets:
+                gw.append(f"set_name IN ({','.join(['%s'] * len(era_sets))})"); gp += era_sets
+            else:
+                gw.append("FALSE")
+        if rarities:
+            gw.append(f"LOWER(rarity) IN ({','.join(['%s'] * len(rarities))})")
+            gp += [r.lower() for r in rarities]
+        meta_clause, meta_params = _build_meta_filter_subquery(
+            active_game, colors, color_mode, card_types, rarities)
+        if meta_clause:
+            gw.append(meta_clause); gp += meta_params
+        row = db.query_one(f"""
+            SELECT COUNT(DISTINCT ({tile})) AS qty
+            FROM raw_cards WHERE {' AND '.join(gw)}
+        """, tuple(gp))
+        counts[active_game] = int((row or {}).get("qty") or 0)
+
     label_map = {
         "pokemon":   "Pokémon",
         "onepiece":  "One Piece",
@@ -1545,11 +1634,11 @@ def list_games():
         "other":     "Other",
     }
     games = [{
-        "code":  r["game"],
-        "label": label_map.get(r["game"], r["game"].title()),
-        "qty":   r["qty"],
-    } for r in rows]
-    return jsonify({"games": games})
+        "code":  g,
+        "label": label_map.get(g, g.title()),
+        "qty":   counts.get(g, 0),
+    } for g in game_order]
+    return jsonify({"games": games, "all_qty": all_qty})
 
 
 @app.route("/api/filter-meta")
