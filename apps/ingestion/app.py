@@ -32,10 +32,11 @@ except ImportError:
     PSANotFound = Exception
     ShopifyCreateError = Exception
 try:
-    from storage import assign_bins, release_bins, _canonical_card_type, assign_display, get_binder_capacity
+    from storage import assign_bins, release_bins, _canonical_card_type, assign_display, get_binder_capacity, infer_card_type_from_set
 except ImportError as e:
     logger.error(f"storage import failed: {e} — raw card push will not work")
     assign_bins = release_bins = _canonical_card_type = assign_display = get_binder_capacity = None
+    infer_card_type_from_set = None
 from rarity import canonicalize_rarity
 try:
     from barcode_gen import generate_barcode_id, generate_barcode_image
@@ -1783,6 +1784,13 @@ def _resolve_storage_card_type(item: dict, tcg_id, scrydex_id) -> tuple[str, dic
         # otherwise a manually-entered MTG promo silently routes to a Pokemon bin.
         manual_game = (item.get("game") or "").strip()
         card_type = _canonical_card_type(manual_game) if manual_game else "pokemon"
+    # Backstop: when we're about to bin as Pokemon but the set name resolves to a
+    # single non-Pokemon game in the cache, the manual tag was wrong (Scrydex/PPT
+    # couldn't self-correct because the card isn't catalogued there yet).
+    if card_type == "pokemon" and infer_card_type_from_set:
+        inferred = infer_card_type_from_set(item.get("set_name"), db)
+        if inferred and inferred != "pokemon":
+            card_type = inferred
     return card_type, card_data
 
 
@@ -2076,6 +2084,13 @@ def _push_raw_item(item: dict) -> dict:
     if not card_type:
         manual_game = (item.get("game") or "").strip()
         card_type = _canonical_card_type(manual_game) if manual_game else "pokemon"
+
+    # Backstop: rescue a Pokemon-defaulted card whose set name resolves to a
+    # single non-Pokemon game in the cache (mirrors _resolve_storage_card_type).
+    if card_type == "pokemon" and infer_card_type_from_set:
+        inferred = infer_card_type_from_set(set_name, db)
+        if inferred and inferred != "pokemon":
+            card_type = inferred
 
     # Assign bin(s) — one card at a time for placement accuracy
     assignments = assign_bins(card_type, qty, db)

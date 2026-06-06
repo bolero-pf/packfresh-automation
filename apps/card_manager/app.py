@@ -17,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template, request, jsonify, g
 
 import db
-from storage import assign_bins, assign_display_case, get_display_case_capacity, get_binder_capacity
+from storage import (assign_bins, assign_display_case, get_display_case_capacity,
+                     get_binder_capacity, infer_card_type_from_set)
 from barcode_gen import generate_barcode_image, generate_barcode_id
 from price_rounding import charm_ceil_raw
 from decimal import Decimal
@@ -1786,7 +1787,8 @@ def store_returns():
         return jsonify({"error": "No barcodes provided — scan cards before storing"}), 400
 
     cards = db.query("""
-        SELECT rc.id, rc.barcode, rc.card_name, COALESCE(rc.game, 'pokemon') AS game,
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name,
+               COALESCE(rc.game, 'pokemon') AS game,
                rc.bin_id, sl.bin_label,
                COALESCE(sr.location_type, 'bin') AS bin_type
         FROM raw_cards rc
@@ -1835,7 +1837,18 @@ def store_returns():
         from collections import defaultdict
         by_game = defaultdict(list)
         for c in storage_cards:
-            by_game[c["game"]].append(c)
+            game = c["game"]
+            # Safety net: a card sitting at the Pokemon default (real game NULL,
+            # or mis-tagged 'pokemon' at intake) whose set name resolves to a
+            # single non-Pokemon game in the Scrydex cache was mislabeled — route
+            # by the real game so a Magic "Final Fantasy" single doesn't get
+            # dumped into a Pokemon bin. Only rescues the Pokemon case; a genuine
+            # Pokemon card's set name resolves to pokemon (or not at all).
+            if game == "pokemon":
+                inferred = infer_card_type_from_set(c.get("set_name"), db)
+                if inferred and inferred != "pokemon":
+                    game = inferred
+            by_game[game].append(c)
         for game, gcards in by_game.items():
             try:
                 assignments = assign_bins(game, len(gcards), db)

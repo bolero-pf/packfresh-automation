@@ -1054,7 +1054,11 @@ async function submitIntakeCardManual() {
     if (isNaN(price) || price < 0) { alert('Enter a valid price'); return; }
 
     const tcgRaw = document.getElementById('intake-card-manual-tcgid').value.trim();
-    const game = (document.getElementById('intake-card-manual-game')?.value || 'pokemon');
+    // Require an explicit game — no silent Pokemon default. A wrong game here
+    // routes the card into the wrong bin at storage (e.g. a Magic "Final
+    // Fantasy" single dumped into a Pokemon bin).
+    const game = (document.getElementById('intake-card-manual-game')?.value || '').trim();
+    if (!game) { alert('Pick a game for this card'); return; }
     const body = {
         session_id: intakeSessionId,
         card_name: name,

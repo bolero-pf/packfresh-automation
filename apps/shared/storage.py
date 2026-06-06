@@ -45,6 +45,40 @@ def _canonical_card_type(card_type: str) -> str:
     return CARD_TYPE_MAP.get((card_type or "pokemon").lower().strip(), "other")
 
 
+def infer_card_type_from_set(set_name: str, db) -> Optional[str]:
+    """Routing safety net: infer a card's game from its set/expansion name.
+
+    Used ONLY to rescue a card that fell back to the Pokemon default (or has no
+    game) before it lands in a bin — e.g. a Magic 'Final Fantasy' single that
+    was tagged 'pokemon' at manual intake because the operator left the game
+    selector on its old value and the card isn't in Scrydex/PPT to self-correct.
+
+    Looks the set name up in scrydex_price_cache. Returns the canonical
+    card_type only when EVERY cached row for that expansion shares one game;
+    returns None when the set is unknown or spans multiple games, so the caller
+    keeps its existing behavior. Data-driven — no hardcoded franchise list.
+    Never call this to override a confident non-Pokemon tag; it's a backstop for
+    the Pokemon dumping-ground case only.
+    """
+    if not set_name or not set_name.strip():
+        return None
+    try:
+        rows = db.query("""
+            SELECT DISTINCT game
+            FROM scrydex_price_cache
+            WHERE expansion_name ILIKE %s AND game IS NOT NULL
+            LIMIT 3
+        """, (set_name.strip(),))
+    except Exception as e:
+        logger.debug(f"set-name game inference for '{set_name}' failed: {e}")
+        return None
+    games = {(r.get("game") or "").strip() for r in rows}
+    games.discard("")
+    if len(games) != 1:
+        return None
+    return _canonical_card_type(next(iter(games)))
+
+
 def _best_fit_assign(bins: list[dict], count: int) -> list[dict]:
     """Place `count` cards across `bins`, preferring a single-bin best fit.
 
