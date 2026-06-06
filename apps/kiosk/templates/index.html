@@ -672,6 +672,29 @@ body.modal-open { overflow: hidden; touch-action: none; }
 .set-row .qty { color: var(--dim); font-family: var(--mono); font-weight: 500; font-size: 0.82rem; font-variant-numeric: tabular-nums; }
 .set-row.on .qty { color: var(--accent); }
 
+/* Advanced filters — collapsible group at the bottom of the sheet holding
+   niche / long-list controls (Card type, Rarity, Illustrator, Set). Tucked
+   away so the common facets up top stay uncluttered. */
+.adv-toggle {
+  display: flex; align-items: center; justify-content: space-between;
+  cursor: pointer; user-select: none; min-height: 32px;
+}
+.adv-toggle .sheet-section-title { margin-bottom: 0; }
+.adv-chev {
+  color: var(--dim); font-size: 1.5rem; line-height: 1;
+  transition: transform 0.18s;
+}
+.adv-wrap.open .adv-chev { transform: rotate(90deg); }
+.adv-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px; margin-left: 8px;
+  border-radius: 9px; background: var(--accent); color: #0B0B09;
+  font-size: 0.72rem; font-weight: 700;
+}
+.adv-body { display: none; padding-top: 16px; }
+.adv-wrap.open .adv-body { display: block; }
+.adv-body .sheet-section:last-child { margin-bottom: 0; }
+
 .price-row { display: flex; gap: 10px; align-items: center; }
 .price-input {
   flex: 1; min-height: 48px; padding: 0 14px;
@@ -958,8 +981,9 @@ body.modal-open { overflow: hidden; touch-action: none; }
         <div class="chip-row" id="sheet-eras"></div>
       </div>
 
-      <!-- ── Game-specific advanced filters (color / type / rarity) ── -->
-      <!-- Each section is conditionally shown based on the selected game's schema -->
+      <!-- Color stays a top-level facet; Card type / Rarity / Illustrator / Set
+           live in the collapsed "Advanced filters" group near the bottom. Each
+           is shown only when the selected game's schema (or data) has it. -->
       <div class="sheet-section" id="sheet-colors-section" style="display:none;">
         <div class="sheet-section-title" id="sheet-colors-title">
           <span id="sheet-colors-label">Color</span>
@@ -968,14 +992,6 @@ body.modal-open { overflow: hidden; touch-action: none; }
           <button type="button" class="mode-btn on" data-mode="any" onclick="setSheetColorMode('any')">Any</button><button type="button" class="mode-btn" data-mode="within" onclick="setSheetColorMode('within')">Within</button><button type="button" class="mode-btn" data-mode="exactly" onclick="setSheetColorMode('exactly')">Exactly</button>
         </div>
         <div class="chip-row" id="sheet-colors"></div>
-      </div>
-      <div class="sheet-section" id="sheet-cardtype-section" style="display:none;">
-        <div class="sheet-section-title" id="sheet-cardtype-label">Card type</div>
-        <div class="chip-row" id="sheet-cardtypes"></div>
-      </div>
-      <div class="sheet-section" id="sheet-rarity-section" style="display:none;">
-        <div class="sheet-section-title">Rarity</div>
-        <div class="chip-row" id="sheet-rarities"></div>
       </div>
 
       <div class="sheet-section">
@@ -1014,10 +1030,32 @@ body.modal-open { overflow: hidden; touch-action: none; }
           <span class="chip" data-sort="newest" onclick="setSheetSort(this)">Newest</span>
         </div>
       </div>
-      <div class="sheet-section">
-        <div class="sheet-section-title">Set</div>
-        <input class="set-search-input" id="set-search-input" placeholder="Search sets…" oninput="renderSetList()" autocomplete="off">
-        <div class="set-list" id="sheet-sets"></div>
+      <!-- ── Advanced filters (collapsed): niche + long-list controls ── -->
+      <div class="sheet-section adv-wrap" id="adv-wrap">
+        <div class="adv-toggle" onclick="toggleAdvanced()">
+          <span class="sheet-section-title">Advanced filters<span class="adv-count" id="adv-count" style="display:none;">0</span></span>
+          <span class="adv-chev">›</span>
+        </div>
+        <div class="adv-body" id="adv-body">
+          <div class="sheet-section" id="sheet-cardtype-section" style="display:none;">
+            <div class="sheet-section-title" id="sheet-cardtype-label">Card type</div>
+            <div class="chip-row" id="sheet-cardtypes"></div>
+          </div>
+          <div class="sheet-section" id="sheet-rarity-section" style="display:none;">
+            <div class="sheet-section-title">Rarity</div>
+            <div class="chip-row" id="sheet-rarities"></div>
+          </div>
+          <div class="sheet-section" id="sheet-illustrator-section" style="display:none;">
+            <div class="sheet-section-title">Illustrator</div>
+            <input class="set-search-input" id="illustrator-search-input" placeholder="Search illustrators…" oninput="renderIllustratorList()" autocomplete="off">
+            <div class="set-list" id="sheet-illustrators"></div>
+          </div>
+          <div class="sheet-section">
+            <div class="sheet-section-title">Set</div>
+            <input class="set-search-input" id="set-search-input" placeholder="Search sets…" oninput="renderSetList()" autocomplete="off">
+            <div class="set-list" id="sheet-sets"></div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="sheet-footer">
@@ -1224,6 +1262,7 @@ let _filters = {
   colorMode: 'any',       // 'any' | 'within' | 'exactly' (MTG/OP only)
   cardTypes: new Set(),   // MTG: Sorcery/Instant/... — Pokemon: Fire/Water/... — OP: Leader/...
   rarities:  new Set(),   // raw_cards.rarity values (game-specific)
+  artist:    '',          // single illustrator (MTG/Pokemon) — Advanced filter
 };
 // Sheet's pending state — committed only when Apply pressed
 let _draft = null;
@@ -1241,6 +1280,8 @@ let _filterMetaReqId = 0;
 // sheet the cache is fine, and Apply runs a fresh /api/browse anyway.
 let _filterMetaCache = {};  // url string -> response
 let _setsCache = {};        // url string -> _allSets array
+let _allIllustrators = [];  // current /api/illustrators response (in-sheet search)
+let _illustratorsCache = {};// url string -> illustrators array
 
 function _activeFilterCount() {
   let n = 0;
@@ -1255,6 +1296,7 @@ function _activeFilterCount() {
   if (_filters.colors && _filters.colors.size)       n++;
   if (_filters.cardTypes && _filters.cardTypes.size) n++;
   if (_filters.rarities && _filters.rarities.size)   n++;
+  if (_filters.artist)                               n++;
   return n;
 }
 
@@ -1358,6 +1400,7 @@ function _gameCountParams() {
   }
   if (f.game && f.cardTypes && f.cardTypes.size) p.set('card_type',   [...f.cardTypes].join(','));
   if (f.game && f.rarities  && f.rarities.size)  p.set('card_rarity', [...f.rarities].join(','));
+  if (f.game && f.artist) p.set('artist', f.artist);
   if (f.game && f.era) p.set('era', f.era);
   if (f.game && f.set) p.set('set', f.set);
   if (f.addedDays) p.set('added_days', String(f.addedDays));
@@ -1397,6 +1440,7 @@ async function loadGames() {
         _filters.cardTypes = new Set();
         _filters.rarities  = new Set();
         _filters.colorMode = 'any';
+        _filters.artist    = '';
         // Refresh meta cache so the next sheet open / chip-render uses the
         // correct labels for the new game.
         _filterMeta = null;
@@ -1435,6 +1479,7 @@ function openFilterSheet() {
     colorMode: _filters.colorMode || 'any',
     cardTypes: new Set(_filters.cardTypes),
     rarities:  new Set(_filters.rarities),
+    artist:    _filters.artist || '',
   };
   renderGameChips();
   _refreshSheetEraVisibility();
@@ -1458,6 +1503,14 @@ function openFilterSheet() {
   renderEraChips();
   document.getElementById('set-search-input').value = '';
   renderSetList();
+  // Illustrator (Advanced): load the in-stock list for this game, then render.
+  document.getElementById('illustrator-search-input').value = '';
+  loadIllustrators().then(renderIllustratorList);
+  // Advanced group: badge the active count and auto-expand if anything inside
+  // is already applied, so a returning user sees their hidden filters.
+  _refreshAdvCount();
+  const _adv = document.getElementById('adv-wrap');
+  if (_adv) _adv.classList.toggle('open', _advActiveCount() > 0);
   // Game-aware advanced filters (color/type/rarity). If a recent boot/top-
   // strip prefetch left us with meta for this game, paint the pills from
   // cache immediately — then re-fetch in the background to refresh counts.
@@ -1494,7 +1547,7 @@ function clearAllFilters() {
     conds: new Set(['NM','LP','MP','HP','DMG']),
     minP: '', maxP: '', addedDays: 0,
     colors: new Set(), colorMode: 'any',
-    cardTypes: new Set(), rarities: new Set(),
+    cardTypes: new Set(), rarities: new Set(), artist: '',
   };
   document.querySelectorAll('#sheet-conds .chip').forEach(el => el.classList.add('on'));
   document.querySelectorAll('#sheet-added .chip').forEach(el => {
@@ -1511,6 +1564,12 @@ function clearAllFilters() {
     document.getElementById('set-search-input').value = '';
     renderSetList();
   });
+  // Illustrator + Advanced group reset (game now '', so they hide / collapse)
+  document.getElementById('illustrator-search-input').value = '';
+  loadIllustrators().then(renderIllustratorList);
+  _refreshAdvCount();
+  const adv = document.getElementById('adv-wrap');
+  if (adv) adv.classList.remove('open');
   // Reset advanced sections (game now '', so they hide)
   loadFilterMetaForDraft().then(renderAdvancedFilterSections);
 }
@@ -1564,6 +1623,7 @@ function renderGameChips() {
       _draft.cardTypes = new Set();
       _draft.rarities  = new Set();
       _draft.colorMode = 'any';
+      _draft.artist    = '';
       renderGameChips();
       // Don't toggle Era visibility yet — hiding the Pokemon Era row right
       // now, before Magic's color/type/rarity pills land, makes everything
@@ -1575,6 +1635,7 @@ function renderGameChips() {
       const [, metaFresh] = await Promise.all([
         loadSetsForFilters(_draft.era, _draft.game),
         loadFilterMetaForDraft(),
+        loadIllustrators(_draft.game),
       ]);
       // Discard if the user clicked another game while these were in flight.
       if (_draft && _draft.game !== newGame) return;
@@ -1582,6 +1643,9 @@ function renderGameChips() {
       renderEraChips();
       document.getElementById('set-search-input').value = '';
       renderSetList();
+      document.getElementById('illustrator-search-input').value = '';
+      renderIllustratorList();
+      _refreshAdvCount();
       if (metaFresh) renderAdvancedFilterSections();
     });
   });
@@ -1612,6 +1676,7 @@ async function loadFilterMetaForDraft() {
     if (_draft.rarities && _draft.rarities.size) {
       p.set('card_rarity', Array.from(_draft.rarities).join(','));
     }
+    if (_draft.artist) p.set('artist', _draft.artist);
     if (_draft.addedDays) p.set('added_days', String(_draft.addedDays));
     // Era + set must facet the color/type/rarity counts too — otherwise
     // picking 'Scarlet & Violet' still leaves Fairy in the Energy chips
@@ -1726,6 +1791,7 @@ function renderAdvancedFilterSections() {
         const v = el.getAttribute('data-cardtype');
         if (_draft.cardTypes.has(v)) _draft.cardTypes.delete(v); else _draft.cardTypes.add(v);
         el.classList.toggle('on');
+        _refreshAdvCount();
         refreshFacetCounts();
       });
     });
@@ -1749,6 +1815,7 @@ function renderAdvancedFilterSections() {
         const v = el.getAttribute('data-rarity');
         if (_draft.rarities.has(v)) _draft.rarities.delete(v); else _draft.rarities.add(v);
         el.classList.toggle('on');
+        _refreshAdvCount();
         refreshFacetCounts();
       });
     });
@@ -1803,6 +1870,9 @@ function _renderActiveChips() {
   if (_filters.rarities && _filters.rarities.size) {
     chip('rarities', [..._filters.rarities].join(', '));
   }
+  if (_filters.artist) {
+    chip('artist', 'Illustrator: ' + _filters.artist);
+  }
   if (_filters.minP || _filters.maxP) {
     const lo = _filters.minP ? `$${_filters.minP}` : '$0';
     const hi = _filters.maxP ? `$${_filters.maxP}` : '∞';
@@ -1836,6 +1906,7 @@ function _removeActive(key) {
     case 'colors':    _filters.colors = new Set(); _filters.colorMode = 'any'; break;
     case 'cardTypes': _filters.cardTypes = new Set(); break;
     case 'rarities':  _filters.rarities = new Set(); break;
+    case 'artist':    _filters.artist = ''; break;
     case 'price':     _filters.minP = ''; _filters.maxP = ''; break;
     case 'conds':     _filters.conds = new Set(['NM','LP','MP','HP','DMG']); break;
     case 'addedDays': _filters.addedDays = 0; break;
@@ -1851,6 +1922,7 @@ function _clearAllActive() {
   _filters.game = ''; _filters.era = ''; _filters.set = '';
   _filters.colors = new Set(); _filters.cardTypes = new Set(); _filters.rarities = new Set();
   _filters.colorMode = 'any';
+  _filters.artist = '';
   _filters.minP = ''; _filters.maxP = '';
   _filters.addedDays = 0;
   _filters.conds = new Set(['NM','LP','MP','HP','DMG']);
@@ -1876,6 +1948,7 @@ function _writeUrlState() {
   }
   if (_filters.cardTypes && _filters.cardTypes.size) p.set('card_type',   [..._filters.cardTypes].join(','));
   if (_filters.rarities  && _filters.rarities.size)  p.set('card_rarity', [..._filters.rarities].join(','));
+  if (_filters.artist)    p.set('artist', _filters.artist);
   if (_filters.addedDays) p.set('added_days', String(_filters.addedDays));
   if (_filters.minP) p.set('min_price', _filters.minP);
   if (_filters.maxP) p.set('max_price', _filters.maxP);
@@ -1897,6 +1970,7 @@ function _readUrlState() {
   if (['within', 'exactly'].includes(p.get('color_mode'))) _filters.colorMode = p.get('color_mode');
   if (p.has('card_type'))   _filters.cardTypes = new Set(p.get('card_type').split(',').filter(Boolean));
   if (p.has('card_rarity')) _filters.rarities  = new Set(p.get('card_rarity').split(',').filter(Boolean));
+  if (p.has('artist'))      _filters.artist    = p.get('artist') || '';
   if (p.has('added_days'))  { const d = parseInt(p.get('added_days'), 10); if (d > 0) _filters.addedDays = d; }
   if (p.has('min_price'))   _filters.minP = p.get('min_price');
   if (p.has('max_price'))   _filters.maxP = p.get('max_price');
@@ -1967,6 +2041,7 @@ function renderSetList() {
       const name = el.getAttribute('data-set');
       _draft.set = (_draft.set === name) ? '' : name;
       list.querySelectorAll('.set-row').forEach(x => x.classList.toggle('on', x === el && _draft.set === name));
+      _refreshAdvCount();
       // Set now facets color/type/rarity too — re-fetch their counts so
       // picking a single set tightens the chip list to only what's in it.
       refreshFacetCounts();
@@ -1988,6 +2063,67 @@ function _prewarmSets(game) {
   const url = '/api/sets?game=' + encodeURIComponent(game);
   if (_setsCache[url]) return;
   get(url).then(d => { if (d) _setsCache[url] = d.sets || []; }).catch(() => {});
+}
+
+// ── Advanced filters group (collapsible) ────────────────────────────────────
+function toggleAdvanced() {
+  const w = document.getElementById('adv-wrap');
+  if (w) w.classList.toggle('open');
+}
+function _advActiveCount() {
+  if (!_draft) return 0;
+  let n = 0;
+  if (_draft.cardTypes && _draft.cardTypes.size) n++;
+  if (_draft.rarities  && _draft.rarities.size)  n++;
+  if (_draft.set)    n++;
+  if (_draft.artist) n++;
+  return n;
+}
+function _refreshAdvCount() {
+  const badge = document.getElementById('adv-count');
+  if (!badge) return;
+  const n = _advActiveCount();
+  badge.textContent = String(n);
+  badge.style.display = n ? '' : 'none';
+}
+
+// ── Illustrator picker (Advanced) — searchable list, mirrors the Set list ───
+async function loadIllustrators(gameOverride) {
+  const g = (gameOverride !== undefined) ? gameOverride : (_draft ? _draft.game : _filters.game);
+  if (!g) { _allIllustrators = []; return; }
+  const url = '/api/illustrators?game=' + encodeURIComponent(g);
+  try {
+    if (_illustratorsCache[url]) { _allIllustrators = _illustratorsCache[url]; return; }
+    const d = await get(url);
+    _allIllustrators = d.illustrators || [];
+    _illustratorsCache[url] = _allIllustrators;
+  } catch(e) { _allIllustrators = []; }
+}
+function renderIllustratorList() {
+  const sec  = document.getElementById('sheet-illustrator-section');
+  const list = document.getElementById('sheet-illustrators');
+  if (!sec || !list) return;
+  // Games without illustrator data (One Piece, Lorcana) → hide the section.
+  if (!_allIllustrators.length) { sec.style.display = 'none'; return; }
+  sec.style.display = '';
+  const filter = (document.getElementById('illustrator-search-input').value || '').toLowerCase().trim();
+  const visible = _allIllustrators.filter(a => !filter || (a.name || '').toLowerCase().includes(filter));
+  list.innerHTML = visible.slice(0, 200).map(a =>
+    `<div class="set-row${(_draft && _draft.artist === a.name) ? ' on' : ''}" data-artist="${esc(a.name)}">
+       <span>${esc(a.name)}</span><span class="qty">${a.qty}</span>
+     </div>`
+  ).join('') || '<div style="padding:12px;color:var(--dim);text-align:center;">No illustrators match.</div>';
+  list.querySelectorAll('.set-row').forEach(el => {
+    el.addEventListener('click', () => {
+      if (!_draft) return;
+      const name = el.getAttribute('data-artist');
+      _draft.artist = (_draft.artist === name) ? '' : name;
+      list.querySelectorAll('.set-row').forEach(x => x.classList.toggle('on', x === el && _draft.artist === name));
+      _refreshAdvCount();
+      // Illustrator now facets color/type/rarity too — refresh their counts.
+      refreshFacetCounts();
+    });
+  });
 }
 
 async function loadSetsForFilters(era, gameOverride) {
@@ -2200,6 +2336,8 @@ function _hasResettableState() {
     if (_filters.colorMode && _filters.colorMode !== 'any') return true;
     if (_filters.cardTypes && _filters.cardTypes.size) return true;
     if (_filters.rarities  && _filters.rarities.size)  return true;
+    if (_filters.artist)                               return true;
+    if (_filters.addedDays)                            return true;
   }
   if (_prodFilters) {
     if (_prodFilters.game) return true;
@@ -2367,6 +2505,7 @@ async function loadEras() {
   }
   if (f.cardTypes && f.cardTypes.size) p.set('card_type',   Array.from(f.cardTypes).join(','));
   if (f.rarities  && f.rarities.size)  p.set('card_rarity', Array.from(f.rarities).join(','));
+  if (f.artist)    p.set('artist', f.artist);
   if (f.addedDays) p.set('added_days', String(f.addedDays));
   if (f.conds     && f.conds.size && f.conds.size !== 5) p.set('condition', Array.from(f.conds).join(','));
   if (f.minP) p.set('min_price', f.minP);
@@ -2435,6 +2574,9 @@ async function doSearch(page) {
   }
   if (_filters.game && _filters.rarities && _filters.rarities.size) {
     params.set('card_rarity', [..._filters.rarities].join(','));
+  }
+  if (_filters.game && _filters.artist) {
+    params.set('artist', _filters.artist);
   }
 
   const grid = document.getElementById('grid');

@@ -266,6 +266,14 @@ GAME_FILTER_SCHEMA = {
             "options": ["Land", "Creature", "Artifact", "Enchantment",
                         "Instant", "Sorcery", "Planeswalker", "Battle"],
         },
+        # Illustrator: free-form, hundreds of values — no fixed options. The
+        # picker pulls its searchable list from /api/illustrators; this entry
+        # just declares the field + that the game supports the filter.
+        "artist": {
+            "label": "Illustrator",
+            "field": "raw->>'artist'",
+            "type":  "text",
+        },
     },
     "pokemon": {
         "card_type": {
@@ -275,6 +283,11 @@ GAME_FILTER_SCHEMA = {
             "options": ["Grass", "Fire", "Water", "Lightning", "Psychic",
                         "Fighting", "Darkness", "Metal", "Fairy",
                         "Dragon", "Colorless"],
+        },
+        "artist": {
+            "label": "Illustrator",
+            "field": "raw->>'artist'",
+            "type":  "text",
         },
     },
     "onepiece": {
@@ -581,7 +594,8 @@ def _multi_param(name: str) -> list[str]:
 def _build_meta_filter_subquery(game: str,
                                 colors: list[str], color_mode: str,
                                 card_types: list[str],
-                                rarities: list[str]) -> tuple[str, list]:
+                                rarities: list[str],
+                                artist: str = "") -> tuple[str, list]:
     """Build a `rc.id IN (subquery)` fragment that narrows raw_cards to those
     matching the per-game advanced filters.
 
@@ -599,7 +613,7 @@ def _build_meta_filter_subquery(game: str,
 
     # Rarity goes in the outer query — it's a column on raw_cards directly
     # and doesn't require a meta join.
-    needs_join = bool(colors or card_types)
+    needs_join = bool(colors or card_types or artist)
     if not needs_join:
         return "", []
 
@@ -672,6 +686,11 @@ def _build_meta_filter_subquery(game: str,
             parts.append(f"{field} IN ({ph})")
             p.extend(card_types)
 
+    # Illustrator (exact match on the Scrydex artist string)
+    if artist and "artist" in schema:
+        parts.append(f"{schema['artist']['field']} = %s")
+        p.append(artist)
+
     if not parts:
         return "", []
 
@@ -739,6 +758,7 @@ def browse():
         color_mode = "any"
     card_types = _multi_param("card_type")
     rarities   = _multi_param("card_rarity")
+    artist     = (request.args.get("artist") or "").strip()
     # "Added in the last X days" — a recency filter so returning customers can
     # see what's new. Tile-level: a card tile shows if ANY of its copies was
     # intaked within the window (matches the bump-on-restock "Newest" sort),
@@ -814,7 +834,7 @@ def browse():
     # so it doesn't blow up rows for the count/aggregation logic that follows.
     if game:
         meta_clause, meta_params = _build_meta_filter_subquery(
-            game, colors, color_mode, card_types, rarities,
+            game, colors, color_mode, card_types, rarities, artist,
         )
         if meta_clause:
             filters.append(meta_clause)
@@ -1422,6 +1442,40 @@ def list_sets():
     return jsonify({"sets": sets, "names": [s["name"] for s in sets]})
 
 
+@app.route("/api/illustrators")
+def list_illustrators():
+    """In-stock illustrators for a game, with tile-ish counts, for the
+    searchable Illustrator picker (mirrors /api/sets). Game-scoped only;
+    once an illustrator is APPLIED it narrows browse / pills / facets like
+    any other game-specific filter. Empty for games without artist data
+    (One Piece, Lorcana)."""
+    game = (request.args.get("game") or "").strip().lower()
+    schema = GAME_FILTER_SCHEMA.get(game) or {}
+    if not game or "artist" not in schema:
+        return jsonify({"illustrators": []})
+    sx_game = _GAME_TO_SCRYDEX_GAME.get(game, game)
+    field = schema["artist"]["field"]   # raw->>'artist'
+    rows = db.query(f"""
+        SELECT m.{field} AS name, COUNT(DISTINCT rc.tcgplayer_id) AS qty
+          FROM raw_cards rc
+          JOIN LATERAL (
+            SELECT scrydex_id FROM scrydex_price_cache
+             WHERE tcgplayer_id = rc.tcgplayer_id AND game = %s
+             LIMIT 1
+          ) pc ON TRUE
+          JOIN scrydex_card_meta m
+            ON m.game = %s AND m.scrydex_id = pc.scrydex_id
+         WHERE rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL
+           AND rc.game = %s
+           AND NULLIF(m.{field}, '') IS NOT NULL
+         GROUP BY m.{field}
+         ORDER BY qty DESC, name ASC
+    """, (sx_game, sx_game, game))
+    return jsonify({"illustrators": [
+        {"name": r["name"], "qty": int(r["qty"])} for r in rows
+    ]})
+
+
 @app.route("/api/eras")
 def list_eras():
     """Return available eras based on Pokemon sets currently in stock.
@@ -1482,8 +1536,9 @@ def list_eras():
     if added_days is not None and 0 < added_days <= 365:
         where.append("created_at >= NOW() - %s::interval")
         params.append(f"{added_days} days")
+    artist = (request.args.get("artist") or "").strip()
     meta_clause, meta_params = _build_meta_filter_subquery(
-        "pokemon", colors, color_mode, card_types, rarities,
+        "pokemon", colors, color_mode, card_types, rarities, artist,
     )
     if meta_clause:
         where.append(meta_clause)
@@ -1596,6 +1651,7 @@ def list_games():
         rarities   = _multi_param("card_rarity")
         era        = (request.args.get("era") or "").strip()
         set_name   = (request.args.get("set") or "").strip()
+        artist     = (request.args.get("artist") or "").strip()
 
         gw = list(agn) + ["game = %s"]
         gp = list(agn_p) + [active_game]
@@ -1615,7 +1671,7 @@ def list_games():
             gw.append(f"LOWER(rarity) IN ({','.join(['%s'] * len(rarities))})")
             gp += [r.lower() for r in rarities]
         meta_clause, meta_params = _build_meta_filter_subquery(
-            active_game, colors, color_mode, card_types, rarities)
+            active_game, colors, color_mode, card_types, rarities, artist)
         if meta_clause:
             gw.append(meta_clause); gp += meta_params
         row = db.query_one(f"""
@@ -1686,6 +1742,7 @@ def filter_meta():
     sel_rarities   = _multi_param("card_rarity")
     sel_era        = (request.args.get("era") or "").strip()
     sel_set        = (request.args.get("set") or "").strip()
+    sel_artist     = (request.args.get("artist") or "").strip()
     sel_added_days = request.args.get("added_days", type=int)
     if sel_added_days is not None and not (0 < sel_added_days <= 365):
         sel_added_days = None
@@ -1782,6 +1839,12 @@ def filter_meta():
             return "", []
         return "rc.set_name = %s", [sel_set]
 
+    def artist_clause() -> tuple[str, list]:
+        # Illustrator narrows the other facets exactly like Set does.
+        if not sel_artist or "artist" not in schema:
+            return "", []
+        return f"m.{schema['artist']['field']} = %s", [sel_artist]
+
     def added_clause() -> tuple[str, list]:
         # Recency isn't a facet (no chips of its own) — it always applies to
         # every other facet's counts so the numbers reflect the new-arrivals
@@ -1795,6 +1858,7 @@ def filter_meta():
     rarity_w, rarity_p = rarity_clause()
     era_w,    era_p    = era_clause()
     set_w,    set_p    = set_clause()
+    artist_w, artist_p = artist_clause()
     added_w,  added_p  = added_clause()
 
     def merged_extra(*pairs: tuple[str, list]) -> tuple[str, list]:
@@ -1817,10 +1881,10 @@ def filter_meta():
 
     if "colors" in schema:
         spec = schema["colors"]
-        # Other filters ⇒ card_type + rarity + era + set + recency (skip colors).
+        # Other filters ⇒ card_type + rarity + era + set + artist + recency.
         extra_w, extra_p = merged_extra((cardt_w, cardt_p), (rarity_w, rarity_p),
                                         (era_w, era_p), (set_w, set_p),
-                                        (added_w, added_p))
+                                        (artist_w, artist_p), (added_w, added_p))
         field = "m." + spec["field"]
         labels = spec.get("labels") or {}
         counts: dict[str, int] = {}
@@ -1910,10 +1974,10 @@ def filter_meta():
     # ── Card type facet ─────────────────────────────────────────────────────
     if "card_type" in schema:
         spec = schema["card_type"]
-        # Other filters ⇒ colors + rarity + era + set + recency (skip card_type).
+        # Other filters ⇒ colors + rarity + era + set + artist + recency.
         extra_w, extra_p = merged_extra((color_w, color_p), (rarity_w, rarity_p),
                                         (era_w, era_p), (set_w, set_p),
-                                        (added_w, added_p))
+                                        (artist_w, artist_p), (added_w, added_p))
         field = "m." + spec["field"]
         if spec["type"] == "jsonb":
             rows = db.query(f"""
@@ -1960,7 +2024,10 @@ def filter_meta():
     # the rarity column itself — but we may still need meta JOIN if colors
     # or card_type filters are active). Era/set live on raw_cards too, so
     # they slot into either path without a meta JOIN. ──────────────────────
-    extra_w, extra_p = merged_extra((color_w, color_p), (cardt_w, cardt_p))
+    # Artist needs the meta join, so it rides with color/card_type, not the
+    # rc-only (era/set/recency) group that can skip the join.
+    extra_w, extra_p = merged_extra((color_w, color_p), (cardt_w, cardt_p),
+                                    (artist_w, artist_p))
     rc_only_w, rc_only_p = merged_extra((era_w, era_p), (set_w, set_p),
                                         (added_w, added_p))
     if extra_w:
