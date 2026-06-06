@@ -3604,7 +3604,7 @@ async function autoLinkSession(sessionId) {
     ).join('');
     body.innerHTML =
         '<div style="font-size:0.95rem;margin-bottom:6px;"><strong style="color:var(--accent);">' + matched + '</strong> of ' + total + ' unmapped cards can be linked unambiguously.</div>'
-        + '<div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:10px;">The other ' + (total - matched) + ' need manual linking. Auto-linked cards use Scrydex market at each card’s condition and pick the printing from the imported variance — you can relink any of them afterward.</div>'
+        + '<div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:10px;">The other ' + (total - matched) + ' need manual linking. Auto-link only sets the Scrydex link + printing (from the imported variance) and <strong>keeps your imported price</strong> — triage high/low afterward in the 💰 Market Prices tab. Relink any card if needed.</div>'
         + '<div style="max-height:300px;overflow:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:10px;"><table style="width:100%;font-size:0.78rem;border-collapse:collapse;">' + rows + '</table></div>'
         + (sample.length < matched ? '<div style="font-size:0.72rem;color:var(--text-dim);margin-bottom:10px;">…and ' + (matched - sample.length) + ' more.</div>' : '')
         + '<div style="display:flex;gap:8px;justify-content:flex-end;"><button class="btn btn-secondary" onclick="_closeAutoLink()">Cancel</button>'

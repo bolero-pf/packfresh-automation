@@ -412,20 +412,29 @@ def auto_link_session(session_id):
             continue
         matched_n += 1
         if len(sample) < 25:
+            imp = float(it.get("market_price") or 0)
             sample.append({
                 "from": f"{it.get('product_name') or ''}"
                         f"{(' #' + it['card_number']) if it.get('card_number') else ''}"
                         f"{(' · ' + it['variance']) if it.get('variance') else ''}"
-                        f" ({it.get('condition') or 'NM'})",
-                "to": f"{plan['new_name'] or ''} · {plan['variant']} · ${plan['price']:.2f}",
+                        f" ({it.get('condition') or 'NM'})"
+                        f"{f' — kept ${imp:.2f}' if imp > 0 else ''}",
+                "to": f"{plan['new_name'] or ''} · {plan['variant']} · mkt ${plan['price']:.2f}",
                 "tier": plan["tier"],
             })
         if do_apply:
             try:
+                # new_market_price=None on purpose: auto-link only establishes
+                # the Scrydex link + identity + variant. It KEEPS the imported
+                # Collectr/CSV/HTML price as market_price so the Market Prices
+                # tab can still show imported-vs-market deltas for triage —
+                # overwriting it with Scrydex market would zero out that delta
+                # and kill the "where were we high/low" step. Pricing stays the
+                # operator's call.
                 intake.map_item(
                     str(it["id"]),
                     tcgplayer_id=plan["tcgplayer_id"],
-                    new_market_price=Decimal(str(plan["price"])),
+                    new_market_price=None,
                     product_name=plan["new_name"],
                     set_name=plan["new_set"],
                     card_number=plan["new_number"],
