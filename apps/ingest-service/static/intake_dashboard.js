@@ -3535,6 +3535,20 @@ function _alEsc(s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Printing badge for the imported variance (Normal / Holofoil / Reverse
+// Holofoil / …). This is the "which one is it?" answer the operator needs when
+// a card has more than one printing — foils get the amber chip so they read at
+// a glance, everything else stays neutral.
+function _varianceBadge(variance) {
+    const v = (variance || '').trim();
+    if (!v) return '';
+    const isFoil = /foil|holo|etched/i.test(v);
+    const bg = isFoil ? 'var(--amber)' : 'var(--surface)';
+    const color = isFoil ? '#000' : 'var(--text)';
+    const icon = isFoil ? '✦ ' : '';
+    return `<span style="background:${bg};color:${color};font-weight:700;font-size:0.75rem;padding:2px 8px;border-radius:4px;border:1px solid var(--border);white-space:nowrap;">${icon}${_alEsc(v)}</span>`;
+}
+
 function _closeAutoLink() {
     const o = document.getElementById('autolink-overlay');
     if (o) o.remove();
@@ -3638,6 +3652,7 @@ async function relinkItem(itemId, sessionId) {
         cardNumber: i.card_number || '', isGraded: !!i.is_graded,
         gradeCompany: i.grade_company || '', gradeValue: i.grade_value || '',
         condition: i.condition || i.listing_condition || 'NM',
+        variance: i.variance || '',
         quantity: parseInt(i.quantity) || 1, currentPrice: parseFloat(i.market_price) || 0,
     };
     _relinkShowSearch();
@@ -3697,8 +3712,8 @@ function _relinkShowSearch() {
             <div class="form-group"><label>TCGPlayer ID</label>
                 <input type="number" id="relink-tcgid" placeholder="e.g. 535090"></div>
         </div>
-        <div style="background:var(--surface-2);border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:0.85rem;">
-            ${rs.cardNumber ? `<span style="color:var(--text-dim);">#${rs.cardNumber}</span> · ` : ''}${metaBadge}${rs.currentPrice > 0 ? ` · Current: <strong style="color:var(--accent);">$${rs.currentPrice.toFixed(2)}</strong>` : ''}${rs.quantity > 1 ? ` · Qty ${rs.quantity}` : ''}
+        <div style="background:var(--surface-2);border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:0.85rem;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            ${(!isSealed && rs.variance) ? _varianceBadge(rs.variance) : ''}${rs.cardNumber ? `<span style="color:var(--text-dim);">#${rs.cardNumber}</span>` : ''}${metaBadge}${rs.currentPrice > 0 ? `<span style="color:var(--text-dim);">Current: <strong style="color:var(--accent);">$${rs.currentPrice.toFixed(2)}</strong></span>` : ''}${rs.quantity > 1 ? `<span style="color:var(--text-dim);">Qty ${rs.quantity}</span>` : ''}
         </div>
         <button class="btn btn-primary" id="relink-search-btn" style="width:100%;">Search</button>
         <button class="btn btn-secondary" id="relink-manual-btn" style="width:100%;margin-top:6px;font-size:0.8rem;">💲 Manual Price (no TCGPlayer ID)</button>
@@ -3770,6 +3785,7 @@ async function _relinkAdvanceOrClose(sessionId, isSkip) {
             cardNumber: next.card_number || '', isGraded: !!next.is_graded,
             gradeCompany: next.grade_company || '', gradeValue: next.grade_value || '',
             condition: next.condition || next.listing_condition || 'NM',
+            variance: next.variance || '',
             quantity: parseInt(next.quantity) || 1, currentPrice: parseFloat(next.market_price) || 0,
         };
         _relinkShowSearch();
@@ -4272,7 +4288,7 @@ function _relinkRenderConditions(selectedCond) {
     const itemGradeBadge = rs.isGraded
         ? `<span style="background:linear-gradient(135deg,#7c3aed,#4f7df9);color:#fff;font-weight:700;font-size:0.72rem;padding:1px 6px;border-radius:4px;">${rs.gradeCompany||'PSA'} ${rs.gradeValue||'?'}</span>`
         : `<span style="font-weight:600;">${rs.condition||'NM'}</span>`;
-    let html = `<div style="margin-bottom:6px; font-size:0.8rem; color:var(--text-dim);">Replacing: <span style="text-decoration:line-through;">${rs.cardName}</span>${rs.cardNumber ? ' #'+rs.cardNumber : ''} ${itemGradeBadge}${rs.quantity > 1 ? ` <span style="font-weight:700;color:var(--amber);">× ${rs.quantity}</span>` : ''}${rs.currentPrice > 0 ? ` — was <strong>$${rs.currentPrice.toFixed(2)}</strong>` : ''}</div>`;
+    let html = `<div style="margin-bottom:6px; font-size:0.8rem; color:var(--text-dim);">Replacing: <span style="text-decoration:line-through;">${rs.cardName}</span>${rs.cardNumber ? ' #'+rs.cardNumber : ''} ${itemGradeBadge}${(!rs.isGraded && rs.variance) ? ' ' + _varianceBadge(rs.variance) : ''}${rs.quantity > 1 ? ` <span style="font-weight:700;color:var(--amber);">× ${rs.quantity}</span>` : ''}${rs.currentPrice > 0 ? ` — was <strong>$${rs.currentPrice.toFixed(2)}</strong>` : ''}</div>`;
     html += `<div style="margin-bottom:12px;"><strong style="color:var(--accent); font-size:1.1rem;">${rs.newName}</strong>`;
     html += `<span style="color:var(--text-dim);"> — ${rs.setName}${rs.cardNum ? ' #'+rs.cardNum : ''} · TCG#${rs.tcgId}</span>`;
     html += `${rs.quantity > 1 ? `<span style="background:var(--amber);color:#000;font-weight:700;font-size:0.75rem;padding:1px 6px;border-radius:4px;margin-left:6px;">Qty: ${rs.quantity}</span>` : ''}</div>`;
