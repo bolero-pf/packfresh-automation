@@ -2168,41 +2168,47 @@ def _current_tier_counts(bin_uuid):
 
 @app.route("/api/display/cases")
 def display_cases():
-    """List every display_case location + the cards currently in each."""
+    """List every display_case location with its capacity meter (headers only).
+
+    Cards are NOT included here — a full glass can hold hundreds of rows and
+    each needs an image-resolving subquery, so loading every case's cards up
+    front made the Display tab crawl. The UI fetches a case's cards lazily via
+    /api/display/cases/<id>/cards when the operator expands that case."""
     cases = get_display_case_capacity(db)
-    out = []
-    for c in cases:
-        # Some raw_cards rows have a NULL image_url (image landed in
-        # scrydex_price_cache after ingest, or was never copied across).
-        # COALESCE through the cache so the case render matches what the
-        # editor's barcode-lookup endpoint would show.
-        cards = db.query("""
-            SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number, rc.condition,
-                   rc.current_price,
-                   COALESCE(
-                     rc.image_url,
-                     (SELECT MAX(image_large)  FROM scrydex_price_cache WHERE scrydex_id   = rc.scrydex_id),
-                     (SELECT MAX(image_medium) FROM scrydex_price_cache WHERE scrydex_id   = rc.scrydex_id),
-                     (SELECT MAX(image_small)  FROM scrydex_price_cache WHERE scrydex_id   = rc.scrydex_id),
-                     (SELECT MAX(image_large)  FROM scrydex_price_cache WHERE tcgplayer_id = rc.tcgplayer_id),
-                     (SELECT MAX(image_medium) FROM scrydex_price_cache WHERE tcgplayer_id = rc.tcgplayer_id),
-                     (SELECT MAX(image_small)  FROM scrydex_price_cache WHERE tcgplayer_id = rc.tcgplayer_id)
-                   ) AS image_url,
-                   rc.variant, rc.tcgplayer_id, rc.scrydex_id, rc.stored_at
-            FROM raw_cards rc
-            WHERE rc.state = 'DISPLAY' AND rc.bin_id = %s
-            ORDER BY rc.current_price DESC NULLS LAST, rc.card_name ASC
-        """, (c["id"],))
-        out.append({
-            "id":            str(c["id"]),
-            "bin_label":     c["bin_label"],
-            "card_type":     c["card_type"],
-            "capacity":      c["capacity"],
-            "current_count": c["current_count"],
-            "available":     c["available"],
-            "cards":         [_ser(dict(r)) for r in cards],
-        })
+    out = [{
+        "id":            str(c["id"]),
+        "bin_label":     c["bin_label"],
+        "card_type":     c["card_type"],
+        "capacity":      c["capacity"],
+        "current_count": c["current_count"],
+        "available":     c["available"],
+    } for c in cases]
     return jsonify({"cases": out, "card_type_options": list(ALL_CARD_TYPES)})
+
+
+@app.route("/api/display/cases/<case_id>/cards")
+def display_case_cards(case_id):
+    """Cards currently in one display case — fetched lazily when the case is
+    expanded in the UI. COALESCEs image_url through scrydex_price_cache so the
+    render matches the editor's barcode-lookup endpoint."""
+    cards = db.query("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number, rc.condition,
+               rc.current_price,
+               COALESCE(
+                 rc.image_url,
+                 (SELECT MAX(image_large)  FROM scrydex_price_cache WHERE scrydex_id   = rc.scrydex_id),
+                 (SELECT MAX(image_medium) FROM scrydex_price_cache WHERE scrydex_id   = rc.scrydex_id),
+                 (SELECT MAX(image_small)  FROM scrydex_price_cache WHERE scrydex_id   = rc.scrydex_id),
+                 (SELECT MAX(image_large)  FROM scrydex_price_cache WHERE tcgplayer_id = rc.tcgplayer_id),
+                 (SELECT MAX(image_medium) FROM scrydex_price_cache WHERE tcgplayer_id = rc.tcgplayer_id),
+                 (SELECT MAX(image_small)  FROM scrydex_price_cache WHERE tcgplayer_id = rc.tcgplayer_id)
+               ) AS image_url,
+               rc.variant, rc.tcgplayer_id, rc.scrydex_id, rc.stored_at
+        FROM raw_cards rc
+        WHERE rc.state = 'DISPLAY' AND rc.bin_id = %s
+        ORDER BY rc.current_price DESC NULLS LAST, rc.card_name ASC
+    """, (str(case_id),))
+    return jsonify({"cards": [_ser(dict(r)) for r in cards]})
 
 
 @app.route("/api/display/cases/<case_id>/capacity", methods=["POST"])
@@ -2863,27 +2869,35 @@ def sell_relist():
 
 @app.route("/api/binders")
 def list_binders():
-    """List every binder with its current contents and capacity meter."""
+    """List every binder with its capacity meter (headers only).
+
+    Cards are NOT included — binders hold hundreds of cards each, so loading
+    them all up front was the main reason the Binders tab was slow. The UI
+    fetches a binder's cards lazily via /api/binders/<id>/cards on expand."""
     binders = get_binder_capacity(db)
-    out = []
-    for b in binders:
-        cards = db.query("""
-            SELECT id, barcode, card_name, set_name, card_number, condition,
-                   current_price, image_url, variant, tcgplayer_id, scrydex_id,
-                   game, stored_at
-            FROM raw_cards
-            WHERE state = 'DISPLAY' AND bin_id = %s
-            ORDER BY card_name ASC
-        """, (b["id"],))
-        out.append({
-            "id":            str(b["id"]),
-            "bin_label":     b["bin_label"],
-            "capacity":      b["capacity"],
-            "current_count": b["current_count"],
-            "available":     b["available"],
-            "cards":         [_ser(dict(r)) for r in cards],
-        })
+    out = [{
+        "id":            str(b["id"]),
+        "bin_label":     b["bin_label"],
+        "capacity":      b["capacity"],
+        "current_count": b["current_count"],
+        "available":     b["available"],
+    } for b in binders]
     return jsonify({"binders": out})
+
+
+@app.route("/api/binders/<binder_id>/cards")
+def binder_cards(binder_id):
+    """Cards currently in one binder — fetched lazily when the binder is
+    expanded in the UI."""
+    cards = db.query("""
+        SELECT id, barcode, card_name, set_name, card_number, condition,
+               current_price, image_url, variant, tcgplayer_id, scrydex_id,
+               game, stored_at
+        FROM raw_cards
+        WHERE state = 'DISPLAY' AND bin_id = %s
+        ORDER BY card_name ASC
+    """, (str(binder_id),))
+    return jsonify({"cards": [_ser(dict(r)) for r in cards]})
 
 
 @app.route("/api/binders/<binder_id>/fill-suggest")
@@ -3837,7 +3851,7 @@ def audit_locations():
     """List every bin + binder with the count of cards the DB thinks live there
     (state STORED for bins, DISPLAY for binders). The Audit view uses this to
     populate the location dropdown plus an at-a-glance expected count."""
-    rows = db.query("""
+    rows = db.query(r"""
         SELECT sl.id, sl.bin_label,
                COALESCE(sr.location_type, 'bin') AS location_type,
                COUNT(rc.id) FILTER (

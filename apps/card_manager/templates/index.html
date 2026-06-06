@@ -2259,19 +2259,79 @@ const _cardTypeLabel = {
   mixed:    'Mixed (everything)',
 };
 
-// Collapsible storage sections (binders / display cases). Default collapsed so
-// operators can find the right binder/case without scrolling past every card.
-// Expansion state is keyed by location id and survives re-renders (e.g. after
-// a fill or return) so an open section stays open.
-const _expandedStorage = new Set();
-function toggleStorageSection(key) {
+// Collapsible storage sections (binders / display cases). Default collapsed AND
+// lazy: a binder/case holds hundreds of cards, so we fetch a section's cards
+// only when the operator expands it (first expand only — then cached in the
+// DOM). This keeps the Binders/Display tabs from fetching + rendering 1000+
+// cards up front. `url` is the per-section cards endpoint; `renderFnName` is
+// the global card-grid renderer to call with the fetched cards.
+async function toggleStorageSection(key, url, renderFnName) {
   const body = document.getElementById('storage-body-' + key);
-  const chev = document.getElementById('storage-chev-' + key);
+  const btn  = document.getElementById('storage-toggle-' + key);
   if (!body) return;
   const willExpand = body.style.display === 'none';
   body.style.display = willExpand ? 'block' : 'none';
-  if (chev) chev.textContent = willExpand ? '▾' : '▸';
-  if (willExpand) _expandedStorage.add(key); else _expandedStorage.delete(key);
+  if (btn) btn.textContent = willExpand ? '▾ Hide cards' : '▸ Show cards';
+  if (willExpand && body.dataset.loaded !== '1') {
+    body.innerHTML = '<div style="text-align:center;padding:24px;"><div class="spinner"></div></div>';
+    try {
+      const d = await get(url);
+      body.innerHTML = window[renderFnName](d.cards || []);
+      body.dataset.loaded = '1';
+    } catch(e) {
+      body.innerHTML = `<div style="padding:16px;color:var(--red);">${esc(e.message)}</div>`;
+    }
+  }
+}
+
+// Card-grid renderer for display cases (cards open the editor on click).
+function renderCaseCards(cards) {
+  if (!cards.length) return '<div style="font-size:0.85rem;color:var(--dim);text-align:center;padding:30px;">Empty case — set out cards from the storage bins.</div>';
+  return `
+    <div class="editor-grid" style="margin-top:14px;">
+      ${cards.map(card => {
+        const img = card.image_url
+          ? `<img src="${esc(card.image_url)}" alt="${esc(card.card_name)}" loading="lazy">`
+          : '<div class="no-img">🃏</div>';
+        return `<div class="ec" title="Open editor (reprint, relink, refresh price)" onclick="openCaseCardEditor('${esc(card.barcode)}')">
+          <div class="ec-img">${img}</div>
+          <div class="ec-body">
+            <div class="ec-name">${esc(card.card_name)}</div>
+            <div class="ec-set">${esc(card.set_name||'')}</div>
+            <div style="font-family:var(--mono);font-size:0.7rem;color:var(--dim);">${esc(card.barcode)}</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
+              <span class="ec-pill ${esc(card.condition||'')}">${esc(card.condition||'')}</span>
+              <span class="ec-price">$${parseFloat(card.current_price||0).toFixed(2)}</span>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+}
+
+// Card-grid renderer for binders (read-only, no click target).
+function renderBinderCards(cards) {
+  if (!cards.length) return '<div style="font-size:0.85rem;color:var(--dim);text-align:center;padding:24px;">Empty binder.</div>';
+  return `
+    <div class="editor-grid" style="margin-top:14px;">
+      ${cards.map(card => {
+        const img = card.image_url
+          ? `<img src="${esc(card.image_url)}" alt="${esc(card.card_name)}" loading="lazy">`
+          : '<div class="no-img">🃏</div>';
+        return `<div class="ec" style="cursor:default;">
+          <div class="ec-img">${img}</div>
+          <div class="ec-body">
+            <div class="ec-name">${esc(card.card_name)}</div>
+            <div class="ec-set">${esc(card.set_name||'')}</div>
+            <div style="font-family:var(--mono);font-size:0.7rem;color:var(--dim);">${esc(card.barcode)}</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
+              <span class="ec-pill ${esc(card.condition||'')}">${esc(card.condition||'')}</span>
+              <span class="ec-price">$${parseFloat(card.current_price||0).toFixed(2)}</span>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
 }
 
 function renderDisplay(cases) {
@@ -2285,27 +2345,7 @@ function renderDisplay(cases) {
   }
   el.innerHTML = addBtn + cases.map(c => {
     const pct = c.capacity ? Math.round(c.current_count / c.capacity * 100) : 0;
-    const cardsHtml = c.cards.length ? `
-      <div class="editor-grid" style="margin-top:14px;">
-        ${c.cards.map(card => {
-          const img = card.image_url
-            ? `<img src="${esc(card.image_url)}" alt="${esc(card.card_name)}" loading="lazy">`
-            : '<div class="no-img">🃏</div>';
-          return `<div class="ec" title="Open editor (reprint, relink, refresh price)" onclick="openCaseCardEditor('${esc(card.barcode)}')">
-            <div class="ec-img">${img}</div>
-            <div class="ec-body">
-              <div class="ec-name">${esc(card.card_name)}</div>
-              <div class="ec-set">${esc(card.set_name||'')}</div>
-              <div style="font-family:var(--mono);font-size:0.7rem;color:var(--dim);">${esc(card.barcode)}</div>
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
-                <span class="ec-pill ${esc(card.condition||'')}">${esc(card.condition||'')}</span>
-                <span class="ec-price">$${parseFloat(card.current_price||0).toFixed(2)}</span>
-              </div>
-            </div>
-          </div>`;
-        }).join('')}
-      </div>
-    ` : '<div style="font-size:0.85rem;color:var(--dim);text-align:center;padding:30px;">Empty case — set out cards from the storage bins.</div>';
+    const cardsUrl = `/api/display/cases/${esc(c.id)}/cards`;
 
     const typeOptionsHtml = _cardTypeOptions.map(t =>
       `<option value="${esc(t)}" ${t===c.card_type?'selected':''}>${esc(_cardTypeLabel[t]||t)}</option>`
@@ -2316,10 +2356,8 @@ function renderDisplay(cases) {
     return `
       <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px;">
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-          <button class="btn btn-sm" onclick="toggleStorageSection('${esc(c.id)}')" title="Expand / collapse" style="min-width:34px;">
-            <span id="storage-chev-${esc(c.id)}">${_expandedStorage.has(c.id)?'▾':'▸'}</span>
-          </button>
-          <div style="font-size:1.15rem;font-weight:700;cursor:pointer;" onclick="toggleStorageSection('${esc(c.id)}')">${esc(c.bin_label)}</div>
+          <button class="btn btn-sm" id="storage-toggle-${esc(c.id)}" onclick="toggleStorageSection('${esc(c.id)}','${cardsUrl}','renderCaseCards')" title="Show / hide cards">▸ Show cards</button>
+          <div style="font-size:1.15rem;font-weight:700;cursor:pointer;" onclick="toggleStorageSection('${esc(c.id)}','${cardsUrl}','renderCaseCards')">${esc(c.bin_label)}</div>
           <span class="badge" style="background:rgba(232,197,71,0.18);color:var(--accent);font-size:0.7rem;padding:2px 8px;border-radius:6px;">
             ${esc(_cardTypeLabel[c.card_type]||c.card_type||'unset')}
           </span>
@@ -2337,7 +2375,7 @@ function renderDisplay(cases) {
           <button class="btn btn-sm" onclick="openReturnAll('${esc(c.id)}')" ${c.current_count===0?'disabled':''}>↩ Return cards</button>
           <button class="btn btn-sm" style="background:none;border:1px solid var(--border);color:var(--red);" onclick="deleteCase('${esc(c.id)}','${esc(c.bin_label)}')" ${canDelete?'':'disabled title="Return all cards before deleting"'}>✕ Delete</button>
         </div>
-        <div id="storage-body-${esc(c.id)}" style="display:${_expandedStorage.has(c.id)?'block':'none'};">${cardsHtml}</div>
+        <div id="storage-body-${esc(c.id)}" data-loaded="0" style="display:none;"></div>
       </div>
     `;
   }).join('');
@@ -2738,42 +2776,19 @@ function renderBinders(binders) {
 
   html += binders.map(b => {
     const pct = b.capacity ? Math.round(b.current_count / b.capacity * 100) : 0;
-    const cardsHtml = b.cards.length ? `
-      <div class="editor-grid" style="margin-top:14px;">
-        ${b.cards.map(card => {
-          const img = card.image_url
-            ? `<img src="${esc(card.image_url)}" alt="${esc(card.card_name)}" loading="lazy">`
-            : '<div class="no-img">🃏</div>';
-          return `<div class="ec" style="cursor:default;">
-            <div class="ec-img">${img}</div>
-            <div class="ec-body">
-              <div class="ec-name">${esc(card.card_name)}</div>
-              <div class="ec-set">${esc(card.set_name||'')}</div>
-              <div style="font-family:var(--mono);font-size:0.7rem;color:var(--dim);">${esc(card.barcode)}</div>
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
-                <span class="ec-pill ${esc(card.condition||'')}">${esc(card.condition||'')}</span>
-                <span class="ec-price">$${parseFloat(card.current_price||0).toFixed(2)}</span>
-              </div>
-            </div>
-          </div>`;
-        }).join('')}
-      </div>
-    ` : '<div style="font-size:0.85rem;color:var(--dim);text-align:center;padding:24px;">Empty binder.</div>';
-
+    const cardsUrl = `/api/binders/${esc(b.id)}/cards`;
     return `
       <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px;">
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-          <button class="btn btn-sm" onclick="toggleStorageSection('${esc(b.id)}')" title="Expand / collapse" style="min-width:34px;">
-            <span id="storage-chev-${esc(b.id)}">${_expandedStorage.has(b.id)?'▾':'▸'}</span>
-          </button>
-          <div style="font-size:1.15rem;font-weight:700;cursor:pointer;" onclick="toggleStorageSection('${esc(b.id)}')">${esc(b.bin_label)}</div>
+          <button class="btn btn-sm" id="storage-toggle-${esc(b.id)}" onclick="toggleStorageSection('${esc(b.id)}','${cardsUrl}','renderBinderCards')" title="Show / hide cards">▸ Show cards</button>
+          <div style="font-size:1.15rem;font-weight:700;cursor:pointer;" onclick="toggleStorageSection('${esc(b.id)}','${cardsUrl}','renderBinderCards')">${esc(b.bin_label)}</div>
           <div style="font-family:var(--mono);font-size:0.9rem;color:var(--dim);">${b.current_count} / ${b.capacity} cards</div>
           <div style="flex:1;min-width:120px;height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;">
             <div style="height:100%;background:${pct>=100?'var(--red)':pct>=80?'var(--accent)':'var(--green)'};width:${Math.min(100,pct)}%;"></div>
           </div>
           <button class="btn btn-sm btn-green" onclick="openBinderFill('${esc(b.id)}', ${b.available})" ${b.available===0?'disabled title="Binder full"':''}>+ Fill</button>
         </div>
-        <div id="storage-body-${esc(b.id)}" style="display:${_expandedStorage.has(b.id)?'block':'none'};">${cardsHtml}</div>
+        <div id="storage-body-${esc(b.id)}" data-loaded="0" style="display:none;"></div>
       </div>
     `;
   }).join('');
