@@ -3649,6 +3649,7 @@ async function relinkItem(itemId, sessionId) {
         itemId, sessionId,
         productType: i.product_type === 'sealed' ? 'sealed' : 'raw',
         cardName: i.product_name || '', setName: i.set_name || '',
+        searchSetName: i.set_name || '',
         cardNumber: i.card_number || '', isGraded: !!i.is_graded,
         gradeCompany: i.grade_company || '', gradeValue: i.grade_value || '',
         condition: i.condition || i.listing_condition || 'NM',
@@ -3708,7 +3709,7 @@ function _relinkShowSearch() {
             <input type="text" id="relink-search" value="${defaultSearch.replace(/"/g,'&quot;')}" placeholder="${namePlaceholder}"></div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
             <div class="form-group"><label>Set</label>
-                <input type="text" id="relink-set" value="${(rs.setName||'').replace(/"/g,'&quot;')}" placeholder="e.g. Paldean Fates"></div>
+                <input type="text" id="relink-set" value="${((rs.searchSetName != null ? rs.searchSetName : rs.setName)||'').replace(/"/g,'&quot;')}" placeholder="e.g. Paldean Fates"></div>
             <div class="form-group"><label>TCGPlayer ID</label>
                 <input type="number" id="relink-tcgid" placeholder="e.g. 535090"></div>
         </div>
@@ -3782,6 +3783,7 @@ async function _relinkAdvanceOrClose(sessionId, isSkip) {
             itemId: next.id, sessionId,
             productType: next.product_type === 'sealed' ? 'sealed' : 'raw',
             cardName: next.product_name || '', setName: next.set_name || '',
+            searchSetName: next.set_name || '',
             cardNumber: next.card_number || '', isGraded: !!next.is_graded,
             gradeCompany: next.grade_company || '', gradeValue: next.grade_value || '',
             condition: next.condition || next.listing_condition || 'NM',
