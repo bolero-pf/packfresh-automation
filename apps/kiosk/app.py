@@ -257,7 +257,7 @@ GAME_FILTER_SCHEMA = {
             "options": ["W", "U", "B", "R", "G", "C"],
             "labels":  {"W": "White", "U": "Blue", "B": "Black",
                         "R": "Red",   "G": "Green", "C": "Colorless"},
-            "modes":   ["any", "exactly"],
+            "modes":   ["any", "within", "exactly"],
         },
         "card_type": {
             "label":   "Card type",
@@ -283,7 +283,7 @@ GAME_FILTER_SCHEMA = {
             "field":   "colors",
             "type":    "jsonb",
             "options": ["Red", "Green", "Blue", "Purple", "Black", "Yellow"],
-            "modes":   ["any", "exactly"],
+            "modes":   ["any", "within", "exactly"],
         },
         "card_type": {
             "label":   "Card type",
@@ -633,6 +633,21 @@ def _build_meta_filter_subquery(game: str,
                     f" FROM unnest(ARRAY[{arr_lit_ph}]) AS v)"
                 )
                 p.extend(chromatic)
+        elif color_mode == "within":
+            # Within ("any of but only these" — commander color identity):
+            # the card's identity is a SUBSET of the picked colors. jsonb <@
+            # is exactly subset containment, and [] <@ anything is true so
+            # colorless cards would slip in — we exclude them unless the C
+            # chip is explicitly picked ("Only your colors" semantics).
+            if has_c and not chromatic:
+                # Only Colorless picked → colorless cards only.
+                parts.append(f"jsonb_array_length({field}) = 0")
+            elif chromatic:
+                within = f"{field} <@ to_jsonb(%s::text[])"
+                if not has_c:
+                    within = f"({within} AND jsonb_array_length({field}) > 0)"
+                parts.append(within)
+                p.append(chromatic)
         else:
             # Any: card's identity contains at least one of the selected
             # chromatic colors, OR (if C was picked) is colorless.
@@ -720,10 +735,19 @@ def browse():
     # Game-aware advanced filters
     colors     = _multi_param("colors")
     color_mode = (request.args.get("color_mode") or "any").strip().lower()
-    if color_mode not in ("any", "exactly"):
+    if color_mode not in ("any", "within", "exactly"):
         color_mode = "any"
     card_types = _multi_param("card_type")
     rarities   = _multi_param("card_rarity")
+    # "Added in the last X days" — a recency filter so returning customers can
+    # see what's new. Tile-level: a card tile shows if ANY of its copies was
+    # intaked within the window (matches the bump-on-restock "Newest" sort),
+    # while the aggregation below still counts the card's FULL stock.
+    added_days = request.args.get("added_days", type=int)
+    if added_days is not None and added_days <= 0:
+        added_days = None
+    if added_days is not None:
+        added_days = min(added_days, 365)
 
     # Include DISPLAY-state cards alongside STORED so customers can see
     # what's in the binders / glass cases. Cart eligibility is split out
@@ -814,12 +838,33 @@ def browse():
                  "CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') "
                  "THEN '' ELSE variant END")
 
-    count_row = db.query_one(f"""
-        SELECT COUNT(DISTINCT ({group_key})) AS total
-        FROM raw_cards
-        WHERE {where}
-          AND current_hold_id IS NULL
-    """, tuple(params))
+    # Recency filter is tile-level: keep tiles whose newest copy falls inside
+    # the window. Applied as a HAVING (not a row WHERE) so the per-condition
+    # aggregation below still reflects the card's full stock, not just the
+    # copies that happen to be recent.
+    having_sql    = ""
+    having_params: tuple = ()
+    if added_days is not None:
+        having_sql    = "HAVING MAX(created_at) >= NOW() - %s::interval"
+        having_params = (f"{added_days} days",)
+
+    if added_days is not None:
+        count_row = db.query_one(f"""
+            SELECT COUNT(*) AS total FROM (
+                SELECT 1
+                FROM raw_cards
+                WHERE {where}
+                GROUP BY {group_key}
+                {having_sql}
+            ) t
+        """, tuple(params) + having_params)
+    else:
+        count_row = db.query_one(f"""
+            SELECT COUNT(DISTINCT ({group_key})) AS total
+            FROM raw_cards
+            WHERE {where}
+              AND current_hold_id IS NULL
+        """, tuple(params))
     total = count_row["total"] if count_row else 0
 
     # Aggregated cards with per-condition breakdown.
@@ -869,9 +914,10 @@ def browse():
                      variant_raw, variant_key, image_url, condition
         ) sub
         GROUP BY card_name, set_name, tcgplayer_id, variant_key
+        {having_sql}
         ORDER BY {order_by}
         LIMIT %s OFFSET %s
-    """, tuple(params) + (per_page, offset))
+    """, tuple(params) + having_params + (per_page, offset))
 
     # Enrich each row with two things from scrydex_price_cache:
     #   1. Image fallback when raw_cards.image_url is missing (esp. JP cards
@@ -1402,7 +1448,7 @@ def list_eras():
     max_price  = request.args.get("max_price", type=float)
     colors     = _multi_param("colors")
     color_mode = (request.args.get("color_mode") or "any").strip().lower()
-    if color_mode not in ("any", "exactly"):
+    if color_mode not in ("any", "within", "exactly"):
         color_mode = "any"
     card_types = _multi_param("card_type")
     rarities   = _multi_param("card_rarity")
@@ -1429,6 +1475,13 @@ def list_eras():
         ph = ",".join(["%s"] * len(rarities))
         where.append(f"LOWER(rarity) IN ({ph})")
         params += [r.lower() for r in rarities]
+    # Recency: COUNT(DISTINCT tile) over copies filtered to the window equals
+    # the number of tiles that have a recent copy — same tile set the browse
+    # grid shows for the same added_days.
+    added_days = request.args.get("added_days", type=int)
+    if added_days is not None and 0 < added_days <= 365:
+        where.append("created_at >= NOW() - %s::interval")
+        params.append(f"{added_days} days")
     meta_clause, meta_params = _build_meta_filter_subquery(
         "pokemon", colors, color_mode, card_types, rarities,
     )
@@ -1538,12 +1591,15 @@ def filter_meta():
     # Read the current filter state.
     sel_colors     = _multi_param("colors")
     sel_color_mode = (request.args.get("color_mode") or "any").strip().lower()
-    if sel_color_mode not in ("any", "exactly"):
+    if sel_color_mode not in ("any", "within", "exactly"):
         sel_color_mode = "any"
     sel_card_types = _multi_param("card_type")
     sel_rarities   = _multi_param("card_rarity")
     sel_era        = (request.args.get("era") or "").strip()
     sel_set        = (request.args.get("set") or "").strip()
+    sel_added_days = request.args.get("added_days", type=int)
+    if sel_added_days is not None and not (0 < sel_added_days <= 365):
+        sel_added_days = None
 
     # Build a set of "extra WHERE clauses + params" snippets, then for each
     # facet we'll OR-together the snippets it needs (i.e. all groups except
@@ -1572,6 +1628,17 @@ def filter_meta():
                 f"= (SELECT COALESCE(array_agg(DISTINCT v ORDER BY v), ARRAY[]::text[]) "
                 f" FROM unnest(ARRAY[{arr_lit_ph}]) AS v)"
             ), list(chrom)
+        if mode == "within":
+            # Subset containment (commander color identity). Colorless cards
+            # ([] <@ X is always true) are excluded unless C is picked.
+            if has_c and not chrom:
+                return f"jsonb_array_length({field}) = 0", []
+            if not chrom:
+                return "", []
+            within = f"{field} <@ to_jsonb(%s::text[])"
+            if not has_c:
+                within = f"({within} AND jsonb_array_length({field}) > 0)"
+            return within, [list(chrom)]
         # any
         any_parts: list[str] = []
         params: list = []
@@ -1626,11 +1693,20 @@ def filter_meta():
             return "", []
         return "rc.set_name = %s", [sel_set]
 
+    def added_clause() -> tuple[str, list]:
+        # Recency isn't a facet (no chips of its own) — it always applies to
+        # every other facet's counts so the numbers reflect the new-arrivals
+        # window the customer is browsing.
+        if sel_added_days is None:
+            return "", []
+        return "rc.created_at >= NOW() - %s::interval", [f"{sel_added_days} days"]
+
     color_w,  color_p  = colors_clause()
     cardt_w,  cardt_p  = card_type_clause()
     rarity_w, rarity_p = rarity_clause()
     era_w,    era_p    = era_clause()
     set_w,    set_p    = set_clause()
+    added_w,  added_p  = added_clause()
 
     def merged_extra(*pairs: tuple[str, list]) -> tuple[str, list]:
         """AND together a subset of (where, params) pairs."""
@@ -1652,28 +1728,29 @@ def filter_meta():
 
     if "colors" in schema:
         spec = schema["colors"]
-        # Other filters ⇒ card_type + rarity + era + set (skip colors itself).
+        # Other filters ⇒ card_type + rarity + era + set + recency (skip colors).
         extra_w, extra_p = merged_extra((cardt_w, cardt_p), (rarity_w, rarity_p),
-                                        (era_w, era_p), (set_w, set_p))
+                                        (era_w, era_p), (set_w, set_p),
+                                        (added_w, added_p))
         field = "m." + spec["field"]
         labels = spec.get("labels") or {}
         counts: dict[str, int] = {}
 
-        if sel_color_mode == "exactly":
-            # Per-chip count semantics in exactly mode:
-            #   - ON chip  → count of cards matching the CURRENT exact-set
+        if sel_color_mode in ("exactly", "within"):
+            # Per-chip count semantics in exactly / within mode:
+            #   - ON chip  → count of cards matching the CURRENT set
             #     (matches what the result grid is showing). Tapping it would
             #     remove the chip, but until then this chip *is* the filter.
-            #   - OFF chip → count if you ADD this color to the exact-set
-            #     (i.e. exactly = current ∪ {v}). Lets you preview multi-color
-            #     exact matches before committing.
+            #   - OFF chip → count if you ADD this color to the set
+            #     (i.e. set = current ∪ {v}). Lets you preview multi-color
+            #     matches before committing.
             # The old "symmetric diff = toggle me" math made the only-selected
             # chip read its own count as the unfiltered total, because
             # toggling the only chip cleared the color predicate entirely.
             current = set(sel_colors)
             for v in spec["options"]:
                 pred_set = current if v in current else (current | {v})
-                pred_w, pred_p = colors_predicate(pred_set, "exactly")
+                pred_w, pred_p = colors_predicate(pred_set, sel_color_mode)
                 if not pred_set or not pred_w:
                     counts[v] = 0
                     continue
@@ -1744,9 +1821,10 @@ def filter_meta():
     # ── Card type facet ─────────────────────────────────────────────────────
     if "card_type" in schema:
         spec = schema["card_type"]
-        # Other filters ⇒ colors + rarity + era + set (skip card_type itself).
+        # Other filters ⇒ colors + rarity + era + set + recency (skip card_type).
         extra_w, extra_p = merged_extra((color_w, color_p), (rarity_w, rarity_p),
-                                        (era_w, era_p), (set_w, set_p))
+                                        (era_w, era_p), (set_w, set_p),
+                                        (added_w, added_p))
         field = "m." + spec["field"]
         if spec["type"] == "jsonb":
             rows = db.query(f"""
@@ -1794,7 +1872,8 @@ def filter_meta():
     # or card_type filters are active). Era/set live on raw_cards too, so
     # they slot into either path without a meta JOIN. ──────────────────────
     extra_w, extra_p = merged_extra((color_w, color_p), (cardt_w, cardt_p))
-    rc_only_w, rc_only_p = merged_extra((era_w, era_p), (set_w, set_p))
+    rc_only_w, rc_only_p = merged_extra((era_w, era_p), (set_w, set_p),
+                                        (added_w, added_p))
     if extra_w:
         rarity_rows = db.query(f"""
             SELECT rc.rarity AS k, COUNT(DISTINCT rc.tcgplayer_id) AS n

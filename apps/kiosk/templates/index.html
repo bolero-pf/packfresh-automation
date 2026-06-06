@@ -965,7 +965,7 @@ body.modal-open { overflow: hidden; touch-action: none; }
           <span id="sheet-colors-label">Color</span>
         </div>
         <div class="mode-toggle" id="sheet-color-mode" style="display:none;">
-          <button type="button" class="mode-btn on" data-mode="any" onclick="setSheetColorMode('any')">Any</button><button type="button" class="mode-btn" data-mode="exactly" onclick="setSheetColorMode('exactly')">Exactly</button>
+          <button type="button" class="mode-btn on" data-mode="any" onclick="setSheetColorMode('any')">Any</button><button type="button" class="mode-btn" data-mode="within" onclick="setSheetColorMode('within')">Within</button><button type="button" class="mode-btn" data-mode="exactly" onclick="setSheetColorMode('exactly')">Exactly</button>
         </div>
         <div class="chip-row" id="sheet-colors"></div>
       </div>
@@ -978,6 +978,15 @@ body.modal-open { overflow: hidden; touch-action: none; }
         <div class="chip-row" id="sheet-rarities"></div>
       </div>
 
+      <div class="sheet-section">
+        <div class="sheet-section-title">New arrivals</div>
+        <div class="chip-row" id="sheet-added">
+          <span class="chip on" data-days="0"  onclick="setSheetAddedDays(this)">Any time</span>
+          <span class="chip"    data-days="7"  onclick="setSheetAddedDays(this)">Last 7 days</span>
+          <span class="chip"    data-days="14" onclick="setSheetAddedDays(this)">Last 14 days</span>
+          <span class="chip"    data-days="30" onclick="setSheetAddedDays(this)">Last 30 days</span>
+        </div>
+      </div>
       <div class="sheet-section">
         <div class="sheet-section-title">Condition</div>
         <div class="chip-row" id="sheet-conds">
@@ -1209,9 +1218,10 @@ let _filters = {
   conds: new Set(['NM','LP','MP','HP','DMG']),
   minP: '',
   maxP: '',
+  addedDays: 0,           // 0 = any time; else 7/14/30 — "added in last X days"
   // Game-aware advanced filters (only meaningful when game !== '')
   colors:    new Set(),   // MTG: W/U/B/R/G/C — OP: Red/Blue/...
-  colorMode: 'any',       // 'any' or 'exactly' (MTG/OP only)
+  colorMode: 'any',       // 'any' | 'within' | 'exactly' (MTG/OP only)
   cardTypes: new Set(),   // MTG: Sorcery/Instant/... — Pokemon: Fire/Water/... — OP: Leader/...
   rarities:  new Set(),   // raw_cards.rarity values (game-specific)
 };
@@ -1238,6 +1248,7 @@ function _activeFilterCount() {
   if (_filters.era)    n++;
   if (_filters.set)    n++;
   if (_filters.sort && _filters.sort !== 'name_asc') n++;
+  if (_filters.addedDays) n++;
   if (_filters.conds.size && _filters.conds.size !== 5) n++;
   if (_filters.minP)   n++;
   if (_filters.maxP)   n++;
@@ -1391,6 +1402,7 @@ function openFilterSheet() {
     conds: new Set(_filters.conds),
     minP: _filters.minP,
     maxP: _filters.maxP,
+    addedDays: _filters.addedDays || 0,
     colors:    new Set(_filters.colors),
     colorMode: _filters.colorMode || 'any',
     cardTypes: new Set(_filters.cardTypes),
@@ -1402,6 +1414,10 @@ function openFilterSheet() {
   document.querySelectorAll('#sheet-conds .chip').forEach(el => {
     const c = el.getAttribute('data-cond');
     el.classList.toggle('on', _draft.conds.has(c));
+  });
+  // New arrivals (added in last X days)
+  document.querySelectorAll('#sheet-added .chip').forEach(el => {
+    el.classList.toggle('on', Number(el.getAttribute('data-days')) === (_draft.addedDays || 0));
   });
   // Sort
   document.querySelectorAll('#sheet-sort .chip').forEach(el => {
@@ -1448,11 +1464,14 @@ function clearAllFilters() {
   _draft = {
     game: '', era: '', set: '', sort: 'name_asc',
     conds: new Set(['NM','LP','MP','HP','DMG']),
-    minP: '', maxP: '',
+    minP: '', maxP: '', addedDays: 0,
     colors: new Set(), colorMode: 'any',
     cardTypes: new Set(), rarities: new Set(),
   };
   document.querySelectorAll('#sheet-conds .chip').forEach(el => el.classList.add('on'));
+  document.querySelectorAll('#sheet-added .chip').forEach(el => {
+    el.classList.toggle('on', el.getAttribute('data-days') === '0');
+  });
   document.querySelectorAll('#sheet-sort .chip').forEach(el => {
     el.classList.toggle('on', el.getAttribute('data-sort') === 'name_asc');
   });
@@ -1558,7 +1577,7 @@ async function loadFilterMetaForDraft() {
   if (_draft) {
     if (_draft.colors && _draft.colors.size) {
       p.set('colors', Array.from(_draft.colors).join(','));
-      if (_draft.colorMode === 'exactly') p.set('color_mode', 'exactly');
+      if (_draft.colorMode && _draft.colorMode !== 'any') p.set('color_mode', _draft.colorMode);
     }
     if (_draft.cardTypes && _draft.cardTypes.size) {
       p.set('card_type', Array.from(_draft.cardTypes).join(','));
@@ -1566,6 +1585,7 @@ async function loadFilterMetaForDraft() {
     if (_draft.rarities && _draft.rarities.size) {
       p.set('card_rarity', Array.from(_draft.rarities).join(','));
     }
+    if (_draft.addedDays) p.set('added_days', String(_draft.addedDays));
     // Era + set must facet the color/type/rarity counts too — otherwise
     // picking 'Scarlet & Violet' still leaves Fairy in the Energy chips
     // even though no S&V card is Fairy-typed.
@@ -1713,10 +1733,17 @@ function renderAdvancedFilterSections() {
 
 function setSheetColorMode(mode) {
   if (!_draft) return;
-  _draft.colorMode = (mode === 'exactly') ? 'exactly' : 'any';
+  _draft.colorMode = (mode === 'exactly' || mode === 'within') ? mode : 'any';
   document.querySelectorAll('#sheet-color-mode .mode-btn').forEach(b => {
     b.classList.toggle('on', b.getAttribute('data-mode') === _draft.colorMode);
   });
+  refreshFacetCounts();
+}
+
+function setSheetAddedDays(el) {
+  if (!_draft) return;
+  _draft.addedDays = Number(el.getAttribute('data-days')) || 0;
+  document.querySelectorAll('#sheet-added .chip').forEach(c => c.classList.toggle('on', c === el));
   refreshFacetCounts();
 }
 
@@ -1735,7 +1762,7 @@ function _renderActiveChips() {
   if (_filters.era) chip('era', _filters.era);
   if (_filters.set) chip('set', _filters.set);
   if (_filters.colors && _filters.colors.size) {
-    const mode = (_filters.colorMode === 'exactly') ? 'Exactly' : 'Any';
+    const mode = {any: 'Any', within: 'Within', exactly: 'Exactly'}[_filters.colorMode] || 'Any';
     // Reuse the option labels from the cached filter meta when available
     const labels = (_filterMeta && _filterMeta.filters && _filterMeta.filters.colors)
       ? Object.fromEntries(_filterMeta.filters.colors.options.map(o => [o.value, o.label]))
@@ -1756,6 +1783,9 @@ function _renderActiveChips() {
   }
   if (_filters.conds && _filters.conds.size && _filters.conds.size !== 5) {
     chip('conds', [..._filters.conds].join(', '));
+  }
+  if (_filters.addedDays) {
+    chip('addedDays', `New: last ${_filters.addedDays} days`);
   }
   if (chips.length) {
     chips.push('<button type="button" class="ac-clear" onclick="_clearAllActive()">Clear all</button>');
@@ -1781,6 +1811,7 @@ function _removeActive(key) {
     case 'rarities':  _filters.rarities = new Set(); break;
     case 'price':     _filters.minP = ''; _filters.maxP = ''; break;
     case 'conds':     _filters.conds = new Set(['NM','LP','MP','HP','DMG']); break;
+    case 'addedDays': _filters.addedDays = 0; break;
   }
   loadGames();             // re-render top game-pills (in case game cleared)
   _refreshFiltersBtn();
@@ -1794,6 +1825,7 @@ function _clearAllActive() {
   _filters.colors = new Set(); _filters.cardTypes = new Set(); _filters.rarities = new Set();
   _filters.colorMode = 'any';
   _filters.minP = ''; _filters.maxP = '';
+  _filters.addedDays = 0;
   _filters.conds = new Set(['NM','LP','MP','HP','DMG']);
   _filters.sort = 'name_asc';
   loadGames();
@@ -1813,10 +1845,11 @@ function _writeUrlState() {
   if (_filters.sort && _filters.sort !== 'name_asc') p.set('sort', _filters.sort);
   if (_filters.colors && _filters.colors.size) {
     p.set('colors', [..._filters.colors].join(','));
-    if (_filters.colorMode === 'exactly') p.set('color_mode', 'exactly');
+    if (_filters.colorMode && _filters.colorMode !== 'any') p.set('color_mode', _filters.colorMode);
   }
   if (_filters.cardTypes && _filters.cardTypes.size) p.set('card_type',   [..._filters.cardTypes].join(','));
   if (_filters.rarities  && _filters.rarities.size)  p.set('card_rarity', [..._filters.rarities].join(','));
+  if (_filters.addedDays) p.set('added_days', String(_filters.addedDays));
   if (_filters.minP) p.set('min_price', _filters.minP);
   if (_filters.maxP) p.set('max_price', _filters.maxP);
   if (_filters.conds && _filters.conds.size !== 5)   p.set('condition', [..._filters.conds].join(','));
@@ -1834,9 +1867,10 @@ function _readUrlState() {
   if (p.has('set'))  _filters.set  = p.get('set');
   if (p.has('sort')) _filters.sort = p.get('sort');
   if (p.has('colors')) _filters.colors = new Set(p.get('colors').split(',').filter(Boolean));
-  if (p.get('color_mode') === 'exactly') _filters.colorMode = 'exactly';
+  if (['within', 'exactly'].includes(p.get('color_mode'))) _filters.colorMode = p.get('color_mode');
   if (p.has('card_type'))   _filters.cardTypes = new Set(p.get('card_type').split(',').filter(Boolean));
   if (p.has('card_rarity')) _filters.rarities  = new Set(p.get('card_rarity').split(',').filter(Boolean));
+  if (p.has('added_days'))  { const d = parseInt(p.get('added_days'), 10); if (d > 0) _filters.addedDays = d; }
   if (p.has('min_price'))   _filters.minP = p.get('min_price');
   if (p.has('max_price'))   _filters.maxP = p.get('max_price');
   if (p.has('condition'))   _filters.conds = new Set(p.get('condition').split(',').filter(Boolean));
@@ -2302,10 +2336,11 @@ async function loadEras() {
   const p = new URLSearchParams();
   if (f.colors && f.colors.size) {
     p.set('colors', Array.from(f.colors).join(','));
-    if (f.colorMode === 'exactly') p.set('color_mode', 'exactly');
+    if (f.colorMode && f.colorMode !== 'any') p.set('color_mode', f.colorMode);
   }
   if (f.cardTypes && f.cardTypes.size) p.set('card_type',   Array.from(f.cardTypes).join(','));
   if (f.rarities  && f.rarities.size)  p.set('card_rarity', Array.from(f.rarities).join(','));
+  if (f.addedDays) p.set('added_days', String(f.addedDays));
   if (f.conds     && f.conds.size && f.conds.size !== 5) p.set('condition', Array.from(f.conds).join(','));
   if (f.minP) p.set('min_price', f.minP);
   if (f.maxP) p.set('max_price', f.maxP);
@@ -2360,11 +2395,12 @@ async function doSearch(page) {
   if (_filters.era)  params.set('era', _filters.era);
   if (_filters.minP) params.set('min_price', _filters.minP);
   if (_filters.maxP) params.set('max_price', _filters.maxP);
+  if (_filters.addedDays) params.set('added_days', String(_filters.addedDays));
   // Game-aware advanced filters — only sent when a game is selected, since
   // the same value space is meaningless cross-game (MTG 'B' ≠ OP 'Black').
   if (_filters.game && _filters.colors && _filters.colors.size) {
     params.set('colors', [..._filters.colors].join(','));
-    if (_filters.colorMode === 'exactly') params.set('color_mode', 'exactly');
+    if (_filters.colorMode && _filters.colorMode !== 'any') params.set('color_mode', _filters.colorMode);
   }
   if (_filters.game && _filters.cardTypes && _filters.cardTypes.size) {
     params.set('card_type', [..._filters.cardTypes].join(','));
