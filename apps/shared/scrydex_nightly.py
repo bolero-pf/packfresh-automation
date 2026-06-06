@@ -33,13 +33,13 @@ UPSERT_SQL = """
         trend_1d_pct, trend_7d_pct, trend_30d_pct,
         image_small, image_medium, image_large,
         product_name_en, expansion_name_en, language_code,
-        currency,
+        currency, subtypes,
         fetched_at
     ) VALUES (
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s,
-        %s,
+        %s, %s::jsonb,
         NOW()
     )
     ON CONFLICT (game, scrydex_id, variant, condition, price_type,
@@ -63,6 +63,7 @@ UPSERT_SQL = """
         image_medium      = EXCLUDED.image_medium,
         image_large       = EXCLUDED.image_large,
         currency          = EXCLUDED.currency,
+        subtypes          = EXCLUDED.subtypes,
         fetched_at        = NOW()
 """
 
@@ -285,6 +286,11 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
     printed_number = item.get("printed_number")  # on-card "OP14-041" / "4/102"
     rarity = item.get("rarity")
     card_img_s, card_img_m, card_img_l = _extract_images(item)
+    # Denormalized onto every price row so card search can match subtypes
+    # (Riftbound legend names, Pokemon tags) without joining scrydex_card_meta —
+    # the join broke trigram-index use and forced a full cache seq scan. None for
+    # sealed items. Kept in sync via the ON CONFLICT update above.
+    subtypes_json = _to_jsonb(item.get("subtypes"))
 
     # Language + English translation (JP sets ship translation.en.name in
     # Scrydex responses). For English sets, there's no translation block —
@@ -327,6 +333,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
                 v_img_s, v_img_m, v_img_l,
                 product_name_en, expansion_name_en, language_code,
                 None,  # currency
+                subtypes_json,
             ))
             continue
 
@@ -352,6 +359,7 @@ def _collect_price_rows(item: dict, *, game: str, expansion_id: str, expansion_n
                 t1, t7, t30, v_img_s, v_img_m, v_img_l,
                 product_name_en, expansion_name_en, language_code,
                 currency,
+                subtypes_json,
             ))
     return rows
 

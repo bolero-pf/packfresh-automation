@@ -640,7 +640,7 @@ class PriceCache:
                            "OR c.card_number ILIKE %s OR c.printed_number ILIKE %s "
                            "OR c.expansion_id ILIKE %s "
                            "OR c.expansion_name ILIKE %s OR c.expansion_name_en ILIKE %s "
-                           "OR m.subtypes::text ILIKE %s)")
+                           "OR c.subtypes::text ILIKE %s)")
                 p = f"%{f}%"
                 params.extend([p, p, p, p, p, p, p, p])
             where_parts.append("(" + " OR ".join(ors) + ")")
@@ -666,8 +666,6 @@ class PriceCache:
                 SELECT DISTINCT ON (c.scrydex_id) c.scrydex_id, c.tcgplayer_id,
                        ({score_sql}) AS score
                 FROM scrydex_price_cache c
-                LEFT JOIN scrydex_card_meta m
-                       ON m.game = c.game AND m.scrydex_id = c.scrydex_id
                 WHERE {where_clause}
                 ORDER BY c.scrydex_id, c.condition, c.price_type
             ) sub
@@ -841,7 +839,7 @@ class PriceCache:
                            "OR c.expansion_id ILIKE %s "
                            "OR c.expansion_name ILIKE %s OR c.expansion_name_en ILIKE %s "
                            "OR c.variant ILIKE %s "
-                           "OR m.subtypes::text ILIKE %s)")
+                           "OR c.subtypes::text ILIKE %s)")
                 p = f"%{f}%"
                 params.extend([p, p, p, p, p, p, p, p, p])
             where_parts.append("(" + " OR ".join(ors) + ")")
@@ -923,7 +921,7 @@ class PriceCache:
             # right Darius/Kai'sa printing among many Riftbound rows the
             # token only matched via subtypes.
             score_parts.append(
-                "(CASE WHEN m.subtypes::text ILIKE %s THEN 12 ELSE 0 END)"
+                "(CASE WHEN c.subtypes::text ILIKE %s THEN 12 ELSE 0 END)"
             )
             score_params.append(f"%{primary}%")
             # Per-token printed_number / card_number boost for numeric tokens.
@@ -948,8 +946,6 @@ class PriceCache:
                 SELECT DISTINCT ON (c.scrydex_id) c.scrydex_id, c.tcgplayer_id,
                        ({score_sql}) AS score
                 FROM scrydex_price_cache c
-                LEFT JOIN scrydex_card_meta m
-                       ON m.game = c.game AND m.scrydex_id = c.scrydex_id
                 WHERE {where_clause}
                 ORDER BY c.scrydex_id, c.condition, c.price_type
             ) sub
