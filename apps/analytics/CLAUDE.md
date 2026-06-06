@@ -4,7 +4,7 @@
 ## Key Files
 - **app.py** — Flask app: dashboard UI, /run pipeline trigger, /api/* endpoints
 - **compute.py** — Pipeline orchestrator: calls all steps in sequence
-- **price_history.py** — Daily scrydex_price_cache → scrydex_price_history snapshot
+- **price_history.py** — Daily scrydex_price_cache → scrydex_price_history snapshot (NM/raw only; auto-creates monthly partition + drops partitions >90d)
 - **taxonomy.py** — Product classification: IP, form_factor, set, era → product_taxonomy
 - **customers.py** — Shopify orders → customer_orders + customer_summary + daily_business_summary
 - **margins.py** — Daily sales × COGS × market price → realized_margin
@@ -58,7 +58,7 @@ days_of_inventory = current_qty / daily_rate
 - **analytics_meta** — last run tracking (keys: last_order_ingest, last_customer_sync)
 
 ### v2
-- **scrydex_price_history** — daily market price snapshots (expansion_id, tcgplayer_id, market_price, low_price)
+- **scrydex_price_history** — daily NM/raw market price snapshots. RANGE-partitioned by snapshot_date (one partition/month, e.g. scrydex_price_history_202606), 90-day retention via partition DROP. Only condition='NM'/price_type='raw' stored (the sole consumer, margins.py, reads nothing else). Two indexes: idx_sph_unique_p (dedup/ON CONFLICT), idx_sph_tcg_date_p (margins lookup). Migrated from a flat 50M-row/12GB heap by migrate_price_history_partition.py — the pre-migration heap is preserved as `scrydex_price_history_old` (DROP after verifying margins).
 - **product_taxonomy** — dimensional classification (ip, form_factor, expansion_id, set_name, era, product_type)
 - **customer_orders** — per-customer order log (order_total, refund_amount, fulfillment_status, items JSONB)
 - **customer_summary** — rolled-up customer dimension (cohort_month, total_orders, net_spend, avg_order_value, vip_tier, days_between_orders)
