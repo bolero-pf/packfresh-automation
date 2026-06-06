@@ -1,5 +1,6 @@
 """Auto-generated from app.py refactor. items routes."""
 import os
+import re
 import json
 import hashlib
 import logging
@@ -12,6 +13,16 @@ from flask import Blueprint, request, jsonify, render_template, send_file, Respo
 import db
 import intake
 from price_provider import PriceError
+
+try:
+    # Variant name normalization shared with the cache layer so auto-link
+    # stores the same display variant the manual picker would ("holofoil" →
+    # "Holofoil") and matches the item's Collectr variance against native rows.
+    from price_cache import _to_native_variant as _native_variant, VARIANT_DISPLAY as _VARIANT_DISPLAY
+except Exception:  # pragma: no cover - defensive; price_cache always on path
+    _VARIANT_DISPLAY = {}
+    def _native_variant(name):
+        return name
 from helpers import (
     _serialize,
     _decode_override,
@@ -182,6 +193,262 @@ def map_item():
         })
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
+
+
+# ==========================================
+# AUTO-LINK — batch-link the unambiguous raw cards
+# ==========================================
+
+# Tokens that don't help distinguish one card from another for the Tier-B
+# name-overlap guard (every Pokemon card is "ex"/"V"/etc.).
+_AUTOLINK_STOPWORDS = {"the", "of", "and", "ex", "gx", "v", "vmax", "vstar",
+                       "delta", "species", "full", "art", "secret", "promo"}
+
+
+def _autolink_cardnum_forms(raw):
+    """Card-number comparison forms. Scrydex stores numbers unpadded and
+    without the '/total' suffix (Collectr '011/025' → cache '11'), so compare
+    against both the head token and its leading-zero-stripped form."""
+    s = (raw or "").strip()
+    if not s:
+        return []
+    head = s.split("/")[0].strip()
+    if not head:
+        return []
+    forms = {head}
+    if head.isdigit():
+        forms.add(head.lstrip("0") or "0")
+    return list(forms)
+
+
+def _autolink_name_tokens(name):
+    return {t for t in re.split(r"[^a-z0-9]+", (name or "").lower())
+            if len(t) >= 3 and t not in _AUTOLINK_STOPWORDS}
+
+
+def _autolink_match(item):
+    """Return a confident link plan for an unmapped raw item, or None.
+
+    Conservative on purpose — mirrors heal_raw_card_bindings' abstain-on-
+    ambiguity rule. A match is returned only when BOTH resolve to exactly one
+    option: (1) the scrydex_id, via exact expansion+number or number-guarded
+    fuzzy search, and (2) the variant, via the item's Collectr variance or a
+    lone priced printing. Anything else stays manual. Never auto-links a card
+    with no card number (no anchor) or a graded-only printing (no raw price).
+    """
+    game = (item.get("game") or "pokemon").lower()
+    set_name = item.get("set_name") or ""
+    num_forms = _autolink_cardnum_forms(item.get("card_number"))
+    if not num_forms:
+        return None
+
+    sid = None
+    tier = None
+
+    # Tier A — exact expansion name + number. Name-independent, so it catches
+    # the Collectr-vs-Scrydex name drift ("Mew (Delta Species)" vs "Mew δ")
+    # that makes the manual picker so tedious.
+    if set_name:
+        rows = db.query(
+            """
+            SELECT DISTINCT scrydex_id
+            FROM scrydex_price_cache
+            WHERE product_type='card' AND price_type='raw' AND market_price IS NOT NULL
+              AND game = %s
+              AND (LOWER(expansion_name) = LOWER(%s) OR LOWER(expansion_name_en) = LOWER(%s))
+              AND (card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[]))
+            """,
+            (game, set_name, set_name, num_forms, num_forms),
+        )
+        if len(rows) == 1:
+            sid, tier = rows[0]["scrydex_id"], "set+number"
+
+    # Tier B — fuzzy search constrained to the same number + a shared name
+    # token. Catches sets whose Collectr name differs from Scrydex's
+    # ("SV: 151" vs "Scarlet & Violet 151") while still abstaining if the
+    # number-matched results point at more than one card.
+    if not sid and pricing:
+        try:
+            results = pricing.search_cards(
+                ((item.get("product_name") or "") + " " + num_forms[0]).strip(),
+                set_name=set_name or None, limit=8,
+                all_games=True, cache_only=True,
+            ) or []
+        except Exception:
+            results = []
+        item_tokens = _autolink_name_tokens(item.get("product_name"))
+        keep = []
+        for r in results:
+            rnum = _autolink_cardnum_forms(r.get("cardNumber") or r.get("printedNumber"))
+            if not (set(rnum) & set(num_forms)):
+                continue
+            rtokens = _autolink_name_tokens(r.get("nameEn")) | _autolink_name_tokens(r.get("name"))
+            if item_tokens and not (item_tokens & rtokens):
+                continue
+            rsid = r.get("scrydexId") or r.get("scrydex_id")
+            if rsid:
+                keep.append(rsid)
+        keep = list(dict.fromkeys(keep))
+        if len(keep) == 1:
+            sid, tier = keep[0], "fuzzy+number"
+
+    if not sid:
+        return None
+
+    # Variant resolution — distinct priced raw printings for this card.
+    vrows = db.query(
+        """
+        SELECT variant,
+               (ARRAY_AGG(tcgplayer_id) FILTER (WHERE tcgplayer_id IS NOT NULL))[1] AS tcgplayer_id
+        FROM scrydex_price_cache
+        WHERE scrydex_id = %s AND product_type='card' AND price_type='raw'
+          AND market_price IS NOT NULL
+        GROUP BY variant
+        """,
+        (sid,),
+    )
+    if not vrows:
+        return None
+    variants = {(r["variant"] or "normal"): r.get("tcgplayer_id") for r in vrows}
+    native = _native_variant(item.get("variance"))
+    if native and native in variants:
+        chosen = native
+    elif len(variants) == 1:
+        chosen = next(iter(variants))
+    else:
+        # e.g. Normal vs Holofoil both exist but the item's variance doesn't
+        # name one — exactly the case the operator must eyeball. Leave it.
+        return None
+
+    cond = (item.get("condition") or "NM").upper()
+    try:
+        price = pricing.get_raw_condition_price(scrydex_id=sid, condition=cond, variant=chosen)
+        if price is None and cond != "NM":
+            price = pricing.get_raw_condition_price(scrydex_id=sid, condition="NM", variant=chosen)
+    except Exception:
+        price = None
+    if price is None:
+        return None
+
+    meta = db.query_one(
+        """
+        SELECT product_name, product_name_en, expansion_name, expansion_name_en,
+               card_number, rarity
+        FROM scrydex_price_cache
+        WHERE scrydex_id = %s AND product_type='card'
+        ORDER BY price_type, condition LIMIT 1
+        """,
+        (sid,),
+    ) or {}
+
+    return {
+        "scrydex_id": sid,
+        "tcgplayer_id": variants.get(chosen),
+        "variant": _VARIANT_DISPLAY.get(chosen, chosen),
+        "price": float(price),
+        "tier": tier,
+        "new_name": meta.get("product_name_en") or meta.get("product_name"),
+        "new_set": meta.get("expansion_name_en") or meta.get("expansion_name"),
+        "new_number": meta.get("card_number"),
+        "new_rarity": meta.get("rarity"),
+    }
+
+
+@bp.route("/api/intake/session/<session_id>/auto-link", methods=["POST"])
+def auto_link_session(session_id):
+    """Batch-link the unambiguous unmapped raw cards in a session to Scrydex.
+
+    Body: {apply: bool, limit?: int, offset?: int}. apply=false previews a
+    window without writing; apply=true links the matched items via
+    intake.map_item (offer recalc + re-link cache write happen there, same as
+    the manual picker). Processed in windows so a 1000-card session can't time
+    a single request out — the client walks the windows.
+
+    Pagination note: in apply mode linked items leave the unmapped set, so the
+    client must advance `offset` by the returned `skipped` (not `processed`);
+    in preview mode advance by `processed`. Stop when `processed < limit`.
+    """
+    data = request.json or {}
+    do_apply = bool(data.get("apply"))
+    try:
+        limit = max(1, min(int(data.get("limit") or 150), 500))
+    except (ValueError, TypeError):
+        limit = 150
+    try:
+        offset = max(0, int(data.get("offset") or 0))
+    except (ValueError, TypeError):
+        offset = 0
+
+    total_row = db.query_one(
+        """
+        SELECT COUNT(*) AS n FROM intake_items
+        WHERE session_id = %s AND is_mapped = FALSE
+          AND (is_graded = FALSE OR is_graded IS NULL)
+          AND product_type = 'raw' AND item_status IN ('good', 'damaged')
+        """,
+        (session_id,),
+    )
+    total_unmapped = (total_row or {}).get("n", 0)
+
+    items = db.query(
+        """
+        SELECT * FROM intake_items
+        WHERE session_id = %s AND is_mapped = FALSE
+          AND (is_graded = FALSE OR is_graded IS NULL)
+          AND product_type = 'raw' AND item_status IN ('good', 'damaged')
+        ORDER BY created_at, id
+        LIMIT %s OFFSET %s
+        """,
+        (session_id, limit, offset),
+    )
+
+    sample, linked, matched_n = [], 0, 0
+    for it in items:
+        try:
+            plan = _autolink_match(it)
+        except Exception as e:
+            logger.warning(f"auto-link match failed for {it.get('id')}: {e}")
+            plan = None
+        if not plan:
+            continue
+        matched_n += 1
+        if len(sample) < 25:
+            sample.append({
+                "from": f"{it.get('product_name') or ''}"
+                        f"{(' #' + it['card_number']) if it.get('card_number') else ''}"
+                        f"{(' · ' + it['variance']) if it.get('variance') else ''}"
+                        f" ({it.get('condition') or 'NM'})",
+                "to": f"{plan['new_name'] or ''} · {plan['variant']} · ${plan['price']:.2f}",
+                "tier": plan["tier"],
+            })
+        if do_apply:
+            try:
+                intake.map_item(
+                    str(it["id"]),
+                    tcgplayer_id=plan["tcgplayer_id"],
+                    new_market_price=Decimal(str(plan["price"])),
+                    product_name=plan["new_name"],
+                    set_name=plan["new_set"],
+                    card_number=plan["new_number"],
+                    rarity=plan["new_rarity"],
+                    variance=plan["variant"],
+                    scrydex_id=plan["scrydex_id"],
+                )
+                linked += 1
+            except Exception as e:
+                logger.warning(f"auto-link apply failed for {it.get('id')}: {e}")
+
+    return jsonify({
+        "success": True,
+        "applied": do_apply,
+        "processed": len(items),
+        "limit": limit,
+        "matched": matched_n,
+        "linked": linked,
+        "skipped": len(items) - linked,
+        "total_unmapped": total_unmapped,
+        "sample": sample,
+    })
 
 
 # ==========================================

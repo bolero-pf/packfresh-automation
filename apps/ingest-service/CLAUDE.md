@@ -7,6 +7,25 @@
 - **schema.sql** — DB schema
 - **templates/intake_dashboard.html** — Main dashboard UI (single-page app with tabs)
 
+## Batch auto-link (`/api/intake/session/<id>/auto-link`)
+Clears the unambiguous unmapped **raw** cards in one pass so the operator only
+hand-picks genuine judgment calls. Lives in `blueprints/items_bp.py`
+(`_autolink_match` + the route); UI is `autoLinkSession()` in
+`static/intake_dashboard.js` ("✨ Auto-link obvious" button on the session,
+preview → apply). Conservative like `heal_raw_card_bindings` — links only when
+BOTH resolve to one option:
+- **Identity:** Tier A exact `expansion_name`+number (name-independent, beats
+  Collectr↔Scrydex name drift like "Mew (Delta Species)" vs "Mew δ"); Tier B
+  fuzzy `search_cards` gated by matching card number **and** a shared name token.
+  Abstains if >1 scrydex_id survives.
+- **Variant:** the item's Collectr `variance` (native-matched) or the lone
+  priced printing; abstains when multiple printings exist and variance names
+  none. No number → skip; graded-only printing (no raw price) → skip.
+Commits through `intake.map_item` (same offer recalc + re-link cache write as
+the manual picker). Batched by `limit`/`offset`; **apply mode** removes linked
+rows from the unmapped set, so the client advances `offset` by `skipped`, not
+`processed`.
+
 ## Re-link cache (product_mappings) — keying invariant
 The Collectr→link cache must be keyed on the **Collectr-parsed identity** (what
 the parser emits and a re-import reproduces), NEVER the Scrydex display values

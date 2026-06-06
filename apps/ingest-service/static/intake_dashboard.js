@@ -1707,6 +1707,10 @@ async function viewSession(sessionId, _preserveScroll) {
                 }
                 html += '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">';
                 html += '<a href="/api/intake/session/' + sessionId + '/export-csv" class="btn btn-secondary btn-sm" style="font-size:0.8rem;">📋 Export CSV</a>';
+                const _rawUnmapped = unmappedActive.filter(i => (i.product_type || 'raw') === 'raw').length;
+                if (_rawUnmapped > 0) {
+                    html += '<button class="btn btn-primary btn-sm" style="font-size:0.8rem;" onclick="autoLinkSession(\'' + sessionId + '\')" title="Link every raw card whose Scrydex match is unambiguous — leaves the judgment calls for you">✨ Auto-link obvious (' + _rawUnmapped + ')</button>';
+                }
                 if (s.status === 'in_progress') {
                     if (unmappedActive.length === 0 && activeItems.length > 0) {
                         html += "<button class=\"btn btn-success\" onclick=\"transitionSession('" + sessionId + "', 'offer')\">📤 Lock &amp; Offer (" + activeItems.length + " items)</button>";
@@ -3519,6 +3523,105 @@ async function editCondition(itemId, sessionId, currentCond, tcgplayerId, cardNa
         } catch(e) { /* show tiles without prices */ }
     }
     renderTiles();
+}
+
+// ═══════════════════════════════ AUTO-LINK ═══════════════════════════════
+// Batch-link the unmapped raw cards whose Scrydex match is unambiguous, so the
+// operator only hand-picks the genuine judgment calls (multiple printings, no
+// number, name Scrydex can't pin). Walks server windows so a huge session
+// can't time a single request out.
+
+function _alEsc(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function _closeAutoLink() {
+    const o = document.getElementById('autolink-overlay');
+    if (o) o.remove();
+}
+
+function _autoLinkOverlay() {
+    _closeAutoLink();
+    const o = document.createElement('div');
+    o.id = 'autolink-overlay';
+    o.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px;';
+    o.innerHTML = '<div style="background:var(--surface,#1a1a1a);border:1px solid var(--border);border-radius:12px;max-width:660px;width:100%;padding:20px;box-shadow:0 12px 48px rgba(0,0,0,0.5);">'
+        + '<div style="font-size:1.05rem;font-weight:700;margin-bottom:12px;">✨ Auto-link obvious matches</div>'
+        + '<div id="autolink-body"></div></div>';
+    o.addEventListener('click', (e) => { if (e.target === o) _closeAutoLink(); });
+    document.body.appendChild(o);
+    return o;
+}
+
+async function autoLinkSession(sessionId) {
+    const overlay = _autoLinkOverlay();
+    const body = overlay.querySelector('#autolink-body');
+    body.innerHTML = '<div class="loading"><span class="spinner"></span> Scanning unmapped cards…</div>';
+
+    let offset = 0, matched = 0, processed = 0, total = 0;
+    const sample = [];
+    try {
+        while (true) {
+            const r = await fetch('/api/intake/session/' + sessionId + '/auto-link', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ apply: false, limit: 150, offset }),
+            });
+            const d = await r.json();
+            if (!r.ok) { body.innerHTML = '<div class="alert alert-error">' + (d.error || 'Scan failed') + '</div>'; return; }
+            matched += d.matched; processed += d.processed; total = d.total_unmapped;
+            for (const s of (d.sample || [])) if (sample.length < 25) sample.push(s);
+            body.innerHTML = '<div class="loading"><span class="spinner"></span> Scanning… ' + processed + ' / ' + total + '</div>';
+            if (d.processed < d.limit) break;
+            offset += d.processed;
+        }
+    } catch (e) { body.innerHTML = '<div class="alert alert-error">' + e.message + '</div>'; return; }
+
+    if (matched === 0) {
+        body.innerHTML = '<div class="alert alert-warning">No unambiguous matches among ' + total + ' unmapped card' + (total === 1 ? '' : 's') + '. These need a manual look — multiple printings, no card number, or a name Scrydex can’t pin down.</div>'
+            + '<div style="text-align:right;margin-top:12px;"><button class="btn btn-secondary" onclick="_closeAutoLink()">Close</button></div>';
+        return;
+    }
+
+    const rows = sample.map(s =>
+        '<tr style="border-bottom:1px solid var(--border);">'
+        + '<td style="padding:5px 8px;color:var(--text-dim);">' + _alEsc(s.from) + '</td>'
+        + '<td style="padding:5px 4px;color:var(--text-dim);">→</td>'
+        + '<td style="padding:5px 8px;font-weight:600;">' + _alEsc(s.to) + '</td></tr>'
+    ).join('');
+    body.innerHTML =
+        '<div style="font-size:0.95rem;margin-bottom:6px;"><strong style="color:var(--accent);">' + matched + '</strong> of ' + total + ' unmapped cards can be linked unambiguously.</div>'
+        + '<div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:10px;">The other ' + (total - matched) + ' need manual linking. Auto-linked cards use Scrydex market at each card’s condition and pick the printing from the imported variance — you can relink any of them afterward.</div>'
+        + '<div style="max-height:300px;overflow:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:10px;"><table style="width:100%;font-size:0.78rem;border-collapse:collapse;">' + rows + '</table></div>'
+        + (sample.length < matched ? '<div style="font-size:0.72rem;color:var(--text-dim);margin-bottom:10px;">…and ' + (matched - sample.length) + ' more.</div>' : '')
+        + '<div style="display:flex;gap:8px;justify-content:flex-end;"><button class="btn btn-secondary" onclick="_closeAutoLink()">Cancel</button>'
+        + '<button class="btn btn-primary" id="autolink-apply">✨ Link ' + matched + ' cards</button></div>';
+
+    document.getElementById('autolink-apply').addEventListener('click', () => _autoLinkApply(sessionId, matched));
+}
+
+async function _autoLinkApply(sessionId, expected) {
+    const body = document.querySelector('#autolink-body');
+    body.innerHTML = '<div class="loading"><span class="spinner"></span> Linking… 0 / ' + expected + '</div>';
+    let offset = 0, linked = 0, guard = 0;
+    try {
+        while (guard++ < 500) {
+            const r = await fetch('/api/intake/session/' + sessionId + '/auto-link', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ apply: true, limit: 150, offset }),
+            });
+            const d = await r.json();
+            if (!r.ok) { body.innerHTML = '<div class="alert alert-error">' + (d.error || 'Link failed') + '</div>'; return; }
+            linked += d.linked;
+            body.innerHTML = '<div class="loading"><span class="spinner"></span> Linking… ' + linked + ' / ' + expected + '</div>';
+            // Linked rows leave the unmapped set, so only step past the skipped
+            // (still-unmapped) items — otherwise we'd jump over fresh ones.
+            offset += d.skipped;
+            if (d.processed < d.limit) break;
+        }
+    } catch (e) { body.innerHTML = '<div class="alert alert-error">' + e.message + '</div>'; return; }
+    _closeAutoLink();
+    if (typeof toast === 'function') toast('✓ Auto-linked ' + linked + ' card' + (linked === 1 ? '' : 's'), 'ok');
+    viewSession(sessionId, true);
 }
 
 async function relinkItem(itemId, sessionId) {
