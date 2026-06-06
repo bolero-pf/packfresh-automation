@@ -93,21 +93,23 @@ cur.execute("""
 print("  [OK] FG-2 seeded (capacity 100, card_type='other' = every non-Pokemon TCG)")
 
 
-# ── 4. Binders typed + capacity 360 ─────────────────────────────────────────
-# Real binders hold 360 slots, not 480 — the old number was over-optimistic.
+# ── 4. Binders typed + capacity 340 ─────────────────────────────────────────
+# Binders are capped at 340 (below the ~360 physical max) on purpose: cards drift
+# as people reshelve them by hand, so leaving slack stops the router from trying
+# to return cards into binders that are effectively full.
 # Each binder gets a card_type that the suggest endpoint will filter on.
-print("\n[4/6] Binder typing + capacity 360...")
+print("\n[4/6] Binder typing + capacity 340...")
 binder_types = {'Binder-1': 'pokemon', 'Binder-2': 'pokemon', 'Binder-3': 'magic'}
 for bin_label, ctype in binder_types.items():
     cur.execute("""
-        UPDATE storage_locations SET capacity = 360, card_type = %s
+        UPDATE storage_locations SET capacity = 340, card_type = %s
         WHERE bin_label = %s
     """, (ctype, bin_label))
     cur.execute("""
         UPDATE storage_rows SET card_type = %s
         WHERE row_label = %s
     """, (ctype, bin_label))
-    print(f"  [OK] {bin_label} -> card_type={ctype}, capacity=360")
+    print(f"  [OK] {bin_label} -> card_type={ctype}, capacity=340")
 
 
 # ── 5. Move magic cards out of pokemon binders -> Binder-3 ───────────────────

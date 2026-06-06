@@ -2259,6 +2259,21 @@ const _cardTypeLabel = {
   mixed:    'Mixed (everything)',
 };
 
+// Collapsible storage sections (binders / display cases). Default collapsed so
+// operators can find the right binder/case without scrolling past every card.
+// Expansion state is keyed by location id and survives re-renders (e.g. after
+// a fill or return) so an open section stays open.
+const _expandedStorage = new Set();
+function toggleStorageSection(key) {
+  const body = document.getElementById('storage-body-' + key);
+  const chev = document.getElementById('storage-chev-' + key);
+  if (!body) return;
+  const willExpand = body.style.display === 'none';
+  body.style.display = willExpand ? 'block' : 'none';
+  if (chev) chev.textContent = willExpand ? '▾' : '▸';
+  if (willExpand) _expandedStorage.add(key); else _expandedStorage.delete(key);
+}
+
 function renderDisplay(cases) {
   const el = document.getElementById('display-content');
   const addBtn = `<div style="margin-bottom:16px;display:flex;justify-content:flex-end;">
@@ -2301,7 +2316,10 @@ function renderDisplay(cases) {
     return `
       <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px;">
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-          <div style="font-size:1.15rem;font-weight:700;">${esc(c.bin_label)}</div>
+          <button class="btn btn-sm" onclick="toggleStorageSection('${esc(c.id)}')" title="Expand / collapse" style="min-width:34px;">
+            <span id="storage-chev-${esc(c.id)}">${_expandedStorage.has(c.id)?'▾':'▸'}</span>
+          </button>
+          <div style="font-size:1.15rem;font-weight:700;cursor:pointer;" onclick="toggleStorageSection('${esc(c.id)}')">${esc(c.bin_label)}</div>
           <span class="badge" style="background:rgba(232,197,71,0.18);color:var(--accent);font-size:0.7rem;padding:2px 8px;border-radius:6px;">
             ${esc(_cardTypeLabel[c.card_type]||c.card_type||'unset')}
           </span>
@@ -2319,7 +2337,7 @@ function renderDisplay(cases) {
           <button class="btn btn-sm" onclick="openReturnAll('${esc(c.id)}')" ${c.current_count===0?'disabled':''}>↩ Return cards</button>
           <button class="btn btn-sm" style="background:none;border:1px solid var(--border);color:var(--red);" onclick="deleteCase('${esc(c.id)}','${esc(c.bin_label)}')" ${canDelete?'':'disabled title="Return all cards before deleting"'}>✕ Delete</button>
         </div>
-        ${cardsHtml}
+        <div id="storage-body-${esc(c.id)}" style="display:${_expandedStorage.has(c.id)?'block':'none'};">${cardsHtml}</div>
       </div>
     `;
   }).join('');
@@ -2745,14 +2763,17 @@ function renderBinders(binders) {
     return `
       <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px;">
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-          <div style="font-size:1.15rem;font-weight:700;">${esc(b.bin_label)}</div>
+          <button class="btn btn-sm" onclick="toggleStorageSection('${esc(b.id)}')" title="Expand / collapse" style="min-width:34px;">
+            <span id="storage-chev-${esc(b.id)}">${_expandedStorage.has(b.id)?'▾':'▸'}</span>
+          </button>
+          <div style="font-size:1.15rem;font-weight:700;cursor:pointer;" onclick="toggleStorageSection('${esc(b.id)}')">${esc(b.bin_label)}</div>
           <div style="font-family:var(--mono);font-size:0.9rem;color:var(--dim);">${b.current_count} / ${b.capacity} cards</div>
           <div style="flex:1;min-width:120px;height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;">
             <div style="height:100%;background:${pct>=100?'var(--red)':pct>=80?'var(--accent)':'var(--green)'};width:${Math.min(100,pct)}%;"></div>
           </div>
           <button class="btn btn-sm btn-green" onclick="openBinderFill('${esc(b.id)}', ${b.available})" ${b.available===0?'disabled title="Binder full"':''}>+ Fill</button>
         </div>
-        ${cardsHtml}
+        <div id="storage-body-${esc(b.id)}" style="display:${_expandedStorage.has(b.id)?'block':'none'};">${cardsHtml}</div>
       </div>
     `;
   }).join('');
