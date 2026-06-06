@@ -44,7 +44,10 @@ bug that stranded every relinked raw card on re-import.
   name+number, diff set) and chips (same set+number, diff name — Master Ball vs
   Poké Ball) trip the guard and stay manual. Sealed = name+type only. Do NOT
   add name-stripping normalization — the suffix tracks a real printing and the
-  NUMBER already distinguishes regular vs Full Art.
+  NUMBER already distinguishes regular vs Full Art. T2/T3 are **language-aware**
+  (`_filter_same_language`): they never cross English↔Japanese — "SV: 151" (EN,
+  `sv3pt5-*`) and "Pokémon Card 151" (JP, `sv2a_ja-*`) share name+number but are
+  different cards. See [[project_relink_cache_language_blind]].
 - `get_cached_mapping()` is a back-compat shim returning just tcgplayer_id.
 - `product_mappings.scrydex_id` lets JP / Scrydex-only links round-trip.
 - `migrate_mapping_scrydex_heal.py` backfills the cache from intake_items history

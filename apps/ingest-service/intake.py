@@ -61,6 +61,31 @@ def _single_card(rows) -> Optional[dict]:
     return None
 
 
+def _is_japanese_text(s: str) -> bool:
+    """True if a Collectr name/set reads as Japanese — an explicit (JP)/(Japanese)
+    marker or any non-ASCII (kana/kanji) character."""
+    s = s or ""
+    low = s.lower()
+    if "(jp)" in low or "(japanese)" in low or "japanese" in low:
+        return True
+    return any(ord(ch) > 127 for ch in s)
+
+
+def _sid_is_japanese(scrydex_id: Optional[str]) -> bool:
+    """True if a scrydex_id is a Japanese printing (ids look like 'sv2a_ja-197')."""
+    s = scrydex_id or ""
+    return "_ja-" in s or s.endswith("_ja")
+
+
+def _filter_same_language(cands, item_is_jp: bool):
+    """Drop candidates whose language disagrees with the item. The set-insensitive
+    tiers below match on name+number and would otherwise cross English↔Japanese —
+    'SV: 151' (EN, sv3pt5-*) and 'Pokémon Card 151' (JP, sv2a_ja-*) share names and
+    numbers but are distinct cards with distinct prices. Tier 1 (exact set) is
+    language-safe already. A tcg-only / scrydex-less row counts as English."""
+    return [c for c in cands if _sid_is_japanese(c.get("scrydex_id")) == item_is_jp]
+
+
 def _bump_use(collectr_name: str, product_type: str, sn: str, cn: str, vr: str):
     execute("""
         UPDATE product_mappings
@@ -83,11 +108,13 @@ def get_cached_link(collectr_name: str, product_type: str,
          parser output (see map_item), so re-importing the same file round-trips
          100% — every card you just linked comes back linked.
       2. Set-insensitive fallback on name + number + variance, for cards whose
-         Collectr set *spelling* drifted between exports ('SV: 151' vs
-         'Pokémon Card 151', 'Crown Zenith: Galarian Gallery' vs no colon). It
-         resolves only when every candidate points at a single card; if the same
-         name+number maps to two different cards (~1% — true same-number
-         reprints), it abstains so the operator picks. Set still decides there.
+         Collectr set *spelling* drifted between exports within one language
+         ('Crown Zenith: Galarian Gallery' vs no colon, 'SWSH09: Brilliant Stars'
+         vs 'Brilliant Stars'). It resolves only when every candidate points at a
+         single card; if the same name+number maps to two different cards (~1% —
+         true same-number reprints), it abstains so the operator picks. It is
+         language-aware: it never crosses English↔Japanese ('SV: 151' EN vs
+         'Pokémon Card 151' JP are different cards), via _filter_same_language.
 
     Sealed matches on name+type only (sealed lacks set/number identity)."""
     sn = set_name or ""
@@ -111,18 +138,22 @@ def get_cached_link(collectr_name: str, product_type: str,
         # a card number to anchor on (without one, name/set alone is too loose).
         nnum = _norm_num(cn)
         nvar = _norm_var(vr)
+        # Language of the item being matched, so the set-insensitive tiers below
+        # never cross English↔Japanese (the bug that mapped EN 'SV: 151' cards
+        # onto JP 'Pokémon Card 151' scrydex_ids).
+        item_jp = _is_japanese_text(collectr_name) or _is_japanese_text(sn)
         if nnum:
-            # Tier 2 — set-insensitive (Collectr renames the same SET across
-            # exports: 'SV: 151' vs 'Pokémon Card 151'). Anchored on name +
-            # number + variance; abstains if name+number is two different cards
-            # across sets (same-number reprints).
+            # Tier 2 — set-insensitive, but NOT language-insensitive (Collectr
+            # renames the same SET across exports — colon/spacing drift — within
+            # one language). Anchored on name + number + variance; abstains if
+            # name+number is two different cards (same-number reprints).
             cands = query("""
                 SELECT DISTINCT tcgplayer_id, scrydex_id FROM product_mappings
                 WHERE collectr_name = %s AND product_type = 'raw'
                   AND upper(replace(COALESCE(card_number, ''), ' ', '')) = %s
                   AND lower(COALESCE(NULLIF(variance, ''), 'normal')) = %s
             """, (collectr_name, nnum, nvar))
-            chosen = _single_card(cands)
+            chosen = _single_card(_filter_same_language(cands, item_jp))
             if chosen:
                 return chosen
 
@@ -140,7 +171,7 @@ def get_cached_link(collectr_name: str, product_type: str,
                       AND upper(replace(COALESCE(card_number, ''), ' ', '')) = %s
                       AND lower(COALESCE(NULLIF(variance, ''), 'normal')) = %s
                 """, (sn, nnum, nvar))
-                chosen = _single_card(cands)
+                chosen = _single_card(_filter_same_language(cands, item_jp))
                 if chosen:
                     return chosen
         return None
