@@ -245,6 +245,13 @@ def _autolink_match(item):
     sid = None
     tier = None
 
+    # English-only: both tiers require COALESCE(language_code,'EN')='EN'. Collectr
+    # imports even Japanese cards as language 'EN', so we can't trust the item's
+    # language — but linking an English card to a JP printing (when only the JP
+    # one is cached) is wrong, and JP cards need the (JP)-suffix handling that
+    # only the manual picker applies. So auto-link sticks to English printings
+    # and leaves Japanese cards for manual.
+
     # Tier A — exact expansion name + number. Name-independent, so it catches
     # the Collectr-vs-Scrydex name drift ("Mew (Delta Species)" vs "Mew δ")
     # that makes the manual picker so tedious. Drives off the partial index
@@ -259,6 +266,7 @@ def _autolink_match(item):
             SELECT DISTINCT scrydex_id
             FROM scrydex_price_cache
             WHERE product_type='card' AND price_type='raw' AND market_price IS NOT NULL
+              AND COALESCE(language_code, 'EN') = 'EN'
               AND lower(expansion_name) = lower(%s)
               AND (card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[]))
             """,
@@ -277,6 +285,7 @@ def _autolink_match(item):
         tokens = sorted(_autolink_name_tokens(item.get("product_name")), key=len, reverse=True)[:3]
         if tokens:
             where = ["product_type='card'", "price_type='raw'", "market_price IS NOT NULL",
+                     "COALESCE(language_code, 'EN') = 'EN'",
                      "game = %s",
                      "(card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[]))"]
             params = [game, num_forms, num_forms]
