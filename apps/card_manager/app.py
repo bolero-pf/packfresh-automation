@@ -3849,7 +3849,10 @@ def audit_locations():
         WHERE COALESCE(sr.location_type, 'bin') IN ('bin', 'binder')
           AND COALESCE(sr.active, TRUE) = TRUE
         GROUP BY sl.id, sl.bin_label, sr.location_type
-        ORDER BY sr.location_type DESC, sl.bin_label
+        ORDER BY sr.location_type DESC,
+                 regexp_replace(sl.bin_label, '\d+$', '') ASC,
+                 (substring(sl.bin_label from '\d+$'))::int ASC NULLS FIRST,
+                 sl.bin_label ASC
     """)
     return jsonify({"locations": [_ser(dict(r)) for r in rows]})
 
