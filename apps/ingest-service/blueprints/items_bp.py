@@ -247,50 +247,49 @@ def _autolink_match(item):
 
     # Tier A — exact expansion name + number. Name-independent, so it catches
     # the Collectr-vs-Scrydex name drift ("Mew (Delta Species)" vs "Mew δ")
-    # that makes the manual picker so tedious.
+    # that makes the manual picker so tedious. Drives off the partial index
+    # idx_spc_lower_expansion_name — do NOT add `OR lower(expansion_name_en)`
+    # here: that column is unindexed and the OR forces a seq scan of the whole
+    # 1M-row cache per item (the bug that timed the worker out). The number OR
+    # is fine: it filters the few hundred rows the expansion index already
+    # narrowed to.
     if set_name:
         rows = db.query(
             """
             SELECT DISTINCT scrydex_id
             FROM scrydex_price_cache
             WHERE product_type='card' AND price_type='raw' AND market_price IS NOT NULL
-              AND game = %s
-              AND (LOWER(expansion_name) = LOWER(%s) OR LOWER(expansion_name_en) = LOWER(%s))
+              AND lower(expansion_name) = lower(%s)
               AND (card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[]))
             """,
-            (game, set_name, set_name, num_forms, num_forms),
+            (set_name, num_forms, num_forms),
         )
         if len(rows) == 1:
             sid, tier = rows[0]["scrydex_id"], "set+number"
 
-    # Tier B — fuzzy search constrained to the same number + a shared name
-    # token. Catches sets whose Collectr name differs from Scrydex's
-    # ("SV: 151" vs "Scarlet & Violet 151") while still abstaining if the
-    # number-matched results point at more than one card.
-    if not sid and pricing:
-        try:
-            results = pricing.search_cards(
-                ((item.get("product_name") or "") + " " + num_forms[0]).strip(),
-                set_name=set_name or None, limit=8,
-                all_games=True, cache_only=True,
-            ) or []
-        except Exception:
-            results = []
-        item_tokens = _autolink_name_tokens(item.get("product_name"))
-        keep = []
-        for r in results:
-            rnum = _autolink_cardnum_forms(r.get("cardNumber") or r.get("printedNumber"))
-            if not (set(rnum) & set(num_forms)):
-                continue
-            rtokens = _autolink_name_tokens(r.get("nameEn")) | _autolink_name_tokens(r.get("name"))
-            if item_tokens and not (item_tokens & rtokens):
-                continue
-            rsid = r.get("scrydexId") or r.get("scrydex_id")
-            if rsid:
-                keep.append(rsid)
-        keep = list(dict.fromkeys(keep))
-        if len(keep) == 1:
-            sid, tier = keep[0], "fuzzy+number"
+    # Tier B — same number + every significant name token, game-scoped. Catches
+    # sets whose Collectr name differs from Scrydex's ("Sword & Shield Promo" →
+    # "SWSH Black Star Promos") while still abstaining if the number+name match
+    # points at more than one card. Direct indexed query (product_name trigram +
+    # number) instead of the heavy scored search_cards — same exactly-one
+    # confidence, a fraction of the cost.
+    if not sid:
+        tokens = sorted(_autolink_name_tokens(item.get("product_name")), key=len, reverse=True)[:3]
+        if tokens:
+            where = ["product_type='card'", "price_type='raw'", "market_price IS NOT NULL",
+                     "game = %s",
+                     "(card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[]))"]
+            params = [game, num_forms, num_forms]
+            for t in tokens:
+                where.append("(product_name ILIKE %s OR product_name_en ILIKE %s)")
+                params.extend([f"%{t}%", f"%{t}%"])
+            rows = db.query(
+                "SELECT DISTINCT scrydex_id FROM scrydex_price_cache WHERE "
+                + " AND ".join(where) + " LIMIT 5",
+                tuple(params),
+            )
+            if len(rows) == 1:
+                sid, tier = rows[0]["scrydex_id"], "name+number"
 
     if not sid:
         return None

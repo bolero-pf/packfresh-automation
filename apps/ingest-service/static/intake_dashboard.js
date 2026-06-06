@@ -3578,7 +3578,7 @@ async function autoLinkSession(sessionId) {
         while (true) {
             const r = await fetch('/api/intake/session/' + sessionId + '/auto-link', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ apply: false, limit: 150, offset }),
+                body: JSON.stringify({ apply: false, limit: 100, offset }),
             });
             const d = await r.json();
             if (!r.ok) { body.innerHTML = '<div class="alert alert-error">' + (d.error || 'Scan failed') + '</div>'; return; }
@@ -3621,7 +3621,7 @@ async function _autoLinkApply(sessionId, expected) {
         while (guard++ < 500) {
             const r = await fetch('/api/intake/session/' + sessionId + '/auto-link', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ apply: true, limit: 150, offset }),
+                body: JSON.stringify({ apply: true, limit: 100, offset }),
             });
             const d = await r.json();
             if (!r.ok) { body.innerHTML = '<div class="alert alert-error">' + (d.error || 'Link failed') + '</div>'; return; }
