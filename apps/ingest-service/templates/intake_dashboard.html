@@ -604,7 +604,7 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='intake_dashboard.js') }}"></script>
+    <script src="{{ url_for('static', filename='intake_dashboard.js') }}?v={{ asset_v('intake_dashboard.js') }}"></script>
     <script src="/api/breakdown-cache/bd-static/breakdown_inline.js"></script>
     <script src="/api/breakdown-cache/bd-static/breakdown_modal.js"></script>
 </body>

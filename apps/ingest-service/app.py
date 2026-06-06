@@ -26,6 +26,20 @@ from cache_manager import CacheManager
 app = Flask(__name__)
 CORS(app)
 
+
+# Cache-bust static assets by file mtime so a deploy that changes
+# intake_dashboard.js actually reaches the browser — without this the
+# URL is stable and Flask's static caching can serve stale JS for hours
+# (which silently hid newly-shipped UI like the auto-link button).
+@app.context_processor
+def _inject_asset_version():
+    def asset_v(filename):
+        try:
+            return int(os.path.getmtime(os.path.join(app.static_folder, filename)))
+        except OSError:
+            return 0
+    return {"asset_v": asset_v}
+
 # Flask 3 serializes Decimal to a string ("518.83"), which breaks every
 # frontend `.toFixed()` call on a price. Coerce Decimal → float once.
 from flask.json.provider import DefaultJSONProvider as _DefaultJSONProvider

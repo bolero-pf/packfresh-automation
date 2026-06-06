@@ -341,7 +341,7 @@
     <div id="relink-modal" class="modal-overlay"><div class="modal"><div id="relink-body"></div></div></div>
     <div id="identify-slab-modal" class="modal-overlay"><div class="modal"></div></div>
 
-    <script src="{{ url_for('static', filename='intake_dashboard.js') }}"></script>
+    <script src="{{ url_for('static', filename='intake_dashboard.js') }}?v={{ asset_v('intake_dashboard.js') }}"></script>
     <script>
     // ═══════════════════════════════ QUICK OFFER PAGE LOGIC ═══════════════════════════════
 
