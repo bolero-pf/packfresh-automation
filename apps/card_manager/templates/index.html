@@ -462,6 +462,10 @@ body.standalone .standalone-bar { display: flex; }
     <div class="nav-item" onclick="showView('featured')" id="nav-featured">
       ★ Featured Cards
     </div>
+    <!-- Owner-only: revealed by JS when window._pfUser.role === 'owner'. -->
+    <div class="nav-item" onclick="showView('gametags')" id="nav-gametags" style="display:none">
+      🧭 Game Tags
+    </div>
     <div class="scanner-status">
       <span class="scanner-dot" id="scanner-dot"></span>
       <span id="scanner-label">Scanner ready</span>
@@ -537,6 +541,20 @@ body.standalone .standalone-bar { display: flex; }
         </div>
       </div>
       <div id="audit-content">
+        <div class="empty"><div class="spinner"></div></div>
+      </div>
+    </div>
+
+    <!-- Game Tags (owner-only detector) -->
+    <div class="view" id="view-gametags">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div>
+          <div class="page-title">Game Tags</div>
+          <div class="page-sub">Cards whose stored game disagrees with what their set resolves to in Scrydex — the routing landmines. One-click fix corrects the tag (and re-routes to the Return Queue if it's sitting in the wrong kind of bin).</div>
+        </div>
+        <button class="btn btn-sm" onclick="loadGameTags()" title="Re-scan" style="background:none;border:1px solid var(--border);color:var(--dim);font-size:0.78rem;padding:6px 12px;">↻ Re-scan</button>
+      </div>
+      <div id="gametags-content">
         <div class="empty"><div class="spinner"></div></div>
       </div>
     </div>
@@ -673,6 +691,7 @@ function showView(name) {
   if (name === 'binders')   loadBinders();
   if (name === 'sell')      { renderSell(); refreshActiveListings(); }
   if (name === 'featured')  loadFeatured();
+  if (name === 'gametags')  loadGameTags();
 }
 
 // ── Hold Queue ────────────────────────────────────────────────────────────────
@@ -1297,6 +1316,66 @@ function renderReturns(cards, recentBatches) {
   `;
 }
 
+// ── Game Tags (owner-only detector) ─────────────────────────────────────────────
+async function loadGameTags() {
+  const el = document.getElementById('gametags-content');
+  el.innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+  try {
+    const d = await get('/api/audit/game-tags');
+    const rows = d.mismatches || [];
+    if (!rows.length) {
+      el.innerHTML = `<div class="empty"><div class="empty-icon">✅</div>
+        <p>No game-tag conflicts — ${d.scanned} on-shelf cards checked.</p></div>`;
+      return;
+    }
+    el.innerHTML = `
+      <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px;">
+        ${rows.length} conflict${rows.length === 1 ? '' : 's'} · ${d.scanned} cards checked
+      </div>
+      ${rows.map(c => {
+        // A card stored in a wrong-game bin gets routed to the Return Queue on
+        // fix; one already in the right kind of location is just a tag fix.
+        const willReroute = (c.state === 'STORED' && !c.location_ok);
+        const locNote = c.location_ok
+          ? `in ${esc(c.bin_label || '—')} <span style="color:var(--green);">(location ok — tag only)</span>`
+          : `in ${esc(c.bin_label || 'no bin')}${willReroute ? ' <span style="color:var(--amber);">→ will move to Return Queue</span>' : ''}`;
+        return `
+        <div class="return-card" id="gt-${esc(c.id)}">
+          <div style="flex:1;">
+            <div style="font-weight:600;">${esc(c.card_name)}</div>
+            <div style="font-size:0.75rem;color:var(--dim);">
+              ${esc(c.set_name || 'no set')} · ${c.link} · ${esc(c.state)} · ${locNote}
+            </div>
+            <div style="font-size:0.78rem;margin-top:3px;">
+              <span style="color:var(--red);text-decoration:line-through;">${esc(c.stored_game)}</span>
+              <span style="color:var(--dim);"> → </span>
+              <span style="color:var(--green);font-weight:700;">${esc(c.inferred_game)}</span>
+            </div>
+          </div>
+          <div class="return-barcode">${esc(c.barcode)}</div>
+          <button class="btn btn-sm btn-green" style="font-size:0.72rem;padding:5px 12px;"
+                  onclick="fixGameTag('${esc(c.id)}', '${esc(c.inferred_game)}')">
+            Fix → ${esc(c.inferred_game)}
+          </button>
+        </div>`;
+      }).join('')}
+    `;
+  } catch(e) {
+    el.innerHTML = `<div class="empty"><p style="color:var(--red)">${esc(e.message)}</p></div>`;
+  }
+}
+
+async function fixGameTag(cardId, inferredGame) {
+  try {
+    const d = await post(`/api/audit/game-tags/${cardId}/fix`, {});
+    toast(`✓ ${d.card_name} → ${d.game}${d.rerouted ? ' (sent to Return Queue to re-bin)' : ''}`, 'green');
+    loadGameTags();
+    refreshBadges();
+  } catch(e) {
+    toast(`✕ ${e.message}`, 'red');
+  }
+}
+
 function _fmtTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -1805,6 +1884,12 @@ let _relinkSearchTimer = null;
 let _relinkTargetCopyId = null;
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Owner-only nav: the Game Tags detector. Hidden for everyone else; the
+  // endpoints are owner-gated server-side too, so this is just discoverability.
+  if ((window._pfUser && window._pfUser.role || '').toLowerCase() === 'owner') {
+    const gt = document.getElementById('nav-gametags');
+    if (gt) gt.style.display = '';
+  }
   const qInput = document.getElementById('editor-q');
   if (qInput) {
     qInput.addEventListener('input', e => {

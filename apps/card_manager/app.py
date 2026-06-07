@@ -18,7 +18,8 @@ from flask import Flask, render_template, request, jsonify, g
 
 import db
 from storage import (assign_bins, assign_display_case, get_display_case_capacity,
-                     get_binder_capacity, infer_card_type_from_set)
+                     get_binder_capacity, infer_card_type_from_set,
+                     _canonical_card_type)
 from barcode_gen import generate_barcode_image, generate_barcode_id
 from price_rounding import charm_ceil_raw
 from decimal import Decimal
@@ -4115,6 +4116,131 @@ def audit_mark_missing():
         WHERE id::text = ANY(%s) AND state IN ('STORED', 'DISPLAY')
     """, (card_ids,))
     return jsonify({"success": True, "marked": n or 0})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Game-tag audit (owner-only) — the detector that replaces a per-card game toggle
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Cards carry a `game` field that drives bin routing. The intake hole that let a
+# Magic "Final Fantasy" single get tagged 'pokemon' is closed going forward
+# (explicit game required at manual entry + set-name routing backstop), but a
+# card whose set isn't in the Scrydex cache can still drift in. Rather than put a
+# free-form game toggle on every card (a new mislabel vector that every operator
+# can fumble), this is a read-only detector: it cross-checks each on-shelf card's
+# stored game against what its set name resolves to, and lets an owner one-click
+# correct only the genuine conflicts.
+
+def _require_owner():
+    """Returns None if the caller is an owner, else a (json, status) 403 tuple."""
+    user = getattr(g, "user", None) or {}
+    if (user.get("role") or "").lower() != "owner":
+        return jsonify({"error": "Owner only."}), 403
+    return None
+
+
+def _load_set_game_map():
+    """expansion_name(lower) -> canonical card_type, for expansions that resolve
+    to exactly one game in the cache. One query; mirrors infer_card_type_from_set
+    but bulk so the audit doesn't fire a query per card."""
+    rows = db.query("""
+        SELECT lower(trim(expansion_name)) AS exp, array_agg(DISTINCT game) AS games
+        FROM scrydex_price_cache
+        WHERE expansion_name IS NOT NULL AND game IS NOT NULL
+        GROUP BY lower(trim(expansion_name))
+    """)
+    out = {}
+    for r in rows:
+        games = [g for g in (r["games"] or []) if g]
+        if len(games) == 1:
+            out[r["exp"]] = _canonical_card_type(games[0])
+    return out
+
+
+@app.route("/api/audit/game-tags")
+def audit_game_tags():
+    """Owner-only. Every on-shelf card whose stored game disagrees with the game
+    its set name resolves to in the Scrydex cache. These are the routing
+    landmines — a card tagged for the wrong game lands in the wrong bin."""
+    deny = _require_owner()
+    if deny:
+        return deny
+
+    set_game = _load_set_game_map()
+    cards = db.query("""
+        SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.game,
+               rc.scrydex_id, rc.tcgplayer_id, rc.state,
+               sl.bin_label, sl.card_type AS bin_type
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.state IN ('STORED','DISPLAY','PENDING_RETURN','PULLED','MISSING')
+    """)
+
+    mismatches = []
+    for rc in cards:
+        stored = _canonical_card_type(rc["game"] or "pokemon")
+        inferred = set_game.get((rc["set_name"] or "").strip().lower())
+        if inferred and inferred != stored:
+            row = _ser(dict(rc))
+            row["stored_game"] = stored
+            row["inferred_game"] = inferred
+            # tag-only fix when the card already sits in a location matching the
+            # real game; otherwise correcting it also has to re-route the card.
+            row["location_ok"] = (rc.get("bin_type") == inferred)
+            row["link"] = "manual" if not rc["scrydex_id"] else "linked"
+            mismatches.append(row)
+
+    mismatches.sort(key=lambda r: (r["stored_game"], r["inferred_game"], r.get("set_name") or ""))
+    return jsonify({"mismatches": mismatches, "scanned": len(cards)})
+
+
+@app.route("/api/audit/game-tags/<copy_id>/fix", methods=["POST"])
+def audit_game_tags_fix(copy_id):
+    """Owner-only. Correct one card's game to what its set name resolves to.
+    If the card is STORED in a bin that doesn't match the real game, also route
+    it to the Return Queue so the next store pass re-bins it correctly (mirrors
+    how a mis-binned card is handled). Cards already in the right kind of
+    location get a tag-only fix."""
+    deny = _require_owner()
+    if deny:
+        return deny
+
+    card = db.query_one("""
+        SELECT rc.id, rc.card_name, rc.set_name, rc.game, rc.state,
+               sl.card_type AS bin_type
+        FROM raw_cards rc
+        LEFT JOIN storage_locations sl ON rc.bin_id = sl.id
+        WHERE rc.id::text = %s
+    """, (copy_id,))
+    if not card:
+        return jsonify({"error": "Card not found"}), 404
+
+    inferred = infer_card_type_from_set(card.get("set_name"), db)
+    if not inferred:
+        return jsonify({"error": "Set name no longer resolves to a single game — fix manually."}), 409
+
+    # Re-route only when the card is physically stored in a bin of the wrong
+    # game; display/binder cards and correctly-located storage just get the tag.
+    needs_reroute = card["state"] == "STORED" and card.get("bin_type") not in (None, inferred)
+    if needs_reroute:
+        db.execute("""
+            UPDATE raw_cards
+            SET game = %s, state = 'PENDING_RETURN', updated_at = CURRENT_TIMESTAMP
+            WHERE id::text = %s
+        """, (inferred, copy_id))
+    else:
+        db.execute("""
+            UPDATE raw_cards
+            SET game = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id::text = %s
+        """, (inferred, copy_id))
+
+    return jsonify({
+        "success": True,
+        "game": inferred,
+        "rerouted": needs_reroute,
+        "card_name": card["card_name"],
+    })
 
 
 if __name__ == "__main__":
