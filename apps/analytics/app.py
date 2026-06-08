@@ -452,6 +452,25 @@ _BD_JOIN = ("LEFT JOIN (SELECT tcgplayer_id, MAX(best_variant_market) AS bd "
 _INTAKE_COST = ("(SELECT tcgplayer_id, AVG(unit_cost_basis) AS ic "
                 "FROM intake_items WHERE unit_cost_basis > 0 GROUP BY 1)")
 
+# Component velocity per parent: do the singles/packs this breaks into actually
+# move? Picks the best variant (highest component market) per parent, then sums
+# its components' 90d sales — catalog packs via sku_analytics, singles via sold
+# raw_cards — weighted by quantity_per_parent. Both keyed on component tcgplayer_id.
+_PARTS_VEL = (
+    "(SELECT bv.ptcg AS tcgplayer_id, "
+    "        SUM(comp.quantity_per_parent*(COALESCE(sa.u,0)+COALESCE(rc.s,0))) AS parts_90d "
+    " FROM (SELECT DISTINCT ON (ca.tcgplayer_id) ca.tcgplayer_id AS ptcg, v.id AS vid "
+    "         FROM sealed_breakdown_cache ca JOIN sealed_breakdown_variants v ON v.breakdown_id = ca.id "
+    "         ORDER BY ca.tcgplayer_id, v.total_component_market DESC NULLS LAST) bv "
+    " JOIN sealed_breakdown_components comp ON comp.variant_id = bv.vid "
+    " LEFT JOIN (SELECT tcgplayer_id, SUM(units_sold_90d) u FROM sku_analytics GROUP BY 1) sa "
+    "        ON sa.tcgplayer_id = comp.tcgplayer_id "
+    " LEFT JOIN (SELECT tcgplayer_id, count(*) s FROM raw_cards "
+    "            WHERE state='SOLD' AND removal_date >= CURRENT_DATE-90 GROUP BY 1) rc "
+    "        ON rc.tcgplayer_id = comp.tcgplayer_id "
+    " GROUP BY 1)"
+)
+
 _DEAD_SELECT = f"""
     SELECT c.title, c.sku, c.tcgplayer_id, t.product_type, t.ip, t.form_factor,
            t.era, t.set_name,
@@ -462,12 +481,14 @@ _DEAD_SELECT = f"""
            s.total_sold_all_time,
            (c.shopify_qty * COALESCE(c.shopify_price,0)) AS tied_value,
            (CURRENT_DATE - iv.first_seen) AS age_days,
-           b.bd AS breakdown_val
+           b.bd AS breakdown_val,
+           pv.parts_90d AS parts_90d
     FROM inventory_product_cache c
     JOIN product_taxonomy t USING (shopify_variant_id)
     LEFT JOIN sku_analytics s USING (shopify_variant_id)
     LEFT JOIN inv iv USING (shopify_variant_id)
     LEFT JOIN ic ON ic.tcgplayer_id = c.tcgplayer_id
+    LEFT JOIN pv ON pv.tcgplayer_id = c.tcgplayer_id
     {_BD_JOIN}
 """
 
@@ -494,16 +515,18 @@ def _dead_action(r):
     cost = float(r.get("cost") or 0) or None
     bd = r.get("breakdown_val")
     bd = float(bd) if bd not in (None, "") else None
+    parts = r.get("parts_90d")
+    pnote = f" · parts ~{int(parts)}/90d" if parts else ""
     if ptype == "sealed" and bd is not None:
         if cost:
             if bd >= cost:
-                return f"Break down — free +${round(bd - cost)}/unit over cost"
+                return f"Break down (+${round(bd - cost)}/unit over cost){pnote}"
             if bd >= cost * 0.8:
-                return f"Break to free cash (~-${round(cost - bd)}/unit vs cost)"
+                return f"Break to free cash (~-${round(cost - bd)}/unit){pnote}"
             return "Markdown / hold"
         # No cost basis recorded — fall back to parts-vs-sealed.
         if bd >= price:
-            return "Break down (parts ≥ sealed)"
+            return f"Break down (parts ≥ sealed){pnote}"
         return "Markdown / bundle"
     if era in _VINTAGE_ERAS or price >= 150:
         return "Reprice / hold (vintage)"
@@ -529,7 +552,7 @@ def inventory_dead():
     """, tuple(params)) or {}
 
     rows = db.query(f"""
-        WITH inv AS {_INV_FIRST_SEEN}, ic AS {_INTAKE_COST}
+        WITH inv AS {_INV_FIRST_SEEN}, ic AS {_INTAKE_COST}, pv AS {_PARTS_VEL}
         {_DEAD_SELECT}
         WHERE {wsql}
         ORDER BY tied_value DESC NULLS LAST
@@ -539,16 +562,22 @@ def inventory_dead():
     for r in rows:
         d = _ser(r)
         d["action"] = _dead_action(d)
+        d["needs_recipe"] = d.get("product_type") == "sealed" and d.get("breakdown_val") in (None, "")
         items.append(d)
     # Items the action recommends breaking (recovers cost or strictly beats sealed).
     brk = [d for d in items if (d.get("action") or "").startswith("Break")]
     brk_recover = sum(float(d.get("breakdown_val") or 0) * (d.get("current_qty") or 0) for d in brk)
+    # Sealed with no recipe at all — can't be assessed; candidates to build a recipe.
+    no_recipe = [d for d in items if d.get("needs_recipe")]
+    no_recipe_value = sum(float(d.get("tied_value") or 0) for d in no_recipe)
     return jsonify({
         "items": items,
         "total": int(agg.get("n") or 0),
         "total_value": float(agg.get("v") or 0),
         "breakdown_count": len(brk),
         "breakdown_recover": round(brk_recover),
+        "no_recipe_count": len(no_recipe),
+        "no_recipe_value": round(no_recipe_value),
     })
 
 
@@ -582,7 +611,7 @@ def inventory_dead_csv():
     ptype = (request.args.get("ptype") or "").strip()
     wsql, params = _dead_where(ptype)
     rows = db.query(f"""
-        WITH inv AS {_INV_FIRST_SEEN}, ic AS {_INTAKE_COST}
+        WITH inv AS {_INV_FIRST_SEEN}, ic AS {_INTAKE_COST}, pv AS {_PARTS_VEL}
         {_DEAD_SELECT}
         WHERE {wsql}
         ORDER BY tied_value DESC NULLS LAST
@@ -591,14 +620,18 @@ def inventory_dead_csv():
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["Title", "SKU", "Type", "Game", "Era", "Set", "Qty", "Cost",
-                "Cost Estimated?", "Sealed Price", "Breakdown Value", "Capital Tied",
-                "Days In Stock", "Sold 90d", "Total Sold All-Time", "Suggested Action"])
+                "Cost Estimated?", "Sealed Price", "Breakdown Value", "Parts Sold 90d",
+                "No Recipe?", "Capital Tied", "Days In Stock", "Sold 90d",
+                "Total Sold All-Time", "Suggested Action"])
     for r in rows:
+        no_recipe = r.get("product_type") == "sealed" and r.get("breakdown_val") in (None, "")
         w.writerow([
             r.get("title"), r.get("sku"), r.get("product_type"), r.get("ip"),
             r.get("era"), r.get("set_name"),
             r.get("current_qty"), r.get("cost"),
-            "yes" if r.get("cost_is_estimate") else "", r.get("current_price"), r.get("breakdown_val"),
+            "yes" if r.get("cost_is_estimate") else "", r.get("current_price"),
+            r.get("breakdown_val"), r.get("parts_90d"),
+            "yes" if no_recipe else "",
             round(float(r.get("tied_value") or 0), 2),
             r.get("age_days"), r.get("units_sold_90d"), r.get("total_sold_all_time"),
             _dead_action(r),
@@ -1046,7 +1079,10 @@ async function loadDead() {
     const bd = d.breakdown_count
       ? ' · break down <b>' + d.breakdown_count + '</b> to recover <b style="color:var(--green)">' + fmtMoney(d.breakdown_recover) + '</b> cash'
       : ' · <span style="color:var(--dim)">none worth breaking down — markdown/bundle play</span>';
-    sum.innerHTML = '<span><b>' + d.total + '</b> items · <b>' + fmtMoney(d.total_value) + '</b> tied up' + bd + '</span>' +
+    const nr = d.no_recipe_count
+      ? ' · <b style="color:var(--amber)">' + d.no_recipe_count + '</b> sealed have no recipe (' + fmtMoney(d.no_recipe_value) + ' — add to assess)'
+      : '';
+    sum.innerHTML = '<span><b>' + d.total + '</b> items · <b>' + fmtMoney(d.total_value) + '</b> tied up' + bd + nr + '</span>' +
       '<a class="btn btn-secondary btn-sm" href="/api/inventory/dead.csv?ptype=' + encodeURIComponent(ptype) + '">⬇ Export CSV</a>';
     if (!d.items.length) { el.innerHTML = '<div class="empty">Nothing stale here.</div>'; return; }
     const shown = d.items.length < d.total ? ' <small style="color:var(--dim)">(showing top ' + d.items.length + ' of ' + d.total + ' — Export CSV for all)</small>' : '';
@@ -1058,13 +1094,16 @@ async function loadDead() {
       const nums = [];
       if (i.cost) nums.push('cost ' + fmtMoney(i.cost) + (i.cost_is_estimate ? '~' : ''));
       nums.push('sealed ' + fmtMoney(i.current_price));
-      if (i.breakdown_val != null) nums.push('parts ' + fmtMoney(i.breakdown_val));
+      if (i.breakdown_val != null) nums.push('parts ' + fmtMoney(i.breakdown_val) +
+        (i.parts_90d ? ' (~' + Math.round(i.parts_90d) + ' sold/90d)' : ''));
       const cmp = (i.cost || i.breakdown_val != null)
         ? '<br><small style="color:var(--dim)">' + nums.join(' · ') + '</small>' : '';
+      const recipeTag = i.needs_recipe
+        ? ' <span class="act" style="border-color:var(--amber);color:var(--amber)">no recipe</span>' : '';
       return '<div class="row"><div class="nm">' + (i.title || '—') +
         '<small>' + ctx + ' — ' + sub + '</small></div>' +
         '<div class="mv"><b>' + fmtMoney(tied) + '</b><br>' +
-        '<small><span class="act">' + (i.action || '') + '</span></small>' + cmp + '</div></div>';
+        '<small><span class="act">' + (i.action || '') + '</span>' + recipeTag + '</small>' + cmp + '</div></div>';
     }).join('') + '</div>' + shown;
   } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
 }
