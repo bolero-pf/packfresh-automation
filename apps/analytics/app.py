@@ -260,11 +260,15 @@ def pipeline_status():
 
 _RAW_ONHAND = "state IN ('STORED','DISPLAY')"  # available to buy; excludes BARCODED bulk
 
-# Dead capital only counts items that have actually had time to sell. Brand-new
-# stock with no sales isn't dead — it just arrived. Gate on days in stock, using
-# the earliest inventory snapshot (sku_daily_inventory) as "in stock since".
+# Dead capital only counts items whose CURRENT stock has actually sat without
+# selling. "In stock since" = start of the current continuous in-stock streak =
+# the day after the most recent qty=0 snapshot (or the first snapshot if never 0).
+# Using MIN(snapshot_date) was wrong: an item that sold out and was restocked
+# looked old when its current lot just arrived (e.g. a UPC restocked 5 days ago
+# read as "in stock 76 days").
 DEAD_MIN_AGE_DAYS = 45
-_INV_FIRST_SEEN = ("(SELECT shopify_variant_id, MIN(snapshot_date) AS first_seen "
+_INV_FIRST_SEEN = ("(SELECT shopify_variant_id, "
+                   "COALESCE(MAX(snapshot_date) FILTER (WHERE qty=0) + 1, MIN(snapshot_date)) AS first_seen "
                    "FROM sku_daily_inventory GROUP BY 1)")
 
 # Whitelisted group-by dimensions (column on product_taxonomy t).
@@ -302,12 +306,10 @@ def inventory_flow():
           COALESCE(SUM(GREATEST(c.shopify_qty,0)*COALESCE(c.shopify_price,0)),0)     AS inv_value,
           -- Matches the Job A list predicate exactly so the KPI == what you can open.
           COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND c.status='ACTIVE'
-                            AND ((COALESCE(s.units_sold_90d,0)=0 AND iv.first_seen <= CURRENT_DATE - %s)
-                                 OR (s.avg_days_to_sell>10 AND c.shopify_qty*s.avg_days_to_sell>180))
+                            AND COALESCE(s.units_sold_90d,0)=0 AND iv.first_seen <= CURRENT_DATE - %s
                             THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0)   AS dead_value,
           COUNT(*) FILTER (WHERE c.shopify_qty>0 AND c.status='ACTIVE'
-                            AND ((COALESCE(s.units_sold_90d,0)=0 AND iv.first_seen <= CURRENT_DATE - %s)
-                                 OR (s.avg_days_to_sell>10 AND c.shopify_qty*s.avg_days_to_sell>180))) AS dead_skus,
+                            AND COALESCE(s.units_sold_90d,0)=0 AND iv.first_seen <= CURRENT_DATE - %s) AS dead_skus,
           COALESCE(SUM(s.units_sold_90d),0)                                         AS sold_90d
         FROM inventory_product_cache c
         LEFT JOIN sku_analytics s USING (shopify_variant_id)
@@ -415,15 +417,15 @@ def inventory_raw_aging():
 
 
 def _dead_where(ptype):
-    """Job A predicate: not moving = in stock AND either (zero 90d sales AND in stock
-    >= DEAD_MIN_AGE_DAYS — so new arrivals don't count) OR (genuinely slow <0.1/day AND
-    piled up >180 days of stock). Fast sellers with deep stock are well-stocked, not dead.
-    `iv` is the inv first-seen CTE; `active_only` restricts to live products."""
+    """Job A predicate: genuinely not moving = in stock, active, zero sales in 90d, and
+    its CURRENT stock has sat continuously >= DEAD_MIN_AGE_DAYS. Deliberately does NOT
+    extrapolate "months of supply" from a handful of sales — that mislabels slow movers
+    you intentionally stock (a UPC that sold 1 in 90d is not dead capital)."""
     where = [
         "c.shopify_qty > 0",
         "c.status = 'ACTIVE'",
-        f"((COALESCE(s.units_sold_90d,0) = 0 AND iv.first_seen <= CURRENT_DATE - {DEAD_MIN_AGE_DAYS})"
-        "  OR (s.avg_days_to_sell > 10 AND c.shopify_qty * s.avg_days_to_sell > 180))",
+        "COALESCE(s.units_sold_90d,0) = 0",
+        f"iv.first_seen <= CURRENT_DATE - {DEAD_MIN_AGE_DAYS}",
     ]
     params = []
     if ptype:
@@ -681,7 +683,7 @@ th:hover { color:var(--text); }
           <option value="accessory">Supplies</option>
         </select>
       </div>
-      <p class="hint">In stock 45+ days but not moving — zero sales in 90d, or 6+ months of stock at the current rate. Stop buying, or break it down.</p>
+      <p class="hint">Current stock has sat 45+ days with zero sales in 90 days — genuinely not moving. Reprice, bundle, or break down. (Restocks reset the clock, so freshly-bought items aren't counted.)</p>
       <div id="dead-summary" class="list-summary"></div>
       <div id="dead-list" class="scroll-list"><div class="spinner"></div></div>
     </div>

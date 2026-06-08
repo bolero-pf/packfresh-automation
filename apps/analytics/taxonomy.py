@@ -307,6 +307,14 @@ def classify_taxonomy():
         else:
             form_factor = _detect_form_factor(title)
             product_type = _detect_product_type(form_factor)
+            # The catalog holds no raw singles (those live in raw_cards). A non-graded
+            # item the regex defaulted to single_card but that's tagged 'sealed' is
+            # really sealed the regex did not recognize (odd-named starter decks, mini
+            # tins, exclusives, bundles). Slabs (form_factor='slab') are left alone, and
+            # board games / accessories were already caught by the tag rules above.
+            if form_factor == "single_card" and re.search(r"\bsealed\b", tags, re.IGNORECASE):
+                product_type = "sealed"
+                form_factor = None
         expansion_id, set_name, era = _detect_expansion(tcg_id, title, scrydex_map)
 
         db.execute("""
