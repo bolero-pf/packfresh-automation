@@ -340,6 +340,7 @@ def inventory_flow():
     }
 
     rows = db.query(f"""
+        WITH inv AS {_INV_FIRST_SEEN}
         SELECT
           COALESCE({col}, '(unclassified)')                              AS grp,
           COUNT(*) FILTER (WHERE c.shopify_qty>0)                        AS skus,
@@ -358,11 +359,16 @@ def inventory_flow():
                             THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0) AS val_med,
           COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND s.units_sold_90d>0 AND s.avg_days_to_sell > 10
                             THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0) AS val_slow,
-          COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND COALESCE(s.units_sold_90d,0)=0
+          -- "Dead $" uses the SAME actionable definition as the dead list/KPI:
+          -- active, zero 90d sales, current stock sat >= DEAD_MIN_AGE_DAYS.
+          COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND c.status='ACTIVE'
+                            AND COALESCE(s.units_sold_90d,0)=0
+                            AND iv.first_seen <= CURRENT_DATE - {DEAD_MIN_AGE_DAYS}
                             THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0) AS val_dead
         FROM inventory_product_cache c
         JOIN product_taxonomy t USING (shopify_variant_id)
         LEFT JOIN sku_analytics s USING (shopify_variant_id)
+        LEFT JOIN inv iv USING (shopify_variant_id)
         GROUP BY 1
         HAVING SUM(GREATEST(c.shopify_qty,0)) > 0 OR SUM(s.units_sold_90d) > 0
         ORDER BY inv_value DESC NULLS LAST
@@ -436,18 +442,41 @@ def _dead_where(ptype):
 
 _DEAD_SELECT = """
     SELECT c.title, c.sku, c.tcgplayer_id, t.product_type, t.ip, t.form_factor,
+           t.era, t.set_name,
            c.shopify_qty AS current_qty, c.shopify_price AS current_price,
            COALESCE(s.units_sold_90d,0) AS units_sold_90d,
            s.total_sold_all_time,
            (c.shopify_qty * COALESCE(c.shopify_price,0)) AS tied_value,
-           (CURRENT_DATE - iv.first_seen) AS age_days,
-           CASE WHEN s.units_sold_90d > 0 AND s.avg_days_to_sell > 0
-                THEN c.shopify_qty * s.avg_days_to_sell END AS days_inv
+           (CURRENT_DATE - iv.first_seen) AS age_days
     FROM inventory_product_cache c
     JOIN product_taxonomy t USING (shopify_variant_id)
     LEFT JOIN sku_analytics s USING (shopify_variant_id)
     LEFT JOIN inv iv USING (shopify_variant_id)
 """
+
+# Group-by dimensions for slicing the dead-capital set.
+_DEAD_DIMS = {
+    "era":          "t.era",
+    "set_name":     "t.set_name",
+    "product_type": "t.product_type",
+    "ip":           "t.ip",
+}
+
+_VINTAGE_ERAS = {"vintage", "xy", "sm", "swsh"}
+
+
+def _dead_action(r):
+    """Suggested action for a stuck item — a starting point, not gospel."""
+    era = (r.get("era") or "").lower()
+    ptype = r.get("product_type")
+    price = float(r.get("current_price") or 0)
+    if era in _VINTAGE_ERAS or price >= 150:
+        return "Reprice / hold (vintage)"
+    if ptype == "sealed":
+        return "Breakdown candidate"
+    if price < 15:
+        return "Bundle / clearance"
+    return "Markdown / reprice"
 
 
 @app.route("/api/inventory/dead")
@@ -473,11 +502,39 @@ def inventory_dead():
         ORDER BY tied_value DESC NULLS LAST
         LIMIT 300
     """, tuple(params))
+    items = []
+    for r in rows:
+        d = _ser(r)
+        d["action"] = _dead_action(d)
+        items.append(d)
     return jsonify({
-        "items": [_ser(r) for r in rows],
+        "items": items,
         "total": int(agg.get("n") or 0),
         "total_value": float(agg.get("v") or 0),
     })
+
+
+@app.route("/api/inventory/dead-by")
+def inventory_dead_by():
+    """Slice the dead-capital set by a dimension (era / set / type / game) — where it sits."""
+    dim = request.args.get("dim", "era")
+    col = _DEAD_DIMS.get(dim, "t.era")
+    ptype = (request.args.get("ptype") or "").strip()
+    wsql, params = _dead_where(ptype)
+    rows = db.query(f"""
+        WITH inv AS {_INV_FIRST_SEEN}
+        SELECT COALESCE({col}::text, '(unclassified)') AS grp,
+               COUNT(*) AS skus,
+               COALESCE(SUM(c.shopify_qty*COALESCE(c.shopify_price,0)),0) AS value
+        FROM inventory_product_cache c
+        JOIN product_taxonomy t USING (shopify_variant_id)
+        LEFT JOIN sku_analytics s USING (shopify_variant_id)
+        LEFT JOIN inv iv USING (shopify_variant_id)
+        WHERE {wsql}
+        GROUP BY 1
+        ORDER BY value DESC NULLS LAST
+    """, tuple(params))
+    return jsonify({"groups": [_ser(r) for r in rows]})
 
 
 @app.route("/api/inventory/dead.csv")
@@ -495,14 +552,17 @@ def inventory_dead_csv():
 
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Title", "SKU", "Type", "Game", "Qty", "Price",
-                "Capital Tied", "Days In Stock", "Sold 90d", "Total Sold All-Time"])
+    w.writerow(["Title", "SKU", "Type", "Game", "Era", "Set", "Qty", "Price",
+                "Capital Tied", "Days In Stock", "Sold 90d", "Total Sold All-Time",
+                "Suggested Action"])
     for r in rows:
         w.writerow([
             r.get("title"), r.get("sku"), r.get("product_type"), r.get("ip"),
+            r.get("era"), r.get("set_name"),
             r.get("current_qty"), r.get("current_price"),
             round(float(r.get("tied_value") or 0), 2),
             r.get("age_days"), r.get("units_sold_90d"), r.get("total_sold_all_time"),
+            _dead_action(r),
         ])
     return Response(buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": "attachment; filename=dead_capital.csv"})
@@ -612,6 +672,7 @@ th:hover { color:var(--text); }
 .row .nm small { display:block; font-weight:400; color:var(--dim); }
 .row .mv { text-align:right; font-size:0.78rem; white-space:nowrap; }
 .row .mv b { font-size:0.9rem; }
+.act { display:inline-block; padding:1px 7px; border-radius:10px; background:var(--s2); border:1px solid var(--border); color:var(--text); font-size:0.72rem; }
 </style>
 </head>
 <body>
@@ -671,36 +732,39 @@ th:hover { color:var(--text); }
   </div>
   <div id="flow-rollup"><div class="spinner"></div></div>
 
-  <div class="flow-cols">
-    <div class="flow-col">
-      <div class="section-head">
-        <h2>🟡 Buying &amp; breakdown</h2>
-        <select id="dead-ptype" onchange="loadDead()">
-          <option value="">All types</option>
-          <option value="sealed">Sealed</option>
-          <option value="card">Cards / slabs</option>
-          <option value="board_game">Board games</option>
-          <option value="accessory">Supplies</option>
-        </select>
-      </div>
-      <p class="hint">Current stock has sat 45+ days with zero sales in 90 days — genuinely not moving. Reprice, bundle, or break down. (Restocks reset the clock, so freshly-bought items aren't counted.)</p>
-      <div id="dead-summary" class="list-summary"></div>
-      <div id="dead-list" class="scroll-list"><div class="spinner"></div></div>
-    </div>
-    <div class="flow-col">
-      <div class="section-head">
-        <h2>🔵 Reorder from distro</h2>
-        <select id="restock-ptype" onchange="loadRestock()">
-          <option value="">All types</option>
-          <option value="sealed">Sealed</option>
-          <option value="board_game">Board games</option>
-          <option value="accessory">Supplies</option>
-        </select>
-      </div>
-      <p class="hint">Under ~30 days of stock left at the current rate (out-of-stock non-singles shown first). Reorder soon.</p>
-      <div id="restock-list"><div class="spinner"></div></div>
+  <div class="section-head">
+    <h2>🟡 Dead capital — where it sits</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <select id="dead-ptype" onchange="reloadDead()">
+        <option value="">All types</option>
+        <option value="sealed">Sealed</option>
+        <option value="card">Cards / slabs</option>
+        <option value="board_game">Board games</option>
+        <option value="accessory">Supplies</option>
+      </select>
+      <select id="dead-dim" onchange="loadDeadBy()">
+        <option value="era">Break down by Era</option>
+        <option value="set_name">by Set</option>
+        <option value="product_type">by Type</option>
+        <option value="ip">by Game</option>
+      </select>
     </div>
   </div>
+  <p class="hint">Current stock sat 45+ days with zero sales in 90 days — genuinely not moving. (Restocks reset the clock, so freshly-bought stock isn't counted.)</p>
+  <div id="dead-summary" class="list-summary"></div>
+  <div id="dead-by"><div class="spinner"></div></div>
+  <div id="dead-list" class="scroll-list"><div class="spinner"></div></div>
+
+  <div class="section-head"><h2>🔵 Reorder from distro</h2>
+    <select id="restock-ptype" onchange="loadRestock()">
+      <option value="">All types</option>
+      <option value="sealed">Sealed</option>
+      <option value="board_game">Board games</option>
+      <option value="accessory">Supplies</option>
+    </select>
+  </div>
+  <p class="hint">Under ~30 days of stock left at the current rate (out-of-stock non-singles shown first). Reorder soon.</p>
+  <div id="restock-list"><div class="spinner"></div></div>
 
   <div class="section-head">
     <h2>Raw singles — on hand (stored + display)</h2>
@@ -843,7 +907,34 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.getElementById('tab-skus').style.display = name === 'skus' ? '' : 'none';
   document.getElementById('tab-flow').style.display = name === 'flow' ? '' : 'none';
-  if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; loadFlow(); loadDead(); loadRestock(); loadRaw(); loadRawAging(); }
+  if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; loadFlow(); reloadDead(); loadRestock(); loadRaw(); loadRawAging(); }
+}
+
+function reloadDead() { loadDead(); loadDeadBy(); }
+
+async function loadDeadBy() {
+  const dim = document.getElementById('dead-dim').value;
+  const ptype = document.getElementById('dead-ptype').value;
+  const el = document.getElementById('dead-by');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/inventory/dead-by?dim=' + dim + '&ptype=' + encodeURIComponent(ptype));
+    const d = await r.json();
+    if (!d.groups.length) { el.innerHTML = ''; return; }
+    const maxVal = Math.max(...d.groups.map(g => g.value || 0), 1);
+    const total = d.groups.reduce((a, g) => a + (g.value || 0), 0) || 1;
+    el.innerHTML = '<div style="overflow-x:auto;margin-bottom:14px;"><table>' +
+      '<thead><tr><th style="text-align:left;">Where it sits</th><th>Tied up</th><th></th><th>% </th><th>Items</th></tr></thead><tbody>' +
+      d.groups.map(g => {
+        const v = g.value || 0;
+        const bar = '<div class="bar" style="width:' + Math.max(v/maxVal*100,2) + '%;"><span style="width:100%;background:var(--red);"></span></div>';
+        return '<tr><td style="text-align:left;font-weight:600;">' + g.grp + '</td>' +
+          '<td style="font-weight:600;">' + fmtMoney(v) + '</td>' +
+          '<td style="min-width:140px;">' + bar + '</td>' +
+          '<td>' + (v/total*100).toFixed(0) + '%</td>' +
+          '<td>' + (g.skus||0) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
 }
 
 function fmtMoney(n) { return '$' + Math.round(n || 0).toLocaleString(); }
@@ -916,15 +1007,16 @@ async function loadDead() {
     sum.innerHTML = '<span><b>' + d.total + '</b> items · <b>' + fmtMoney(d.total_value) + '</b> tied up</span>' +
       '<a class="btn btn-secondary btn-sm" href="/api/inventory/dead.csv?ptype=' + encodeURIComponent(ptype) + '">⬇ Export CSV</a>';
     if (!d.items.length) { el.innerHTML = '<div class="empty">Nothing stale here.</div>'; return; }
-    const shown = d.items.length < d.total ? ' <small style="color:var(--dim)">(showing top ' + d.items.length + ')</small>' : '';
+    const shown = d.items.length < d.total ? ' <small style="color:var(--dim)">(showing top ' + d.items.length + ' of ' + d.total + ' — Export CSV for all)</small>' : '';
     el.innerHTML = '<div class="lst">' + d.items.map(i => {
       const tied = (i.current_qty || 0) * (i.current_price || 0);
-      const sub = (i.units_sold_90d > 0)
-        ? Math.round(i.days_inv) + 'd of stock · ' + i.units_sold_90d + ' sold 90d'
-        : 'no sales' + (i.age_days != null ? ' · ' + i.age_days + 'd in stock' : '');
+      const ctx = [i.era || i.product_type, i.set_name].filter(Boolean).join(' · ');
+      const sub = 'qty ' + (i.current_qty||0) + (i.age_days != null ? ' · ' + i.age_days + 'd in stock' : '') +
+        (i.total_sold_all_time ? '' : ' · never sold');
       return '<div class="row"><div class="nm">' + (i.title || '—') +
-        '<small>' + (i.product_type || '?') + ' · qty ' + (i.current_qty||0) + '</small></div>' +
-        '<div class="mv"><b>' + fmtMoney(tied) + '</b><br><small>' + sub + '</small></div></div>';
+        '<small>' + ctx + ' — ' + sub + '</small></div>' +
+        '<div class="mv"><b>' + fmtMoney(tied) + '</b><br>' +
+        '<small><span class="act">' + (i.action || '') + '</span></small></div></div>';
     }).join('') + '</div>' + shown;
   } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
 }
