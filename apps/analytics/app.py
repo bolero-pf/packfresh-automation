@@ -809,6 +809,10 @@ th:hover { color:var(--text); }
 .row .mv { text-align:right; font-size:0.78rem; white-space:nowrap; }
 .row .mv b { font-size:0.9rem; }
 .act { display:inline-block; padding:1px 7px; border-radius:10px; background:var(--s2); border:1px solid var(--border); color:var(--text); font-size:0.72rem; }
+.subtabs { display:flex; gap:4px; margin:4px 0 18px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+.subtab { height:36px; padding:0 14px; background:transparent; border:none; border-bottom:2px solid transparent; color:var(--dim); cursor:pointer; font:inherit; font-size:0.86rem; font-weight:600; margin-bottom:-1px; }
+.subtab.active { color:var(--text); border-bottom-color:var(--accent); }
+.subtab:hover { color:var(--text); }
 </style>
 </head>
 <body>
@@ -848,89 +852,105 @@ th:hover { color:var(--text); }
 </div>
 
 <div class="main" id="tab-flow" style="display:none;">
-  <div class="stats" id="flow-kpis"><div class="spinner"></div></div>
-
-  <div class="section-head">
-    <h2>Where capital sits vs. where it sells</h2>
-    <select id="flow-dim" onchange="loadFlow()">
-      <option value="product_type">Group by Product Type</option>
-      <option value="ip">Group by Game / IP</option>
-      <option value="form_factor">Group by Form Factor</option>
-      <option value="set_name">Group by Set</option>
-      <option value="era">Group by Era</option>
-    </select>
+  <div class="subtabs">
+    <button class="subtab active" data-sub="overview" onclick="switchSub('overview')">Overview</button>
+    <button class="subtab" data-sub="dead" onclick="switchSub('dead')">Dead Capital</button>
+    <button class="subtab" data-sub="reorder" onclick="switchSub('reorder')">Reorder</button>
+    <button class="subtab" data-sub="raw" onclick="switchSub('raw')">Raw Singles</button>
+    <button class="subtab" data-sub="needsera" onclick="switchSub('needsera')">Needs Era</button>
   </div>
-  <div class="legend">
-    <span><i class="sw" style="background:var(--green)"></i>Fast</span>
-    <span><i class="sw" style="background:var(--amber)"></i>Medium</span>
-    <span><i class="sw" style="background:#d98a4b"></i>Slow</span>
-    <span><i class="sw" style="background:var(--dim)"></i>No sales</span>
-  </div>
-  <div id="flow-rollup"><div class="spinner"></div></div>
 
-  <div class="section-head">
-    <h2>🟡 Dead capital — where it sits</h2>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <select id="dead-ptype" onchange="reloadDead()">
+  <div class="sub" id="sub-overview">
+    <div class="stats" id="flow-kpis"><div class="spinner"></div></div>
+    <div class="section-head">
+      <h2>Where capital sits vs. where it sells</h2>
+      <select id="flow-dim" onchange="loadFlow()">
+        <option value="product_type">Group by Product Type</option>
+        <option value="ip">Group by Game / IP</option>
+        <option value="form_factor">Group by Form Factor</option>
+        <option value="set_name">Group by Set</option>
+        <option value="era">Group by Era</option>
+      </select>
+    </div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--green)"></i>Fast</span>
+      <span><i class="sw" style="background:var(--amber)"></i>Medium</span>
+      <span><i class="sw" style="background:#d98a4b"></i>Slow</span>
+      <span><i class="sw" style="background:var(--dim)"></i>No sales</span>
+    </div>
+    <div id="flow-rollup"><div class="spinner"></div></div>
+  </div>
+
+  <div class="sub" id="sub-dead" style="display:none;">
+    <div class="section-head">
+      <h2>🟡 Dead capital — where it sits</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <select id="dead-ptype" onchange="reloadDead()">
+          <option value="">All types</option>
+          <option value="sealed">Sealed</option>
+          <option value="card">Cards / slabs</option>
+          <option value="board_game">Board games</option>
+          <option value="accessory">Supplies</option>
+        </select>
+        <select id="dead-dim" onchange="loadDeadBy()">
+          <option value="era">Break down by Era</option>
+          <option value="set_name">by Set</option>
+          <option value="product_type">by Type</option>
+          <option value="ip">by Game</option>
+        </select>
+      </div>
+    </div>
+    <p class="hint">Current stock sat 45+ days with zero sales in 90 days — genuinely not moving. (Restocks reset the clock, so freshly-bought stock isn't counted.)</p>
+    <div id="dead-summary" class="list-summary"></div>
+    <div id="dead-by"><div class="spinner"></div></div>
+    <div id="dead-list" class="scroll-list"><div class="spinner"></div></div>
+  </div>
+
+  <div class="sub" id="sub-reorder" style="display:none;">
+    <div class="section-head"><h2>🔵 Reorder from distro</h2>
+      <select id="restock-ptype" onchange="loadRestock()">
         <option value="">All types</option>
         <option value="sealed">Sealed</option>
-        <option value="card">Cards / slabs</option>
         <option value="board_game">Board games</option>
         <option value="accessory">Supplies</option>
       </select>
-      <select id="dead-dim" onchange="loadDeadBy()">
-        <option value="era">Break down by Era</option>
-        <option value="set_name">by Set</option>
-        <option value="product_type">by Type</option>
-        <option value="ip">by Game</option>
+    </div>
+    <p class="hint">Under ~30 days of stock left at the current rate (out-of-stock non-singles shown first). Reorder soon.</p>
+    <div id="restock-list"><div class="spinner"></div></div>
+  </div>
+
+  <div class="sub" id="sub-raw" style="display:none;">
+    <div class="section-head">
+      <h2>Raw singles — on hand (stored + display)</h2>
+      <select id="raw-dim" onchange="loadRaw()">
+        <option value="game">Group by Game</option>
+        <option value="set_name">Group by Set</option>
+        <option value="condition">Group by Condition</option>
+        <option value="rarity">Group by Rarity</option>
       </select>
     </div>
+    <div id="raw-rollup"><div class="spinner"></div></div>
+    <div class="section-head">
+      <h2>⏳ Aged raw singles</h2>
+      <select id="raw-aging-game" onchange="loadRawAging()">
+        <option value="">All games</option>
+        <option value="pokemon">Pokemon</option>
+        <option value="magic">Magic</option>
+        <option value="onepiece">One Piece</option>
+      </select>
+    </div>
+    <p class="hint">On-hand singles held longest without selling — oldest first. Candidates to reprice, bundle, or move.</p>
+    <div id="raw-aging-list"><div class="spinner"></div></div>
   </div>
-  <p class="hint">Current stock sat 45+ days with zero sales in 90 days — genuinely not moving. (Restocks reset the clock, so freshly-bought stock isn't counted.)</p>
-  <div id="dead-summary" class="list-summary"></div>
-  <div id="dead-by"><div class="spinner"></div></div>
-  <div id="dead-list" class="scroll-list"><div class="spinner"></div></div>
 
-  <div class="section-head">
-    <h2>⚠ Pokémon missing era metafield</h2>
-    <a class="btn btn-secondary btn-sm" href="/api/inventory/needs-era.csv">⬇ Export CSV</a>
+  <div class="sub" id="sub-needsera" style="display:none;">
+    <div class="section-head">
+      <h2>⚠ Pokémon missing era metafield</h2>
+      <a class="btn btn-secondary btn-sm" href="/api/inventory/needs-era.csv">⬇ Export CSV</a>
+    </div>
+    <p class="hint" id="needs-era-hint">Active Pokémon products with no custom.era metafield — click a title to set it in Shopify.</p>
+    <div id="needs-era-list" class="scroll-list"><div class="spinner"></div></div>
   </div>
-  <p class="hint" id="needs-era-hint">Active Pokémon products with no custom.era metafield — click a title to set it in Shopify.</p>
-  <div id="needs-era-list" class="scroll-list"><div class="spinner"></div></div>
-
-  <div class="section-head"><h2>🔵 Reorder from distro</h2>
-    <select id="restock-ptype" onchange="loadRestock()">
-      <option value="">All types</option>
-      <option value="sealed">Sealed</option>
-      <option value="board_game">Board games</option>
-      <option value="accessory">Supplies</option>
-    </select>
-  </div>
-  <p class="hint">Under ~30 days of stock left at the current rate (out-of-stock non-singles shown first). Reorder soon.</p>
-  <div id="restock-list"><div class="spinner"></div></div>
-
-  <div class="section-head">
-    <h2>Raw singles — on hand (stored + display)</h2>
-    <select id="raw-dim" onchange="loadRaw()">
-      <option value="game">Group by Game</option>
-      <option value="set_name">Group by Set</option>
-      <option value="condition">Group by Condition</option>
-      <option value="rarity">Group by Rarity</option>
-    </select>
-  </div>
-  <div id="raw-rollup"><div class="spinner"></div></div>
-
-  <div class="section-head">
-    <h2>⏳ Aged raw singles</h2>
-    <select id="raw-aging-game" onchange="loadRawAging()">
-      <option value="">All games</option>
-      <option value="pokemon">Pokemon</option>
-      <option value="magic">Magic</option>
-      <option value="onepiece">One Piece</option>
-    </select>
-  </div>
-  <p class="hint">On-hand singles held longest without selling — oldest first. Candidates to reprice, bundle, or move.</p>
-  <div id="raw-aging-list"><div class="spinner"></div></div>
 </div>
 
 <script>
@@ -1050,7 +1070,21 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.getElementById('tab-skus').style.display = name === 'skus' ? '' : 'none';
   document.getElementById('tab-flow').style.display = name === 'flow' ? '' : 'none';
-  if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; loadFlow(); reloadDead(); loadRestock(); loadRaw(); loadRawAging(); loadNeedsEra(); }
+  if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; switchSub('overview'); }
+}
+
+const _subLoaded = {};
+const _SUBS = ['overview', 'dead', 'reorder', 'raw', 'needsera'];
+function switchSub(name) {
+  document.querySelectorAll('.subtab').forEach(t => t.classList.toggle('active', t.dataset.sub === name));
+  _SUBS.forEach(s => { document.getElementById('sub-' + s).style.display = s === name ? '' : 'none'; });
+  if (_subLoaded[name]) return;
+  _subLoaded[name] = true;
+  if (name === 'overview') loadFlow();
+  else if (name === 'dead') reloadDead();
+  else if (name === 'reorder') loadRestock();
+  else if (name === 'raw') { loadRaw(); loadRawAging(); }
+  else if (name === 'needsera') loadNeedsEra();
 }
 
 async function loadNeedsEra() {
