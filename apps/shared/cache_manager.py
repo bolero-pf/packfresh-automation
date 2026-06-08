@@ -212,6 +212,9 @@ class CacheManager:
                 # diverge for sealed/slab, unlike raw cards where they match).
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS barcode VARCHAR(200)",
                 f"CREATE INDEX IF NOT EXISTS idx_{self._cache_table}_barcode ON {self._cache_table}(barcode) WHERE barcode IS NOT NULL",
+                # Era is the authoritative custom.era metafield (Pokemon era), mirrored
+                # from Shopify like tcgplayer_id — consumers must READ it, never infer it.
+                f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS era VARCHAR(50)",
             ]
         migrations += [
             f"ALTER TABLE {self._meta_table} ADD COLUMN IF NOT EXISTS last_tool_push_at TIMESTAMP",
@@ -361,8 +364,8 @@ class CacheManager:
                 INSERT INTO {self._cache_table}
                     (shopify_product_id, shopify_variant_id, title, handle, status,
                      tags, sku, barcode, shopify_price, shopify_qty, inventory_item_id,
-                     tcgplayer_id, is_damaged, committed, unit_cost, image_url, last_synced)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                     tcgplayer_id, is_damaged, committed, unit_cost, image_url, era, last_synced)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (shopify_product_id, shopify_variant_id) DO UPDATE SET
                     title             = EXCLUDED.title,
                     handle            = EXCLUDED.handle,
@@ -378,6 +381,7 @@ class CacheManager:
                     committed         = EXCLUDED.committed,
                     unit_cost         = EXCLUDED.unit_cost,
                     image_url         = EXCLUDED.image_url,
+                    era               = EXCLUDED.era,
                     last_synced       = CURRENT_TIMESTAMP
             """, (
                 p["shopify_product_id"], p["variant_id"],
@@ -392,6 +396,7 @@ class CacheManager:
                 p.get("committed", 0),
                 p.get("unit_cost"),
                 p.get("image_url"),
+                p.get("era"),
             ))
         else:
             # Intake/ingestion schema (keyed by tcgplayer_id)

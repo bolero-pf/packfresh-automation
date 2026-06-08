@@ -276,6 +276,7 @@ class ShopifyClient:
                 metafields(namespace: "tcg", first: 5) {
                   edges { node { key value } }
                 }
+                era_mf: metafield(namespace: "custom", key: "era") { value }
               }
             }
           }
@@ -302,6 +303,9 @@ class ShopifyClient:
                         except (ValueError, TypeError):
                             tcg_id = None
                         break
+
+                # Era is the authoritative custom.era metafield — read it, never infer.
+                era = (node.get("era_mf") or {}).get("value") or None
 
                 tags = node.get("tags", [])
                 tags_csv = ", ".join(tags) if isinstance(tags, list) else (tags or "")
@@ -341,6 +345,7 @@ class ShopifyClient:
                         "tags_csv":           tags_csv,
                         "unit_cost":          unit_cost,
                         "image_url":          image_url,
+                        "era":                era,
                     })
 
             has_next = data["products"]["pageInfo"]["hasNextPage"]

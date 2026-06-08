@@ -266,7 +266,7 @@ def classify_taxonomy():
     # Get all inventory variants
     rows = db.query("""
         SELECT shopify_variant_id, shopify_product_id, tcgplayer_id,
-               title, tags, is_damaged
+               title, tags, is_damaged, era
         FROM inventory_product_cache
         WHERE shopify_variant_id IS NOT NULL
     """)
@@ -315,7 +315,10 @@ def classify_taxonomy():
             if form_factor == "single_card" and re.search(r"\bsealed\b", tags, re.IGNORECASE):
                 product_type = "sealed"
                 form_factor = None
-        expansion_id, set_name, era = _detect_expansion(tcg_id, title, scrydex_map)
+        # set_name/expansion_id come from the Scrydex lookup (by tcgplayer_id); era is
+        # the authoritative custom.era metafield mirrored into the cache — NEVER inferred.
+        expansion_id, set_name, _ = _detect_expansion(tcg_id, title, scrydex_map)
+        era = row.get("era")
 
         db.execute("""
             INSERT INTO product_taxonomy (
