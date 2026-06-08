@@ -253,8 +253,18 @@ def refresh_session_prices(session_id):
     rate_limited = False
     retry_after = None
     fetched_count = 0
+    # Cap work per request. The loop previously only stopped on PPT rate-limit,
+    # but auto-linked items are all Scrydex cache hits (no PPT call → never
+    # throttled), so a fully-linked session would price every item in ONE
+    # request and blow the gunicorn 120s / proxy timeout → "upstream error".
+    # Bound the batch and let the client walk offsets (see refreshPrices()).
+    MAX_PER_REQUEST = 80
+    stop_idx = len(unique_lookups)
 
     for idx in range(offset, len(unique_lookups)):
+        if idx - offset >= MAX_PER_REQUEST:
+            stop_idx = idx  # hit per-request cap; client continues from here
+            break
         tcg_id, ptype, is_graded, grade_co, grade_val = unique_lookups[idx]
 
         # Check rate limit BEFORE making the request — never trigger a 429
@@ -262,6 +272,7 @@ def refresh_session_prices(session_id):
             rate_info = pricing.get_rate_limit_info()
             retry_after = rate_info.get("retry_after") or 60
             rate_limited = True
+            stop_idx = idx
             logger.info(f"PPT throttle: minute_remaining={rate_info['minute_remaining']}, "
                             f"pausing at offset {idx} (fetched {fetched_count}), retry in {retry_after}s")
             break
@@ -351,6 +362,7 @@ def refresh_session_prices(session_id):
                 body = getattr(e, 'body', {}) or {}
                 retry_after = body.get("retry_after", 60) if isinstance(body, dict) else 60
                 rate_limited = True
+                stop_idx = idx
                 logger.warning(f"PPT 429 despite throttle check — pausing at {idx}, retry in {retry_after}s")
                 break
             elif status_code == 403:
@@ -359,6 +371,7 @@ def refresh_session_prices(session_id):
                 price_cache[(tcg_id, ptype, is_graded, grade_co, grade_val)] = {"ppt_price": None, "ppt_low": None, "ppt_name": None, "error": error}
                 rate_limited = True
                 retry_after = None
+                stop_idx = idx
                 break
             else:
                 error = str(e)
@@ -444,7 +457,10 @@ def refresh_session_prices(session_id):
         })
 
     succeeded = sum(1 for c in comparisons if c.get("ppt_market") is not None)
-    next_offset = offset + fetched_count
+    # Advance by where the loop actually stopped (cap/throttle/end), not by
+    # fetched_count — errored lookups don't increment fetched_count, and basing
+    # the offset on it would re-request the same failing items forever.
+    next_offset = stop_idx
 
     result = {
         "comparisons": comparisons,

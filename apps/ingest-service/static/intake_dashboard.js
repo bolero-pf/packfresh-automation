@@ -2421,6 +2421,11 @@ async function refreshPrices(sessionId, offset) {
                     refreshPrices(sessionId, d.next_offset);
                 }
             }, 1000);
+        } else if (!d.complete && comps.length) {
+            // Not rate-limited, just batched (the backend caps work per request
+            // so cache-heavy sessions don't time the worker out). Walk the next
+            // batch immediately; results stream in as each batch lands.
+            refreshPrices(sessionId, d.next_offset);
         }
     } catch(err) {
         panel.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
