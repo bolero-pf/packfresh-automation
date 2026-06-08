@@ -9,7 +9,7 @@ Also exposes /api/analytics for batch lookups from other services.
 import os
 import logging
 import threading
-from flask import Flask, request, jsonify, render_template_string, g
+from flask import Flask, request, jsonify, render_template_string, g, Response
 
 import db
 
@@ -260,6 +260,13 @@ def pipeline_status():
 
 _RAW_ONHAND = "state IN ('STORED','DISPLAY')"  # available to buy; excludes BARCODED bulk
 
+# Dead capital only counts items that have actually had time to sell. Brand-new
+# stock with no sales isn't dead — it just arrived. Gate on days in stock, using
+# the earliest inventory snapshot (sku_daily_inventory) as "in stock since".
+DEAD_MIN_AGE_DAYS = 45
+_INV_FIRST_SEEN = ("(SELECT shopify_variant_id, MIN(snapshot_date) AS first_seen "
+                   "FROM sku_daily_inventory GROUP BY 1)")
+
 # Whitelisted group-by dimensions (column on product_taxonomy t).
 _FLOW_DIMS = {
     "product_type": "t.product_type",
@@ -285,18 +292,27 @@ def inventory_flow():
     col = _FLOW_DIMS.get(dim, "t.product_type")
 
     # Sealed — based on the cache (the inventory page's source), velocity LEFT-joined.
-    sealed = db.query_one("""
+    # Dead capital = in stock, no 90d sales, AND in stock >= DEAD_MIN_AGE_DAYS (so
+    # freshly-stocked items that simply haven't sold yet don't get counted).
+    sealed = db.query_one(f"""
+        WITH inv AS {_INV_FIRST_SEEN}
         SELECT
           COUNT(*) FILTER (WHERE c.shopify_qty > 0)                                 AS in_stock_skus,
           COALESCE(SUM(GREATEST(c.shopify_qty,0)),0)                                AS units,
           COALESCE(SUM(GREATEST(c.shopify_qty,0)*COALESCE(c.shopify_price,0)),0)     AS inv_value,
-          COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND COALESCE(s.units_sold_90d,0)=0
+          -- Matches the Job A list predicate exactly so the KPI == what you can open.
+          COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND c.status='ACTIVE'
+                            AND ((COALESCE(s.units_sold_90d,0)=0 AND iv.first_seen <= CURRENT_DATE - %s)
+                                 OR (s.avg_days_to_sell>10 AND c.shopify_qty*s.avg_days_to_sell>180))
                             THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0)   AS dead_value,
-          COUNT(*) FILTER (WHERE c.shopify_qty>0 AND COALESCE(s.units_sold_90d,0)=0) AS dead_skus,
+          COUNT(*) FILTER (WHERE c.shopify_qty>0 AND c.status='ACTIVE'
+                            AND ((COALESCE(s.units_sold_90d,0)=0 AND iv.first_seen <= CURRENT_DATE - %s)
+                                 OR (s.avg_days_to_sell>10 AND c.shopify_qty*s.avg_days_to_sell>180))) AS dead_skus,
           COALESCE(SUM(s.units_sold_90d),0)                                         AS sold_90d
         FROM inventory_product_cache c
         LEFT JOIN sku_analytics s USING (shopify_variant_id)
-    """) or {}
+        LEFT JOIN inv iv USING (shopify_variant_id)
+    """, (DEAD_MIN_AGE_DAYS, DEAD_MIN_AGE_DAYS)) or {}
 
     raw = db.query_one(f"""
         SELECT
@@ -398,37 +414,96 @@ def inventory_raw_aging():
     return jsonify({"items": [_ser(r) for r in rows]})
 
 
-@app.route("/api/inventory/dead")
-def inventory_dead():
-    """Job A — capital that is not working: in stock and either zero sales in 90d
-    or more than ~6 months of stock at the current rate. Markdown / breakdown / stop-buying."""
-    ptype = (request.args.get("ptype") or "").strip()
+def _dead_where(ptype):
+    """Job A predicate: not moving = in stock AND either (zero 90d sales AND in stock
+    >= DEAD_MIN_AGE_DAYS — so new arrivals don't count) OR (genuinely slow <0.1/day AND
+    piled up >180 days of stock). Fast sellers with deep stock are well-stocked, not dead.
+    `iv` is the inv first-seen CTE; `active_only` restricts to live products."""
+    where = [
+        "c.shopify_qty > 0",
+        "c.status = 'ACTIVE'",
+        f"((COALESCE(s.units_sold_90d,0) = 0 AND iv.first_seen <= CURRENT_DATE - {DEAD_MIN_AGE_DAYS})"
+        "  OR (s.avg_days_to_sell > 10 AND c.shopify_qty * s.avg_days_to_sell > 180))",
+    ]
     params = []
-    # Not moving = in stock AND (zero sales in 90d) OR (genuinely slow <0.1/day AND piled
-    # up >180 days of stock). Fast sellers with deep stock are well-stocked, NOT dead.
-    where = ["c.shopify_qty > 0",
-             "(COALESCE(s.units_sold_90d,0) = 0 "
-             " OR (s.avg_days_to_sell > 10 AND c.shopify_qty * s.avg_days_to_sell > 180))"]
     if ptype:
         where.append("t.product_type = %s")
         params.append(ptype)
+    return " AND ".join(where), params
 
-    rows = db.query(f"""
-        SELECT c.title, c.tcgplayer_id, t.product_type, t.ip, t.form_factor,
-               c.shopify_qty AS current_qty, c.shopify_price AS current_price,
-               COALESCE(s.units_sold_90d,0) AS units_sold_90d,
-               COALESCE(s.units_sold_30d,0) AS units_sold_30d,
-               (c.shopify_qty * COALESCE(c.shopify_price,0)) AS tied_value,
-               CASE WHEN s.units_sold_90d > 0 AND s.avg_days_to_sell > 0
-                    THEN c.shopify_qty * s.avg_days_to_sell END AS days_inv
+
+_DEAD_SELECT = """
+    SELECT c.title, c.sku, c.tcgplayer_id, t.product_type, t.ip, t.form_factor,
+           c.shopify_qty AS current_qty, c.shopify_price AS current_price,
+           COALESCE(s.units_sold_90d,0) AS units_sold_90d,
+           s.total_sold_all_time,
+           (c.shopify_qty * COALESCE(c.shopify_price,0)) AS tied_value,
+           (CURRENT_DATE - iv.first_seen) AS age_days,
+           CASE WHEN s.units_sold_90d > 0 AND s.avg_days_to_sell > 0
+                THEN c.shopify_qty * s.avg_days_to_sell END AS days_inv
+    FROM inventory_product_cache c
+    JOIN product_taxonomy t USING (shopify_variant_id)
+    LEFT JOIN sku_analytics s USING (shopify_variant_id)
+    LEFT JOIN inv iv USING (shopify_variant_id)
+"""
+
+
+@app.route("/api/inventory/dead")
+def inventory_dead():
+    """Job A list + total count/value of capital that is not working."""
+    ptype = (request.args.get("ptype") or "").strip()
+    wsql, params = _dead_where(ptype)
+
+    agg = db.query_one(f"""
+        WITH inv AS {_INV_FIRST_SEEN}
+        SELECT COUNT(*) AS n, COALESCE(SUM(c.shopify_qty*COALESCE(c.shopify_price,0)),0) AS v
         FROM inventory_product_cache c
         JOIN product_taxonomy t USING (shopify_variant_id)
         LEFT JOIN sku_analytics s USING (shopify_variant_id)
-        WHERE {' AND '.join(where)}
+        LEFT JOIN inv iv USING (shopify_variant_id)
+        WHERE {wsql}
+    """, tuple(params)) or {}
+
+    rows = db.query(f"""
+        WITH inv AS {_INV_FIRST_SEEN}
+        {_DEAD_SELECT}
+        WHERE {wsql}
         ORDER BY tied_value DESC NULLS LAST
-        LIMIT 60
+        LIMIT 300
     """, tuple(params))
-    return jsonify({"items": [_ser(r) for r in rows]})
+    return jsonify({
+        "items": [_ser(r) for r in rows],
+        "total": int(agg.get("n") or 0),
+        "total_value": float(agg.get("v") or 0),
+    })
+
+
+@app.route("/api/inventory/dead.csv")
+def inventory_dead_csv():
+    """Full dead-capital worklist as CSV — for a spreadsheet repricing/breakdown pass."""
+    import io, csv
+    ptype = (request.args.get("ptype") or "").strip()
+    wsql, params = _dead_where(ptype)
+    rows = db.query(f"""
+        WITH inv AS {_INV_FIRST_SEEN}
+        {_DEAD_SELECT}
+        WHERE {wsql}
+        ORDER BY tied_value DESC NULLS LAST
+    """, tuple(params))
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Title", "SKU", "Type", "Game", "Qty", "Price",
+                "Capital Tied", "Days In Stock", "Sold 90d", "Total Sold All-Time"])
+    for r in rows:
+        w.writerow([
+            r.get("title"), r.get("sku"), r.get("product_type"), r.get("ip"),
+            r.get("current_qty"), r.get("current_price"),
+            round(float(r.get("tied_value") or 0), 2),
+            r.get("age_days"), r.get("units_sold_90d"), r.get("total_sold_all_time"),
+        ])
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=dead_capital.csv"})
 
 
 @app.route("/api/inventory/restock")
@@ -526,6 +601,9 @@ th:hover { color:var(--text); }
 .flow-cols { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:10px; }
 @media (max-width:860px) { .flow-cols { grid-template-columns:1fr; } }
 .hint { font-size:0.76rem; color:var(--dim); margin:0 0 10px; }
+.list-summary { display:flex; align-items:center; gap:10px; justify-content:space-between; font-size:0.8rem; margin-bottom:8px; }
+.list-summary b { font-size:0.95rem; }
+.scroll-list { max-height:520px; overflow-y:auto; padding-right:4px; }
 .lst { display:flex; flex-direction:column; gap:6px; }
 .row { display:flex; align-items:center; gap:10px; padding:8px 10px; background:var(--surface); border:1px solid var(--border); border-radius:8px; }
 .row .nm { flex:1; min-width:0; font-size:0.82rem; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -598,13 +676,14 @@ th:hover { color:var(--text); }
         <select id="dead-ptype" onchange="loadDead()">
           <option value="">All types</option>
           <option value="sealed">Sealed</option>
-          <option value="card">Cards</option>
+          <option value="card">Cards / slabs</option>
           <option value="board_game">Board games</option>
           <option value="accessory">Supplies</option>
         </select>
       </div>
-      <p class="hint">In stock but not moving — zero sales in 90d, or 6+ months of stock at the current rate. Stop buying, or break it down.</p>
-      <div id="dead-list"><div class="spinner"></div></div>
+      <p class="hint">In stock 45+ days but not moving — zero sales in 90d, or 6+ months of stock at the current rate. Stop buying, or break it down.</p>
+      <div id="dead-summary" class="list-summary"></div>
+      <div id="dead-list" class="scroll-list"><div class="spinner"></div></div>
     </div>
     <div class="flow-col">
       <div class="section-head">
@@ -827,20 +906,24 @@ function renderRollup(groups) {
 async function loadDead() {
   const ptype = document.getElementById('dead-ptype').value;
   const el = document.getElementById('dead-list');
-  el.innerHTML = '<div class="spinner"></div>';
+  const sum = document.getElementById('dead-summary');
+  el.innerHTML = '<div class="spinner"></div>'; sum.innerHTML = '';
   try {
     const r = await fetch('/api/inventory/dead?ptype=' + encodeURIComponent(ptype));
     const d = await r.json();
+    sum.innerHTML = '<span><b>' + d.total + '</b> items · <b>' + fmtMoney(d.total_value) + '</b> tied up</span>' +
+      '<a class="btn btn-secondary btn-sm" href="/api/inventory/dead.csv?ptype=' + encodeURIComponent(ptype) + '">⬇ Export CSV</a>';
     if (!d.items.length) { el.innerHTML = '<div class="empty">Nothing stale here.</div>'; return; }
+    const shown = d.items.length < d.total ? ' <small style="color:var(--dim)">(showing top ' + d.items.length + ')</small>' : '';
     el.innerHTML = '<div class="lst">' + d.items.map(i => {
       const tied = (i.current_qty || 0) * (i.current_price || 0);
       const sub = (i.units_sold_90d > 0)
         ? Math.round(i.days_inv) + 'd of stock · ' + i.units_sold_90d + ' sold 90d'
-        : 'no sales in 90d';
+        : 'no sales' + (i.age_days != null ? ' · ' + i.age_days + 'd in stock' : '');
       return '<div class="row"><div class="nm">' + (i.title || '—') +
         '<small>' + (i.product_type || '?') + ' · qty ' + (i.current_qty||0) + '</small></div>' +
         '<div class="mv"><b>' + fmtMoney(tied) + '</b><br><small>' + sub + '</small></div></div>';
-    }).join('') + '</div>';
+    }).join('') + '</div>' + shown;
   } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
 }
 
