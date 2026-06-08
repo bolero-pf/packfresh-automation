@@ -12,6 +12,17 @@ from flask import Blueprint, request, jsonify, render_template, send_file, Respo
 import db
 import intake
 from price_provider import PriceError
+
+try:
+    # Variant normalization shared with the cache layer so the Market Prices
+    # comparison resolves the item's actual printing (e.g. Collectr variance
+    # "Reverse Holofoil" → "reverseHolofoil" → display "Reverse Holofoil")
+    # instead of falling back to the cache's Normal-preferred default.
+    from price_cache import _to_native_variant, VARIANT_DISPLAY
+except Exception:  # pragma: no cover - defensive; price_cache always on path
+    VARIANT_DISPLAY = {}
+    def _to_native_variant(name):
+        return name
 from helpers import (
     _serialize,
     _decode_override,
@@ -47,6 +58,19 @@ def configure(*, _pricing=None, _shopify=None, _cache_mgr=None,
 
 
 bp = Blueprint("pricing", __name__)
+
+
+def _resolve_item_display_variant(item):
+    """Map an intake item's printing to the display-variant key used in the
+    cache's per-variant condition maps (e.g. variance "Reverse Holofoil" →
+    "Reverse Holofoil", "holofoil" → "Holofoil"). Prefers the explicit
+    `variant` column, falls back to Collectr `variance`. Returns None when the
+    item names no printing — caller then uses the cache default."""
+    raw = item.get("variant") or item.get("variance")
+    native = _to_native_variant(raw)
+    if not native:
+        return None
+    return VARIANT_DISPLAY.get(native, native)
 
 
 def _maybe_backfill_english_name(session_id, tcgplayer_id, english_name):
@@ -366,8 +390,20 @@ def refresh_session_prices(session_id):
             cond_map = {"NM": "Near Mint", "LP": "Lightly Played", "MP": "Moderately Played",
                         "HP": "Heavily Played", "DMG": "Damaged"}
             cond_key = cond_map.get(condition.upper(), "Near Mint")
-            conditions = raw_prices.get("conditions") or {}
-            cond_data = conditions.get(cond_key) or {}
+            # Pick the item's ACTUAL printing. One tcgplayer_id can map to
+            # several variants (normal + reverseHolofoil share one TCG id), and
+            # raw_prices["conditions"] is the cache's Normal-preferred default —
+            # using it for a reverse-holo item compares apples to oranges (the
+            # $6.33-vs-$37.21 Glaceon bug). Resolve from variance/variant and
+            # read that variant's condition map; fall back to the default only
+            # when the item names no printing or the cache lacks that variant.
+            item_variant = _resolve_item_display_variant(item)
+            variants = raw_prices.get("variants") or {}
+            cond_data = {}
+            if item_variant and item_variant in variants:
+                cond_data = variants[item_variant].get(cond_key) or {}
+            if not cond_data:
+                cond_data = (raw_prices.get("conditions") or {}).get(cond_key) or {}
             cond_price = cond_data.get("price")
             if cond_price is not None:
                 ppt_price = cond_price
