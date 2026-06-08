@@ -260,6 +260,11 @@ def pipeline_status():
 
 _RAW_ONHAND = "state IN ('STORED','DISPLAY')"  # available to buy; excludes BARCODED bulk
 
+# Damaged variants share a tcgplayer_id with their non-damaged twin and are a
+# separate disposition — they must NEVER appear as their own line or pollute
+# velocity/dead analytics. Authoritative across every cache-based view here.
+_NOT_DAMAGED = "COALESCE(c.is_damaged, FALSE) = FALSE"
+
 # Dead capital only counts items whose CURRENT stock has actually sat without
 # selling. "In stock since" = start of the current continuous in-stock streak =
 # the day after the most recent qty=0 snapshot (or the first snapshot if never 0).
@@ -323,6 +328,7 @@ def inventory_flow():
         FROM inventory_product_cache c
         LEFT JOIN sku_analytics s USING (shopify_variant_id)
         LEFT JOIN inv iv USING (shopify_variant_id)
+        WHERE {_NOT_DAMAGED}
     """, (DEAD_MIN_AGE_DAYS, DEAD_MIN_AGE_DAYS)) or {}
 
     raw = db.query_one(f"""
@@ -378,6 +384,7 @@ def inventory_flow():
         JOIN product_taxonomy t USING (shopify_variant_id)
         LEFT JOIN sku_analytics s USING (shopify_variant_id)
         LEFT JOIN inv iv USING (shopify_variant_id)
+        WHERE {_NOT_DAMAGED}
         GROUP BY 1
         HAVING SUM(GREATEST(c.shopify_qty,0)) > 0 OR SUM(s.units_sold_90d) > 0
         ORDER BY inv_value DESC NULLS LAST
@@ -439,6 +446,7 @@ def _dead_where(ptype):
     where = [
         "c.shopify_qty > 0",
         "c.status = 'ACTIVE'",
+        _NOT_DAMAGED,
         "COALESCE(s.units_sold_90d,0) = 0",
         f"iv.first_seen <= CURRENT_DATE - {DEAD_MIN_AGE_DAYS}",
     ]
@@ -593,7 +601,7 @@ def inventory_dead():
 def _needs_era_rows():
     """Pokémon products (active) whose authoritative custom.era metafield is unset —
     grouped to product level (era is a product metafield). In-stock first."""
-    return db.query("""
+    return db.query(f"""
         SELECT c.shopify_product_id,
                MAX(c.title) AS title,
                MAX(c.handle) AS handle,
@@ -601,7 +609,7 @@ def _needs_era_rows():
                round(SUM(GREATEST(c.shopify_qty,0)*COALESCE(c.shopify_price,0))::numeric,2) AS value
         FROM inventory_product_cache c
         JOIN product_taxonomy t USING (shopify_variant_id)
-        WHERE c.status='ACTIVE' AND t.ip='pokemon' AND c.era IS NULL
+        WHERE c.status='ACTIVE' AND t.ip='pokemon' AND c.era IS NULL AND {_NOT_DAMAGED}
         GROUP BY c.shopify_product_id
         ORDER BY (SUM(GREATEST(c.shopify_qty,0)) > 0) DESC, value DESC NULLS LAST
     """)
@@ -707,7 +715,7 @@ def inventory_restock():
     cond = ("(c.shopify_qty > 0 AND s.units_sold_90d > 0 AND s.avg_days_to_sell > 0 "
             "     AND c.shopify_qty * s.avg_days_to_sell <= 30) "
             "OR (c.shopify_qty = 0 AND COALESCE(s.units_sold_30d,0) > 0 AND t.product_type <> 'card')")
-    where = [f"({cond})"]
+    where = [f"({cond})", _NOT_DAMAGED]
     if ptype:
         where.append("t.product_type = %s")
         params.append(ptype)
