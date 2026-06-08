@@ -3,7 +3,11 @@
 
 ## Key Files
 - **app.py** — Flask app: tabbed dashboard UI (SKUs + Inventory Flow), /run pipeline trigger, /api/* endpoints
-  - Inventory Flow tab → `/api/inventory/flow` (KPIs + group-by roll-up w/ velocity-banded capital bar), `/api/inventory/dead` (Job A: in-stock + not moving), `/api/inventory/restock` (Job B: reorder signals). All value/stale metrics gate on `current_qty>0`.
+  - Inventory Flow tab. TWO streams, reconciles to the inventory page (~$485k):
+    - Sealed/catalog: value/qty from `inventory_product_cache` (shopify_qty × shopify_price) — the SAME source the inventory page sums. Velocity is LEFT-joined from `sku_analytics`; a missing row = never sold = 0 sales (so we MUST base on the cache, not sku_analytics, or never-sold deadstock vanishes — that was the original $288k-vs-$400k bug).
+    - Raw singles: `raw_cards` in STORED/DISPLAY (= on hand / available to buy; BARCODED is excluded bulk). Velocity from state='SOLD' + removal_date.
+  - Velocity uses the TRUE daily rate = 1/`avg_days_to_sell` (first-seen + OOS adjusted), NOT units_sold_90d/90 — the naive denominator understates recent fast movers (a 6-week-old pack that sold 31 looked half as fast). days_of_inventory = qty × avg_days_to_sell.
+  - Endpoints: `/api/inventory/flow` (combined KPIs + sealed roll-up), `/api/inventory/raw` (raw roll-up), `/api/inventory/raw-aging` (raw dead capital), `/api/inventory/dead` (Job A: zero-sales OR slow<0.1/day AND piled>180d — fast sellers w/ deep stock are NOT flagged), `/api/inventory/restock` (Job B: ≤30 days left at true rate).
 - **compute.py** — Pipeline orchestrator: calls all steps in sequence
 - **price_history.py** — Daily scrydex_price_cache → scrydex_price_history snapshot (NM/raw only; auto-creates monthly partition + drops partitions >90d)
 - **taxonomy.py** — Product classification: IP, form_factor, set, era → product_taxonomy

@@ -247,11 +247,18 @@ def pipeline_status():
 
 
 # ── Inventory Flow ───────────────────────────────────────────────────────────
-# Two jobs this powers:
-#   A. Buying / breakdown — are we sitting on capital that does not move?
-#   B. Reorder-from-distro — which board games / supplies / sealed are running low?
-# Every "value" / "stale" metric is gated on current_qty > 0 — items we no longer
-# own (qty=0) are not dead capital, just not owned.
+# Reconciles to the inventory page. Two inventory streams:
+#   • Sealed / store catalog → inventory_product_cache (shopify_qty * shopify_price),
+#     the SAME source the inventory page sums. Velocity is LEFT-joined from
+#     sku_analytics, which is built FROM sku_daily_sales — so a SKU only has a
+#     velocity row once it has sold. Never-sold deadstock has NO row, which is
+#     exactly why we base on the cache and treat a missing row as 0 sales.
+#   • Raw singles → raw_cards in STORED/DISPLAY (on hand / available to buy).
+#     BARCODED is bulk that just sits, excluded. Velocity from SOLD + removal_date.
+# Jobs: (A) buying/breakdown — capital not moving; (B) reorder-from-distro.
+# All sealed value/stale metrics gate on shopify_qty > 0.
+
+_RAW_ONHAND = "state IN ('STORED','DISPLAY')"  # available to buy; excludes BARCODED bulk
 
 # Whitelisted group-by dimensions (column on product_taxonomy t).
 _FLOW_DIMS = {
@@ -262,52 +269,133 @@ _FLOW_DIMS = {
     "era":          "t.era",
 }
 
+# Whitelisted raw-card group-by dimensions (column on raw_cards).
+_RAW_DIMS = {
+    "game":      "game",
+    "set_name":  "set_name",
+    "condition": "condition",
+    "rarity":    "rarity",
+}
+
 
 @app.route("/api/inventory/flow")
 def inventory_flow():
-    """KPI strip + group-by roll-up with per-group velocity-band value split."""
+    """Combined KPI strip (sealed + raw) + sealed group-by roll-up with velocity bands."""
     dim = request.args.get("dim", "product_type")
     col = _FLOW_DIMS.get(dim, "t.product_type")
 
-    kpi = db.query_one("""
+    # Sealed — based on the cache (the inventory page's source), velocity LEFT-joined.
+    sealed = db.query_one("""
         SELECT
-          COUNT(*) FILTER (WHERE s.current_qty > 0)                       AS in_stock_skus,
-          COALESCE(SUM(GREATEST(s.current_qty,0)),0)                      AS units,
-          COALESCE(SUM(GREATEST(s.current_qty,0)*COALESCE(s.current_price,0)),0) AS inv_value,
-          COALESCE(SUM(CASE WHEN s.current_qty>0 AND COALESCE(s.units_sold_90d,0)=0
-                            THEN s.current_qty*COALESCE(s.current_price,0) END),0)  AS dead_value,
-          COUNT(*) FILTER (WHERE s.current_qty>0 AND COALESCE(s.units_sold_90d,0)=0) AS dead_skus,
-          COALESCE(SUM(s.units_sold_90d),0)                              AS sold_90d
-        FROM sku_analytics s
-    """)
+          COUNT(*) FILTER (WHERE c.shopify_qty > 0)                                 AS in_stock_skus,
+          COALESCE(SUM(GREATEST(c.shopify_qty,0)),0)                                AS units,
+          COALESCE(SUM(GREATEST(c.shopify_qty,0)*COALESCE(c.shopify_price,0)),0)     AS inv_value,
+          COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND COALESCE(s.units_sold_90d,0)=0
+                            THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0)   AS dead_value,
+          COUNT(*) FILTER (WHERE c.shopify_qty>0 AND COALESCE(s.units_sold_90d,0)=0) AS dead_skus,
+          COALESCE(SUM(s.units_sold_90d),0)                                         AS sold_90d
+        FROM inventory_product_cache c
+        LEFT JOIN sku_analytics s USING (shopify_variant_id)
+    """) or {}
+
+    raw = db.query_one(f"""
+        SELECT
+          COALESCE(SUM(current_price) FILTER (WHERE {_RAW_ONHAND}),0)               AS raw_value,
+          COUNT(*) FILTER (WHERE {_RAW_ONHAND})                                     AS raw_cnt,
+          COUNT(*) FILTER (WHERE state='SOLD' AND removal_date >= CURRENT_DATE-90)  AS raw_sold_90d
+        FROM raw_cards
+    """) or {}
+
+    sv = float(sealed.get("inv_value") or 0)
+    rv = float(raw.get("raw_value") or 0)
+    kpi = {
+        "total_value":   sv + rv,
+        "sealed_value":  sv,
+        "raw_value":     rv,
+        "in_stock_skus": int(sealed.get("in_stock_skus") or 0),
+        "sealed_units":  int(sealed.get("units") or 0),
+        "raw_cnt":       int(raw.get("raw_cnt") or 0),
+        "dead_value":    float(sealed.get("dead_value") or 0),
+        "dead_skus":     int(sealed.get("dead_skus") or 0),
+        "sold_90d":      int(sealed.get("sold_90d") or 0),
+        "raw_sold_90d":  int(raw.get("raw_sold_90d") or 0),
+    }
 
     rows = db.query(f"""
         SELECT
           COALESCE({col}, '(unclassified)')                              AS grp,
-          COUNT(*) FILTER (WHERE s.current_qty>0)                        AS skus,
-          COALESCE(SUM(GREATEST(s.current_qty,0)),0)                     AS units,
-          COALESCE(SUM(GREATEST(s.current_qty,0)*COALESCE(s.current_price,0)),0) AS inv_value,
+          COUNT(*) FILTER (WHERE c.shopify_qty>0)                        AS skus,
+          COALESCE(SUM(GREATEST(c.shopify_qty,0)),0)                     AS units,
+          COALESCE(SUM(GREATEST(c.shopify_qty,0)*COALESCE(c.shopify_price,0)),0) AS inv_value,
           COALESCE(SUM(s.units_sold_90d),0)                             AS sold_90d,
           COALESCE(SUM(s.units_sold_30d),0)                             AS sold_30d,
           COALESCE(SUM(s.units_sold_7d),0)                              AS sold_7d,
-          COALESCE(SUM(CASE WHEN s.current_qty>0 AND COALESCE(s.units_sold_90d,0)/90.0 >= 0.3
-                            THEN s.current_qty*COALESCE(s.current_price,0) END),0) AS val_fast,
-          COALESCE(SUM(CASE WHEN s.current_qty>0 AND COALESCE(s.units_sold_90d,0)/90.0 >= 0.1
-                            AND COALESCE(s.units_sold_90d,0)/90.0 < 0.3
-                            THEN s.current_qty*COALESCE(s.current_price,0) END),0) AS val_med,
-          COALESCE(SUM(CASE WHEN s.current_qty>0 AND s.units_sold_90d > 0
-                            AND COALESCE(s.units_sold_90d,0)/90.0 < 0.1
-                            THEN s.current_qty*COALESCE(s.current_price,0) END),0) AS val_slow,
-          COALESCE(SUM(CASE WHEN s.current_qty>0 AND COALESCE(s.units_sold_90d,0)=0
-                            THEN s.current_qty*COALESCE(s.current_price,0) END),0) AS val_dead
-        FROM sku_analytics s
+          -- Velocity bands use the TRUE daily rate (1/avg_days_to_sell), which is
+          -- first-seen + OOS adjusted — NOT units/90, which understates recent fast movers.
+          COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND s.units_sold_90d>0 AND s.avg_days_to_sell > 0
+                            AND s.avg_days_to_sell <= 3.333
+                            THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0) AS val_fast,
+          COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND s.units_sold_90d>0
+                            AND s.avg_days_to_sell > 3.333 AND s.avg_days_to_sell <= 10
+                            THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0) AS val_med,
+          COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND s.units_sold_90d>0 AND s.avg_days_to_sell > 10
+                            THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0) AS val_slow,
+          COALESCE(SUM(CASE WHEN c.shopify_qty>0 AND COALESCE(s.units_sold_90d,0)=0
+                            THEN c.shopify_qty*COALESCE(c.shopify_price,0) END),0) AS val_dead
+        FROM inventory_product_cache c
         JOIN product_taxonomy t USING (shopify_variant_id)
+        LEFT JOIN sku_analytics s USING (shopify_variant_id)
         GROUP BY 1
-        HAVING SUM(GREATEST(s.current_qty,0)) > 0 OR SUM(s.units_sold_90d) > 0
+        HAVING SUM(GREATEST(c.shopify_qty,0)) > 0 OR SUM(s.units_sold_90d) > 0
         ORDER BY inv_value DESC NULLS LAST
     """)
 
-    return jsonify({"kpi": _ser(kpi) if kpi else {}, "groups": [_ser(r) for r in rows]})
+    return jsonify({"kpi": kpi, "groups": [_ser(r) for r in rows]})
+
+
+@app.route("/api/inventory/raw")
+def inventory_raw():
+    """Raw-singles roll-up: on-hand value/count, velocity from SOLD history, avg age."""
+    dim = request.args.get("dim", "game")
+    col = _RAW_DIMS.get(dim, "game")
+
+    rows = db.query(f"""
+        SELECT
+          COALESCE({col}::text, '(none)')                                          AS grp,
+          COUNT(*) FILTER (WHERE {_RAW_ONHAND})                                     AS cnt,
+          COALESCE(SUM(current_price) FILTER (WHERE {_RAW_ONHAND}),0)               AS value,
+          COUNT(*) FILTER (WHERE state='SOLD' AND removal_date >= CURRENT_DATE-90)  AS sold_90d,
+          COUNT(*) FILTER (WHERE state='SOLD' AND removal_date >= CURRENT_DATE-30)  AS sold_30d,
+          COUNT(*) FILTER (WHERE state='SOLD' AND removal_date >= CURRENT_DATE-7)   AS sold_7d,
+          ROUND(AVG(CURRENT_DATE - stored_at::date) FILTER (WHERE {_RAW_ONHAND}))   AS avg_age
+        FROM raw_cards
+        GROUP BY 1
+        HAVING COUNT(*) FILTER (WHERE {_RAW_ONHAND}) > 0
+            OR COUNT(*) FILTER (WHERE state='SOLD' AND removal_date >= CURRENT_DATE-90) > 0
+        ORDER BY value DESC NULLS LAST
+    """)
+    return jsonify({"groups": [_ser(r) for r in rows]})
+
+
+@app.route("/api/inventory/raw-aging")
+def inventory_raw_aging():
+    """Raw dead capital: on-hand singles held longest without selling. Reprice / bundle / move."""
+    game = (request.args.get("game") or "").strip()
+    where = [_RAW_ONHAND, "COALESCE(current_price,0) >= 1"]
+    params = []
+    if game:
+        where.append("game = %s")
+        params.append(game)
+
+    rows = db.query(f"""
+        SELECT card_name, set_name, condition, game, current_price,
+               (CURRENT_DATE - stored_at::date) AS age_days
+        FROM raw_cards
+        WHERE {' AND '.join(where)}
+        ORDER BY age_days DESC, current_price DESC
+        LIMIT 60
+    """, tuple(params))
+    return jsonify({"items": [_ser(r) for r in rows]})
 
 
 @app.route("/api/inventory/dead")
@@ -316,20 +404,26 @@ def inventory_dead():
     or more than ~6 months of stock at the current rate. Markdown / breakdown / stop-buying."""
     ptype = (request.args.get("ptype") or "").strip()
     params = []
-    where = ["s.current_qty > 0",
-             "(COALESCE(s.units_sold_90d,0) = 0 OR s.current_qty / (NULLIF(s.units_sold_90d,0)/90.0) > 180)"]
+    # Not moving = in stock AND (zero sales in 90d) OR (genuinely slow <0.1/day AND piled
+    # up >180 days of stock). Fast sellers with deep stock are well-stocked, NOT dead.
+    where = ["c.shopify_qty > 0",
+             "(COALESCE(s.units_sold_90d,0) = 0 "
+             " OR (s.avg_days_to_sell > 10 AND c.shopify_qty * s.avg_days_to_sell > 180))"]
     if ptype:
         where.append("t.product_type = %s")
         params.append(ptype)
 
     rows = db.query(f"""
-        SELECT s.title, s.tcgplayer_id, t.product_type, t.ip, t.form_factor,
-               s.current_qty, s.current_price, s.units_sold_90d, s.units_sold_30d,
-               (s.current_qty * COALESCE(s.current_price,0)) AS tied_value,
-               CASE WHEN COALESCE(s.units_sold_90d,0) > 0
-                    THEN s.current_qty / (s.units_sold_90d/90.0) END AS days_inv
-        FROM sku_analytics s
+        SELECT c.title, c.tcgplayer_id, t.product_type, t.ip, t.form_factor,
+               c.shopify_qty AS current_qty, c.shopify_price AS current_price,
+               COALESCE(s.units_sold_90d,0) AS units_sold_90d,
+               COALESCE(s.units_sold_30d,0) AS units_sold_30d,
+               (c.shopify_qty * COALESCE(c.shopify_price,0)) AS tied_value,
+               CASE WHEN s.units_sold_90d > 0 AND s.avg_days_to_sell > 0
+                    THEN c.shopify_qty * s.avg_days_to_sell END AS days_inv
+        FROM inventory_product_cache c
         JOIN product_taxonomy t USING (shopify_variant_id)
+        LEFT JOIN sku_analytics s USING (shopify_variant_id)
         WHERE {' AND '.join(where)}
         ORDER BY tied_value DESC NULLS LAST
         LIMIT 60
@@ -343,23 +437,29 @@ def inventory_restock():
     plus out-of-stock non-singles that are still selling (sealed / board games / supplies)."""
     ptype = (request.args.get("ptype") or "").strip()
     params = []
-    cond = ("(s.current_qty > 0 AND COALESCE(s.units_sold_90d,0) > 0 "
-            "     AND s.current_qty / (s.units_sold_90d/90.0) <= 30) "
-            "OR (s.current_qty = 0 AND COALESCE(s.units_sold_30d,0) > 0 AND t.product_type <> 'card')")
+    # Running low = in stock, selling, with <=30 days of stock left at the TRUE rate
+    # (qty * avg_days_to_sell). Plus out-of-stock non-singles still selling.
+    cond = ("(c.shopify_qty > 0 AND s.units_sold_90d > 0 AND s.avg_days_to_sell > 0 "
+            "     AND c.shopify_qty * s.avg_days_to_sell <= 30) "
+            "OR (c.shopify_qty = 0 AND COALESCE(s.units_sold_30d,0) > 0 AND t.product_type <> 'card')")
     where = [f"({cond})"]
     if ptype:
         where.append("t.product_type = %s")
         params.append(ptype)
 
     rows = db.query(f"""
-        SELECT s.title, s.tcgplayer_id, t.product_type, t.ip,
-               s.current_qty, s.current_price, s.units_sold_90d, s.units_sold_30d, s.units_sold_7d,
-               CASE WHEN COALESCE(s.units_sold_90d,0) > 0
-                    THEN s.current_qty / (s.units_sold_90d/90.0) END AS days_inv
-        FROM sku_analytics s
+        SELECT c.title, c.tcgplayer_id, t.product_type, t.ip,
+               c.shopify_qty AS current_qty, c.shopify_price AS current_price,
+               COALESCE(s.units_sold_90d,0) AS units_sold_90d,
+               COALESCE(s.units_sold_30d,0) AS units_sold_30d,
+               COALESCE(s.units_sold_7d,0) AS units_sold_7d,
+               CASE WHEN s.units_sold_90d > 0 AND s.avg_days_to_sell > 0
+                    THEN c.shopify_qty * s.avg_days_to_sell END AS days_inv
+        FROM inventory_product_cache c
         JOIN product_taxonomy t USING (shopify_variant_id)
+        LEFT JOIN sku_analytics s USING (shopify_variant_id)
         WHERE {' AND '.join(where)}
-        ORDER BY (s.current_qty = 0) DESC, days_inv ASC NULLS LAST
+        ORDER BY (c.shopify_qty = 0) DESC, days_inv ASC NULLS LAST
         LIMIT 60
     """, tuple(params))
     return jsonify({"items": [_ser(r) for r in rows]})
@@ -520,6 +620,29 @@ th:hover { color:var(--text); }
       <div id="restock-list"><div class="spinner"></div></div>
     </div>
   </div>
+
+  <div class="section-head">
+    <h2>Raw singles — on hand (stored + display)</h2>
+    <select id="raw-dim" onchange="loadRaw()">
+      <option value="game">Group by Game</option>
+      <option value="set_name">Group by Set</option>
+      <option value="condition">Group by Condition</option>
+      <option value="rarity">Group by Rarity</option>
+    </select>
+  </div>
+  <div id="raw-rollup"><div class="spinner"></div></div>
+
+  <div class="section-head">
+    <h2>⏳ Aged raw singles</h2>
+    <select id="raw-aging-game" onchange="loadRawAging()">
+      <option value="">All games</option>
+      <option value="pokemon">Pokemon</option>
+      <option value="magic">Magic</option>
+      <option value="onepiece">One Piece</option>
+    </select>
+  </div>
+  <p class="hint">On-hand singles held longest without selling — oldest first. Candidates to reprice, bundle, or move.</p>
+  <div id="raw-aging-list"><div class="spinner"></div></div>
 </div>
 
 <script>
@@ -639,7 +762,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.getElementById('tab-skus').style.display = name === 'skus' ? '' : 'none';
   document.getElementById('tab-flow').style.display = name === 'flow' ? '' : 'none';
-  if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; loadFlow(); loadDead(); loadRestock(); }
+  if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; loadFlow(); loadDead(); loadRestock(); loadRaw(); loadRawAging(); }
 }
 
 function fmtMoney(n) { return '$' + Math.round(n || 0).toLocaleString(); }
@@ -657,16 +780,15 @@ async function loadFlow() {
 }
 
 function renderKpis(k) {
-  const units = k.units || 0, sold = k.sold_90d || 0;
-  const sellThrough = (units + sold) > 0 ? (sold / (units + sold) * 100) : 0;
-  const daysToClear = sold > 0 ? Math.round(units / (sold / 90)) : null;
+  const su = k.sealed_units || 0, sold = k.sold_90d || 0;
+  const sellThrough = (su + sold) > 0 ? (sold / (su + sold) * 100) : 0;
   document.getElementById('flow-kpis').innerHTML = `
-    <div class="stat"><div class="stat-label">Inventory Value</div><div class="stat-val">${fmtMoney(k.inv_value)}</div></div>
-    <div class="stat"><div class="stat-label">Units in Stock</div><div class="stat-val">${(units).toLocaleString()}</div></div>
-    <div class="stat"><div class="stat-label">In-Stock SKUs</div><div class="stat-val">${(k.in_stock_skus||0).toLocaleString()}</div></div>
-    <div class="stat"><div class="stat-label">Dead Capital</div><div class="stat-val" style="color:var(--red);">${fmtMoney(k.dead_value)}</div><div class="stat-label">${k.dead_skus||0} SKUs</div></div>
-    <div class="stat"><div class="stat-label">Sell-Through 90d</div><div class="stat-val" style="color:var(--green);">${sellThrough.toFixed(0)}%</div></div>
-    <div class="stat"><div class="stat-label">Days to Clear</div><div class="stat-val">${daysToClear !== null ? daysToClear + 'd' : '—'}</div></div>`;
+    <div class="stat"><div class="stat-label">Total Inventory</div><div class="stat-val">${fmtMoney(k.total_value)}</div></div>
+    <div class="stat"><div class="stat-label">Sealed / Catalog</div><div class="stat-val">${fmtMoney(k.sealed_value)}</div><div class="stat-label">${(k.in_stock_skus||0).toLocaleString()} SKUs</div></div>
+    <div class="stat"><div class="stat-label">Raw Singles</div><div class="stat-val">${fmtMoney(k.raw_value)}</div><div class="stat-label">${(k.raw_cnt||0).toLocaleString()} on hand</div></div>
+    <div class="stat"><div class="stat-label">Dead Capital</div><div class="stat-val" style="color:var(--red);">${fmtMoney(k.dead_value)}</div><div class="stat-label">${k.dead_skus||0} SKUs, no 90d sales</div></div>
+    <div class="stat"><div class="stat-label">Sealed Sell-Through 90d</div><div class="stat-val" style="color:var(--green);">${sellThrough.toFixed(0)}%</div></div>
+    <div class="stat"><div class="stat-label">Raw Sold 90d</div><div class="stat-val" style="color:var(--green);">${(k.raw_sold_90d||0).toLocaleString()}</div></div>`;
 }
 
 function renderRollup(groups) {
@@ -738,6 +860,52 @@ async function loadRestock() {
         '<small>' + (i.product_type || '?') + ' · qty ' + (i.current_qty||0) + '</small></div>' +
         '<div class="mv">' + lead + '<br><small>' + (i.units_sold_30d||0) + ' · 30d / ' + (i.units_sold_7d||0) + ' · 7d</small></div></div>';
     }).join('') + '</div>';
+  } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
+}
+
+async function loadRaw() {
+  const dim = document.getElementById('raw-dim').value;
+  const el = document.getElementById('raw-rollup');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/inventory/raw?dim=' + dim);
+    const d = await r.json();
+    if (!d.groups.length) { el.innerHTML = '<div class="empty">No raw inventory.</div>'; return; }
+    const maxVal = Math.max(...d.groups.map(g => g.value || 0), 1);
+    el.innerHTML = '<div style="overflow-x:auto;"><table>' +
+      '<thead><tr><th style="text-align:left;">Group</th><th>On-hand Value</th><th>On hand</th>' +
+      '<th>Sold 90d</th><th>30d</th><th>7d</th><th>Avg Age</th></tr></thead><tbody>' +
+      d.groups.map(g => {
+        const v = g.value || 0;
+        const bar = '<div class="bar" style="width:' + Math.max(v/maxVal*100, 2) + '%;">' +
+          '<span style="width:100%;background:var(--accent);"></span></div>';
+        return '<tr>' +
+          '<td style="text-align:left;font-weight:600;">' + g.grp + '</td>' +
+          '<td style="min-width:160px;"><div style="display:flex;align-items:center;gap:8px;">' + bar +
+            '<span style="font-weight:600;white-space:nowrap;">' + fmtMoney(v) + '</span></div></td>' +
+          '<td>' + (g.cnt||0) + '</td>' +
+          '<td style="font-weight:600;">' + (g.sold_90d||0) + '</td>' +
+          '<td>' + (g.sold_30d||0) + '</td>' +
+          '<td>' + (g.sold_7d||0) + '</td>' +
+          '<td>' + (g.avg_age != null ? g.avg_age + 'd' : '—') + '</td>' +
+        '</tr>';
+      }).join('') + '</tbody></table></div>';
+  } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
+}
+
+async function loadRawAging() {
+  const game = document.getElementById('raw-aging-game').value;
+  const el = document.getElementById('raw-aging-list');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/inventory/raw-aging?game=' + encodeURIComponent(game));
+    const d = await r.json();
+    if (!d.items.length) { el.innerHTML = '<div class="empty">Nothing aged.</div>'; return; }
+    el.innerHTML = '<div class="lst">' + d.items.map(i =>
+      '<div class="row"><div class="nm">' + (i.card_name || '—') +
+        '<small>' + (i.set_name || '?') + ' · ' + (i.condition || '?') + '</small></div>' +
+        '<div class="mv"><b>' + Math.round(i.age_days) + 'd</b> held<br><small>' + fmtMoney(i.current_price) + '</small></div></div>'
+    ).join('') + '</div>';
   } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
 }
 
