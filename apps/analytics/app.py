@@ -246,6 +246,125 @@ def pipeline_status():
     })
 
 
+# ── Inventory Flow ───────────────────────────────────────────────────────────
+# Two jobs this powers:
+#   A. Buying / breakdown — are we sitting on capital that does not move?
+#   B. Reorder-from-distro — which board games / supplies / sealed are running low?
+# Every "value" / "stale" metric is gated on current_qty > 0 — items we no longer
+# own (qty=0) are not dead capital, just not owned.
+
+# Whitelisted group-by dimensions (column on product_taxonomy t).
+_FLOW_DIMS = {
+    "product_type": "t.product_type",
+    "ip":           "t.ip",
+    "form_factor":  "t.form_factor",
+    "set_name":     "t.set_name",
+    "era":          "t.era",
+}
+
+
+@app.route("/api/inventory/flow")
+def inventory_flow():
+    """KPI strip + group-by roll-up with per-group velocity-band value split."""
+    dim = request.args.get("dim", "product_type")
+    col = _FLOW_DIMS.get(dim, "t.product_type")
+
+    kpi = db.query_one("""
+        SELECT
+          COUNT(*) FILTER (WHERE s.current_qty > 0)                       AS in_stock_skus,
+          COALESCE(SUM(GREATEST(s.current_qty,0)),0)                      AS units,
+          COALESCE(SUM(GREATEST(s.current_qty,0)*COALESCE(s.current_price,0)),0) AS inv_value,
+          COALESCE(SUM(CASE WHEN s.current_qty>0 AND COALESCE(s.units_sold_90d,0)=0
+                            THEN s.current_qty*COALESCE(s.current_price,0) END),0)  AS dead_value,
+          COUNT(*) FILTER (WHERE s.current_qty>0 AND COALESCE(s.units_sold_90d,0)=0) AS dead_skus,
+          COALESCE(SUM(s.units_sold_90d),0)                              AS sold_90d
+        FROM sku_analytics s
+    """)
+
+    rows = db.query(f"""
+        SELECT
+          COALESCE({col}, '(unclassified)')                              AS grp,
+          COUNT(*) FILTER (WHERE s.current_qty>0)                        AS skus,
+          COALESCE(SUM(GREATEST(s.current_qty,0)),0)                     AS units,
+          COALESCE(SUM(GREATEST(s.current_qty,0)*COALESCE(s.current_price,0)),0) AS inv_value,
+          COALESCE(SUM(s.units_sold_90d),0)                             AS sold_90d,
+          COALESCE(SUM(s.units_sold_30d),0)                             AS sold_30d,
+          COALESCE(SUM(s.units_sold_7d),0)                              AS sold_7d,
+          COALESCE(SUM(CASE WHEN s.current_qty>0 AND COALESCE(s.units_sold_90d,0)/90.0 >= 0.3
+                            THEN s.current_qty*COALESCE(s.current_price,0) END),0) AS val_fast,
+          COALESCE(SUM(CASE WHEN s.current_qty>0 AND COALESCE(s.units_sold_90d,0)/90.0 >= 0.1
+                            AND COALESCE(s.units_sold_90d,0)/90.0 < 0.3
+                            THEN s.current_qty*COALESCE(s.current_price,0) END),0) AS val_med,
+          COALESCE(SUM(CASE WHEN s.current_qty>0 AND s.units_sold_90d > 0
+                            AND COALESCE(s.units_sold_90d,0)/90.0 < 0.1
+                            THEN s.current_qty*COALESCE(s.current_price,0) END),0) AS val_slow,
+          COALESCE(SUM(CASE WHEN s.current_qty>0 AND COALESCE(s.units_sold_90d,0)=0
+                            THEN s.current_qty*COALESCE(s.current_price,0) END),0) AS val_dead
+        FROM sku_analytics s
+        JOIN product_taxonomy t USING (shopify_variant_id)
+        GROUP BY 1
+        HAVING SUM(GREATEST(s.current_qty,0)) > 0 OR SUM(s.units_sold_90d) > 0
+        ORDER BY inv_value DESC NULLS LAST
+    """)
+
+    return jsonify({"kpi": _ser(kpi) if kpi else {}, "groups": [_ser(r) for r in rows]})
+
+
+@app.route("/api/inventory/dead")
+def inventory_dead():
+    """Job A — capital that is not working: in stock and either zero sales in 90d
+    or more than ~6 months of stock at the current rate. Markdown / breakdown / stop-buying."""
+    ptype = (request.args.get("ptype") or "").strip()
+    params = []
+    where = ["s.current_qty > 0",
+             "(COALESCE(s.units_sold_90d,0) = 0 OR s.current_qty / (NULLIF(s.units_sold_90d,0)/90.0) > 180)"]
+    if ptype:
+        where.append("t.product_type = %s")
+        params.append(ptype)
+
+    rows = db.query(f"""
+        SELECT s.title, s.tcgplayer_id, t.product_type, t.ip, t.form_factor,
+               s.current_qty, s.current_price, s.units_sold_90d, s.units_sold_30d,
+               (s.current_qty * COALESCE(s.current_price,0)) AS tied_value,
+               CASE WHEN COALESCE(s.units_sold_90d,0) > 0
+                    THEN s.current_qty / (s.units_sold_90d/90.0) END AS days_inv
+        FROM sku_analytics s
+        JOIN product_taxonomy t USING (shopify_variant_id)
+        WHERE {' AND '.join(where)}
+        ORDER BY tied_value DESC NULLS LAST
+        LIMIT 60
+    """, tuple(params))
+    return jsonify({"items": [_ser(r) for r in rows]})
+
+
+@app.route("/api/inventory/restock")
+def inventory_restock():
+    """Job B — reorder signals: in stock with under ~30 days left at the current rate,
+    plus out-of-stock non-singles that are still selling (sealed / board games / supplies)."""
+    ptype = (request.args.get("ptype") or "").strip()
+    params = []
+    cond = ("(s.current_qty > 0 AND COALESCE(s.units_sold_90d,0) > 0 "
+            "     AND s.current_qty / (s.units_sold_90d/90.0) <= 30) "
+            "OR (s.current_qty = 0 AND COALESCE(s.units_sold_30d,0) > 0 AND t.product_type <> 'card')")
+    where = [f"({cond})"]
+    if ptype:
+        where.append("t.product_type = %s")
+        params.append(ptype)
+
+    rows = db.query(f"""
+        SELECT s.title, s.tcgplayer_id, t.product_type, t.ip,
+               s.current_qty, s.current_price, s.units_sold_90d, s.units_sold_30d, s.units_sold_7d,
+               CASE WHEN COALESCE(s.units_sold_90d,0) > 0
+                    THEN s.current_qty / (s.units_sold_90d/90.0) END AS days_inv
+        FROM sku_analytics s
+        JOIN product_taxonomy t USING (shopify_variant_id)
+        WHERE {' AND '.join(where)}
+        ORDER BY (s.current_qty = 0) DESC, days_inv ASC NULLS LAST
+        LIMIT 60
+    """, tuple(params))
+    return jsonify({"items": [_ser(r) for r in rows]})
+
+
 def _ser(d):
     out = {}
     for k, v in dict(d).items():
@@ -292,17 +411,42 @@ th:hover { color:var(--text); }
 .empty { text-align:center; padding:40px; color:var(--dim); }
 .spinner { width:24px; height:24px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.7s linear infinite; margin:40px auto; }
 @keyframes spin { to { transform:rotate(360deg); } }
+/* tabs */
+.tabs { display:flex; gap:2px; }
+.tab { height:34px; padding:0 16px; background:transparent; border:1px solid var(--border); border-radius:8px; color:var(--dim); cursor:pointer; font:inherit; font-size:0.85rem; font-weight:600; }
+.tab.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+/* inventory flow */
+.section-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:22px 0 10px; flex-wrap:wrap; }
+.section-head h2 { font-size:1rem; }
+.section-head select { height:34px; background:var(--s2); border:1.5px solid var(--border); border-radius:8px; color:var(--text); padding:0 10px; font:inherit; font-size:0.82rem; outline:none; }
+.legend { display:flex; gap:16px; font-size:0.74rem; color:var(--dim); margin-bottom:6px; }
+.legend i.sw { display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+.bar { display:flex; height:14px; border-radius:3px; overflow:hidden; background:var(--s2); min-width:40px; }
+.bar > span { display:block; height:100%; }
+.flow-cols { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:10px; }
+@media (max-width:860px) { .flow-cols { grid-template-columns:1fr; } }
+.hint { font-size:0.76rem; color:var(--dim); margin:0 0 10px; }
+.lst { display:flex; flex-direction:column; gap:6px; }
+.row { display:flex; align-items:center; gap:10px; padding:8px 10px; background:var(--surface); border:1px solid var(--border); border-radius:8px; }
+.row .nm { flex:1; min-width:0; font-size:0.82rem; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.row .nm small { display:block; font-weight:400; color:var(--dim); }
+.row .mv { text-align:right; font-size:0.78rem; white-space:nowrap; }
+.row .mv b { font-size:0.9rem; }
 </style>
 </head>
 <body>
 <div class="header">
-  <h1>SKU Analytics</h1>
+  <h1>Analytics</h1>
+  <div class="tabs">
+    <button class="tab active" data-tab="skus" onclick="switchTab('skus')">SKUs</button>
+    <button class="tab" data-tab="flow" onclick="switchTab('flow')">Inventory Flow</button>
+  </div>
   <button class="btn btn-secondary btn-sm" onclick="runPipeline()" id="run-btn">▶ Run Now</button>
   <button class="btn btn-secondary btn-sm" onclick="runBackfill()" id="bf-btn">↻ Full Backfill</button>
   <span id="status-label" style="font-size:0.78rem;color:var(--dim);margin-left:auto;"></span>
 </div>
 
-<div class="main">
+<div class="main" id="tab-skus">
   <div class="stats" id="stats"><div class="spinner"></div></div>
 
   <div class="controls">
@@ -324,6 +468,58 @@ th:hover { color:var(--text); }
 
   <div id="results"><div class="spinner"></div></div>
   <div class="pg" id="pagination"></div>
+</div>
+
+<div class="main" id="tab-flow" style="display:none;">
+  <div class="stats" id="flow-kpis"><div class="spinner"></div></div>
+
+  <div class="section-head">
+    <h2>Where capital sits vs. where it sells</h2>
+    <select id="flow-dim" onchange="loadFlow()">
+      <option value="product_type">Group by Product Type</option>
+      <option value="ip">Group by Game / IP</option>
+      <option value="form_factor">Group by Form Factor</option>
+      <option value="set_name">Group by Set</option>
+      <option value="era">Group by Era</option>
+    </select>
+  </div>
+  <div class="legend">
+    <span><i class="sw" style="background:var(--green)"></i>Fast</span>
+    <span><i class="sw" style="background:var(--amber)"></i>Medium</span>
+    <span><i class="sw" style="background:#d98a4b"></i>Slow</span>
+    <span><i class="sw" style="background:var(--dim)"></i>No sales</span>
+  </div>
+  <div id="flow-rollup"><div class="spinner"></div></div>
+
+  <div class="flow-cols">
+    <div class="flow-col">
+      <div class="section-head">
+        <h2>🟡 Buying &amp; breakdown</h2>
+        <select id="dead-ptype" onchange="loadDead()">
+          <option value="">All types</option>
+          <option value="sealed">Sealed</option>
+          <option value="card">Cards</option>
+          <option value="board_game">Board games</option>
+          <option value="accessory">Supplies</option>
+        </select>
+      </div>
+      <p class="hint">In stock but not moving — zero sales in 90d, or 6+ months of stock at the current rate. Stop buying, or break it down.</p>
+      <div id="dead-list"><div class="spinner"></div></div>
+    </div>
+    <div class="flow-col">
+      <div class="section-head">
+        <h2>🔵 Reorder from distro</h2>
+        <select id="restock-ptype" onchange="loadRestock()">
+          <option value="">All types</option>
+          <option value="sealed">Sealed</option>
+          <option value="board_game">Board games</option>
+          <option value="accessory">Supplies</option>
+        </select>
+      </div>
+      <p class="hint">Under ~30 days of stock left at the current rate (out-of-stock non-singles shown first). Reorder soon.</p>
+      <div id="restock-list"><div class="spinner"></div></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -434,6 +630,115 @@ async function runBackfill() {
   catch(e) {}
   btn.textContent = 'Started!';
   setTimeout(() => { btn.disabled = false; btn.textContent = '↻ Full Backfill'; loadStatus(); doSearch(); }, 15000);
+}
+
+// ── Inventory Flow ──────────────────────────────────────────────
+let _flowLoaded = false;
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.getElementById('tab-skus').style.display = name === 'skus' ? '' : 'none';
+  document.getElementById('tab-flow').style.display = name === 'flow' ? '' : 'none';
+  if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; loadFlow(); loadDead(); loadRestock(); }
+}
+
+function fmtMoney(n) { return '$' + Math.round(n || 0).toLocaleString(); }
+
+async function loadFlow() {
+  const dim = document.getElementById('flow-dim').value;
+  const roll = document.getElementById('flow-rollup');
+  roll.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/inventory/flow?dim=' + dim);
+    const d = await r.json();
+    renderKpis(d.kpi);
+    renderRollup(d.groups);
+  } catch(e) { roll.innerHTML = '<div class="empty">' + e.message + '</div>'; }
+}
+
+function renderKpis(k) {
+  const units = k.units || 0, sold = k.sold_90d || 0;
+  const sellThrough = (units + sold) > 0 ? (sold / (units + sold) * 100) : 0;
+  const daysToClear = sold > 0 ? Math.round(units / (sold / 90)) : null;
+  document.getElementById('flow-kpis').innerHTML = `
+    <div class="stat"><div class="stat-label">Inventory Value</div><div class="stat-val">${fmtMoney(k.inv_value)}</div></div>
+    <div class="stat"><div class="stat-label">Units in Stock</div><div class="stat-val">${(units).toLocaleString()}</div></div>
+    <div class="stat"><div class="stat-label">In-Stock SKUs</div><div class="stat-val">${(k.in_stock_skus||0).toLocaleString()}</div></div>
+    <div class="stat"><div class="stat-label">Dead Capital</div><div class="stat-val" style="color:var(--red);">${fmtMoney(k.dead_value)}</div><div class="stat-label">${k.dead_skus||0} SKUs</div></div>
+    <div class="stat"><div class="stat-label">Sell-Through 90d</div><div class="stat-val" style="color:var(--green);">${sellThrough.toFixed(0)}%</div></div>
+    <div class="stat"><div class="stat-label">Days to Clear</div><div class="stat-val">${daysToClear !== null ? daysToClear + 'd' : '—'}</div></div>`;
+}
+
+function renderRollup(groups) {
+  const el = document.getElementById('flow-rollup');
+  if (!groups || !groups.length) { el.innerHTML = '<div class="empty">No data.</div>'; return; }
+  const maxVal = Math.max(...groups.map(g => g.inv_value || 0), 1);
+  const totalVal = groups.reduce((a, g) => a + (g.inv_value || 0), 0) || 1;
+  el.innerHTML = `<div style="overflow-x:auto;"><table>
+    <thead><tr>
+      <th style="text-align:left;">Group</th><th>Capital (by velocity)</th><th>Value</th><th>% of $</th>
+      <th>Sold 90d</th><th>30d</th><th>7d</th><th>Sell-Thru</th><th>Dead $</th>
+    </tr></thead><tbody>${groups.map(g => {
+      const v = g.inv_value || 0;
+      const seg = (x) => v > 0 ? (x / v * 100) : 0;
+      const barW = (v / maxVal * 100);
+      const st = (g.units + g.sold_90d) > 0 ? (g.sold_90d / (g.units + g.sold_90d) * 100) : 0;
+      const bar = '<div class="bar" style="width:' + Math.max(barW, 2) + '%;">' +
+        '<span style="width:' + seg(g.val_fast) + '%;background:var(--green);"></span>' +
+        '<span style="width:' + seg(g.val_med) + '%;background:var(--amber);"></span>' +
+        '<span style="width:' + seg(g.val_slow) + '%;background:#d98a4b;"></span>' +
+        '<span style="width:' + seg(g.val_dead) + '%;background:var(--dim);"></span></div>';
+      return '<tr>' +
+        '<td style="text-align:left;font-weight:600;">' + g.grp + '</td>' +
+        '<td style="min-width:200px;">' + bar + '</td>' +
+        '<td style="font-weight:600;">' + fmtMoney(v) + '</td>' +
+        '<td>' + (v / totalVal * 100).toFixed(0) + '%</td>' +
+        '<td style="font-weight:600;">' + (g.sold_90d||0) + '</td>' +
+        '<td>' + (g.sold_30d||0) + '</td>' +
+        '<td>' + (g.sold_7d||0) + '</td>' +
+        '<td>' + st.toFixed(0) + '%</td>' +
+        '<td style="color:' + (g.val_dead > 0 ? 'var(--red)' : 'var(--dim)') + ';">' + fmtMoney(g.val_dead) + '</td>' +
+      '</tr>';
+    }).join('')}</tbody></table></div>`;
+}
+
+async function loadDead() {
+  const ptype = document.getElementById('dead-ptype').value;
+  const el = document.getElementById('dead-list');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/inventory/dead?ptype=' + encodeURIComponent(ptype));
+    const d = await r.json();
+    if (!d.items.length) { el.innerHTML = '<div class="empty">Nothing stale here.</div>'; return; }
+    el.innerHTML = '<div class="lst">' + d.items.map(i => {
+      const tied = (i.current_qty || 0) * (i.current_price || 0);
+      const sub = (i.units_sold_90d > 0)
+        ? Math.round(i.days_inv) + 'd of stock · ' + i.units_sold_90d + ' sold 90d'
+        : 'no sales in 90d';
+      return '<div class="row"><div class="nm">' + (i.title || '—') +
+        '<small>' + (i.product_type || '?') + ' · qty ' + (i.current_qty||0) + '</small></div>' +
+        '<div class="mv"><b>' + fmtMoney(tied) + '</b><br><small>' + sub + '</small></div></div>';
+    }).join('') + '</div>';
+  } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
+}
+
+async function loadRestock() {
+  const ptype = document.getElementById('restock-ptype').value;
+  const el = document.getElementById('restock-list');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/inventory/restock?ptype=' + encodeURIComponent(ptype));
+    const d = await r.json();
+    if (!d.items.length) { el.innerHTML = '<div class="empty">Nothing running low.</div>'; return; }
+    el.innerHTML = '<div class="lst">' + d.items.map(i => {
+      const out = (i.current_qty || 0) === 0;
+      const lead = out ? '<b style="color:var(--red);">OUT</b>'
+                       : '<b>' + Math.round(i.days_inv) + 'd</b> left';
+      return '<div class="row"><div class="nm">' + (i.title || '—') +
+        '<small>' + (i.product_type || '?') + ' · qty ' + (i.current_qty||0) + '</small></div>' +
+        '<div class="mv">' + lead + '<br><small>' + (i.units_sold_30d||0) + ' · 30d / ' + (i.units_sold_7d||0) + ' · 7d</small></div></div>';
+    }).join('') + '</div>';
+  } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
 }
 
 loadStatus();

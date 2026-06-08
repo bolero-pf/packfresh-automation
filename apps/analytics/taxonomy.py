@@ -150,6 +150,35 @@ def _detect_ip(title: str, tags: str) -> str:
     return "other"
 
 
+# ── Non-TCG retail detection (board games, supplies, apparel) ────────────────
+# These products mirror their Shopify "Product type" (Board Games / Accessories
+# / Apparel) into the tags field. We classify off tags because the Shopify
+# product_type column is NOT cached in inventory_product_cache. Tag-based
+# detection runs BEFORE the title regex so a "Catan 6th Edition" board game
+# stops falling through to card/single_card. Order matters: first match wins.
+# (card-game / TCG products are left to the existing title+scrydex logic.)
+TAG_PRODUCT_RULES = [
+    # (regex against the tag string, product_type, form_factor)
+    (r"\bboard\s*games?\b",                          "board_game", "board_game"),
+    (r"\baccessor(?:y|ies)\b|\bsleeves?\b|\bdeck\s*box(?:es)?\b"
+     r"|\bbinders?\b|\bplaymats?\b|\btop\s*loaders?\b|\btoploaders?\b",
+                                                     "accessory",  "accessory"),
+    (r"\bapparel\b|\bclothing\b",                    "apparel",    "apparel"),
+]
+
+
+def _detect_from_tags(tags: str):
+    """Classify non-TCG retail (board games, supplies, apparel) from Shopify
+    tags. Returns (product_type, form_factor) or None if no rule matches."""
+    if not tags:
+        return None
+    text = tags.lower()
+    for pattern, ptype, form in TAG_PRODUCT_RULES:
+        if re.search(pattern, text):
+            return ptype, form
+    return None
+
+
 def _detect_form_factor(title: str) -> str:
     """Detect form factor from title using TYPE_RULES from product_enrichment."""
     title_lower = title.lower()
@@ -269,8 +298,15 @@ def classify_taxonomy():
         tcg_id = row["tcgplayer_id"]
 
         ip = _detect_ip(title, tags)
-        form_factor = _detect_form_factor(title)
-        product_type = _detect_product_type(form_factor)
+        # Non-TCG retail (board games / supplies / apparel) is identified by its
+        # Shopify product-type tag, which is more authoritative than the title
+        # regex. Fall back to title-based form factor for everything else.
+        tag_class = _detect_from_tags(tags)
+        if tag_class:
+            product_type, form_factor = tag_class
+        else:
+            form_factor = _detect_form_factor(title)
+            product_type = _detect_product_type(form_factor)
         expansion_id, set_name, era = _detect_expansion(tcg_id, title, scrydex_map)
 
         db.execute("""
