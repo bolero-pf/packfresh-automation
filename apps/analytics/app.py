@@ -890,6 +890,8 @@ th:hover { color:var(--text); }
           <option value="sealed">Sealed</option>
           <option value="card">Cards / slabs</option>
           <option value="board_game">Board games</option>
+          <option value="card_game">Card games</option>
+          <option value="puzzle">Puzzles</option>
           <option value="accessory">Supplies</option>
         </select>
         <select id="dead-dim" onchange="loadDeadBy()">
@@ -912,6 +914,8 @@ th:hover { color:var(--text); }
         <option value="">All types</option>
         <option value="sealed">Sealed</option>
         <option value="board_game">Board games</option>
+        <option value="card_game">Card games</option>
+        <option value="puzzle">Puzzles</option>
         <option value="accessory">Supplies</option>
       </select>
     </div>

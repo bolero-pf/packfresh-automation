@@ -159,7 +159,13 @@ def _detect_ip(title: str, tags: str) -> str:
 # (card-game / TCG products are left to the existing title+scrydex logic.)
 TAG_PRODUCT_RULES = [
     # (regex against the tag string, product_type, form_factor)
+    # card games (Adventure Time Card Wars, Disney Villainous, etc.) carry BOTH a
+    # 'card game' and 'board game' tag — check card game FIRST so they don't fall
+    # into board_game. No TCG product carries the 'card game(s)' tag, so no collision.
+    (r"\bcard\s*games?\b",                           "card_game",  "card_game"),
     (r"\bboard\s*games?\b",                          "board_game", "board_game"),
+    # puzzles carry a 'sealed' tag too, so this must win before the sealed fallback.
+    (r"\bpuzzles?\b",                                "puzzle",     "puzzle"),
     (r"\baccessor(?:y|ies)\b|\bsleeves?\b|\bdeck\s*box(?:es)?\b"
      r"|\bbinders?\b|\bplaymats?\b|\btop\s*loaders?\b|\btoploaders?\b",
                                                      "accessory",  "accessory"),
