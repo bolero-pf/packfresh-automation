@@ -440,18 +440,26 @@ def _dead_where(ptype):
     return " AND ".join(where), params
 
 
-_DEAD_SELECT = """
+# Per-unit break-down value (best breakdown variant's component market) keyed by
+# tcgplayer_id. Aggregated so a duplicate recipe can't multiply dead-list rows.
+_BD_JOIN = ("LEFT JOIN (SELECT tcgplayer_id, MAX(best_variant_market) AS bd "
+            "FROM sealed_breakdown_cache GROUP BY 1) b ON b.tcgplayer_id = c.tcgplayer_id")
+
+_DEAD_SELECT = f"""
     SELECT c.title, c.sku, c.tcgplayer_id, t.product_type, t.ip, t.form_factor,
            t.era, t.set_name,
            c.shopify_qty AS current_qty, c.shopify_price AS current_price,
+           c.unit_cost AS cost,
            COALESCE(s.units_sold_90d,0) AS units_sold_90d,
            s.total_sold_all_time,
            (c.shopify_qty * COALESCE(c.shopify_price,0)) AS tied_value,
-           (CURRENT_DATE - iv.first_seen) AS age_days
+           (CURRENT_DATE - iv.first_seen) AS age_days,
+           b.bd AS breakdown_val
     FROM inventory_product_cache c
     JOIN product_taxonomy t USING (shopify_variant_id)
     LEFT JOIN sku_analytics s USING (shopify_variant_id)
     LEFT JOIN inv iv USING (shopify_variant_id)
+    {_BD_JOIN}
 """
 
 # Group-by dimensions for slicing the dead-capital set.
@@ -466,14 +474,30 @@ _VINTAGE_ERAS = {"vintage", "xy", "sm", "swsh"}
 
 
 def _dead_action(r):
-    """Suggested action for a stuck item — a starting point, not gospel."""
+    """Suggested action for a stuck item — a starting point, not gospel.
+    For sealed with a breakdown recipe this is a LIQUIDITY call: breaking into
+    faster-moving parts to free trapped cash. Judged against COST basis (recover
+    what you paid), not the inflated sealed price that's keeping it dead. A small
+    loss vs cost can still be worth it for the velocity."""
     era = (r.get("era") or "").lower()
     ptype = r.get("product_type")
     price = float(r.get("current_price") or 0)
+    cost = float(r.get("cost") or 0) or None
+    bd = r.get("breakdown_val")
+    bd = float(bd) if bd not in (None, "") else None
+    if ptype == "sealed" and bd is not None:
+        if cost:
+            if bd >= cost:
+                return f"Break down — free +${round(bd - cost)}/unit over cost"
+            if bd >= cost * 0.8:
+                return f"Break to free cash (~-${round(cost - bd)}/unit vs cost)"
+            return "Markdown / hold"
+        # No cost basis recorded — fall back to parts-vs-sealed.
+        if bd >= price:
+            return "Break down (parts ≥ sealed)"
+        return "Markdown / bundle"
     if era in _VINTAGE_ERAS or price >= 150:
         return "Reprice / hold (vintage)"
-    if ptype == "sealed":
-        return "Breakdown candidate"
     if price < 15:
         return "Bundle / clearance"
     return "Markdown / reprice"
@@ -507,10 +531,15 @@ def inventory_dead():
         d = _ser(r)
         d["action"] = _dead_action(d)
         items.append(d)
+    # Items the action recommends breaking (recovers cost or strictly beats sealed).
+    brk = [d for d in items if (d.get("action") or "").startswith("Break")]
+    brk_recover = sum(float(d.get("breakdown_val") or 0) * (d.get("current_qty") or 0) for d in brk)
     return jsonify({
         "items": items,
         "total": int(agg.get("n") or 0),
         "total_value": float(agg.get("v") or 0),
+        "breakdown_count": len(brk),
+        "breakdown_recover": round(brk_recover),
     })
 
 
@@ -552,14 +581,14 @@ def inventory_dead_csv():
 
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Title", "SKU", "Type", "Game", "Era", "Set", "Qty", "Price",
-                "Capital Tied", "Days In Stock", "Sold 90d", "Total Sold All-Time",
-                "Suggested Action"])
+    w.writerow(["Title", "SKU", "Type", "Game", "Era", "Set", "Qty", "Cost",
+                "Sealed Price", "Breakdown Value", "Capital Tied", "Days In Stock",
+                "Sold 90d", "Total Sold All-Time", "Suggested Action"])
     for r in rows:
         w.writerow([
             r.get("title"), r.get("sku"), r.get("product_type"), r.get("ip"),
             r.get("era"), r.get("set_name"),
-            r.get("current_qty"), r.get("current_price"),
+            r.get("current_qty"), r.get("cost"), r.get("current_price"), r.get("breakdown_val"),
             round(float(r.get("tied_value") or 0), 2),
             r.get("age_days"), r.get("units_sold_90d"), r.get("total_sold_all_time"),
             _dead_action(r),
@@ -1004,7 +1033,10 @@ async function loadDead() {
   try {
     const r = await fetch('/api/inventory/dead?ptype=' + encodeURIComponent(ptype));
     const d = await r.json();
-    sum.innerHTML = '<span><b>' + d.total + '</b> items · <b>' + fmtMoney(d.total_value) + '</b> tied up</span>' +
+    const bd = d.breakdown_count
+      ? ' · break down <b>' + d.breakdown_count + '</b> to recover <b style="color:var(--green)">' + fmtMoney(d.breakdown_recover) + '</b> cash'
+      : ' · <span style="color:var(--dim)">none worth breaking down — markdown/bundle play</span>';
+    sum.innerHTML = '<span><b>' + d.total + '</b> items · <b>' + fmtMoney(d.total_value) + '</b> tied up' + bd + '</span>' +
       '<a class="btn btn-secondary btn-sm" href="/api/inventory/dead.csv?ptype=' + encodeURIComponent(ptype) + '">⬇ Export CSV</a>';
     if (!d.items.length) { el.innerHTML = '<div class="empty">Nothing stale here.</div>'; return; }
     const shown = d.items.length < d.total ? ' <small style="color:var(--dim)">(showing top ' + d.items.length + ' of ' + d.total + ' — Export CSV for all)</small>' : '';
@@ -1013,10 +1045,16 @@ async function loadDead() {
       const ctx = [i.era || i.product_type, i.set_name].filter(Boolean).join(' · ');
       const sub = 'qty ' + (i.current_qty||0) + (i.age_days != null ? ' · ' + i.age_days + 'd in stock' : '') +
         (i.total_sold_all_time ? '' : ' · never sold');
+      const nums = [];
+      if (i.cost) nums.push('cost ' + fmtMoney(i.cost));
+      nums.push('sealed ' + fmtMoney(i.current_price));
+      if (i.breakdown_val != null) nums.push('parts ' + fmtMoney(i.breakdown_val));
+      const cmp = (i.cost || i.breakdown_val != null)
+        ? '<br><small style="color:var(--dim)">' + nums.join(' · ') + '</small>' : '';
       return '<div class="row"><div class="nm">' + (i.title || '—') +
         '<small>' + ctx + ' — ' + sub + '</small></div>' +
         '<div class="mv"><b>' + fmtMoney(tied) + '</b><br>' +
-        '<small><span class="act">' + (i.action || '') + '</span></small></div></div>';
+        '<small><span class="act">' + (i.action || '') + '</span></small>' + cmp + '</div></div>';
     }).join('') + '</div>' + shown;
   } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
 }
