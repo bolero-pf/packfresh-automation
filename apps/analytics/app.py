@@ -271,13 +271,22 @@ _INV_FIRST_SEEN = ("(SELECT shopify_variant_id, "
                    "COALESCE(MAX(snapshot_date) FILTER (WHERE qty=0) + 1, MIN(snapshot_date)) AS first_seen "
                    "FROM sku_daily_inventory GROUP BY 1)")
 
+# Era is a Pokémon concept. For non-Pokémon, "no era" is correct — label by game
+# instead of dumping into "(unclassified)". Only Pokémon with a missing era is a
+# real gap, surfaced as "(needs era)".
+_ERA_LABEL = ("COALESCE(t.era, CASE t.ip "
+              "WHEN 'pokemon' THEN '(needs era)' "
+              "WHEN 'mtg' THEN 'Magic' WHEN 'onepiece' THEN 'One Piece' "
+              "WHEN 'lorcana' THEN 'Lorcana' WHEN 'other' THEN 'Other / misc' "
+              "ELSE INITCAP(COALESCE(t.ip,'?')) END)")
+
 # Whitelisted group-by dimensions (column on product_taxonomy t).
 _FLOW_DIMS = {
     "product_type": "t.product_type",
     "ip":           "t.ip",
     "form_factor":  "t.form_factor",
     "set_name":     "t.set_name",
-    "era":          "t.era",
+    "era":          _ERA_LABEL,
 }
 
 # Whitelisted raw-card group-by dimensions (column on raw_cards).
@@ -494,7 +503,7 @@ _DEAD_SELECT = f"""
 
 # Group-by dimensions for slicing the dead-capital set.
 _DEAD_DIMS = {
-    "era":          "t.era",
+    "era":          _ERA_LABEL,
     "set_name":     "t.set_name",
     "product_type": "t.product_type",
     "ip":           "t.ip",
