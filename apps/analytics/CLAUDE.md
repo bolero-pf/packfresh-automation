@@ -2,7 +2,8 @@
 > Executive analytics engine (analytics.pack-fresh.com)
 
 ## Key Files
-- **app.py** — Flask app: dashboard UI, /run pipeline trigger, /api/* endpoints
+- **app.py** — Flask app: tabbed dashboard UI (SKUs + Inventory Flow), /run pipeline trigger, /api/* endpoints
+  - Inventory Flow tab → `/api/inventory/flow` (KPIs + group-by roll-up w/ velocity-banded capital bar), `/api/inventory/dead` (Job A: in-stock + not moving), `/api/inventory/restock` (Job B: reorder signals). All value/stale metrics gate on `current_qty>0`.
 - **compute.py** — Pipeline orchestrator: calls all steps in sequence
 - **price_history.py** — Daily scrydex_price_cache → scrydex_price_history snapshot (NM/raw only; auto-creates monthly partition + drops partitions >90d)
 - **taxonomy.py** — Product classification: IP, form_factor, set, era → product_taxonomy
@@ -37,6 +38,7 @@ days_of_inventory = current_qty / daily_rate
 
 ## Taxonomy Classification
 - **IP detection**: scrydex expansion data (Pokemon-only for now), title keyword fallback for MTG/Yu-Gi-Oh/One Piece/Lorcana
+- **Non-TCG retail**: board games / supplies / apparel are classified from Shopify product-type tags (`board game`, `accessories`/`sleeve`, `apparel`) via TAG_PRODUCT_RULES, checked BEFORE the title regex. Without this they fall through to card/single_card. The Shopify product_type column is NOT cached locally — only `tags` are, so tags are the signal. (shared/product_enrichment.py mislabels these too for intake/ingest, but is out of scope unless those services need it.)
 - **Form factor**: reuses TYPE_RULES regex from shared/product_enrichment.py
 - **Expansion/era**: scrydex_price_cache lookup by tcgplayer_id, fallback to ERA_SETS from product_enrichment.py
 - **manual_override=TRUE** on product_taxonomy skips auto-classification
