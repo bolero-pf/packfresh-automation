@@ -590,6 +590,53 @@ def inventory_dead():
     })
 
 
+def _needs_era_rows():
+    """Pokémon products (active) whose authoritative custom.era metafield is unset —
+    grouped to product level (era is a product metafield). In-stock first."""
+    return db.query("""
+        SELECT c.shopify_product_id,
+               MAX(c.title) AS title,
+               MAX(c.handle) AS handle,
+               COALESCE(SUM(GREATEST(c.shopify_qty,0)),0) AS qty,
+               round(SUM(GREATEST(c.shopify_qty,0)*COALESCE(c.shopify_price,0))::numeric,2) AS value
+        FROM inventory_product_cache c
+        JOIN product_taxonomy t USING (shopify_variant_id)
+        WHERE c.status='ACTIVE' AND t.ip='pokemon' AND c.era IS NULL
+        GROUP BY c.shopify_product_id
+        ORDER BY (SUM(GREATEST(c.shopify_qty,0)) > 0) DESC, value DESC NULLS LAST
+    """)
+
+
+@app.route("/api/inventory/needs-era")
+def inventory_needs_era():
+    store = os.getenv("SHOPIFY_STORE", "")
+    rows = _needs_era_rows()
+    items = []
+    for r in rows:
+        d = _ser(r)
+        pid = r["shopify_product_id"]
+        d["admin_url"] = f"https://{store}/admin/products/{pid}" if store else None
+        items.append(d)
+    in_stock = sum(1 for d in items if (d.get("qty") or 0) > 0)
+    return jsonify({"items": items, "total": len(items), "in_stock": in_stock})
+
+
+@app.route("/api/inventory/needs-era.csv")
+def inventory_needs_era_csv():
+    import io, csv
+    store = os.getenv("SHOPIFY_STORE", "")
+    rows = _needs_era_rows()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Title", "Product ID", "Qty In Stock", "Inventory Value", "Admin URL"])
+    for r in rows:
+        pid = r["shopify_product_id"]
+        w.writerow([r.get("title"), pid, r.get("qty"), r.get("value"),
+                    f"https://{store}/admin/products/{pid}" if store else ""])
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=needs_era.csv"})
+
+
 @app.route("/api/inventory/dead-by")
 def inventory_dead_by():
     """Slice the dead-capital set by a dimension (era / set / type / game) — where it sits."""
@@ -836,6 +883,13 @@ th:hover { color:var(--text); }
   <div id="dead-by"><div class="spinner"></div></div>
   <div id="dead-list" class="scroll-list"><div class="spinner"></div></div>
 
+  <div class="section-head">
+    <h2>⚠ Pokémon missing era metafield</h2>
+    <a class="btn btn-secondary btn-sm" href="/api/inventory/needs-era.csv">⬇ Export CSV</a>
+  </div>
+  <p class="hint" id="needs-era-hint">Active Pokémon products with no custom.era metafield — click a title to set it in Shopify.</p>
+  <div id="needs-era-list" class="scroll-list"><div class="spinner"></div></div>
+
   <div class="section-head"><h2>🔵 Reorder from distro</h2>
     <select id="restock-ptype" onchange="loadRestock()">
       <option value="">All types</option>
@@ -988,7 +1042,26 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.getElementById('tab-skus').style.display = name === 'skus' ? '' : 'none';
   document.getElementById('tab-flow').style.display = name === 'flow' ? '' : 'none';
-  if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; loadFlow(); reloadDead(); loadRestock(); loadRaw(); loadRawAging(); }
+  if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; loadFlow(); reloadDead(); loadRestock(); loadRaw(); loadRawAging(); loadNeedsEra(); }
+}
+
+async function loadNeedsEra() {
+  const el = document.getElementById('needs-era-list');
+  el.innerHTML = '<div class="spinner"></div>';
+  try {
+    const r = await fetch('/api/inventory/needs-era');
+    const d = await r.json();
+    document.getElementById('needs-era-hint').textContent =
+      d.total + ' Pokémon products missing era (' + d.in_stock + ' in stock) — click a title to set custom.era in Shopify.';
+    if (!d.items.length) { el.innerHTML = '<div class="empty">Every Pokémon product has an era. 🎉</div>'; return; }
+    el.innerHTML = '<div class="lst">' + d.items.map(i => {
+      const name = i.admin_url
+        ? '<a href="' + i.admin_url + '" target="_blank" rel="noopener" style="color:var(--accent)">' + (i.title||'—') + '</a>'
+        : (i.title||'—');
+      return '<div class="row"><div class="nm">' + name + '<small>qty ' + (i.qty||0) + '</small></div>' +
+        '<div class="mv"><b>' + fmtMoney(i.value) + '</b></div></div>';
+    }).join('') + '</div>';
+  } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
 }
 
 function reloadDead() { loadDead(); loadDeadBy(); }
