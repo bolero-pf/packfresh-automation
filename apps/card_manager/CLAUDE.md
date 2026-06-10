@@ -45,7 +45,18 @@ PENDING → PULLING → READY → ACCEPTED or RETURNED
 - Hold can proceed to READY with MISSING items
 - "Missing Cards" sidebar view lists all MISSING cards
 - Scan a missing card's barcode → return to storage flow
-- "Mark Gone" → permanent loss (state = GONE)
+- "Mark Gone" → permanent loss (state = GONE) via `POST /api/missing/<id>/gone`
+
+## Shrink / GONE
+- A `GONE` state is the audit exit for cards that physically can't be found.
+- Two entry points: Missing Cards ("Mark Gone") and Return Queue ("Mark Gone",
+  `POST /api/returns/<id>/gone`, guarded on PENDING_RETURN). A Return Queue card
+  that never gets a successful return-scan is shrink (handed over unscanned, POS
+  scan didn't register, theft) — Mark Gone closes it out instead of parking it.
+- Shrink ledger: every state change (incl. →GONE) is auto-written to `audit_log`
+  by the DB trigger `trg_log_state_transition` — query `to_state='GONE'` by
+  timestamp for loss reporting. App code does NOT write audit_log; the trigger
+  does, so never insert rows manually (causes duplicates).
 
 ## Decision Reversal
 - After decisions, Re-accept a REJECTED card → creates Shopify listing
