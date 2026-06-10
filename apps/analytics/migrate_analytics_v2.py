@@ -137,6 +137,12 @@ if not table_exists("customer_orders"):
 else:
     print("  customer_orders already exists")
 
+# delivery_method = Shopify fulfillmentOrders.deliveryMethod.methodType
+# (SHIPPING / RETAIL / PICK_UP). The authoritative in-store vs shipped signal —
+# the pos/online `channel` mislabels in-store RETAIL orders as 'online'.
+cur.execute("ALTER TABLE customer_orders ADD COLUMN IF NOT EXISTS delivery_method TEXT")
+cur.execute("CREATE INDEX IF NOT EXISTS idx_custord_delivery ON customer_orders(delivery_method)")
+
 
 # ── customer_summary ─────────────────────────────────────────────────────────
 
@@ -205,6 +211,12 @@ if not table_exists("daily_business_summary"):
     print("  Created daily_business_summary table")
 else:
     print("  daily_business_summary already exists")
+
+# True in-store vs shipped split (from delivery_method) — the orders_online/pos
+# columns above are based on the unreliable pos/online channel.
+for _col in ("orders_instore INTEGER DEFAULT 0", "orders_shipped INTEGER DEFAULT 0",
+             "revenue_instore NUMERIC(12,2) DEFAULT 0", "revenue_shipped NUMERIC(12,2) DEFAULT 0"):
+    cur.execute(f"ALTER TABLE daily_business_summary ADD COLUMN IF NOT EXISTS {_col}")
 
 
 # ── realized_margin ──────────────────────────────────────────────────────────

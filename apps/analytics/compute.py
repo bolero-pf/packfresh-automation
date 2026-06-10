@@ -403,11 +403,14 @@ def run_full_pipeline():
 
     # 6. Sync customer orders + summaries
     try:
-        from customers import sync_customer_orders, recompute_customer_summaries, compute_daily_business_summary
+        from customers import sync_customer_orders, recompute_customer_summaries, backfill_daily_summaries
         results["customer_orders"] = sync_customer_orders()
         results["customer_summaries"] = recompute_customer_summaries()
-        # 7. Daily business summary for today
-        results["daily_summary"] = compute_daily_business_summary(date.today())
+        # 7. Daily business summary — recompute a TRAILING WINDOW, not just today.
+        # Orders keep landing all day after the morning run; computing only `today`
+        # froze each day at its pre-run slice (the May/June collapse). Re-running the
+        # last 14 days lets every recent day finalize as its orders complete.
+        results["daily_summary"] = backfill_daily_summaries(days=14)
     except Exception as e:
         logger.exception(f"Customer pipeline failed: {e}")
 

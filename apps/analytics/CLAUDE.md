@@ -16,6 +16,8 @@
   - **No-recipe gap**: sealed with no `sealed_breakdown_cache` row = `needs_recipe` (amber "no recipe" tag + summary stat). ~82 dead sealed / ~$33k have no recipe, so can't be assessed — biggest lever is building recipes for these (done in the inventory/ingest breakdown UI, not analytics).
   - Endpoints: `/api/inventory/flow` (combined KPIs + sealed roll-up), `/api/inventory/raw` (raw roll-up), `/api/inventory/raw-aging` (raw dead capital), `/api/inventory/dead` (Job A list + total, top 300, each w/ action), `/api/inventory/dead-by` (dead grouped by dimension), `/api/inventory/dead.csv` (full export), `/api/inventory/restock` (Job B: ≤30 days left at true rate).
   - NOTE: product_type `card` = catalog singles + graded slabs listed as normal Shopify products (~$25k slabs / ~$21k singles in stock). This is SEPARATE from "Raw Singles" (the `raw_cards` barcoded binder/display inventory, ~$81k) — disjoint tables, not double-counted.
+  - **Sales tab** — sub-tabs Overview / Channel / Buy-vs-Sell / Product-Mix, with a 7d/30d/90d/1yr window selector. Reads LIVE off source tables, NOT `daily_business_summary` (that pre-agg drifted — see below); `customer_orders` is ~10k rows so live roll-up is cheap and always correct. Charts are hand-rolled SVG (`buildChart()` — area/line/bar + hover tooltip, no CDN). Endpoints: `/api/sales/overview` (KPIs + prior-period deltas + daily series: net/orders/units/in-store/shipped/margin), `/api/sales/buysell` (weekly intake spend by `ingested_at` vs net sales), `/api/sales/mix` (weekly stacked revenue by stream or game). **Margin** = catalog `realized_margin.gross_margin` + raw singles (`sale_price-cost_basis`); margin% is vs merch revenue (realized_margin.revenue + raw sale_price), not order totals. **Raw singles** are categorized straight from `raw_cards` by barcode (game/set/graded) — their revenue is ALREADY in `customer_orders` (barcode line items), so they're a reclassification, never added on top.
+  - **In-store vs shipped = `customer_orders.delivery_method`** (Shopify `fulfillmentOrders.deliveryMethod.methodType`: SHIPPING=shipped, RETAIL=walk-in POS, PICK_UP=hold pickup; RETAIL+PICK_UP = in-store). The pos/online `channel` field is WRONG for this — in-store RETAIL orders carry a customer record so the sync labels them 'online', which hid the entire in-store channel (often the LARGER one: ~87 in-store vs 54 shipped on a Saturday). Validated against a store-closed Tuesday (in-store craters to ~4) and the April-2026 store opening (pre-open is ~all shipped).
 - **compute.py** — Pipeline orchestrator: calls all steps in sequence
 - **price_history.py** — Daily scrydex_price_cache → scrydex_price_history snapshot (NM/raw only; auto-creates monthly partition + drops partitions >90d)
 - **taxonomy.py** — Product classification: IP, form_factor, set, era → product_taxonomy
@@ -33,10 +35,12 @@
 5. Classify product taxonomy (IP, form_factor, set, era)
 6. Sync customer orders → customer_orders
 7. Recompute customer_summary rollups
-8. Compute daily_business_summary
+8. Compute daily_business_summary — recomputes a TRAILING 14-DAY WINDOW (`backfill_daily_summaries(days=14)`), not just today
 9. Compute realized_margin (sales × COGS × market price)
 
 Each step is independent — if one fails, the rest still run.
+
+**daily_business_summary trailing-window fix**: step 8 used to compute only `date.today()` once per run. Orders keep landing all day after the morning `/run`, so each day froze at its pre-run slice — recent months collapsed (May 2026 logged $6.7k vs the real ~$368k) while pre-backfill history stayed correct. Now it re-runs the last 14 days so each day finalizes as its orders complete. The Sales tab sidesteps this entirely by reading `customer_orders` live; the pre-agg is kept correct mainly for the future Morning Coffee dashboard.
 
 ## Velocity Formula
 ```
@@ -76,9 +80,9 @@ days_of_inventory = current_qty / daily_rate
 ### v2
 - **scrydex_price_history** — daily NM/raw market price snapshots. RANGE-partitioned by snapshot_date (one partition/month, e.g. scrydex_price_history_202606), 90-day retention via partition DROP. Only condition='NM'/price_type='raw' stored (the sole consumer, margins.py, reads nothing else). Two indexes: idx_sph_unique_p (dedup/ON CONFLICT), idx_sph_tcg_date_p (margins lookup). Migrated from a flat 50M-row/12GB heap by migrate_price_history_partition.py — the pre-migration heap is preserved as `scrydex_price_history_old` (DROP after verifying margins).
 - **product_taxonomy** — dimensional classification (ip, form_factor, expansion_id, set_name, era, product_type)
-- **customer_orders** — per-customer order log (order_total, refund_amount, fulfillment_status, items JSONB)
+- **customer_orders** — per-customer order log (order_total, refund_amount, fulfillment_status, **delivery_method** [SHIPPING/RETAIL/PICK_UP — the real in-store vs shipped signal], items JSONB)
 - **customer_summary** — rolled-up customer dimension (cohort_month, total_orders, net_spend, avg_order_value, vip_tier, days_between_orders)
-- **daily_business_summary** — pre-aggregated daily KPIs (revenue, orders, AOV, new/returning customers, intake spend)
+- **daily_business_summary** — pre-aggregated daily KPIs (revenue, orders, AOV, new/returning customers, intake spend, **revenue_instore/revenue_shipped + orders_instore/orders_shipped** from delivery_method). Recomputed over a trailing 14-day window each run (see fix above).
 - **realized_margin** — per-variant per-day margin (cogs_at_sale, market_price_at_sale, gross_margin, margin_pct)
 
 ## Auth

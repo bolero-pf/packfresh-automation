@@ -750,6 +750,194 @@ def _ser(d):
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sales dashboard — live off source tables (customer_orders / realized_margin /
+# raw_cards / intake_sessions). Deliberately NOT reading daily_business_summary:
+# that pre-aggregate froze each day at its morning slice (the May/June collapse),
+# and customer_orders is only ~10k rows so live roll-up is cheap and always correct.
+# ═══════════════════════════════════════════════════════════════════════════════
+from datetime import date as _date, timedelta as _timedelta
+
+# In-store = picked up over the counter (walk-in POS or hold pickup); shipped = carrier.
+# delivery_method comes from Shopify fulfillmentOrders.deliveryMethod.methodType and is
+# authoritative — the pos/online `channel` mislabels in-store RETAIL orders as 'online'.
+_INSTORE_DM = "delivery_method IN ('RETAIL','PICK_UP')"
+_SHIPPED_DM = "delivery_method = 'SHIPPING'"
+
+_MIX_LABELS = {
+    "sealed": "Sealed", "card": "Singles / Slabs", "accessory": "Supplies",
+    "board_game": "Board Games", "card_game": "Card Games", "puzzle": "Puzzles",
+    "raw_single": "Raw Singles", "pokemon": "Pokémon", "magic": "Magic",
+    "onepiece": "One Piece", "lorcana": "Lorcana", "yugioh": "Yu-Gi-Oh",
+    "other": "Other",
+}
+
+
+def _margin_by_day(start, end):
+    """Combined gross margin $ per day: catalog (realized_margin) + raw singles."""
+    mmap = {}
+    for r in db.query("""SELECT sale_date::text d, COALESCE(SUM(gross_margin),0) m
+                         FROM realized_margin WHERE sale_date BETWEEN %s AND %s GROUP BY 1""",
+                      (start, end)):
+        mmap[r["d"]] = mmap.get(r["d"], 0) + float(r["m"])
+    for r in db.query("""SELECT removal_date::date::text d, COALESCE(SUM(sale_price-COALESCE(cost_basis,0)),0) m
+                         FROM raw_cards WHERE state='SOLD' AND removal_date::date BETWEEN %s AND %s GROUP BY 1""",
+                      (start, end)):
+        mmap[r["d"]] = mmap.get(r["d"], 0) + float(r["m"])
+    return mmap
+
+
+def _sales_series(start, end):
+    """Per-day orders / net / units / in-store / shipped / margin for [start,end]."""
+    rows = db.query(f"""
+        SELECT order_date::text d, COUNT(*) orders,
+               COALESCE(SUM(net_amount),0) net, COALESCE(SUM(item_count),0) units,
+               COALESCE(SUM(net_amount) FILTER (WHERE {_INSTORE_DM}),0) instore,
+               COALESCE(SUM(net_amount) FILTER (WHERE {_SHIPPED_DM}),0) shipped,
+               COALESCE(SUM(net_amount) FILTER (WHERE delivery_method IS NULL),0) unattr
+        FROM customer_orders WHERE order_date BETWEEN %s AND %s GROUP BY 1
+    """, (start, end))
+    smap = {r["d"]: r for r in rows}
+    mmap = _margin_by_day(start, end)
+    out, cur = [], start
+    while cur <= end:
+        ds = cur.isoformat()
+        r = smap.get(ds)
+        out.append({
+            "d": ds,
+            "orders": int(r["orders"]) if r else 0,
+            "net": round(float(r["net"]), 2) if r else 0,
+            "units": int(r["units"]) if r else 0,
+            "instore": round(float(r["instore"]), 2) if r else 0,
+            "shipped": round(float(r["shipped"]), 2) if r else 0,
+            "unattr": round(float(r["unattr"]), 2) if r else 0,
+            "margin": round(mmap.get(ds, 0), 2),
+        })
+        cur += _timedelta(days=1)
+    return out
+
+
+def _kpi_block(start, end):
+    o = db.query_one(f"""
+        SELECT COUNT(*) orders, COALESCE(SUM(net_amount),0) net, COALESCE(SUM(item_count),0) units,
+               COALESCE(AVG(net_amount),0) aov,
+               COUNT(DISTINCT customer_id) FILTER (WHERE customer_id<>0) custs,
+               COALESCE(SUM(net_amount) FILTER (WHERE {_INSTORE_DM}),0) instore,
+               COALESCE(SUM(net_amount) FILTER (WHERE {_SHIPPED_DM}),0) shipped
+        FROM customer_orders WHERE order_date BETWEEN %s AND %s""", (start, end)) or {}
+    cm = db.query_one("""SELECT COALESCE(SUM(gross_margin),0) m, COALESCE(SUM(revenue),0) r
+                         FROM realized_margin WHERE sale_date BETWEEN %s AND %s""", (start, end)) or {}
+    rm = db.query_one("""SELECT COALESCE(SUM(sale_price-COALESCE(cost_basis,0)),0) m, COALESCE(SUM(sale_price),0) r
+                         FROM raw_cards WHERE state='SOLD' AND removal_date::date BETWEEN %s AND %s""", (start, end)) or {}
+    margin = float(cm["m"]) + float(rm["m"])
+    merch = float(cm["r"]) + float(rm["r"])
+    return {
+        "orders": int(o.get("orders") or 0), "net": round(float(o.get("net") or 0), 2),
+        "units": int(o.get("units") or 0), "aov": round(float(o.get("aov") or 0), 2),
+        "custs": int(o.get("custs") or 0),
+        "instore": round(float(o.get("instore") or 0), 2),
+        "shipped": round(float(o.get("shipped") or 0), 2),
+        "margin": round(margin, 2),
+        "margin_pct": round(margin / merch * 100, 1) if merch > 0 else 0,
+    }
+
+
+@app.route("/api/sales/overview")
+def sales_overview():
+    days = max(1, min(int(request.args.get("days", 90)), 730))
+    today = _date.today()
+    start = today - _timedelta(days=days - 1)
+    prev_end = start - _timedelta(days=1)
+    prev_start = prev_end - _timedelta(days=days - 1)
+    return jsonify({
+        "days": days,
+        "kpi": _kpi_block(start, today),
+        "prev": _kpi_block(prev_start, prev_end),
+        "series": _sales_series(start, today),
+    })
+
+
+@app.route("/api/sales/buysell")
+def sales_buysell():
+    """Weekly intake spend (by ingested_at) vs net sales — the cash-conversion view."""
+    days = max(7, min(int(request.args.get("days", 180)), 730))
+    start = _date.today() - _timedelta(days=days)
+    sell = db.query("""SELECT date_trunc('week',order_date)::date::text wk, COALESCE(SUM(net_amount),0) v
+                       FROM customer_orders WHERE order_date >= %s GROUP BY 1""", (start,))
+    # Buy = what we PAID (total_offer_amount), attributed to ingested_at, only sessions
+    # that actually got ingested. partially_ingested counted too (bulk still clearing).
+    buy = db.query("""SELECT date_trunc('week',ingested_at::date)::date::text wk,
+                             COALESCE(SUM(total_offer_amount),0) v
+                      FROM intake_sessions
+                      WHERE status IN ('ingested','partially_ingested')
+                        AND ingested_at IS NOT NULL AND ingested_at::date >= %s
+                      GROUP BY 1""", (start,))
+    sm = {r["wk"]: float(r["v"]) for r in sell}
+    bm = {r["wk"]: float(r["v"]) for r in buy}
+    wks = sorted(set(sm) | set(bm))
+    series = [{"period": w, "sell": round(sm.get(w, 0), 2), "buy": round(bm.get(w, 0), 2)} for w in wks]
+    partial = db.query_one("""SELECT COUNT(*) c, COALESCE(SUM(total_offer_amount),0) v
+                              FROM intake_sessions
+                              WHERE status='partially_ingested' AND ingested_at::date >= %s""", (start,)) or {}
+    return jsonify({
+        "series": series,
+        "partial": {"cnt": int(partial.get("c") or 0), "value": round(float(partial.get("v") or 0), 2)},
+    })
+
+
+@app.route("/api/sales/mix")
+def sales_mix():
+    """Weekly stacked revenue by stream or game (catalog + raw singles), + totals pivot."""
+    days = max(7, min(int(request.args.get("days", 90)), 730))
+    dim = request.args.get("dim", "stream")
+    start = _date.today() - _timedelta(days=days)
+    if dim == "ip":
+        cat_expr = "LOWER(COALESCE(t.ip,'other'))"
+        raw_cat = "LOWER(COALESCE(game,'other'))"
+    else:  # stream
+        cat_expr = "COALESCE(t.product_type,'other')"
+        raw_cat = "'raw_single'"
+    catalog = db.query(f"""SELECT date_trunc('week',s.sale_date)::date::text wk, {cat_expr} cat,
+                          SUM(s.revenue) rev, SUM(s.units_sold) units
+                          FROM sku_daily_sales s LEFT JOIN product_taxonomy t USING (shopify_variant_id)
+                          WHERE s.sale_date >= %s GROUP BY 1,2""", (start,))
+    raw = db.query(f"""SELECT date_trunc('week',removal_date)::date::text wk, {raw_cat} cat,
+                      SUM(sale_price) rev, COUNT(*) units
+                      FROM raw_cards WHERE state='SOLD' AND removal_date::date >= %s GROUP BY 1,2""", (start,))
+    # Catalog taxonomy says 'mtg'; raw_cards.game says 'magic' — same game, merge them.
+    ip_norm = {"mtg": "magic"} if dim == "ip" else {}
+    per, totals = {}, {}
+    for r in list(catalog) + list(raw):
+        wk = r["wk"]
+        cat = r["cat"] or "other"
+        cat = ip_norm.get(cat, cat)
+        rev = float(r["rev"] or 0)
+        units = int(r["units"] or 0)
+        per.setdefault(wk, {})
+        per[wk][cat] = per[wk].get(cat, 0) + rev
+        t = totals.setdefault(cat, {"rev": 0, "units": 0})
+        t["rev"] += rev
+        t["units"] += units
+    ranked = sorted(totals, key=lambda c: -totals[c]["rev"])
+    keep = ranked[:8]
+    periods = sorted(per)
+    series = []
+    for w in periods:
+        vals = {}
+        for cat, rev in per[w].items():
+            k = cat if cat in keep else "other"
+            vals[k] = vals.get(k, 0) + rev
+        series.append({"period": w, "vals": {k: round(v, 2) for k, v in vals.items()}})
+    cats = keep if "other" in keep or not [c for c in ranked if c not in keep] else keep + ["other"]
+    totlist = [{"grp": _MIX_LABELS.get(c, c.title()), "key": c,
+                "rev": round(totals[c]["rev"], 2), "units": totals[c]["units"]} for c in ranked]
+    return jsonify({
+        "periods": periods, "cats": cats,
+        "labels": {c: _MIX_LABELS.get(c, c.title()) for c in cats},
+        "series": series, "totals": totlist,
+    })
+
+
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -813,6 +1001,29 @@ th:hover { color:var(--text); }
 .subtab { height:36px; padding:0 14px; background:transparent; border:none; border-bottom:2px solid transparent; color:var(--dim); cursor:pointer; font:inherit; font-size:0.86rem; font-weight:600; margin-bottom:-1px; }
 .subtab.active { color:var(--text); border-bottom-color:var(--accent); }
 .subtab:hover { color:var(--text); }
+/* charts */
+.card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px 18px; margin-bottom:18px; }
+.card h3 { font-size:0.92rem; margin:0 0 2px; }
+.card .sub-note { font-size:0.74rem; color:var(--dim); margin:0 0 12px; }
+.chart-wrap { position:relative; width:100%; }
+.chart-wrap svg { display:block; width:100%; height:auto; }
+.chart-grid line { stroke:var(--border); stroke-width:1; }
+.chart-axis { fill:var(--dim); font-size:11px; font-family:'DM Mono',monospace; }
+.chart-line { fill:none; stroke-width:2; }
+.chart-ma { fill:none; stroke-width:1.5; stroke-dasharray:4 3; opacity:0.9; }
+.chart-tip { position:absolute; pointer-events:none; background:var(--s2); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:0.74rem; box-shadow:0 4px 14px rgba(0,0,0,0.35); z-index:5; min-width:130px; transform:translate(-50%,-105%); display:none; white-space:nowrap; }
+.chart-tip b { display:block; margin-bottom:4px; font-size:0.78rem; }
+.chart-tip .tr { display:flex; justify-content:space-between; gap:14px; }
+.chart-tip .sw { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; vertical-align:0; }
+.chart-guide { stroke:var(--dim); stroke-width:1; stroke-dasharray:3 3; opacity:0; }
+.legend2 { display:flex; gap:14px; flex-wrap:wrap; font-size:0.76rem; color:var(--dim); margin-top:10px; }
+.legend2 span { display:inline-flex; align-items:center; }
+.legend2 i { width:11px; height:11px; border-radius:3px; margin-right:6px; }
+.kpi-delta { font-size:0.72rem; margin-top:2px; }
+.kpi-up { color:var(--green); } .kpi-down { color:var(--red); }
+.win-sel { display:flex; gap:4px; }
+.win-sel button { height:32px; padding:0 12px; background:var(--s2); border:1px solid var(--border); border-radius:7px; color:var(--dim); cursor:pointer; font:inherit; font-size:0.8rem; font-weight:600; }
+.win-sel button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
 </style>
 </head>
 <body>
@@ -821,6 +1032,7 @@ th:hover { color:var(--text); }
   <div class="tabs">
     <button class="tab active" data-tab="skus" onclick="switchTab('skus')">SKUs</button>
     <button class="tab" data-tab="flow" onclick="switchTab('flow')">Inventory Flow</button>
+    <button class="tab" data-tab="sales" onclick="switchTab('sales')">Sales</button>
   </div>
   <button class="btn btn-secondary btn-sm" onclick="runPipeline()" id="run-btn">▶ Run Now</button>
   <button class="btn btn-secondary btn-sm" onclick="runBackfill()" id="bf-btn">↻ Full Backfill</button>
@@ -957,6 +1169,76 @@ th:hover { color:var(--text); }
   </div>
 </div>
 
+<div class="main" id="tab-sales" style="display:none;">
+  <div class="section-head" style="margin-top:0;">
+    <div class="subtabs" style="margin:0;border:none;">
+      <button class="subtab active" data-ssub="overview" onclick="switchSales('overview')">Overview</button>
+      <button class="subtab" data-ssub="channel" onclick="switchSales('channel')">Channel</button>
+      <button class="subtab" data-ssub="buysell" onclick="switchSales('buysell')">Buy vs Sell</button>
+      <button class="subtab" data-ssub="mix" onclick="switchSales('mix')">Product Mix</button>
+    </div>
+    <div class="win-sel" id="sales-win">
+      <button data-d="7" onclick="setSalesWin(7)">7d</button>
+      <button data-d="30" onclick="setSalesWin(30)">30d</button>
+      <button data-d="90" class="active" onclick="setSalesWin(90)">90d</button>
+      <button data-d="365" onclick="setSalesWin(365)">1yr</button>
+    </div>
+  </div>
+
+  <div class="ssub" id="ssub-overview">
+    <div class="stats" id="sales-kpis"><div class="spinner"></div></div>
+    <div class="card">
+      <h3>Net revenue</h3>
+      <p class="sub-note">Daily net sales with a 7-day moving average. In-store + shipped combined.</p>
+      <div class="chart-wrap" id="chart-rev"></div>
+    </div>
+    <div class="card">
+      <h3>Orders &amp; average order value</h3>
+      <p class="sub-note">Order count (bars) with AOV trend (line).</p>
+      <div class="chart-wrap" id="chart-orders"></div>
+    </div>
+  </div>
+
+  <div class="ssub" id="ssub-channel" style="display:none;">
+    <div class="stats" id="channel-kpis"><div class="spinner"></div></div>
+    <div class="card">
+      <h3>In-store vs shipped — revenue</h3>
+      <p class="sub-note">Stacked daily revenue by delivery method (Shopify deliveryMethod — RETAIL/PICK_UP = in-store, SHIPPING = shipped). The pos/online channel field mislabels in-store, so this is the real split.</p>
+      <div class="chart-wrap" id="chart-channel"></div>
+    </div>
+  </div>
+
+  <div class="ssub" id="ssub-buysell" style="display:none;">
+    <div class="stats" id="buysell-kpis"><div class="spinner"></div></div>
+    <div class="card">
+      <h3>Buy vs Sell — weekly capital flow</h3>
+      <p class="sub-note">What we paid to intake (by ingested date, offer amount) vs net sales. Buy is attributed when stock is <b>ingested</b>, not offered — partially-ingested lots (bulk still clearing) are flagged below.</p>
+      <div class="chart-wrap" id="chart-buysell"></div>
+      <div class="legend2" id="buysell-legend"></div>
+      <p class="hint" id="buysell-partial" style="margin-top:10px;"></p>
+    </div>
+  </div>
+
+  <div class="ssub" id="ssub-mix" style="display:none;">
+    <div class="section-head">
+      <h2>Product mix over time</h2>
+      <select id="mix-dim" onchange="loadMix()">
+        <option value="stream">By stream (sealed / singles / raw …)</option>
+        <option value="ip">By game (Pokémon / Magic …)</option>
+      </select>
+    </div>
+    <div class="card">
+      <p class="sub-note">Weekly revenue, stacked by category. Raw singles are categorized from the card table by barcode; catalog from taxonomy.</p>
+      <div class="chart-wrap" id="chart-mix"></div>
+      <div class="legend2" id="mix-legend"></div>
+    </div>
+    <div class="card">
+      <h3>Totals for the window</h3>
+      <div id="mix-totals"><div class="spinner"></div></div>
+    </div>
+  </div>
+</div>
+
 <script>
 let _page = 1, _timer = null;
 
@@ -1074,7 +1356,9 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.getElementById('tab-skus').style.display = name === 'skus' ? '' : 'none';
   document.getElementById('tab-flow').style.display = name === 'flow' ? '' : 'none';
+  document.getElementById('tab-sales').style.display = name === 'sales' ? '' : 'none';
   if (name === 'flow' && !_flowLoaded) { _flowLoaded = true; switchSub('overview'); }
+  if (name === 'sales' && !_salesLoaded) { _salesLoaded = true; switchSales('overview'); }
 }
 
 const _subLoaded = {};
@@ -1299,6 +1583,212 @@ async function loadRawAging() {
         '<div class="mv"><b>' + Math.round(i.age_days) + 'd</b> held<br><small>' + fmtMoney(i.current_price) + '</small></div></div>'
     ).join('') + '</div>';
   } catch(e) { el.innerHTML = '<div class="empty">' + e.message + '</div>'; }
+}
+
+// ── Sales dashboard ─────────────────────────────────────────────
+let _salesLoaded = false, _salesWin = 90, _salesSub = 'overview', _salesData = null;
+const _SSUBS = ['overview', 'channel', 'buysell', 'mix'];
+const PALETTE = ['#5b8def','#34c759','#ff9f0a','#ff6b6b','#bf5af2','#32ade6','#ffd60a','#8e8e93','#d98a4b'];
+const _charts = {};
+
+function fmtK(n){ n = Math.round(n||0); const a = Math.abs(n); if (a >= 1000) return '$'+(n/1000).toFixed(a>=10000?0:1)+'k'; return '$'+n; }
+function fmtDate(iso){ if(!iso) return ''; const p = iso.split('-'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][(+p[1])-1]+' '+(+p[2]); }
+function movingAvg(arr,w){ const out=[]; for(let i=0;i<arr.length;i++){ let s=0,c=0; for(let j=Math.max(0,i-w+1);j<=i;j++){ s+=arr[j]||0; c++; } out.push(c?s/c:0);} return out; }
+function legendHtml(items){ return items.map(i=>'<span><i style="background:'+i.color+'"></i>'+i.label+'</span>').join(''); }
+function niceMax(v){ if(v<=0) return 1; const p=Math.pow(10,Math.floor(Math.log10(v))); const f=v/p; let nf; if(f<=1)nf=1;else if(f<=2)nf=2;else if(f<=2.5)nf=2.5;else if(f<=5)nf=5;else nf=10; return nf*p; }
+function pctDelta(c,p){ if(!p) return null; return (c-p)/p*100; }
+function deltaHtml(c,p){ const d=pctDelta(c,p); if(d===null||!isFinite(d)) return ''; const up=d>=0; return '<div class="kpi-delta '+(up?'kpi-up':'kpi-down')+'">'+(up?'▲':'▼')+' '+Math.abs(d).toFixed(0)+'% vs prev</div>'; }
+
+function switchSales(name){
+  _salesSub = name;
+  document.querySelectorAll('[data-ssub]').forEach(t => t.classList.toggle('active', t.dataset.ssub === name));
+  _SSUBS.forEach(s => document.getElementById('ssub-'+s).style.display = s === name ? '' : 'none');
+  loadSalesSub(name);
+}
+function loadSalesSub(name){
+  if (name==='overview') loadSalesOverview();
+  else if (name==='channel') loadChannel();
+  else if (name==='buysell') loadBuySell();
+  else if (name==='mix') loadMix();
+}
+function setSalesWin(d){
+  _salesWin = d; _salesData = null;
+  document.querySelectorAll('#sales-win button').forEach(b => b.classList.toggle('active', +b.dataset.d === d));
+  loadSalesSub(_salesSub);
+}
+
+// Generic SVG chart: series = [{key,label,color,type:'area'|'line'|'ma'|'bar',data:[],axis,money}]
+function buildChart(wrapId, periods, series, opts){
+  opts = opts || {};
+  const wrap = document.getElementById(wrapId);
+  const n = periods.length;
+  if (!n){ wrap.innerHTML = '<div class="empty">No sales in this window.</div>'; return; }
+  const hasRight = series.some(s => s.axis === 'right');
+  const W = 1000, H = opts.h || 300, padL = 54, padR = hasRight ? 56 : 16, padT = 14, padB = 30;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const xAt = i => n <= 1 ? padL + plotW/2 : padL + (i/(n-1))*plotW;
+  const areas = series.filter(s => s.type === 'area');
+  const bars = series.filter(s => s.type === 'bar');
+  const stackTop = new Array(n).fill(0);
+  areas.forEach(a => { for(let i=0;i<n;i++) stackTop[i] += (+a.data[i]||0); });
+  let leftMax = 0, rightMax = 0;
+  for(let i=0;i<n;i++) leftMax = Math.max(leftMax, stackTop[i]);
+  series.forEach(s => { if(s.type==='area') return; const t = s.axis==='right'?'r':'l'; s.data.forEach(v => { const val=+v||0; if(t==='r') rightMax=Math.max(rightMax,val); else leftMax=Math.max(leftMax,val); }); });
+  leftMax = niceMax(leftMax); rightMax = niceMax(rightMax);
+  const yL = v => padT + plotH - (v/leftMax)*plotH;
+  const yR = v => padT + plotH - (v/rightMax)*plotH;
+
+  let grid = '', body = '', steps = 4;
+  for(let s=0;s<=steps;s++){
+    const val = leftMax*s/steps, y = yL(val);
+    grid += '<line x1="'+padL+'" y1="'+y+'" x2="'+(W-padR)+'" y2="'+y+'"/>';
+    grid += '<text class="chart-axis" x="'+(padL-6)+'" y="'+(y+3)+'" text-anchor="end">'+(opts.money?fmtK(val):Math.round(val))+'</text>';
+    if (hasRight){ const ry = yR(rightMax*s/steps); body += '<text class="chart-axis" x="'+(W-padR+6)+'" y="'+(ry+3)+'" text-anchor="start">'+(opts.rightMoney?fmtK(rightMax*s/steps):Math.round(rightMax*s/steps))+'</text>'; }
+  }
+  // bars (behind)
+  const bw = Math.max(1, (plotW/Math.max(n,1))*0.55);
+  bars.forEach(b => { for(let i=0;i<n;i++){ const v=+b.data[i]||0; if(v<=0) continue; const y=yL(v); body += '<rect x="'+(xAt(i)-bw/2)+'" y="'+y+'" width="'+bw+'" height="'+(padT+plotH-y)+'" fill="'+b.color+'" opacity="0.5" rx="1"/>'; } });
+  // stacked areas
+  const bottom = new Array(n).fill(0);
+  areas.forEach(a => {
+    const top=[], bot=[];
+    for(let i=0;i<n;i++){ const v=+a.data[i]||0; bot[i]=bottom[i]; bottom[i]+=v; top[i]=bottom[i]; }
+    let pts=''; for(let i=0;i<n;i++) pts += xAt(i)+','+yL(top[i])+' ';
+    for(let i=n-1;i>=0;i--) pts += xAt(i)+','+yL(bot[i])+' ';
+    body += '<polygon points="'+pts.trim()+'" fill="'+a.color+'" opacity="0.30"/>';
+    let lp=''; for(let i=0;i<n;i++) lp += (i?'L':'M')+xAt(i)+' '+yL(top[i])+' ';
+    body += '<path d="'+lp+'" class="chart-line" stroke="'+a.color+'"/>';
+  });
+  // lines + ma
+  series.filter(s => s.type==='line'||s.type==='ma').forEach(l => {
+    const yf = l.axis==='right'?yR:yL; let lp='', started=false;
+    for(let i=0;i<n;i++){ const v=+l.data[i]; if(v==null||isNaN(v)) continue; lp += (started?'L':'M')+xAt(i)+' '+yf(v)+' '; started=true; }
+    body += '<path d="'+lp+'" class="'+(l.type==='ma'?'chart-ma':'chart-line')+'" stroke="'+l.color+'"/>';
+  });
+  // x labels
+  const want = Math.min(6, n);
+  for(let k=0;k<want;k++){ const i = want<=1?0:Math.round(k/(want-1)*(n-1)); body += '<text class="chart-axis" x="'+xAt(i)+'" y="'+(H-8)+'" text-anchor="middle">'+fmtDate(periods[i])+'</text>'; }
+  // guide + hit area
+  body += '<line class="chart-guide" id="'+wrapId+'-guide" x1="0" y1="'+padT+'" x2="0" y2="'+(padT+plotH)+'"/>';
+  body += '<rect x="'+padL+'" y="'+padT+'" width="'+plotW+'" height="'+plotH+'" fill="transparent"/>';
+
+  wrap.innerHTML = '<svg viewBox="0 0 '+W+' '+H+'"><g class="chart-grid">'+grid+'</g>'+body+'</svg>';
+  const tip = document.createElement('div'); tip.className='chart-tip'; tip.id=wrapId+'-tip'; wrap.appendChild(tip);
+  _charts[wrapId] = {periods, series, geom:{W,padL,padT,plotW,plotH,n}};
+  attachHover(wrapId);
+}
+
+function attachHover(wrapId){
+  const wrap = document.getElementById(wrapId);
+  const svg = wrap.querySelector('svg');
+  const guide = document.getElementById(wrapId+'-guide');
+  const tip = document.getElementById(wrapId+'-tip');
+  const c = _charts[wrapId], G = c.geom;
+  svg.addEventListener('mousemove', ev => {
+    const rect = svg.getBoundingClientRect();
+    const vbx = (ev.clientX-rect.left)/rect.width*G.W;
+    let i = G.n<=1?0:Math.round((vbx-G.padL)/G.plotW*(G.n-1));
+    i = Math.max(0, Math.min(G.n-1, i));
+    const x = G.n<=1?G.padL+G.plotW/2:G.padL+(i/(G.n-1))*G.plotW;
+    guide.setAttribute('x1',x); guide.setAttribute('x2',x); guide.style.opacity=0.7;
+    let rows='';
+    c.series.forEach(s => { if(s.noTip) return; const v=s.data[i]; rows += '<div class="tr"><span><i class="sw" style="background:'+s.color+'"></i>'+s.label+'</span><b>'+(s.money===false?Math.round(v||0).toLocaleString():fmtMoney(v))+'</b></div>'; });
+    tip.innerHTML = '<b>'+fmtDate(c.periods[i])+'</b>'+rows;
+    tip.style.display='block';
+    tip.style.left = (x/G.W*rect.width)+'px';
+    tip.style.top = (ev.clientY-rect.top-10)+'px';
+  });
+  svg.addEventListener('mouseleave', () => { tip.style.display='none'; guide.style.opacity=0; });
+}
+
+async function loadSalesOverview(){
+  document.getElementById('sales-kpis').innerHTML = '<div class="spinner"></div>';
+  try {
+    const d = await (await fetch('/api/sales/overview?days='+_salesWin)).json();
+    _salesData = d;
+    const k = d.kpi, p = d.prev;
+    const cards = [
+      {label:'Net revenue', val:fmtMoney(k.net), cur:k.net, prev:p.net},
+      {label:'Orders', val:k.orders.toLocaleString(), cur:k.orders, prev:p.orders},
+      {label:'Avg order value', val:fmtMoney(k.aov), cur:k.aov, prev:p.aov},
+      {label:'Gross margin', val:fmtMoney(k.margin), sub:k.margin_pct+'% of merch', color:'var(--green)', cur:k.margin, prev:p.margin},
+      {label:'Units sold', val:k.units.toLocaleString(), cur:k.units, prev:p.units},
+      {label:'Customers', val:k.custs.toLocaleString(), cur:k.custs, prev:p.custs},
+    ];
+    document.getElementById('sales-kpis').innerHTML = cards.map(c =>
+      '<div class="stat"><div class="stat-label">'+c.label+'</div><div class="stat-val" style="'+(c.color?'color:'+c.color:'')+'">'+c.val+'</div>'+
+      (c.sub?'<div class="stat-label">'+c.sub+'</div>':'')+deltaHtml(c.cur,c.prev)+'</div>').join('');
+    const periods = d.series.map(s=>s.d), net = d.series.map(s=>s.net);
+    buildChart('chart-rev', periods, [
+      {key:'net', label:'Net revenue', color:'var(--accent)', type:'area', data:net},
+      {key:'ma', label:'7-day avg', color:'var(--green)', type:'ma', data:movingAvg(net,7)},
+    ], {money:true});
+    buildChart('chart-orders', periods, [
+      {key:'orders', label:'Orders', color:'var(--accent)', type:'bar', data:d.series.map(s=>s.orders), money:false},
+      {key:'aov', label:'AOV', color:'var(--amber)', type:'line', axis:'right', data:d.series.map(s=> s.orders? s.net/s.orders : 0)},
+    ], {money:false, rightMoney:true});
+  } catch(e){ document.getElementById('sales-kpis').innerHTML = '<div class="empty">'+e.message+'</div>'; }
+}
+
+async function loadChannel(){
+  if (!_salesData) await loadSalesOverview();
+  const d = _salesData; if (!d) return;
+  const k = d.kpi, tot = (k.instore+k.shipped)||1;
+  document.getElementById('channel-kpis').innerHTML = [
+    {label:'In-store revenue', val:fmtMoney(k.instore), sub:(k.instore/tot*100).toFixed(0)+'% of attributed', color:'#34c759'},
+    {label:'Shipped revenue', val:fmtMoney(k.shipped), sub:(k.shipped/tot*100).toFixed(0)+'% of attributed', color:'#5b8def'},
+    {label:'Total net revenue', val:fmtMoney(k.net)},
+  ].map(c => '<div class="stat"><div class="stat-label">'+c.label+'</div><div class="stat-val" style="'+(c.color?'color:'+c.color:'')+'">'+c.val+'</div>'+(c.sub?'<div class="stat-label">'+c.sub+'</div>':'')+'</div>').join('');
+  const periods = d.series.map(s=>s.d);
+  buildChart('chart-channel', periods, [
+    {key:'instore', label:'In-store', color:'#34c759', type:'area', data:d.series.map(s=>s.instore)},
+    {key:'shipped', label:'Shipped', color:'#5b8def', type:'area', data:d.series.map(s=>s.shipped)},
+  ], {money:true});
+}
+
+async function loadBuySell(){
+  document.getElementById('buysell-kpis').innerHTML = '<div class="spinner"></div>';
+  try {
+    const d = await (await fetch('/api/sales/buysell?days='+_salesWin)).json();
+    const periods = d.series.map(s=>s.period);
+    buildChart('chart-buysell', periods, [
+      {key:'buy', label:'Buy (ingested cost)', color:'#ff9f0a', type:'area', data:d.series.map(s=>s.buy)},
+      {key:'sell', label:'Sell (net sales)', color:'#34c759', type:'line', data:d.series.map(s=>s.sell)},
+    ], {money:true});
+    document.getElementById('buysell-legend').innerHTML = legendHtml([{label:'Buy — what we paid to intake (ingested)',color:'#ff9f0a'},{label:'Sell — net sales',color:'#34c759'}]);
+    const tb = d.series.reduce((a,s)=>a+s.buy,0), ts = d.series.reduce((a,s)=>a+s.sell,0);
+    document.getElementById('buysell-kpis').innerHTML = [
+      {label:'Intake spend (ingested)', val:fmtMoney(tb), color:'#ff9f0a'},
+      {label:'Net sales', val:fmtMoney(ts), color:'var(--green)'},
+      {label:'Sell : Buy', val:(tb>0?(ts/tb).toFixed(2):'—')+'×'},
+    ].map(c => '<div class="stat"><div class="stat-label">'+c.label+'</div><div class="stat-val" style="'+(c.color?'color:'+c.color:'')+'">'+c.val+'</div></div>').join('');
+    const pp = d.partial;
+    document.getElementById('buysell-partial').textContent = pp.cnt
+      ? '⚠ '+pp.cnt+' partially-ingested lot(s) ('+fmtMoney(pp.value)+' offer) counted at ingest date — bulk may still be clearing, so recent buy can be slightly overstated.'
+      : '';
+  } catch(e){ document.getElementById('buysell-kpis').innerHTML = '<div class="empty">'+e.message+'</div>'; }
+}
+
+async function loadMix(){
+  const dim = document.getElementById('mix-dim').value;
+  document.getElementById('mix-totals').innerHTML = '<div class="spinner"></div>';
+  try {
+    const d = await (await fetch('/api/sales/mix?days='+_salesWin+'&dim='+dim)).json();
+    const colors = {}; d.cats.forEach((c,i)=> colors[c] = PALETTE[i%PALETTE.length]);
+    const rowFor = {}; d.series.forEach(s => rowFor[s.period] = s.vals);
+    const series = d.cats.map(c => ({ key:c, label:d.labels[c]||c, color:colors[c], type:'area',
+      data:d.periods.map(p => (rowFor[p] && rowFor[p][c]) || 0) }));
+    buildChart('chart-mix', d.periods, series, {money:true});
+    document.getElementById('mix-legend').innerHTML = legendHtml(d.cats.map(c => ({label:d.labels[c]||c, color:colors[c]})));
+    const tot = d.totals, max = Math.max(...tot.map(t=>t.rev), 1), sum = tot.reduce((a,t)=>a+t.rev,0)||1;
+    document.getElementById('mix-totals').innerHTML = '<div style="overflow-x:auto;"><table>' +
+      '<thead><tr><th style="text-align:left;">Category</th><th>Revenue</th><th></th><th>%</th><th>Units</th></tr></thead><tbody>' +
+      tot.map(t => '<tr><td style="text-align:left;font-weight:600;">'+t.grp+'</td>' +
+        '<td style="font-weight:600;">'+fmtMoney(t.rev)+'</td>' +
+        '<td style="min-width:120px;"><div class="bar" style="width:'+Math.max(t.rev/max*100,2)+'%;"><span style="width:100%;background:var(--accent);"></span></div></td>' +
+        '<td>'+(t.rev/sum*100).toFixed(0)+'%</td><td>'+t.units.toLocaleString()+'</td></tr>').join('') +
+      '</tbody></table></div>';
+  } catch(e){ document.getElementById('mix-totals').innerHTML = '<div class="empty">'+e.message+'</div>'; }
 }
 
 loadStatus();

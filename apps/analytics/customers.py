@@ -35,6 +35,7 @@ query CustomerOrders($first:Int!, $after:String, $query:String!) {
         customer { id email firstName lastName }
         currentTotalPriceSet { shopMoney { amount } }
         totalRefundedSet { shopMoney { amount } }
+        fulfillmentOrders(first:1) { edges { node { deliveryMethod { methodType } } } }
         lineItems(first:100) {
           edges { node {
             sku
@@ -114,6 +115,17 @@ def sync_customer_orders(full_backfill: bool = False):
             fulfillment_status = node.get("displayFulfillmentStatus")
             channel = "pos" if anonymous else "online"
 
+            # Delivery method = the TRUE in-store vs shipped signal.
+            # SHIPPING = shipped; RETAIL = walk-in POS; PICK_UP = online hold picked up in store.
+            # (The pos/online `channel` above mislabels in-store RETAIL orders as 'online'
+            #  because they carry a customer record — delivery_method is authoritative.)
+            fo_edges = node.get("fulfillmentOrders", {}).get("edges", [])
+            delivery_method = None
+            if fo_edges:
+                dm = fo_edges[0]["node"].get("deliveryMethod")
+                if dm:
+                    delivery_method = dm.get("methodType")
+
             # Extract line items summary
             items = []
             item_count = 0
@@ -134,13 +146,14 @@ def sync_customer_orders(full_backfill: bool = False):
                 INSERT INTO customer_orders (
                     customer_id, order_id, order_gid, order_name,
                     order_date, order_total, refund_amount, net_amount,
-                    channel, fulfillment_status, created_at_ts,
+                    channel, fulfillment_status, delivery_method, created_at_ts,
                     item_count, items
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (customer_id, order_id) DO UPDATE SET
                     refund_amount = EXCLUDED.refund_amount,
                     net_amount = EXCLUDED.net_amount,
                     fulfillment_status = EXCLUDED.fulfillment_status,
+                    delivery_method = EXCLUDED.delivery_method,
                     item_count = EXCLUDED.item_count,
                     items = EXCLUDED.items
             """, (
@@ -148,6 +161,7 @@ def sync_customer_orders(full_backfill: bool = False):
                 order_date, order_total, refund_amount, net_amount,
                 channel,
                 fulfillment_status,
+                delivery_method,
                 node["createdAt"],
                 item_count,
                 json.dumps(items),
@@ -323,7 +337,12 @@ def compute_daily_business_summary(target_date: date = None):
             COUNT(*) FILTER (WHERE channel = 'online') AS orders_online,
             COUNT(*) FILTER (WHERE channel = 'pos') AS orders_pos,
             COALESCE(SUM(net_amount) FILTER (WHERE channel = 'online'), 0) AS revenue_online,
-            COALESCE(SUM(net_amount) FILTER (WHERE channel = 'pos'), 0) AS revenue_pos
+            COALESCE(SUM(net_amount) FILTER (WHERE channel = 'pos'), 0) AS revenue_pos,
+            -- TRUE in-store vs shipped split, from delivery method (channel mislabels in-store)
+            COUNT(*) FILTER (WHERE delivery_method IN ('RETAIL','PICK_UP')) AS orders_instore,
+            COUNT(*) FILTER (WHERE delivery_method = 'SHIPPING') AS orders_shipped,
+            COALESCE(SUM(net_amount) FILTER (WHERE delivery_method IN ('RETAIL','PICK_UP')), 0) AS revenue_instore,
+            COALESCE(SUM(net_amount) FILTER (WHERE delivery_method = 'SHIPPING'), 0) AS revenue_shipped
         FROM customer_orders
         WHERE order_date = %s
     """, (target,))
@@ -359,8 +378,9 @@ def compute_daily_business_summary(target_date: date = None):
             summary_date, total_orders, total_revenue, total_refunds, net_revenue,
             unique_customers, new_customers, returning_customers, avg_order_value,
             total_units_sold, orders_online, orders_pos, revenue_online, revenue_pos,
+            orders_instore, orders_shipped, revenue_instore, revenue_shipped,
             intake_sessions, intake_total_cost, intake_total_items, updated_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
         ON CONFLICT (summary_date) DO UPDATE SET
             total_orders = EXCLUDED.total_orders,
             total_revenue = EXCLUDED.total_revenue,
@@ -375,6 +395,10 @@ def compute_daily_business_summary(target_date: date = None):
             orders_pos = EXCLUDED.orders_pos,
             revenue_online = EXCLUDED.revenue_online,
             revenue_pos = EXCLUDED.revenue_pos,
+            orders_instore = EXCLUDED.orders_instore,
+            orders_shipped = EXCLUDED.orders_shipped,
+            revenue_instore = EXCLUDED.revenue_instore,
+            revenue_shipped = EXCLUDED.revenue_shipped,
             intake_sessions = EXCLUDED.intake_sessions,
             intake_total_cost = EXCLUDED.intake_total_cost,
             intake_total_items = EXCLUDED.intake_total_items,
@@ -394,6 +418,10 @@ def compute_daily_business_summary(target_date: date = None):
         order_stats["orders_pos"] or 0,
         order_stats["revenue_online"] or 0,
         order_stats["revenue_pos"] or 0,
+        order_stats["orders_instore"] or 0,
+        order_stats["orders_shipped"] or 0,
+        order_stats["revenue_instore"] or 0,
+        order_stats["revenue_shipped"] or 0,
         intake_stats["sessions"] if intake_stats else 0,
         intake_stats["total_cost"] if intake_stats else 0,
         intake_stats["total_items"] if intake_stats else 0,
@@ -411,3 +439,4 @@ def backfill_daily_summaries(days: int = 365):
         target = today - timedelta(days=i)
         compute_daily_business_summary(target)
     logger.info(f"Backfilled {days + 1} daily summaries")
+    return {"days": days + 1}
