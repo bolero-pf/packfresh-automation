@@ -850,29 +850,66 @@ def _sales_series(start, end, gran):
     return out
 
 
-def _nocost_projection(start, end):
-    """Category-weighted estimate of margin on catalog sales that lack a cost.
-    No-cost stock (older, pre-cost-tracking) skews by type, so project each
-    product_type's no-cost revenue at THAT type's own known margin rate, with the
-    overall blended rate as fallback for a type that has no costed sales to learn from."""
-    rows = db.query("""
+def _margin_estimate(start, end):
+    """Margin over the FULL window.
+    - PROVEN = real margin where we have captured cost (cost-known, COGS-tracking era).
+    - EST. TOTAL = proven + a category-rate projection of EVERY other dollar of
+      merchandise revenue in the window — pre-COGS-era sales, no-cost stock, and
+      suspect-cost rows alike. So "90 days" of est. margin really covers 90 days; the
+      cost_coverage % says how much is proven vs estimated. Conservative: older stock
+      runs higher-margin than the recent category rate we project at.
+    Catalog revenue is the catalog merchandise base (sku_daily_sales × taxonomy, full
+    window); raw singles come from raw_cards (cost_basis frozen at intake)."""
+    # Per-category proven margin + cost-known revenue → category rates (tracked era)
+    prov = db.query("""
         SELECT COALESCE(t.product_type,'other') pt,
                COALESCE(SUM(rm.gross_margin),0) margin,
-               COALESCE(SUM(rm.revenue) FILTER (WHERE rm.gross_margin IS NOT NULL),0) costed_rev,
-               COALESCE(SUM(rm.revenue) FILTER (WHERE rm.gross_margin IS NULL),0) nocost_rev
+               COALESCE(SUM(rm.revenue) FILTER (WHERE rm.gross_margin IS NOT NULL),0) costed_rev
         FROM realized_margin rm LEFT JOIN product_taxonomy t USING (shopify_variant_id)
         WHERE rm.sale_date BETWEEN %s AND %s GROUP BY 1
     """, (start, end))
-    tot_margin = sum(float(r["margin"]) for r in rows)
-    tot_costed = sum(float(r["costed_rev"]) for r in rows)
-    blended = (tot_margin / tot_costed) if tot_costed > 0 else 0
-    proj = 0.0
-    for r in rows:
-        cr, nc = float(r["costed_rev"]), float(r["nocost_rev"])
-        if nc <= 0:
-            continue
-        proj += (float(r["margin"]) / cr if cr > 0 else blended) * nc
-    return proj
+    rate, costed_by = {}, {}
+    cat_margin = cat_costed = 0.0
+    for r in prov:
+        m, cr = float(r["margin"]), float(r["costed_rev"])
+        cat_margin += m
+        cat_costed += cr
+        costed_by[r["pt"]] = cr
+        if cr > 0:
+            rate[r["pt"]] = m / cr
+    blended = (cat_margin / cat_costed) if cat_costed > 0 else 0.0
+    # Total catalog merchandise revenue by category (full window, catalog only)
+    cat_total = cat_est = 0.0
+    for r in db.query("""SELECT t.product_type pt, COALESCE(SUM(s.revenue),0) rev
+                         FROM sku_daily_sales s JOIN product_taxonomy t USING (shopify_variant_id)
+                         WHERE s.sale_date BETWEEN %s AND %s GROUP BY 1""", (start, end)):
+        pt = r["pt"] or "other"
+        trev = float(r["rev"])
+        cat_total += trev
+        cat_est += rate.get(pt, blended) * max(0.0, trev - costed_by.get(pt, 0.0))
+    cat_est += cat_margin  # proven portion
+    # Raw singles (cost_basis frozen at intake; mostly cost-known)
+    raw = db.query_one("""SELECT COALESCE(SUM(sale_price-cost_basis) FILTER (WHERE cost_basis IS NOT NULL),0) margin,
+                                 COALESCE(SUM(sale_price) FILTER (WHERE cost_basis IS NOT NULL),0) costed_rev,
+                                 COALESCE(SUM(sale_price),0) total_rev
+                          FROM raw_cards WHERE state='SOLD' AND removal_date::date BETWEEN %s AND %s""", (start, end)) or {}
+    raw_margin = float(raw.get("margin") or 0)
+    raw_costed = float(raw.get("costed_rev") or 0)
+    raw_total = float(raw.get("total_rev") or 0)
+    raw_rate = (raw_margin / raw_costed) if raw_costed > 0 else blended
+    raw_est = raw_margin + raw_rate * max(0.0, raw_total - raw_costed)
+
+    proven = cat_margin + raw_margin
+    proven_costed = cat_costed + raw_costed
+    est = cat_est + raw_est
+    total_merch = cat_total + raw_total
+    return {
+        "margin": round(proven, 2),
+        "margin_pct": round(proven / proven_costed * 100, 1) if proven_costed > 0 else 0,
+        "est_margin": round(est, 2),
+        "est_margin_pct": round(est / total_merch * 100, 1) if total_merch > 0 else 0,
+        "cost_coverage": round(proven_costed / total_merch * 100, 0) if total_merch > 0 else 0,
+    }
 
 
 def _kpi_block(start, end):
@@ -883,34 +920,13 @@ def _kpi_block(start, end):
                COALESCE(SUM(net_amount) FILTER (WHERE {_INSTORE_DM}),0) instore,
                COALESCE(SUM(net_amount) FILTER (WHERE {_SHIPPED_DM}),0) shipped
         FROM customer_orders WHERE order_date BETWEEN %s AND %s""", (start, end)) or {}
-    # Margin only counts sales where we actually KNOW cost. Catalog: gross_margin is
-    # NULL when unit_cost is missing (~22% of catalog rev, older stock pre-cost-tracking)
-    # — those book $0 margin, never full. % is taken against COST-KNOWN revenue (not all
-    # revenue) so the no-cost tail doesn't dilute the rate; coverage is surfaced separately.
-    cm = db.query_one("""SELECT COALESCE(SUM(gross_margin),0) m,
-                                COALESCE(SUM(revenue) FILTER (WHERE gross_margin IS NOT NULL),0) r_costed,
-                                COALESCE(SUM(revenue),0) r_all
-                         FROM realized_margin WHERE sale_date BETWEEN %s AND %s""", (start, end)) or {}
-    rm = db.query_one("""SELECT COALESCE(SUM(sale_price-cost_basis) FILTER (WHERE cost_basis IS NOT NULL),0) m,
-                                COALESCE(SUM(sale_price) FILTER (WHERE cost_basis IS NOT NULL),0) r_costed,
-                                COALESCE(SUM(sale_price),0) r_all
-                         FROM raw_cards WHERE state='SOLD' AND removal_date::date BETWEEN %s AND %s""", (start, end)) or {}
-    margin = float(cm["m"]) + float(rm["m"])
-    merch_costed = float(cm["r_costed"]) + float(rm["r_costed"])
-    merch_all = float(cm["r_all"]) + float(rm["r_all"])
-    # Est. total = proven margin + per-category projection of the no-cost catalog tail.
-    est_margin = margin + _nocost_projection(start, end)
     return {
         "orders": int(o.get("orders") or 0), "net": round(float(o.get("net") or 0), 2),
         "units": int(o.get("units") or 0), "aov": round(float(o.get("aov") or 0), 2),
         "custs": int(o.get("custs") or 0),
         "instore": round(float(o.get("instore") or 0), 2),
         "shipped": round(float(o.get("shipped") or 0), 2),
-        "margin": round(margin, 2),
-        "margin_pct": round(margin / merch_costed * 100, 1) if merch_costed > 0 else 0,
-        "cost_coverage": round(merch_costed / merch_all * 100, 0) if merch_all > 0 else 0,
-        "est_margin": round(est_margin, 2),
-        "est_margin_pct": round(est_margin / merch_all * 100, 1) if merch_all > 0 else 0,
+        **_margin_estimate(start, end),
     }
 
 
@@ -1784,14 +1800,12 @@ async function loadSalesOverview(){
     const d = await (await fetch('/api/sales/overview?days='+_salesWin)).json();
     _salesData = d;
     const k = d.kpi, p = d.prev;
-    // Margin only exists for the COGS-tracking era; flag it when the window reaches before that.
-    const era = _salesWin > 80 ? ' · margin since Mar 23 (COGS era)' : '';
     const cards = [
       {label:'Net revenue', val:fmtMoney(k.net), cur:k.net, prev:p.net},
       {label:'Orders', val:k.orders.toLocaleString(), cur:k.orders, prev:p.orders},
       {label:'Avg order value', val:fmtMoney(k.aov), cur:k.aov, prev:p.aov},
-      {label:'Gross margin (proven)', val:fmtMoney(k.margin), sub:k.margin_pct+'% · cost known on '+k.cost_coverage+'% of sales'+era, color:'var(--green)', cur:k.margin, prev:p.margin},
-      {label:'Est. total margin', val:'≥ '+fmtMoney(k.est_margin), sub:k.est_margin_pct+'% · no-cost tail projected at category rates — conservative floor'+era, color:'var(--green)', cur:k.est_margin, prev:p.est_margin},
+      {label:'Gross margin (proven)', val:fmtMoney(k.margin), sub:k.margin_pct+'% · cost known on '+k.cost_coverage+'% of window sales', color:'var(--green)', cur:k.margin, prev:p.margin},
+      {label:'Est. total margin', val:'≥ '+fmtMoney(k.est_margin), sub:k.est_margin_pct+'% · pre-COGS + no-cost projected at category rates — conservative floor', color:'var(--green)', cur:k.est_margin, prev:p.est_margin},
       {label:'Units sold', val:k.units.toLocaleString(), cur:k.units, prev:p.units},
       {label:'Customers', val:k.custs.toLocaleString(), cur:k.custs, prev:p.custs},
     ];
