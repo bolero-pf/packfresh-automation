@@ -499,6 +499,29 @@ def _allowed_kinds(mode: str | None) -> list[str]:
     return []
 
 
+def _champion_binder_exclude(tbl: str) -> str:
+    """SQL predicate that hides binder-located cards from remote Champions.
+
+    Binder cards live in the in-store binders and can only be pulled at the
+    counter, so they must not surface for online (VIP-only) holds — but in-store
+    holds keep full access. Returns a bare predicate (no leading AND) that
+    excludes any card whose bin resolves to a 'binder' storage row; display-case
+    (front glass) and plain bins stay visible. Returns '' for in-store/anonymous
+    so binders remain fully accessible there.
+
+    `tbl` is the alias/name raw_cards goes by in the calling query (e.g. 'rc'
+    or 'raw_cards') so the correlated subquery references the right bin_id.
+    """
+    if g.get("kiosk_mode") == "champion":
+        return (
+            "NOT EXISTS ("
+            " SELECT 1 FROM storage_locations _sl"
+            " JOIN storage_rows _sr ON _sr.id = _sl.row_id"
+            f" WHERE _sl.id = {tbl}.bin_id AND _sr.location_type = 'binder')"
+        )
+    return ""
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Admin: mint activation token, list / revoke devices (JWT-gated)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -775,6 +798,12 @@ def browse():
     # "in display" info only, not as add-to-cart conditions.
     filters = ["state IN ('STORED', 'DISPLAY')", "current_hold_id IS NULL"]
     params  = []
+
+    # Remote Champions can't have binder cards pulled — counter-only stock.
+    # No-op for in-store mode, where binders are fully browsable.
+    binder_excl = _champion_binder_exclude("raw_cards")
+    if binder_excl:
+        filters.append(binder_excl)
 
     if game:
         # Game filter is canonical (pokemon / onepiece / magic / lorcana /
@@ -2119,6 +2148,11 @@ def card_detail():
     # "1 in Binder-1" alongside the cartable conditions. The frontend keys
     # off rc.state to decide which copies render with a qty stepper vs.
     # an info-only line.
+    # Remote Champions never see binder copies (counter-only stock); in-store
+    # mode shows them so staff can pull from the binder.
+    _binder_excl = _champion_binder_exclude("rc")
+    binder_filter = f"AND {_binder_excl}" if _binder_excl else ""
+
     copies = db.query(f"""
         SELECT rc.id, rc.barcode, rc.card_name, rc.set_name, rc.card_number,
                rc.condition, rc.current_price, rc.image_url, rc.variant,
@@ -2131,6 +2165,7 @@ def card_detail():
           AND rc.state IN ('STORED','DISPLAY') AND rc.current_hold_id IS NULL
           {variant_filter.replace('variant', 'rc.variant')}
           {id_filter.replace('scrydex_id', 'rc.scrydex_id').replace('tcgplayer_id', 'rc.tcgplayer_id')}
+          {binder_filter}
         ORDER BY
             CASE rc.state WHEN 'STORED' THEN 0 ELSE 1 END,
             CASE rc.condition
@@ -2944,6 +2979,11 @@ def champion_checkout():
             exclude_filter = f" AND id NOT IN ({ph})"
             exclude_params = list(allocated_raw_ids)
 
+        # Never allocate a binder card to a remote Champion hold — those are
+        # counter-only and aren't surfaced in browse/detail for this cohort.
+        _binder_excl = _champion_binder_exclude("raw_cards")
+        binder_filter = f" AND {_binder_excl}" if _binder_excl else ""
+
         available = db.query(f"""
             SELECT id, barcode, card_name, set_name, card_number,
                    condition, current_price, image_url
@@ -2954,6 +2994,7 @@ def champion_checkout():
               AND CASE WHEN variant IS NULL OR LOWER(variant) IN ('normal','holofoil') THEN '' ELSE variant END = %s
               {id_filter}
               {exclude_filter}
+              {binder_filter}
             ORDER BY created_at ASC
             LIMIT %s
         """, (card_name, set_name, condition, variant,
@@ -2972,7 +3013,17 @@ def champion_checkout():
     if not lines_resolved:
         return jsonify({"error": "No cards available", "details": errors}), 409
 
-    # ── Step 3: Create hold + lock cards ────────────────────────────────────
+    # ── Step 3: Get-or-create the customer's OPEN hold + lock cards ──────────
+    # A Champion who clicks "Checkout" more than once before paying merges each
+    # batch into the SAME Shopify cart (/pages/kiosk-add appends), so all the
+    # passes land on one paid order. We mirror that here: reuse the customer's
+    # existing unpaid hold instead of spawning a new one, otherwise one order
+    # ends up split across multiple holds on the screening pull screen.
+    #
+    # ON CONFLICT targets the partial unique index ux_one_open_champion_hold
+    # (one row per email WHERE cohort='champion' AND checkout_status='pending'),
+    # so concurrent double-submits resolve to a single hold at the DB level
+    # rather than racing in app code. (xmax = 0) distinguishes insert vs reuse.
     with db.get_conn() as conn:
         conn.autocommit = False
         try:
@@ -2985,9 +3036,18 @@ def champion_checkout():
                         (customer_name, customer_phone, status, item_count,
                          cohort, customer_email, shopify_customer_gid, checkout_status)
                     VALUES (%s, NULL, 'PENDING', %s, 'champion', %s, %s, 'pending')
-                    RETURNING id
+                    ON CONFLICT (customer_email)
+                        WHERE cohort = 'champion' AND checkout_status = 'pending'
+                        -- Reuse the open hold; bump created_at so the 30-min
+                        -- expiry clock tracks latest activity, not first click,
+                        -- and refresh the gid in case it changed.
+                        DO UPDATE SET created_at = CURRENT_TIMESTAMP,
+                                      shopify_customer_gid = EXCLUDED.shopify_customer_gid
+                    RETURNING id, (xmax = 0) AS inserted
                 """, (email, len(lines_resolved), email, customer_gid))
-                hold_id = str(cur.fetchone()["id"])
+                _hold_row = cur.fetchone()
+                hold_id = str(_hold_row["id"])
+                reused_hold = not _hold_row["inserted"]
 
                 for card in lines_resolved:
                     cur.execute("""
@@ -2997,6 +3057,13 @@ def champion_checkout():
                         INSERT INTO hold_items (hold_id, raw_card_id, barcode, status)
                         VALUES (%s, %s, %s, 'REQUESTED')
                     """, (hold_id, card["id"], card["barcode"]))
+
+                # Recompute from actual rows so a reused hold counts old + new.
+                cur.execute("""
+                    UPDATE holds SET item_count =
+                        (SELECT COUNT(*) FROM hold_items WHERE hold_id = %s)
+                    WHERE id = %s
+                """, (hold_id, hold_id))
 
                 conn.commit()
         except Exception:
@@ -3041,7 +3108,9 @@ def champion_checkout():
 
     db.execute("UPDATE holds SET checkout_url = %s WHERE id = %s", (checkout_url, hold_id))
 
-    logger.info(f"Champion checkout: hold={hold_id} email={email} items={len(lines_resolved)} total=${cart_total:.2f}")
+    logger.info(f"Champion checkout: hold={hold_id} email={email} "
+                f"items={len(lines_resolved)} total=${cart_total:.2f} "
+                f"{'(reused open hold)' if reused_hold else '(new hold)'}")
 
     return jsonify({
         "success": True,
