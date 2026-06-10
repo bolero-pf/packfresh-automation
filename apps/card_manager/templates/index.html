@@ -659,6 +659,7 @@ let _holdData = null;
 let _scanBuffer = '';
 let _scanTimer = null;
 let _returnScanned = new Set();
+let _returnsCache = [];
 let _pollTimer = null;
 // Ephemeral "got it" ticks for sealed items in the current hold detail —
 // purely a visual aid for staff, not persisted.
@@ -1256,6 +1257,7 @@ async function loadReturns() {
 function renderReturns(cards, recentBatches) {
   const el = document.getElementById('returns-content');
   recentBatches = recentBatches || [];
+  _returnsCache = cards || [];
 
   const recentHtml = `
     <details style="margin-top:32px;">
@@ -1309,6 +1311,9 @@ function renderReturns(cards, recentBatches) {
                   onclick="event.stopPropagation();regenerateAndPrint('${c.id}')">🖨 Reprint label</button>
           <button class="btn btn-sm" style="font-size:0.7rem;padding:4px 10px;background:none;border:1px solid var(--green);color:var(--green);"
                   onclick="event.stopPropagation();sellInstead('${esc(c.barcode)}')">💵 Sell instead</button>
+          <button class="btn btn-sm" style="font-size:0.68rem;padding:4px 10px;background:none;border:1px solid var(--red);color:var(--red);"
+                  title="Card can't be found — mark as lost/shrink (flags it for audit)"
+                  onclick="event.stopPropagation();markGoneReturn('${c.id}')">Mark Gone</button>
         </div>
       `;}).join('')}
     </div>
@@ -1496,6 +1501,18 @@ async function markGone(cardId) {
     await post(`/api/missing/${cardId}/gone`, {});
     toast('Card marked as gone', 'red');
     loadMissing();
+  } catch(e) { toast(e.message, 'red'); }
+}
+
+async function markGoneReturn(cardId) {
+  const card = _returnsCache.find(c => c.id === cardId);
+  const cardName = card ? card.card_name : 'this card';
+  if (!await themedConfirm('Mark Card Gone',
+        `Can not find "${cardName}" to re-shelve? Mark it as lost (shrink). This flags it for audit/review.`)) return;
+  try {
+    await post(`/api/returns/${cardId}/gone`, {});
+    toast('Card marked as gone', 'red');
+    loadReturns();
   } catch(e) { toast(e.message, 'red'); }
 }
 

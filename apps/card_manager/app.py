@@ -1713,6 +1713,27 @@ def mark_gone(card_id):
     return jsonify({"success": True, "card_name": card["card_name"]})
 
 
+@app.route("/api/returns/<card_id>/gone", methods=["POST"])
+def mark_return_gone(card_id):
+    """Permanently mark a PENDING_RETURN card as GONE — it never made it back to
+    the shelf (handed over unscanned, the POS scan didn't register, or theft).
+    A Return Queue card that can't be physically found is shrink, so we give it
+    the same exit as the Missing flow. The state change is recorded in audit_log
+    by trg_log_state_transition, which is the shrink ledger (timestamped GONE
+    events, queryable for loss reporting)."""
+    card = db.query_one(
+        "SELECT id, card_name FROM raw_cards WHERE id::text = %s AND state = 'PENDING_RETURN'",
+        (card_id,))
+    if not card:
+        return jsonify({"error": "Card not found or not in PENDING_RETURN state"}), 404
+    db.execute("""
+        UPDATE raw_cards SET state = 'GONE', current_hold_id = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id::text = %s
+    """, (card_id,))
+    return jsonify({"success": True, "card_name": card["card_name"]})
+
+
 @app.route("/api/returns/scan", methods=["POST"])
 def scan_return():
     """Verify a card being physically returned. Also handles re-found MISSING cards."""
