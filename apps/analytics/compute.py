@@ -66,7 +66,11 @@ def ingest_orders(since_date: str = None, full_backfill: bool = False):
 
     logger.info(f"Ingesting orders since {since}")
 
-    query_filter = f'financial_status:paid created_at:>="{since}"'
+    # Include AUTHORIZED (not-yet-captured) orders, not just PAID — capture happens
+    # around fulfillment, so paid-only blanks the most recent 1-3 days. Voided/expired
+    # are skipped per-order below; the daily re-sum overwrites, so they drop out on re-sync.
+    from customers import COUNTED_FINANCIAL_STATUSES
+    query_filter = f'created_at:>="{since}"'
     cursor = None
     total_orders = 0
     daily_sales = {}  # (date_str, variant_id) -> {units, revenue}
@@ -88,6 +92,8 @@ def ingest_orders(since_date: str = None, full_backfill: bool = False):
 
         for edge in edges:
             node = edge["node"]
+            if node.get("displayFinancialStatus") not in COUNTED_FINANCIAL_STATUSES:
+                continue
             order_date = node["createdAt"][:10]  # YYYY-MM-DD
             total_orders += 1
 

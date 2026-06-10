@@ -773,35 +773,69 @@ _MIX_LABELS = {
 }
 
 
-def _margin_by_day(start, end):
-    """Combined gross margin $ per day: catalog (realized_margin) + raw singles."""
+# Granularity adapts to the window so every X tick is meaningful (no weekly buckets
+# on a 7-day window). day ≤ 31d, week ≤ 100d, else month — applied to ALL sales series.
+def _granularity(days):
+    if days <= 31:
+        return "day"
+    if days <= 100:
+        return "week"
+    return "month"
+
+
+def _bucket_start(d, gran):
+    if gran == "day":
+        return d
+    if gran == "week":
+        return d - _timedelta(days=d.weekday())  # Monday, matches date_trunc('week')
+    return d.replace(day=1)
+
+
+def _next_bucket(d, gran):
+    if gran == "day":
+        return d + _timedelta(days=1)
+    if gran == "week":
+        return d + _timedelta(days=7)
+    return (d.replace(day=1) + _timedelta(days=32)).replace(day=1)
+
+
+def _bucket_seq(start, end, gran):
+    """All bucket-start dates from start..end so zero-activity buckets still render."""
+    out, cur = [], _bucket_start(start, gran)
+    while cur <= end:
+        out.append(cur)
+        cur = _next_bucket(cur, gran)
+    return out
+
+
+def _margin_by_bucket(start, end, gran):
+    """Combined gross margin $ per bucket: catalog (realized_margin) + raw singles."""
     mmap = {}
-    for r in db.query("""SELECT sale_date::text d, COALESCE(SUM(gross_margin),0) m
-                         FROM realized_margin WHERE sale_date BETWEEN %s AND %s GROUP BY 1""",
-                      (start, end)):
-        mmap[r["d"]] = mmap.get(r["d"], 0) + float(r["m"])
-    for r in db.query("""SELECT removal_date::date::text d, COALESCE(SUM(sale_price-COALESCE(cost_basis,0)),0) m
-                         FROM raw_cards WHERE state='SOLD' AND removal_date::date BETWEEN %s AND %s GROUP BY 1""",
-                      (start, end)):
-        mmap[r["d"]] = mmap.get(r["d"], 0) + float(r["m"])
+    for r in db.query(f"""SELECT date_trunc('{gran}', sale_date)::date::text b, COALESCE(SUM(gross_margin),0) m
+                          FROM realized_margin WHERE sale_date BETWEEN %s AND %s GROUP BY 1""", (start, end)):
+        mmap[r["b"]] = mmap.get(r["b"], 0) + float(r["m"])
+    for r in db.query(f"""SELECT date_trunc('{gran}', removal_date)::date::text b,
+                                 COALESCE(SUM(sale_price-cost_basis) FILTER (WHERE cost_basis IS NOT NULL),0) m
+                          FROM raw_cards WHERE state='SOLD' AND removal_date::date BETWEEN %s AND %s GROUP BY 1""", (start, end)):
+        mmap[r["b"]] = mmap.get(r["b"], 0) + float(r["m"])
     return mmap
 
 
-def _sales_series(start, end):
-    """Per-day orders / net / units / in-store / shipped / margin for [start,end]."""
+def _sales_series(start, end, gran):
+    """Per-bucket orders / net / units / in-store / shipped / margin for [start,end]."""
     rows = db.query(f"""
-        SELECT order_date::text d, COUNT(*) orders,
+        SELECT date_trunc('{gran}', order_date)::date::text b, COUNT(*) orders,
                COALESCE(SUM(net_amount),0) net, COALESCE(SUM(item_count),0) units,
                COALESCE(SUM(net_amount) FILTER (WHERE {_INSTORE_DM}),0) instore,
                COALESCE(SUM(net_amount) FILTER (WHERE {_SHIPPED_DM}),0) shipped,
                COALESCE(SUM(net_amount) FILTER (WHERE delivery_method IS NULL),0) unattr
         FROM customer_orders WHERE order_date BETWEEN %s AND %s GROUP BY 1
     """, (start, end))
-    smap = {r["d"]: r for r in rows}
-    mmap = _margin_by_day(start, end)
-    out, cur = [], start
-    while cur <= end:
-        ds = cur.isoformat()
+    smap = {r["b"]: r for r in rows}
+    mmap = _margin_by_bucket(start, end, gran)
+    out = []
+    for b in _bucket_seq(start, end, gran):
+        ds = b.isoformat()
         r = smap.get(ds)
         out.append({
             "d": ds,
@@ -813,8 +847,32 @@ def _sales_series(start, end):
             "unattr": round(float(r["unattr"]), 2) if r else 0,
             "margin": round(mmap.get(ds, 0), 2),
         })
-        cur += _timedelta(days=1)
     return out
+
+
+def _nocost_projection(start, end):
+    """Category-weighted estimate of margin on catalog sales that lack a cost.
+    No-cost stock (older, pre-cost-tracking) skews by type, so project each
+    product_type's no-cost revenue at THAT type's own known margin rate, with the
+    overall blended rate as fallback for a type that has no costed sales to learn from."""
+    rows = db.query("""
+        SELECT COALESCE(t.product_type,'other') pt,
+               COALESCE(SUM(rm.gross_margin),0) margin,
+               COALESCE(SUM(rm.revenue) FILTER (WHERE rm.gross_margin IS NOT NULL),0) costed_rev,
+               COALESCE(SUM(rm.revenue) FILTER (WHERE rm.gross_margin IS NULL),0) nocost_rev
+        FROM realized_margin rm LEFT JOIN product_taxonomy t USING (shopify_variant_id)
+        WHERE rm.sale_date BETWEEN %s AND %s GROUP BY 1
+    """, (start, end))
+    tot_margin = sum(float(r["margin"]) for r in rows)
+    tot_costed = sum(float(r["costed_rev"]) for r in rows)
+    blended = (tot_margin / tot_costed) if tot_costed > 0 else 0
+    proj = 0.0
+    for r in rows:
+        cr, nc = float(r["costed_rev"]), float(r["nocost_rev"])
+        if nc <= 0:
+            continue
+        proj += (float(r["margin"]) / cr if cr > 0 else blended) * nc
+    return proj
 
 
 def _kpi_block(start, end):
@@ -825,12 +883,23 @@ def _kpi_block(start, end):
                COALESCE(SUM(net_amount) FILTER (WHERE {_INSTORE_DM}),0) instore,
                COALESCE(SUM(net_amount) FILTER (WHERE {_SHIPPED_DM}),0) shipped
         FROM customer_orders WHERE order_date BETWEEN %s AND %s""", (start, end)) or {}
-    cm = db.query_one("""SELECT COALESCE(SUM(gross_margin),0) m, COALESCE(SUM(revenue),0) r
+    # Margin only counts sales where we actually KNOW cost. Catalog: gross_margin is
+    # NULL when unit_cost is missing (~22% of catalog rev, older stock pre-cost-tracking)
+    # — those book $0 margin, never full. % is taken against COST-KNOWN revenue (not all
+    # revenue) so the no-cost tail doesn't dilute the rate; coverage is surfaced separately.
+    cm = db.query_one("""SELECT COALESCE(SUM(gross_margin),0) m,
+                                COALESCE(SUM(revenue) FILTER (WHERE gross_margin IS NOT NULL),0) r_costed,
+                                COALESCE(SUM(revenue),0) r_all
                          FROM realized_margin WHERE sale_date BETWEEN %s AND %s""", (start, end)) or {}
-    rm = db.query_one("""SELECT COALESCE(SUM(sale_price-COALESCE(cost_basis,0)),0) m, COALESCE(SUM(sale_price),0) r
+    rm = db.query_one("""SELECT COALESCE(SUM(sale_price-cost_basis) FILTER (WHERE cost_basis IS NOT NULL),0) m,
+                                COALESCE(SUM(sale_price) FILTER (WHERE cost_basis IS NOT NULL),0) r_costed,
+                                COALESCE(SUM(sale_price),0) r_all
                          FROM raw_cards WHERE state='SOLD' AND removal_date::date BETWEEN %s AND %s""", (start, end)) or {}
     margin = float(cm["m"]) + float(rm["m"])
-    merch = float(cm["r"]) + float(rm["r"])
+    merch_costed = float(cm["r_costed"]) + float(rm["r_costed"])
+    merch_all = float(cm["r_all"]) + float(rm["r_all"])
+    # Est. total = proven margin + per-category projection of the no-cost catalog tail.
+    est_margin = margin + _nocost_projection(start, end)
     return {
         "orders": int(o.get("orders") or 0), "net": round(float(o.get("net") or 0), 2),
         "units": int(o.get("units") or 0), "aov": round(float(o.get("aov") or 0), 2),
@@ -838,101 +907,109 @@ def _kpi_block(start, end):
         "instore": round(float(o.get("instore") or 0), 2),
         "shipped": round(float(o.get("shipped") or 0), 2),
         "margin": round(margin, 2),
-        "margin_pct": round(margin / merch * 100, 1) if merch > 0 else 0,
+        "margin_pct": round(margin / merch_costed * 100, 1) if merch_costed > 0 else 0,
+        "cost_coverage": round(merch_costed / merch_all * 100, 0) if merch_all > 0 else 0,
+        "est_margin": round(est_margin, 2),
+        "est_margin_pct": round(est_margin / merch_all * 100, 1) if merch_all > 0 else 0,
     }
 
 
 @app.route("/api/sales/overview")
 def sales_overview():
     days = max(1, min(int(request.args.get("days", 90)), 730))
+    gran = _granularity(days)
     today = _date.today()
     start = today - _timedelta(days=days - 1)
     prev_end = start - _timedelta(days=1)
     prev_start = prev_end - _timedelta(days=days - 1)
     return jsonify({
-        "days": days,
+        "days": days, "granularity": gran,
         "kpi": _kpi_block(start, today),
         "prev": _kpi_block(prev_start, prev_end),
-        "series": _sales_series(start, today),
+        "series": _sales_series(start, today, gran),
     })
 
 
 @app.route("/api/sales/buysell")
 def sales_buysell():
-    """Weekly intake spend (by ingested_at) vs net sales — the cash-conversion view."""
+    """Intake spend (by ingested_at) vs net sales per bucket — the cash-conversion view."""
     days = max(7, min(int(request.args.get("days", 180)), 730))
-    start = _date.today() - _timedelta(days=days)
-    sell = db.query("""SELECT date_trunc('week',order_date)::date::text wk, COALESCE(SUM(net_amount),0) v
-                       FROM customer_orders WHERE order_date >= %s GROUP BY 1""", (start,))
+    gran = _granularity(days)
+    today = _date.today()
+    start = today - _timedelta(days=days - 1)
+    sell = db.query(f"""SELECT date_trunc('{gran}',order_date)::date::text b, COALESCE(SUM(net_amount),0) v
+                        FROM customer_orders WHERE order_date >= %s GROUP BY 1""", (start,))
     # Buy = what we PAID (total_offer_amount), attributed to ingested_at, only sessions
     # that actually got ingested. partially_ingested counted too (bulk still clearing).
-    buy = db.query("""SELECT date_trunc('week',ingested_at::date)::date::text wk,
-                             COALESCE(SUM(total_offer_amount),0) v
-                      FROM intake_sessions
-                      WHERE status IN ('ingested','partially_ingested')
-                        AND ingested_at IS NOT NULL AND ingested_at::date >= %s
-                      GROUP BY 1""", (start,))
-    sm = {r["wk"]: float(r["v"]) for r in sell}
-    bm = {r["wk"]: float(r["v"]) for r in buy}
-    wks = sorted(set(sm) | set(bm))
-    series = [{"period": w, "sell": round(sm.get(w, 0), 2), "buy": round(bm.get(w, 0), 2)} for w in wks]
+    buy = db.query(f"""SELECT date_trunc('{gran}',ingested_at::date)::date::text b,
+                              COALESCE(SUM(total_offer_amount),0) v
+                       FROM intake_sessions
+                       WHERE status IN ('ingested','partially_ingested')
+                         AND ingested_at IS NOT NULL AND ingested_at::date >= %s
+                       GROUP BY 1""", (start,))
+    sm = {r["b"]: float(r["v"]) for r in sell}
+    bm = {r["b"]: float(r["v"]) for r in buy}
+    series = [{"period": b.isoformat(), "sell": round(sm.get(b.isoformat(), 0), 2),
+               "buy": round(bm.get(b.isoformat(), 0), 2)} for b in _bucket_seq(start, today, gran)]
     partial = db.query_one("""SELECT COUNT(*) c, COALESCE(SUM(total_offer_amount),0) v
                               FROM intake_sessions
                               WHERE status='partially_ingested' AND ingested_at::date >= %s""", (start,)) or {}
     return jsonify({
-        "series": series,
+        "granularity": gran, "series": series,
         "partial": {"cnt": int(partial.get("c") or 0), "value": round(float(partial.get("v") or 0), 2)},
     })
 
 
 @app.route("/api/sales/mix")
 def sales_mix():
-    """Weekly stacked revenue by stream or game (catalog + raw singles), + totals pivot."""
+    """Stacked revenue per bucket by stream or game (catalog + raw singles), + totals pivot."""
     days = max(7, min(int(request.args.get("days", 90)), 730))
+    gran = _granularity(days)
     dim = request.args.get("dim", "stream")
-    start = _date.today() - _timedelta(days=days)
+    today = _date.today()
+    start = today - _timedelta(days=days - 1)
     if dim == "ip":
         cat_expr = "LOWER(COALESCE(t.ip,'other'))"
         raw_cat = "LOWER(COALESCE(game,'other'))"
     else:  # stream
         cat_expr = "COALESCE(t.product_type,'other')"
         raw_cat = "'raw_single'"
-    catalog = db.query(f"""SELECT date_trunc('week',s.sale_date)::date::text wk, {cat_expr} cat,
+    catalog = db.query(f"""SELECT date_trunc('{gran}',s.sale_date)::date::text b, {cat_expr} cat,
                           SUM(s.revenue) rev, SUM(s.units_sold) units
                           FROM sku_daily_sales s LEFT JOIN product_taxonomy t USING (shopify_variant_id)
                           WHERE s.sale_date >= %s GROUP BY 1,2""", (start,))
-    raw = db.query(f"""SELECT date_trunc('week',removal_date)::date::text wk, {raw_cat} cat,
+    raw = db.query(f"""SELECT date_trunc('{gran}',removal_date)::date::text b, {raw_cat} cat,
                       SUM(sale_price) rev, COUNT(*) units
                       FROM raw_cards WHERE state='SOLD' AND removal_date::date >= %s GROUP BY 1,2""", (start,))
     # Catalog taxonomy says 'mtg'; raw_cards.game says 'magic' — same game, merge them.
     ip_norm = {"mtg": "magic"} if dim == "ip" else {}
     per, totals = {}, {}
     for r in list(catalog) + list(raw):
-        wk = r["wk"]
+        b = r["b"]
         cat = r["cat"] or "other"
         cat = ip_norm.get(cat, cat)
         rev = float(r["rev"] or 0)
         units = int(r["units"] or 0)
-        per.setdefault(wk, {})
-        per[wk][cat] = per[wk].get(cat, 0) + rev
+        per.setdefault(b, {})
+        per[b][cat] = per[b].get(cat, 0) + rev
         t = totals.setdefault(cat, {"rev": 0, "units": 0})
         t["rev"] += rev
         t["units"] += units
     ranked = sorted(totals, key=lambda c: -totals[c]["rev"])
     keep = ranked[:8]
-    periods = sorted(per)
+    periods = [b.isoformat() for b in _bucket_seq(start, today, gran)]
     series = []
-    for w in periods:
+    for p in periods:
         vals = {}
-        for cat, rev in per[w].items():
+        for cat, rev in per.get(p, {}).items():
             k = cat if cat in keep else "other"
             vals[k] = vals.get(k, 0) + rev
-        series.append({"period": w, "vals": {k: round(v, 2) for k, v in vals.items()}})
+        series.append({"period": p, "vals": {k: round(v, 2) for k, v in vals.items()}})
     cats = keep if "other" in keep or not [c for c in ranked if c not in keep] else keep + ["other"]
     totlist = [{"grp": _MIX_LABELS.get(c, c.title()), "key": c,
                 "rev": round(totals[c]["rev"], 2), "units": totals[c]["units"]} for c in ranked]
     return jsonify({
-        "periods": periods, "cats": cats,
+        "granularity": gran, "periods": periods, "cats": cats,
         "labels": {c: _MIX_LABELS.get(c, c.title()) for c in cats},
         "series": series, "totals": totlist,
     })
@@ -1592,7 +1669,7 @@ const PALETTE = ['#5b8def','#34c759','#ff9f0a','#ff6b6b','#bf5af2','#32ade6','#f
 const _charts = {};
 
 function fmtK(n){ n = Math.round(n||0); const a = Math.abs(n); if (a >= 1000) return '$'+(n/1000).toFixed(a>=10000?0:1)+'k'; return '$'+n; }
-function fmtDate(iso){ if(!iso) return ''; const p = iso.split('-'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][(+p[1])-1]+' '+(+p[2]); }
+function fmtDate(iso, gran){ if(!iso) return ''; const p = iso.split('-'); const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][(+p[1])-1]; if(gran==='month') return mon+" '"+p[0].slice(2); return mon+' '+(+p[2]); }
 function movingAvg(arr,w){ const out=[]; for(let i=0;i<arr.length;i++){ let s=0,c=0; for(let j=Math.max(0,i-w+1);j<=i;j++){ s+=arr[j]||0; c++; } out.push(c?s/c:0);} return out; }
 function legendHtml(items){ return items.map(i=>'<span><i style="background:'+i.color+'"></i>'+i.label+'</span>').join(''); }
 function niceMax(v){ if(v<=0) return 1; const p=Math.pow(10,Math.floor(Math.log10(v))); const f=v/p; let nf; if(f<=1)nf=1;else if(f<=2)nf=2;else if(f<=2.5)nf=2.5;else if(f<=5)nf=5;else nf=10; return nf*p; }
@@ -1666,15 +1743,15 @@ function buildChart(wrapId, periods, series, opts){
     body += '<path d="'+lp+'" class="'+(l.type==='ma'?'chart-ma':'chart-line')+'" stroke="'+l.color+'"/>';
   });
   // x labels
-  const want = Math.min(6, n);
-  for(let k=0;k<want;k++){ const i = want<=1?0:Math.round(k/(want-1)*(n-1)); body += '<text class="chart-axis" x="'+xAt(i)+'" y="'+(H-8)+'" text-anchor="middle">'+fmtDate(periods[i])+'</text>'; }
+  const want = Math.min(8, n);
+  for(let k=0;k<want;k++){ const i = want<=1?0:Math.round(k/(want-1)*(n-1)); body += '<text class="chart-axis" x="'+xAt(i)+'" y="'+(H-8)+'" text-anchor="middle">'+fmtDate(periods[i], opts.gran)+'</text>'; }
   // guide + hit area
   body += '<line class="chart-guide" id="'+wrapId+'-guide" x1="0" y1="'+padT+'" x2="0" y2="'+(padT+plotH)+'"/>';
   body += '<rect x="'+padL+'" y="'+padT+'" width="'+plotW+'" height="'+plotH+'" fill="transparent"/>';
 
   wrap.innerHTML = '<svg viewBox="0 0 '+W+' '+H+'"><g class="chart-grid">'+grid+'</g>'+body+'</svg>';
   const tip = document.createElement('div'); tip.className='chart-tip'; tip.id=wrapId+'-tip'; wrap.appendChild(tip);
-  _charts[wrapId] = {periods, series, geom:{W,padL,padT,plotW,plotH,n}};
+  _charts[wrapId] = {periods, series, gran:opts.gran, geom:{W,padL,padT,plotW,plotH,n}};
   attachHover(wrapId);
 }
 
@@ -1693,7 +1770,7 @@ function attachHover(wrapId){
     guide.setAttribute('x1',x); guide.setAttribute('x2',x); guide.style.opacity=0.7;
     let rows='';
     c.series.forEach(s => { if(s.noTip) return; const v=s.data[i]; rows += '<div class="tr"><span><i class="sw" style="background:'+s.color+'"></i>'+s.label+'</span><b>'+(s.money===false?Math.round(v||0).toLocaleString():fmtMoney(v))+'</b></div>'; });
-    tip.innerHTML = '<b>'+fmtDate(c.periods[i])+'</b>'+rows;
+    tip.innerHTML = '<b>'+(c.gran==='week'?'Week of ':'')+fmtDate(c.periods[i], c.gran)+'</b>'+rows;
     tip.style.display='block';
     tip.style.left = (x/G.W*rect.width)+'px';
     tip.style.top = (ev.clientY-rect.top-10)+'px';
@@ -1711,7 +1788,8 @@ async function loadSalesOverview(){
       {label:'Net revenue', val:fmtMoney(k.net), cur:k.net, prev:p.net},
       {label:'Orders', val:k.orders.toLocaleString(), cur:k.orders, prev:p.orders},
       {label:'Avg order value', val:fmtMoney(k.aov), cur:k.aov, prev:p.aov},
-      {label:'Gross margin', val:fmtMoney(k.margin), sub:k.margin_pct+'% of merch', color:'var(--green)', cur:k.margin, prev:p.margin},
+      {label:'Gross margin (proven)', val:fmtMoney(k.margin), sub:k.margin_pct+'% · cost known on '+k.cost_coverage+'% of sales', color:'var(--green)', cur:k.margin, prev:p.margin},
+      {label:'Est. total margin', val:'≥ '+fmtMoney(k.est_margin), sub:k.est_margin_pct+'% · no-cost tail projected at category rates — conservative floor (older stock runs higher)', color:'var(--green)', cur:k.est_margin, prev:p.est_margin},
       {label:'Units sold', val:k.units.toLocaleString(), cur:k.units, prev:p.units},
       {label:'Customers', val:k.custs.toLocaleString(), cur:k.custs, prev:p.custs},
     ];
@@ -1719,14 +1797,13 @@ async function loadSalesOverview(){
       '<div class="stat"><div class="stat-label">'+c.label+'</div><div class="stat-val" style="'+(c.color?'color:'+c.color:'')+'">'+c.val+'</div>'+
       (c.sub?'<div class="stat-label">'+c.sub+'</div>':'')+deltaHtml(c.cur,c.prev)+'</div>').join('');
     const periods = d.series.map(s=>s.d), net = d.series.map(s=>s.net);
-    buildChart('chart-rev', periods, [
-      {key:'net', label:'Net revenue', color:'var(--accent)', type:'area', data:net},
-      {key:'ma', label:'7-day avg', color:'var(--green)', type:'ma', data:movingAvg(net,7)},
-    ], {money:true});
+    const revSeries = [{key:'net', label:'Net revenue', color:'var(--accent)', type:'area', data:net}];
+    if (d.granularity === 'day') revSeries.push({key:'ma', label:'7-day avg', color:'var(--green)', type:'ma', data:movingAvg(net,7)});
+    buildChart('chart-rev', periods, revSeries, {money:true, gran:d.granularity});
     buildChart('chart-orders', periods, [
       {key:'orders', label:'Orders', color:'var(--accent)', type:'bar', data:d.series.map(s=>s.orders), money:false},
       {key:'aov', label:'AOV', color:'var(--amber)', type:'line', axis:'right', data:d.series.map(s=> s.orders? s.net/s.orders : 0)},
-    ], {money:false, rightMoney:true});
+    ], {money:false, rightMoney:true, gran:d.granularity});
   } catch(e){ document.getElementById('sales-kpis').innerHTML = '<div class="empty">'+e.message+'</div>'; }
 }
 
@@ -1743,7 +1820,7 @@ async function loadChannel(){
   buildChart('chart-channel', periods, [
     {key:'instore', label:'In-store', color:'#34c759', type:'area', data:d.series.map(s=>s.instore)},
     {key:'shipped', label:'Shipped', color:'#5b8def', type:'area', data:d.series.map(s=>s.shipped)},
-  ], {money:true});
+  ], {money:true, gran:d.granularity});
 }
 
 async function loadBuySell(){
@@ -1754,7 +1831,7 @@ async function loadBuySell(){
     buildChart('chart-buysell', periods, [
       {key:'buy', label:'Buy (ingested cost)', color:'#ff9f0a', type:'area', data:d.series.map(s=>s.buy)},
       {key:'sell', label:'Sell (net sales)', color:'#34c759', type:'line', data:d.series.map(s=>s.sell)},
-    ], {money:true});
+    ], {money:true, gran:d.granularity});
     document.getElementById('buysell-legend').innerHTML = legendHtml([{label:'Buy — what we paid to intake (ingested)',color:'#ff9f0a'},{label:'Sell — net sales',color:'#34c759'}]);
     const tb = d.series.reduce((a,s)=>a+s.buy,0), ts = d.series.reduce((a,s)=>a+s.sell,0);
     document.getElementById('buysell-kpis').innerHTML = [
@@ -1778,7 +1855,7 @@ async function loadMix(){
     const rowFor = {}; d.series.forEach(s => rowFor[s.period] = s.vals);
     const series = d.cats.map(c => ({ key:c, label:d.labels[c]||c, color:colors[c], type:'area',
       data:d.periods.map(p => (rowFor[p] && rowFor[p][c]) || 0) }));
-    buildChart('chart-mix', d.periods, series, {money:true});
+    buildChart('chart-mix', d.periods, series, {money:true, gran:d.granularity});
     document.getElementById('mix-legend').innerHTML = legendHtml(d.cats.map(c => ({label:d.labels[c]||c, color:colors[c]})));
     const tot = d.totals, max = Math.max(...tot.map(t=>t.rev), 1), sum = tot.reduce((a,t)=>a+t.rev,0)||1;
     document.getElementById('mix-totals').innerHTML = '<div style="overflow-x:auto;"><table>' +

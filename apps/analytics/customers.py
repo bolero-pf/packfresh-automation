@@ -17,6 +17,14 @@ import db
 
 logger = logging.getLogger(__name__)
 
+# A realized sale = order placed and money committed. Payment is AUTHORIZED at
+# checkout and CAPTURED (→PAID) later, around fulfillment — so filtering on PAID
+# alone blanks the most recent 1-3 days (yesterday's $27k was 100% AUTHORIZED).
+# Count authorized/paid/partial/refunded; exclude voided/expired/pending.
+COUNTED_FINANCIAL_STATUSES = {
+    "PAID", "AUTHORIZED", "PARTIALLY_PAID", "PARTIALLY_REFUNDED", "REFUNDED",
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GraphQL — richer than the velocity query, includes customer + fulfillment
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -57,14 +65,17 @@ query CustomerOrders($first:Int!, $after:String, $query:String!) {
 # Order sync
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def sync_customer_orders(full_backfill: bool = False):
+def sync_customer_orders(full_backfill: bool = False, since_override: str = None):
     """
     Pull Shopify orders and upsert into customer_orders.
 
     Args:
         full_backfill: if True, pull 365 days. Otherwise incremental from last sync.
+        since_override: ISO date to pull from, ignoring the incremental cursor.
     """
-    if full_backfill:
+    if since_override:
+        since = since_override
+    elif full_backfill:
         since = (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%d")
     else:
         meta = db.query_one("SELECT value FROM analytics_meta WHERE key = 'last_customer_sync'")
@@ -76,7 +87,9 @@ def sync_customer_orders(full_backfill: bool = False):
 
     logger.info(f"Syncing customer orders since {since}")
 
-    query_filter = f'financial_status:paid created_at:>="{since}"'
+    # No financial_status filter here — we classify in code (see COUNTED_FINANCIAL_STATUSES)
+    # so AUTHORIZED orders count immediately and voids can be removed on re-sync.
+    query_filter = f'created_at:>="{since}"'
     cursor = None
     total_orders = 0
     skipped_no_customer = 0
@@ -107,6 +120,13 @@ def sync_customer_orders(full_backfill: bool = False):
                 customer_id = int(gid_numeric(customer["id"]))
 
             order_id = int(gid_numeric(node["id"]))
+
+            # Skip non-sales (voided / expired / pending). If one was counted earlier
+            # while AUTHORIZED and has since voided, remove the stale row.
+            if node.get("displayFinancialStatus") not in COUNTED_FINANCIAL_STATUSES:
+                db.execute("DELETE FROM customer_orders WHERE order_id = %s", (order_id,))
+                continue
+
             order_date = node["createdAt"][:10]
             order_total = float(node.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
             refund_amount = float(node.get("totalRefundedSet", {}).get("shopMoney", {}).get("amount", 0))
