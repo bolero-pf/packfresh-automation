@@ -616,12 +616,18 @@ def map_item(item_id: str, tcgplayer_id: int = None,
 
 def _recalculate_session_totals(session_id: str):
     """Recalculate total_market_value and total_offer_amount for a session.
-    Only includes items with item_status 'good' or 'damaged'."""
-    execute("""
+    Only includes items with item_status 'good' or 'damaged'. Damaged items
+    take the same DAMAGE_DISCOUNT haircut on market value that calc_offer_price
+    already applies to their offer — so a damaged card's Market Value reflects
+    its reduced worth, not the pristine comp."""
+    execute(f"""
         UPDATE intake_sessions SET
             total_market_value = (
-                SELECT COALESCE(SUM(market_price * quantity), 0)
-                FROM intake_items 
+                SELECT COALESCE(SUM(
+                    market_price * quantity
+                    * CASE WHEN item_status = 'damaged' THEN {DAMAGE_DISCOUNT} ELSE 1 END
+                ), 0)
+                FROM intake_items
                 WHERE session_id = %s AND item_status IN ('good', 'damaged')
             ),
             total_offer_amount = (

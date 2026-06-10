@@ -3217,7 +3217,7 @@ async function damageItem(itemId, sessionId, currentQty) {
     if (currentQty > 1) {
         const input = await themedPrompt({
             title: '🔨 Mark as Damaged',
-            message: `This item has ${currentQty} units. How many are damaged? Damaged items receive 85% of the original offer.`,
+            message: `This item has ${currentQty} units. How many are damaged? Damaged items take a 12% haircut on both market value and offer.`,
             inputs: [{ type: 'number', label: 'Damaged quantity', default: '1', min: 1, max: currentQty }],
             confirmText: 'Split & Mark Damaged',
             dangerous: true,
@@ -3231,7 +3231,7 @@ async function damageItem(itemId, sessionId, currentQty) {
     } else {
         const ok = await themedConfirm(
             '🔨 Mark as Damaged',
-            'Mark this item as damaged? Offer becomes 85% of original.',
+            'Mark this item as damaged? Market value and offer each drop 12%.',
             { confirmText: 'Mark Damaged', dangerous: true }
         );
         if (!ok) return;
@@ -3252,7 +3252,7 @@ async function markItemStatus(itemId, sessionId, newStatus) {
     // Close dropdown
     document.querySelectorAll('.action-dropdown.show').forEach(d => d.classList.remove('show'));
 
-    // Damaged has its own flow with 15% price reduction
+    // Damaged has its own flow with a 12% price reduction
     if (newStatus === 'damaged') {
         return damageItem(itemId, sessionId, 1);
     }
