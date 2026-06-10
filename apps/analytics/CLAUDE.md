@@ -29,6 +29,13 @@
 - **migrate_analytics_v2.py** — v2 tables (scrydex_price_history, product_taxonomy, customer_orders, customer_summary, daily_business_summary, realized_margin)
 - DB via shared/db.py (no local db.py)
 
+## Revenue definition (customer_orders.net_amount = NET SALES)
+- `net_amount` = **net sales: ex-tax, shipping kept, net of refunds.** Sales tax is a pass-through (remitted to the state), so it's stripped; shipping charged is kept. ~2.2% below the orders-page total (tax), which itself sits ~2% above pure merchandise (shipping).
+- Computed as `kept - currentTotalTax`, where `kept = currentTotalPrice` for not-yet-captured AUTHORIZED/PARTIALLY_PAID orders (netPayment is $0 until capture) else `netPayment`.
+- **Why not `currentTotalPrice - totalRefunded`** (the old formula): `currentTotalPrice` ALREADY nets return-based refunds, so subtracting the refund again double-counts — refunded orders went negative (a fully-refunded $1.5k order recorded −$1,500). `netPayment` is Shopify's true kept amount and handles both return refunds and money-back refunds correctly.
+- `order_total` column = `currentTotalPrice` (gross, incl tax+shipping) kept for reference.
+- **Voids never count**: VOIDED/EXPIRED are excluded by the financial-status gate (verified 0 of 99 voided orders in a 90d window leaked in). A void releases the authorization — `netPayment`/`currentTotalPrice` go to $0 and the row is deleted on re-sync.
+
 ## Order capture (financial status)
 - A sale is counted when the order is **placed**, attributed by `createdAt` date — NOT fulfillment, NOT payment capture.
 - **Both** order syncs (`compute.ingest_orders` → sku_daily_sales, `customers.sync_customer_orders` → customer_orders) count `COUNTED_FINANCIAL_STATUSES` = PAID / AUTHORIZED / PARTIALLY_PAID / PARTIALLY_REFUNDED / REFUNDED, and skip VOIDED / EXPIRED / PENDING. Defined in `customers.py`, imported by `compute.py`.

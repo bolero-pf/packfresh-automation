@@ -42,6 +42,8 @@ query CustomerOrders($first:Int!, $after:String, $query:String!) {
         displayFulfillmentStatus
         customer { id email firstName lastName }
         currentTotalPriceSet { shopMoney { amount } }
+        currentTotalTaxSet { shopMoney { amount } }
+        netPaymentSet { shopMoney { amount } }
         totalRefundedSet { shopMoney { amount } }
         fulfillmentOrders(first:1) { edges { node { deliveryMethod { methodType } } } }
         lineItems(first:100) {
@@ -120,17 +122,28 @@ def sync_customer_orders(full_backfill: bool = False, since_override: str = None
                 customer_id = int(gid_numeric(customer["id"]))
 
             order_id = int(gid_numeric(node["id"]))
+            fin_status = node.get("displayFinancialStatus")
 
             # Skip non-sales (voided / expired / pending). If one was counted earlier
             # while AUTHORIZED and has since voided, remove the stale row.
-            if node.get("displayFinancialStatus") not in COUNTED_FINANCIAL_STATUSES:
+            if fin_status not in COUNTED_FINANCIAL_STATUSES:
                 db.execute("DELETE FROM customer_orders WHERE order_id = %s", (order_id,))
                 continue
 
             order_date = node["createdAt"][:10]
-            order_total = float(node.get("currentTotalPriceSet", {}).get("shopMoney", {}).get("amount", 0))
-            refund_amount = float(node.get("totalRefundedSet", {}).get("shopMoney", {}).get("amount", 0))
-            net_amount = round(order_total - refund_amount, 2)
+            gross_total = float((node.get("currentTotalPriceSet") or {}).get("shopMoney", {}).get("amount") or 0)
+            tax_amount = float((node.get("currentTotalTaxSet") or {}).get("shopMoney", {}).get("amount") or 0)
+            net_payment = float((node.get("netPaymentSet") or {}).get("shopMoney", {}).get("amount") or 0)
+            refund_amount = float((node.get("totalRefundedSet") or {}).get("shopMoney", {}).get("amount") or 0)
+
+            # net_amount = NET SALES: ex-tax, shipping kept, net of refunds.
+            # currentTotalPrice already nets return-refunds (so currentTotal - refund would
+            # double-count, pushing refunded orders negative). netPayment is the true kept
+            # amount for captured orders; it's $0 for not-yet-captured AUTHORIZED/PARTIALLY_PAID,
+            # so use the full order total for those. Then strip tax (a pass-through we remit).
+            kept = gross_total if fin_status in ("AUTHORIZED", "PARTIALLY_PAID") else net_payment
+            order_total = round(gross_total, 2)
+            net_amount = round(kept - tax_amount, 2)
 
             fulfillment_status = node.get("displayFulfillmentStatus")
             channel = "pos" if anonymous else "online"
