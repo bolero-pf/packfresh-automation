@@ -2733,7 +2733,7 @@ def sell_active_listings():
                             removal_reason = 'SOLD',
                             removal_date = CURRENT_TIMESTAMP,
                             updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
+                        WHERE id = %s AND state = 'PENDING_SALE'
                     """, (str(r["id"]),))
                     logger.info(f"Auto-healed PENDING_SALE → SOLD: {r['barcode']} (product archived)")
                     clean.append(r["barcode"])
@@ -2746,7 +2746,7 @@ def sell_active_listings():
                         removal_reason = 'SOLD',
                         removal_date = CURRENT_TIMESTAMP,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
+                    WHERE id = %s AND state = 'PENDING_SALE'
                 """, (str(r["id"]),))
                 logger.info(f"Auto-healed PENDING_SALE → SOLD: {r['barcode']} (product gone)")
                 clean.append(r["barcode"])
