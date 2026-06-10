@@ -89,6 +89,9 @@ if not table_exists("sku_daily_sales"):
 else:
     print("  sku_daily_sales already exists")
 
+# unit_cost = COGS frozen at ingest time (cost AT SALE, not today's drifting cost).
+cur.execute("ALTER TABLE sku_daily_sales ADD COLUMN IF NOT EXISTS unit_cost NUMERIC")
+
 # Daily inventory snapshots for OOS tracking
 if not table_exists("sku_daily_inventory"):
     cur.execute("""

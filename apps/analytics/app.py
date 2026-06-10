@@ -1784,12 +1784,14 @@ async function loadSalesOverview(){
     const d = await (await fetch('/api/sales/overview?days='+_salesWin)).json();
     _salesData = d;
     const k = d.kpi, p = d.prev;
+    // Margin only exists for the COGS-tracking era; flag it when the window reaches before that.
+    const era = _salesWin > 80 ? ' · margin since Mar 23 (COGS era)' : '';
     const cards = [
       {label:'Net revenue', val:fmtMoney(k.net), cur:k.net, prev:p.net},
       {label:'Orders', val:k.orders.toLocaleString(), cur:k.orders, prev:p.orders},
       {label:'Avg order value', val:fmtMoney(k.aov), cur:k.aov, prev:p.aov},
-      {label:'Gross margin (proven)', val:fmtMoney(k.margin), sub:k.margin_pct+'% · cost known on '+k.cost_coverage+'% of sales', color:'var(--green)', cur:k.margin, prev:p.margin},
-      {label:'Est. total margin', val:'≥ '+fmtMoney(k.est_margin), sub:k.est_margin_pct+'% · no-cost tail projected at category rates — conservative floor (older stock runs higher)', color:'var(--green)', cur:k.est_margin, prev:p.est_margin},
+      {label:'Gross margin (proven)', val:fmtMoney(k.margin), sub:k.margin_pct+'% · cost known on '+k.cost_coverage+'% of sales'+era, color:'var(--green)', cur:k.margin, prev:p.margin},
+      {label:'Est. total margin', val:'≥ '+fmtMoney(k.est_margin), sub:k.est_margin_pct+'% · no-cost tail projected at category rates — conservative floor'+era, color:'var(--green)', cur:k.est_margin, prev:p.est_margin},
       {label:'Units sold', val:k.units.toLocaleString(), cur:k.units, prev:p.units},
       {label:'Customers', val:k.custs.toLocaleString(), cur:k.custs, prev:p.custs},
     ];

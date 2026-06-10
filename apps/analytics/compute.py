@@ -34,6 +34,7 @@ query Orders($first:Int!, $after:String, $query:String!) {
               variant { id }
               quantity
               originalTotalSet { shopMoney { amount } }
+              discountAllocations { allocatedAmountSet { shopMoney { amount } } }
             }
           }
         }
@@ -105,7 +106,13 @@ def ingest_orders(since_date: str = None, full_backfill: bool = False):
 
                 variant_id = int(gid_numeric(variant["id"]))
                 qty = li.get("quantity", 0) or 0
-                revenue = float(li.get("originalTotalSet", {}).get("shopMoney", {}).get("amount", 0))
+                # Net of ALL discounts (line + allocated order/cart codes), not list price —
+                # discountedTotalSet only nets line-level discounts, so margin would be
+                # overstated by the cart-code portion. discountAllocations covers both.
+                original = float(li.get("originalTotalSet", {}).get("shopMoney", {}).get("amount", 0))
+                disc = sum(float((da.get("allocatedAmountSet") or {}).get("shopMoney", {}).get("amount") or 0)
+                           for da in (li.get("discountAllocations") or []))
+                revenue = round(original - disc, 2)
 
                 key = (order_date, variant_id)
                 if key not in daily_sales:
@@ -118,16 +125,29 @@ def ingest_orders(since_date: str = None, full_backfill: bool = False):
             break
         cursor = page_info.get("endCursor")
 
+    # Capture COGS at ingest time and FREEZE it — cost AT SALE, never today's cost.
+    # inventory_product_cache.unit_cost is the weighted-average COGS maintained by
+    # ingestion; captured during the daily run it ≈ the cost on the sale date. Frozen via
+    # COALESCE on conflict so it NEVER drifts as inventory appreciates (the whole reason a
+    # fixed period's margin must stay stable over time). margins.py reads this, not live cost.
+    variant_ids = list({vid for (_, vid) in daily_sales.keys()})
+    cost_map = {}
+    if variant_ids:
+        for r in db.query("""SELECT shopify_variant_id, unit_cost FROM inventory_product_cache
+                             WHERE shopify_variant_id = ANY(%s)""", (variant_ids,)):
+            cost_map[r["shopify_variant_id"]] = r["unit_cost"]
+
     # Write to sku_daily_sales (upsert)
     written = 0
     for (sale_date, variant_id), vals in daily_sales.items():
         db.execute("""
-            INSERT INTO sku_daily_sales (sale_date, shopify_variant_id, units_sold, revenue)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO sku_daily_sales (sale_date, shopify_variant_id, units_sold, revenue, unit_cost)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (sale_date, shopify_variant_id) DO UPDATE SET
                 units_sold = EXCLUDED.units_sold,
-                revenue = EXCLUDED.revenue
-        """, (sale_date, variant_id, vals["units"], vals["revenue"]))
+                revenue = EXCLUDED.revenue,
+                unit_cost = COALESCE(sku_daily_sales.unit_cost, EXCLUDED.unit_cost)
+        """, (sale_date, variant_id, vals["units"], vals["revenue"], cost_map.get(variant_id)))
         written += 1
 
     # Update last run timestamp
