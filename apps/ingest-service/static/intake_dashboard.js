@@ -928,6 +928,7 @@ async function submitIntakeManualDirect() {
                     body: JSON.stringify({
                         session_id: intakeSessionId,
                         store_product_id: String(intakeDirectStoreSel.product_id),
+                        store_variant_id: intakeDirectStoreSel.variant_id ? String(intakeDirectStoreSel.variant_id) : undefined,
                         store_product_name: intakeDirectStoreSel.title,
                         tcgplayer_id: intakeDirectStoreSel.tcgplayer_id || undefined,
                     }),
@@ -972,7 +973,8 @@ async function intakeDirectStoreSearch() {
                  onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
                 <div style="flex:1; min-width:0;">
                     <div style="font-size:0.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${row.title}</div>
-                    <div style="font-size:0.72rem; color:var(--text-dim);">$${parseFloat(row.shopify_price||0).toFixed(2)} · qty ${row.shopify_qty??'?'}${row.tcgplayer_id?' · TCG#'+row.tcgplayer_id:''}</div>
+                    ${row.variant_label ? '<div style="font-size:0.78rem; font-weight:700; color:var(--accent); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + row.variant_label + '</div>' : ''}
+                    <div style="font-size:0.72rem; color:var(--text-dim);">$${parseFloat(row.shopify_price||0).toFixed(2)} · qty ${row.shopify_qty??'?'}${row.tcgplayer_id?' · TCG#'+row.tcgplayer_id:''}${row.barcode?' · '+row.barcode:''}</div>
                 </div>
                 <span class="btn btn-sm btn-primary" style="font-size:0.7rem; padding:2px 8px;">Select</span>
             </div>`).join('');
@@ -987,7 +989,9 @@ async function intakeDirectStoreSearch() {
 function intakeDirectStorePick(row) {
     intakeDirectStoreSel = {
         product_id: row.shopify_product_id || row.id || '',
-        title: row.title || '',
+        variant_id: row.shopify_variant_id || null,
+        variant_label: row.variant_label || '',
+        title: (row.title || '') + (row.variant_label ? ' · ' + row.variant_label : ''),
         tcgplayer_id: row.tcgplayer_id ? parseInt(row.tcgplayer_id) : null,
     };
     document.getElementById('intake-direct-store-results').innerHTML = '';
@@ -2984,15 +2988,13 @@ async function findInStore(btn, tcgplayerId, productName, itemId, offerPrice, ma
                         const d = await resp.json();
                         if (!resp.ok) { alert(d.error || 'Link failed'); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; return; }
                         document.body.removeChild(overlay);
-                        // Refresh whichever view we were linking from: the Store
-                        // tab (if it's the active panel) or the main item list
-                        // (when launched from the per-item "Link to Store" action).
-                        const storeTab = document.getElementById('stab-store');
-                        if (storeTab && storeTab.style.display !== 'none') {
-                            storeCheck(currentSessionId);
-                        } else {
-                            viewSession(currentSessionId, true);
-                        }
+                        // Full session re-render so the item list, linked-status
+                        // badge AND the "Lock & Offer" gate (_renderStickyActions)
+                        // all reflect is_mapped — not just the Store tab. Routes to
+                        // loadIntakeItems automatically when this is the active
+                        // intake session. (storeCheck alone left the gate showing
+                        // "needs linking" after a successful store link.)
+                        viewSession(currentSessionId, true);
                     } catch(e) { alert(e.message); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; }
                 });
             });
