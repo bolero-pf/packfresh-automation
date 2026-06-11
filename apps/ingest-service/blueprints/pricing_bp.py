@@ -508,6 +508,7 @@ def accept_price_no_link(item_id):
     override_price = data.get("override_price")  # optional new price
     store_product_id = data.get("store_product_id")  # optional shopify ref
     store_product_name = data.get("store_product_name")
+    store_variant_id = data.get("store_variant_id")  # specific variant the operator picked
     tcgplayer_id = data.get("tcgplayer_id")  # if store product has a TCGPlayer ID, link it
 
     item = db.query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
@@ -534,12 +535,14 @@ def accept_price_no_link(item_id):
             market_price = %s, offer_price = %s, unit_cost_basis = %s,
             tcgplayer_id = COALESCE(%s, tcgplayer_id),
             shopify_product_id = COALESCE(%s, shopify_product_id),
+            shopify_variant_id = COALESCE(%s, shopify_variant_id),
             shopify_product_name = COALESCE(%s, shopify_product_name)
         WHERE id = %s
         RETURNING *
     """, (market_price, offer_price, unit_cost_basis,
           tcgplayer_id or None,
           str(store_product_id) if store_product_id else None,
+          str(store_variant_id) if store_variant_id else None,
           store_product_name or None,
           item_id))
 
@@ -555,6 +558,7 @@ def accept_price_no_link(item_id):
         card_number=item.get("card_number"),
         variance=item.get("variance") or "",
         shopify_product_id=str(store_product_id) if store_product_id else None,
+        shopify_variant_id=str(store_variant_id) if store_variant_id else None,
         shopify_product_name=store_product_name or None,
     )
 

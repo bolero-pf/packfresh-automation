@@ -200,7 +200,8 @@ def get_cached_mapping(collectr_name: str, product_type: str,
 def save_mapping(collectr_name: str, tcgplayer_id: Optional[int], product_type: str,
                  set_name: str = None, card_number: str = None, variance: str = None,
                  scrydex_id: str = None,
-                 shopify_product_id: int = None, shopify_product_name: str = None):
+                 shopify_product_id: int = None, shopify_product_name: str = None,
+                 shopify_variant_id: int = None):
     """Save or update a product mapping for future imports.
     tcgplayer_id may be None when linking a Scrydex-only product (JP, no TCG
     marketplace mapping) — scrydex_id carries it instead.
@@ -217,24 +218,25 @@ def save_mapping(collectr_name: str, tcgplayer_id: Optional[int], product_type: 
     execute("""
         INSERT INTO product_mappings
             (collectr_name, tcgplayer_id, scrydex_id, product_type, set_name, card_number, variance,
-             shopify_product_id, shopify_product_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+             shopify_product_id, shopify_product_name, shopify_variant_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (collectr_name, product_type, COALESCE(set_name, ''), COALESCE(card_number, ''), COALESCE(variance, ''))
         DO UPDATE SET
             tcgplayer_id = COALESCE(EXCLUDED.tcgplayer_id, product_mappings.tcgplayer_id),
             scrydex_id = COALESCE(EXCLUDED.scrydex_id, product_mappings.scrydex_id),
             shopify_product_id = COALESCE(EXCLUDED.shopify_product_id, product_mappings.shopify_product_id),
             shopify_product_name = COALESCE(EXCLUDED.shopify_product_name, product_mappings.shopify_product_name),
+            shopify_variant_id = COALESCE(EXCLUDED.shopify_variant_id, product_mappings.shopify_variant_id),
             last_used = CURRENT_TIMESTAMP,
             use_count = product_mappings.use_count + 1
     """, (collectr_name, tcgplayer_id, sx, product_type, sn, cn, vr,
-          shopify_product_id, shopify_product_name))
+          shopify_product_id, shopify_product_name, shopify_variant_id))
 
 
 def get_cached_shopify_link(collectr_name: str, product_type: str) -> Optional[dict]:
     """Return cached Shopify product link (id + name) for a Collectr product name, if any."""
     row = query_one("""
-        SELECT shopify_product_id, shopify_product_name, tcgplayer_id
+        SELECT shopify_product_id, shopify_variant_id, shopify_product_name, tcgplayer_id
         FROM product_mappings
         WHERE collectr_name = %s AND product_type = %s
           AND shopify_product_id IS NOT NULL
@@ -242,6 +244,7 @@ def get_cached_shopify_link(collectr_name: str, product_type: str) -> Optional[d
     if row:
         return {
             "shopify_product_id": row["shopify_product_id"],
+            "shopify_variant_id": row["shopify_variant_id"],
             "shopify_product_name": row["shopify_product_name"],
             "tcgplayer_id": row["tcgplayer_id"],
         }
@@ -418,8 +421,8 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
              set_name, card_number, condition, rarity, variance,
              quantity, market_price, offer_price, unit_cost_basis, is_mapped,
              is_graded, grade_company, grade_value, slab_uuid,
-             shopify_product_id, shopify_product_name, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             shopify_product_id, shopify_product_name, shopify_variant_id, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params_list = [
         (
@@ -447,6 +450,7 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             item.get("slab_uuid") or None,
             item.get("shopify_product_id") or None,
             item.get("shopify_product_name") or None,
+            item.get("shopify_variant_id") or None,
             base_ts + timedelta(microseconds=idx),
         )
         for idx, item in enumerate(items)

@@ -262,13 +262,18 @@ def shopify_session_store_check(session_id):
             }
         target[tcg]["shopify_qty"] += (r["shopify_qty"] or 0)
 
-    # Build shopify_product_id -> cache row map for store-only items
-    shopify_direct_map = {}  # shopify_product_id (str) -> cache row
+    # Build shopify_product_id -> cache row map for store-only items, plus a
+    # per-variant map so an item linked to a SPECIFIC variant (distro products
+    # with many same-title variants, e.g. Dragon Shield colors) shows that
+    # variant's price/qty/label instead of the product-wide aggregate.
+    shopify_direct_map = {}   # shopify_product_id (str) -> aggregated product row
+    variant_direct_map = {}   # shopify_variant_id (str) -> single variant row
     for r in shopify_rows:
         pid = str(r["shopify_product_id"])
+        vid = r.get("shopify_variant_id")
         if pid not in shopify_direct_map:
             shopify_direct_map[pid] = {
-                "title": r["title"], "handle": r["handle"],
+                "title": r["title"], "variant_label": None, "handle": r["handle"],
                 "shopify_price": float(r["shopify_price"]) if r["shopify_price"] else None,
                 "shopify_qty": 0, "shopify_product_id": r["shopify_product_id"],
                 "shopify_variant_id": r.get("shopify_variant_id"),
@@ -278,6 +283,17 @@ def shopify_session_store_check(session_id):
                 "tcgplayer_id": r.get("tcgplayer_id"),
             }
         shopify_direct_map[pid]["shopify_qty"] += (r["shopify_qty"] or 0)
+        if vid is not None:
+            variant_direct_map[str(vid)] = {
+                "title": r["title"], "variant_label": r.get("variant_label"), "handle": r["handle"],
+                "shopify_price": float(r["shopify_price"]) if r["shopify_price"] else None,
+                "shopify_qty": r["shopify_qty"] or 0, "shopify_product_id": r["shopify_product_id"],
+                "shopify_variant_id": vid,
+                "status": r["status"],
+                "last_synced": r["last_synced"].isoformat() if r["last_synced"] else None,
+                "is_damaged": r.get("is_damaged") or False,
+                "tcgplayer_id": r.get("tcgplayer_id"),
+            }
 
     # Merge linked list — treat shopify-only as a third category
     linked = linked_tcg  # still processed via tcg map below
@@ -328,6 +344,10 @@ def shopify_session_store_check(session_id):
         # tab shows it as found instead of "Not Found". This path is also
         # the only way non-sealed items can show as in-store, since the
         # auto-match above is gated on is_sealed_item.
+        if sd is None and item.get("shopify_variant_id"):
+            sd = variant_direct_map.get(str(item["shopify_variant_id"]))
+            if sd:
+                store_note = "Matched by store link"
         if sd is None and item.get("shopify_product_id"):
             sd = shopify_direct_map.get(str(item["shopify_product_id"]))
             if sd:
@@ -340,6 +360,7 @@ def shopify_session_store_check(session_id):
             "set_name": item.get("set_name"), "product_type": item.get("product_type", "sealed"),
             "in_store": sd is not None,
             "store_title": sd["title"] if sd else None, "store_price": sd["shopify_price"] if sd else None,
+            "store_variant_label": sd.get("variant_label") if sd else None,
             "store_qty": sd["shopify_qty"] if sd else None, "store_handle": sd["handle"] if sd else None,
             "store_product_id": sd["shopify_product_id"] if sd else None,
             "shopify_variant_id": sd.get("shopify_variant_id") if sd else None,
@@ -350,7 +371,11 @@ def shopify_session_store_check(session_id):
     # Shopify-only linked items — look up by shopify_product_id directly
     for item in linked_shopify_only:
         pid = str(item["shopify_product_id"])
-        sd = shopify_direct_map.get(pid)
+        sd = None
+        if item.get("shopify_variant_id"):
+            sd = variant_direct_map.get(str(item["shopify_variant_id"]))
+        if sd is None:
+            sd = shopify_direct_map.get(pid)
         result_items.append({
             "item_id": item["id"], "product_name": item.get("product_name"),
             "tcgplayer_id": sd.get("tcgplayer_id") if sd else None,
@@ -360,6 +385,7 @@ def shopify_session_store_check(session_id):
             "set_name": item.get("set_name"), "product_type": item.get("product_type", "sealed"),
             "in_store": sd is not None,
             "store_title": sd["title"] if sd else item.get("shopify_product_name"),
+            "store_variant_label": sd.get("variant_label") if sd else None,
             "store_price": sd["shopify_price"] if sd else None,
             "store_qty": sd["shopify_qty"] if sd else None,
             "store_handle": sd["handle"] if sd else None,
@@ -696,14 +722,15 @@ def store_search():
         def ranked(conditions_sql, where_params):
             return db.query(
                 f"""SELECT tcgplayer_id, shopify_product_id, shopify_variant_id,
-                          title, handle, shopify_price, shopify_qty, is_damaged
+                          title, variant_label, handle, sku, barcode,
+                          shopify_price, shopify_qty, is_damaged
                    FROM inventory_product_cache
                    WHERE ({conditions_sql}) AND (is_damaged = false OR is_damaged IS NULL)
                    ORDER BY (lower(title) = %s) DESC,
                             ({TITLE_NORM} = %s) DESC,
                             (title ILIKE %s) DESC,
                             ({TITLE_NORM} LIKE %s) DESC,
-                            length(title) ASC, title ASC
+                            length(title) ASC, title ASC, variant_label ASC NULLS FIRST
                    LIMIT 25""",
                 tuple(where_params) + (q_stripped.lower(), q_norm, f"{q_stripped}%", f"{q_norm}%")
             )

@@ -183,6 +183,7 @@ def upload_collectr():
             "grade_value": getattr(item, "grade_value", "") or None,
             "shopify_product_id": shopify_link["shopify_product_id"] if shopify_link else None,
             "shopify_product_name": shopify_link["shopify_product_name"] if shopify_link else None,
+            "shopify_variant_id": shopify_link.get("shopify_variant_id") if shopify_link else None,
         })
 
     # Add items to session
@@ -357,6 +358,7 @@ def upload_collectr_html():
             "slab_uuid": slab_uuid or None,
             "shopify_product_id": shopify_link["shopify_product_id"] if shopify_link else None,
             "shopify_product_name": shopify_link["shopify_product_name"] if shopify_link else None,
+            "shopify_variant_id": shopify_link.get("shopify_variant_id") if shopify_link else None,
         })
 
     intake.add_items_to_session(session["id"], processed)
@@ -528,6 +530,7 @@ def upload_generic_csv():
             "grade_value": getattr(item, "grade_value", "") or None,
             "shopify_product_id": shopify_link["shopify_product_id"] if shopify_link else None,
             "shopify_product_name": shopify_link["shopify_product_name"] if shopify_link else None,
+            "shopify_variant_id": shopify_link.get("shopify_variant_id") if shopify_link else None,
         })
 
     # Add items to session

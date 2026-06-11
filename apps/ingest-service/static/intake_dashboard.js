@@ -1633,6 +1633,10 @@ async function viewSession(sessionId, _preserveScroll) {
                                         const linkClass = i.is_mapped ? 'btn-secondary' : 'btn-primary';
                                         btns += `<button class="btn ${linkClass} btn-sm" style="font-size:0.7rem;padding:2px 6px;" onclick="relinkItem('${i.id}','${sessionId}')">${linkLabel}</button> `;
                                         btns += '<div class="action-dropdown-container" style="display:inline-block; position:relative;"><button class="btn btn-sm btn-secondary action-trigger" style="font-size:0.7rem;padding:2px 6px;" onclick="toggleActionMenu(event, this.nextElementSibling)">⋯</button><div class="action-dropdown">';
+                                        // Direct store-link — for distro items not in Scrydex, link
+                                        // straight to a Shopify variant without first running a search
+                                        // that has to fail. Opens the Find-in-Store picker pre-seeded.
+                                        btns += `<button onclick="findInStore(null, ${i.tcgplayer_id ? parseInt(i.tcgplayer_id) : 0}, '${(i.product_name||'').replace(/'/g,"\\'").replace(/"/g,'&quot;')}', '${i.id}', ${i.offer_price||0}, ${i.market_price||0})">🏪 Link to Store</button>`;
                                         if (!i.is_graded && i.product_type !== 'raw') {
                                             btns += status !== 'damaged' ? `<button onclick="damageItem('${i.id}','${sessionId}',${i.quantity})">&#9888; Damaged${i.quantity > 1 ? ' (partial?)' : ''}</button>` : `<button onclick="markItemStatus('${i.id}','${sessionId}','good')">Mark Good</button>`;
                                         }
@@ -2206,11 +2210,13 @@ async function mappingSearchStore() {
             ${results.map((p, idx) => {
                 const price = p.shopify_price || 0;
                 const title = p.title || '?';
+                const vlabel = p.variant_label ? ` <span style="color:var(--accent);font-weight:700;">· ${p.variant_label}</span>` : '';
                 const qty = p.shopify_qty != null ? ` · qty ${p.shopify_qty}` : '';
+                const bc = p.barcode ? ` · ${p.barcode}` : '';
                 const priceStr = price ? '$' + parseFloat(price).toFixed(2) : '—';
                 return `<div class="search-result" data-smi="${idx}">
-                    <h4>${title}</h4>
-                    <p>Store price: <strong>${priceStr}</strong>${qty}</p>
+                    <h4>${title}${vlabel}</h4>
+                    <p>Store price: <strong>${priceStr}</strong>${qty}${bc}</p>
                     <div style="display:flex;gap:6px;margin-top:6px;">
                         <button class="btn btn-primary btn-sm" style="font-size:0.72rem;" data-smi="${idx}" data-use="store">Use Store Price (${priceStr})</button>
                         <button class="btn btn-secondary btn-sm" style="font-size:0.72rem;" data-smi="${idx}" data-use="collectr">Use Collectr Price ($${collectrPrice.toFixed(2)})</button>
@@ -2226,13 +2232,14 @@ async function mappingSearchStore() {
                 const idx = parseInt(el.dataset.smi);
                 const p = window._storeMatchResults[idx];
                 const pid = p.shopify_product_id || p.id || '';
-                const title = p.title || '?';
+                const vid = p.shopify_variant_id || null;
+                const title = (p.title || '?') + (p.variant_label ? ' · ' + p.variant_label : '');
                 const storePrice = parseFloat(p.shopify_price) || 0;
                 const tcgId = p.tcgplayer_id ? parseInt(p.tcgplayer_id) : null;
                 const useStore = !el.dataset.use || el.dataset.use === 'store';
                 const price = useStore ? storePrice : collectrPrice;
                 e.stopPropagation();
-                mappingLinkStore(pid, title, price, tcgId);
+                mappingLinkStore(pid, title, price, tcgId, vid);
             });
         });
         document.getElementById('store-match-none')?.addEventListener('click', mappingAcceptPrice);
@@ -2245,7 +2252,7 @@ async function mappingSearchStore() {
     }
 }
 
-async function mappingLinkStore(storeProductId, storeProductName, storePrice, tcgplayerId) {
+async function mappingLinkStore(storeProductId, storeProductName, storePrice, tcgplayerId, storeVariantId) {
     // Use store price if available, otherwise fall back to collectr price
     const price = storePrice > 0 ? storePrice : currentMapCollectrPrice;
     const container = document.getElementById('fuzzy-results');
@@ -2257,6 +2264,7 @@ async function mappingLinkStore(storeProductId, storeProductName, storePrice, tc
             store_product_id: storeProductId,
             store_product_name: storeProductName,
         };
+        if (storeVariantId) body.store_variant_id = String(storeVariantId);
         if (tcgplayerId) body.tcgplayer_id = tcgplayerId;
         const r = await fetch(`/api/intake/item/${currentMapItemId}/accept-price`, {
             method: 'POST',
@@ -2801,6 +2809,7 @@ function renderStoreCheck() {
                     <td>
                         ${i.product_name}
                         ${found && i.store_title !== i.product_name ? '<br><small style="color:var(--text-dim);">Shopify: ' + i.store_title + '</small>' : ''}
+                        ${found && i.store_variant_label ? '<br><small style="color:var(--accent);font-weight:600;">Variant: ' + i.store_variant_label + '</small>' : ''}
                         ${i.store_note ? '<br><small style="color:var(--amber);">&#x26A0; ' + i.store_note + '</small>' : ''}
                         ${i.item_status === 'damaged' ? '<br><span class="badge" style="background:#b45309;color:#fff;font-size:0.65rem;">DAMAGED</span>' + (!i.damaged_variant_exists ? ' <span class="badge" style="background:var(--red);color:#fff;font-size:0.65rem;">Needs Listing</span>' : '') : ''}
                         ${bd ? (() => {
@@ -2924,11 +2933,12 @@ async function findInStore(btn, tcgplayerId, productName, itemId, offerPrice, ma
                       : results.map((r, ri) => `
                         <div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:6px;border:1px solid var(--border);margin-bottom:6px;background:var(--surface-2);">
                             <div style="flex:1;min-width:0;">
-                                <div style="font-size:0.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.title}</div>
+                                <div style="font-size:0.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.title}${r.variant_label ? ' <span style="color:var(--accent);font-weight:700;">· ' + r.variant_label + '</span>' : ''}</div>
                                 <div style="font-size:0.75rem;color:var(--text-dim);">
                                     $${parseFloat(r.shopify_price||0).toFixed(2)} · qty ${r.shopify_qty??'?'}
                                     ${r.is_damaged ? ' · <span style="color:var(--red);">dmg</span>' : ''}
                                     ${r.tcgplayer_id ? ' · TCG#' + r.tcgplayer_id : ''}
+                                    ${r.barcode ? ' · <span title="Shopify barcode">' + r.barcode + '</span>' : ''}
                                 </div>
                             </div>
                             <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0;">
@@ -2965,14 +2975,23 @@ async function findInStore(btn, tcgplayerId, productName, itemId, offerPrice, ma
                                 session_id: currentSessionId,
                                 override_price: usePrice,
                                 store_product_id: String(r.shopify_product_id || r.id || ''),
-                                store_product_name: r.title || '',
+                                store_variant_id: r.shopify_variant_id ? String(r.shopify_variant_id) : undefined,
+                                store_product_name: (r.title || '') + (r.variant_label ? ' · ' + r.variant_label : ''),
                                 tcgplayer_id: r.tcgplayer_id ? parseInt(r.tcgplayer_id) : undefined,
                             }),
                         });
                         const d = await resp.json();
                         if (!resp.ok) { alert(d.error || 'Link failed'); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; return; }
                         document.body.removeChild(overlay);
-                        storeCheck(currentSessionId);
+                        // Refresh whichever view we were linking from: the Store
+                        // tab (if it's the active panel) or the main item list
+                        // (when launched from the per-item "Link to Store" action).
+                        const storeTab = document.getElementById('stab-store');
+                        if (storeTab && storeTab.style.display !== 'none') {
+                            storeCheck(currentSessionId);
+                        } else {
+                            viewSession(currentSessionId, true);
+                        }
                     } catch(e) { alert(e.message); linkBtn.disabled = false; linkBtn.textContent = '🔗 Link'; }
                 });
             });

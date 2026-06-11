@@ -141,6 +141,7 @@ class CacheManager:
                         shopify_product_id  BIGINT NOT NULL,
                         shopify_variant_id  BIGINT NOT NULL,
                         title               VARCHAR(500),
+                        variant_label       VARCHAR(255),
                         handle              VARCHAR(500),
                         status              VARCHAR(50),
                         tags                TEXT,
@@ -215,6 +216,10 @@ class CacheManager:
                 # Era is the authoritative custom.era metafield (Pokemon era), mirrored
                 # from Shopify like tcgplayer_id — consumers must READ it, never infer it.
                 f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS era VARCHAR(50)",
+                # variant_label = Shopify variant.title (joined option values like
+                # "Crimson") so the intake store-link picker can tell apart the
+                # many same-title variant rows (e.g. Dragon Shield colors).
+                f"ALTER TABLE {self._cache_table} ADD COLUMN IF NOT EXISTS variant_label VARCHAR(255)",
             ]
         migrations += [
             f"ALTER TABLE {self._meta_table} ADD COLUMN IF NOT EXISTS last_tool_push_at TIMESTAMP",
@@ -362,12 +367,13 @@ class CacheManager:
         if self.table_prefix == "inventory_":
             self.db.execute(f"""
                 INSERT INTO {self._cache_table}
-                    (shopify_product_id, shopify_variant_id, title, handle, status,
+                    (shopify_product_id, shopify_variant_id, title, variant_label, handle, status,
                      tags, sku, barcode, shopify_price, shopify_qty, inventory_item_id,
                      tcgplayer_id, is_damaged, committed, unit_cost, image_url, era, last_synced)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (shopify_product_id, shopify_variant_id) DO UPDATE SET
                     title             = EXCLUDED.title,
+                    variant_label     = EXCLUDED.variant_label,
                     handle            = EXCLUDED.handle,
                     status            = EXCLUDED.status,
                     tags              = EXCLUDED.tags,
@@ -385,7 +391,7 @@ class CacheManager:
                     last_synced       = CURRENT_TIMESTAMP
             """, (
                 p["shopify_product_id"], p["variant_id"],
-                p["title"], p["handle"], p.get("status", "ACTIVE"),
+                p["title"], p.get("variant_label"), p["handle"], p.get("status", "ACTIVE"),
                 p.get("tags_csv", ""),
                 p.get("sku"),
                 p.get("barcode"),

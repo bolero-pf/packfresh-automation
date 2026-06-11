@@ -264,7 +264,7 @@ class ShopifyClient:
                 id title handle status tags
                 featuredImage { url }
                 variants(first: 10) {
-                  edges { node { id price sku barcode inventoryQuantity
+                  edges { node { id title price sku barcode inventoryQuantity
                     inventoryItem { id
                       unitCost { amount }
                       inventoryLevels(first: 1) {
@@ -317,6 +317,12 @@ class ShopifyClient:
 
                 for var_edge in node["variants"]["edges"]:
                     variant = var_edge["node"]
+                    # Shopify variant.title is the joined option values
+                    # ("Crimson", "Crimson / Small"). It's "Default Title" for
+                    # single-variant products — treat that as no label so the
+                    # store picker only shows real differentiators.
+                    v_title = (variant.get("title") or "").strip()
+                    variant_label = "" if v_title.lower() == "default title" else v_title
                     inv_item_id = None
                     unit_cost = None
                     if variant.get("inventoryItem"):
@@ -334,6 +340,7 @@ class ShopifyClient:
                         "handle":             node["handle"],
                         "status":             node.get("status", "ACTIVE"),
                         "variant_id":         int(variant["id"].split("/")[-1]),
+                        "variant_label":      variant_label,
                         "shopify_price":      float(variant["price"]),
                         "shopify_qty":        variant["inventoryQuantity"],
                         "sku":                variant.get("sku"),
