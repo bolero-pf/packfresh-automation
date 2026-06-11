@@ -4209,6 +4209,7 @@ let _pushedItemIds = new Set();
 // scans (e.g. binder card while filling storage A4).
 let _pushPlan       = [];
 let _pushPlanMeta   = { bulk_count: 0, grade_count: 0, sealed_count: 0 };
+let _pushBinderOverflow = { count: 0, item_ids: [], barcodes: [], by_game: {} };
 let _pushIndex      = 0;
 let _pushPending    = [];
 let _pushSessionId  = null;
@@ -4233,6 +4234,7 @@ async function _loadPushPlan(sessionId) {
             grade_count:  d.grade_count  || 0,
             sealed_count: d.sealed_count || 0,
         };
+        _pushBinderOverflow = d.binder_overflow || { count: 0, item_ids: [], barcodes: [], by_game: {} };
         _renderPushScanWidget();
     } catch(e) {
         slot.innerHTML = `<div class="card"><div class="alert alert-warning">Plan failed: ${e.message}</div></div>`;
@@ -4250,12 +4252,39 @@ function _renderPushScanWidget() {
            </div>`
         : '';
 
+    // Binders-full callout: cards routed to a binder with no binder space left.
+    // Shown above every plan state so it can't be missed — without this they'd
+    // silently disappear from the plan and the scanner would reject them.
+    const ov = _pushBinderOverflow || { count: 0 };
+    let overflowBanner = '';
+    if (ov.count > 0) {
+        const games = Object.entries(ov.by_game || {})
+            .map(([g, n]) => `${n} ${g}`).join(' · ');
+        overflowBanner = `<div class="card" style="border-color:#f59e0b; background:rgba(245,158,11,0.06); margin-bottom:12px;">
+            <h2 style="margin:0; color:#f59e0b;">⚠ Binders are full</h2>
+            <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">
+                <strong>${ov.count} card${ov.count === 1 ? '' : 's'}</strong> ${games ? `(${games}) ` : ''}routed to a binder, but there is no binder space left.
+                Send them to storage instead, or add a binder and reload.
+            </p>
+            <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+                <button class="btn btn-success" onclick="_pushRerouteOverflowToStorage()" style="font-weight:700;">
+                    Send ${ov.count} to storage
+                </button>
+                <button class="btn btn-secondary" onclick="_loadPushPlan(_pushSessionId)" title="Reload the plan after adding binder capacity.">
+                    I added a binder — reload
+                </button>
+            </div>
+        </div>`;
+    }
+
     if (_pushPlan.length === 0) {
-        slot.innerHTML = `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
+        // With overflow present this isn't really "nothing to do" — the overflow
+        // banner carries the action, so suppress the all-clear copy.
+        slot.innerHTML = overflowBanner + (ov.count > 0 ? '' : `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
             <h2 style="margin:0;">📦 No bins to scan into</h2>
             <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">No raw cards routed to storage/binder are pending placement.</p>
             ${otherSummary}
-        </div>`;
+        </div>`);
         return;
     }
 
@@ -4266,7 +4295,7 @@ function _renderPushScanWidget() {
     }
 
     if (_pushIndex >= _pushPlan.length) {
-        slot.innerHTML = `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
+        slot.innerHTML = overflowBanner + `<div class="card" style="border-color: var(--green); background: rgba(45,212,160,0.04);">
             <h2 style="margin:0; color:var(--green);">✓ All bins placed</h2>
             <p style="color:var(--text-dim); font-size:0.85rem; margin-top:4px;">Storage + binder cards are placed. Click <strong>Push Session</strong> below to send bulk/grade/sealed.</p>
             ${otherSummary}
@@ -4293,7 +4322,7 @@ function _renderPushScanWidget() {
     </button>`;
     const destLabel = target.destination === 'display' ? 'Binder' : 'Storage';
 
-    slot.innerHTML = `<div class="card" style="border-color: var(--accent); background: rgba(99,102,241,0.04);">
+    slot.innerHTML = overflowBanner + `<div class="card" style="border-color: var(--accent); background: rgba(99,102,241,0.04);">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
             <div>
                 <h2 style="margin:0;">📦 Place into ${target.bin_label}</h2>
@@ -4327,6 +4356,31 @@ function _renderPushScanWidget() {
     </div>`;
 
     document.getElementById('push-scan-input')?.focus();
+}
+
+async function _pushRerouteOverflowToStorage() {
+    const ov = _pushBinderOverflow;
+    if (!ov || !ov.item_ids || !ov.item_ids.length) return;
+    const ok = await themedConfirm('Send to storage?',
+        `${ov.count} card${ov.count === 1 ? '' : 's'} routed to a binder will be re-routed to storage and placed in storage bins instead. Continue?`,
+        { confirmText: 'Send to storage' });
+    if (!ok) return;
+    try {
+        const r = await fetch(`/api/ingest/session/${_pushSessionId}/route-batch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_ids: ov.item_ids, destination: 'storage' })
+        });
+        if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            await pfBlock("Couldn't re-route", (err.error || ('HTTP ' + r.status)) + ' — try again.', { error: true });
+            return;
+        }
+        if (window.toast) window.toast(`${ov.count} card${ov.count === 1 ? '' : 's'} re-routed to storage`, 'success');
+        _loadPushPlan(_pushSessionId);
+    } catch (e) {
+        await pfBlock("Couldn't re-route", 'Network error: ' + e.message + ' — try again.', { error: true });
+    }
 }
 
 function _pushScanSubmit(e) {

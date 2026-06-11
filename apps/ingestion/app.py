@@ -4019,7 +4019,7 @@ def push_plan(session_id):
     # ── Display destination (binders) ──
     # Same routing_reviewed_at guard as storage — see comment above.
     display_cards = db.query("""
-        SELECT rc.id, rc.barcode, rc.game,
+        SELECT rc.id, rc.barcode, rc.game, rc.intake_item_id,
                ii.routing_reviewed_at
           FROM raw_cards rc
           JOIN intake_items ii ON ii.id = rc.intake_item_id
@@ -4032,6 +4032,12 @@ def push_plan(session_id):
          ORDER BY ii.routing_reviewed_at ASC NULLS LAST, rc.created_at ASC
     """, (session_id,))
 
+    # Display cards that can't get a binder slot (binders full). assign_display
+    # returns a PARTIAL assignment when capacity < count; the old code sliced
+    # only the placed cards and silently dropped the rest, so they vanished
+    # from the plan and Push rejected the scan with "not routed to binder".
+    # Collect the overflow so the operator can one-click re-route to storage.
+    binder_overflow = {"count": 0, "item_ids": [], "barcodes": [], "by_game": {}}
     if display_cards:
         # Group by game so Magic cards only get assigned to Magic binders,
         # Pokemon only to Pokemon binders. Mixed-game push sessions still
@@ -4053,6 +4059,17 @@ def push_plan(session_id):
                 slice_cards = cards[idx:idx + a["count"]]
                 idx += a["count"]
                 per_assignment.append((a, slice_cards))
+
+            # Anything past the placed slice couldn't fit in a binder.
+            overflow = cards[idx:]
+            if overflow:
+                binder_overflow["count"] += len(overflow)
+                binder_overflow["by_game"][game] = (
+                    binder_overflow["by_game"].get(game, 0) + len(overflow))
+                binder_overflow["item_ids"].extend(
+                    str(c["intake_item_id"]) for c in overflow
+                    if c.get("intake_item_id"))
+                binder_overflow["barcodes"].extend(c["barcode"] for c in overflow)
 
         binder_ids = [a["bin_id"] for a, _ in per_assignment]
         binder_caps = ({str(r["id"]): (r["capacity"] or 0) - (r["current_count"] or 0)
@@ -4098,6 +4115,7 @@ def push_plan(session_id):
         "bulk_count":   int(other.get("bulk_count")  or 0),
         "grade_count":  int(other.get("grade_count") or 0),
         "sealed_count": int(sealed.get("n")          or 0),
+        "binder_overflow": binder_overflow,
     })
 
 
