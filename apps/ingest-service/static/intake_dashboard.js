@@ -2933,7 +2933,8 @@ async function findInStore(btn, tcgplayerId, productName, itemId, offerPrice, ma
                       : results.map((r, ri) => `
                         <div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:6px;border:1px solid var(--border);margin-bottom:6px;background:var(--surface-2);">
                             <div style="flex:1;min-width:0;">
-                                <div style="font-size:0.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.title}${r.variant_label ? ' <span style="color:var(--accent);font-weight:700;">· ' + r.variant_label + '</span>' : ''}</div>
+                                <div style="font-size:0.85rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.title}</div>
+                                ${r.variant_label ? '<div style="font-size:0.82rem;font-weight:700;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + r.variant_label + '</div>' : ''}
                                 <div style="font-size:0.75rem;color:var(--text-dim);">
                                     $${parseFloat(r.shopify_price||0).toFixed(2)} · qty ${r.shopify_qty??'?'}
                                     ${r.is_damaged ? ' · <span style="color:var(--red);">dmg</span>' : ''}
