@@ -1458,6 +1458,7 @@ async function viewSession(sessionId, _preserveScroll) {
                         addHtml += '<input type="text" id="session-sealed-search" placeholder="e.g. Celebrations ETB" onkeydown="if(event.key===\'Enter\') searchSealedForSession(\'' + _sid + '\', ' + _opct + ')"></div>';
                         addHtml += '<div class="form-group" style="width:60px; margin:0;"><label>Qty</label><input type="number" id="session-sealed-qty" value="1" min="1"></div>';
                         addHtml += '<button class="btn btn-primary btn-sm" onclick="searchSealedForSession(\'' + _sid + '\', ' + _opct + ')">Search</button>';
+                        addHtml += '<button class="btn btn-secondary btn-sm" onclick="searchStoreForSession(\'' + _sid + '\', ' + _opct + ')" title="Find a distro item that is already in your Shopify store but not in Scrydex (dice, sleeves, board games)">🏪 Store</button>';
                         addHtml += '<button class="btn btn-secondary btn-sm" onclick="toggleManualSealedAdd(\'' + _sid + '\', ' + _opct + ')">Manual</button>';
                         addHtml += '</div>';
                         addHtml += '<div id="session-sealed-results" style="margin-top:8px;"></div>';
@@ -4943,7 +4944,13 @@ async function searchSealedForSession(sessionId, offerPct, tryPpt) {
         if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error}</div>`; return; }
 
         const products = d.results || [];
-        if (!products.length) { resultsDiv.innerHTML = '<div class="alert alert-warning">No results found</div>'; return; }
+        if (!products.length) {
+            resultsDiv.innerHTML = `<div class="alert alert-warning">No price-catalog match — this may be a distro item not in Scrydex.</div>
+                <div style="margin-top:8px; text-align:center;">
+                    <button class="btn btn-secondary btn-sm" onclick="searchStoreForSession('${sessionId}', ${offerPct})">🏪 Search store products instead</button>
+                </div>`;
+            return;
+        }
 
         const qty = parseInt(document.getElementById('session-sealed-qty').value) || 1;
         resultsDiv.innerHTML = products.map(p => {
@@ -5005,6 +5012,96 @@ async function addSealedToSession(sessionId, tcgplayerId, name, setName, price, 
         document.getElementById('session-sealed-search').value = '';
         document.getElementById('session-sealed-qty').value = '1';
         resultsDiv.innerHTML = '<div class="alert alert-success">Added! ✓</div>';
+        setTimeout(() => viewSession(sessionId, true), 500);
+    } catch(err) {
+        resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+// Search the Shopify store cache for a distro item that isn't in Scrydex (dice,
+// sleeves, board games) and add it to the session linked to the exact variant.
+// This is the only add path that can place a product the price catalog has never
+// heard of — picks resolve straight to a shopify_variant_id, so the item lands
+// mapped (won't block "Lock & Offer") and ingest increments the right listing.
+async function searchStoreForSession(sessionId, offerPct) {
+    const searchTerm = document.getElementById('session-sealed-search').value.trim();
+    const resultsDiv = document.getElementById('session-sealed-results');
+    if (!searchTerm) { resultsDiv.innerHTML = '<div class="alert alert-warning">Enter a search term</div>'; return; }
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Searching store…</div>';
+    try {
+        const r = await fetch('/api/store/search?q=' + encodeURIComponent(searchTerm));
+        const d = await r.json();
+        const rows = d.results || [];
+        if (!rows.length) { resultsDiv.innerHTML = `<div class="alert alert-warning">No store products match "${searchTerm}"</div>`; return; }
+        const qty = parseInt(document.getElementById('session-sealed-qty').value) || 1;
+        window._sessionStoreRows = rows;
+        resultsDiv.innerHTML = '<div style="font-size:0.78rem; color:var(--text-dim); margin-bottom:6px;">Store products — pick the exact variant to add &amp; link:</div>' +
+            rows.map((row, ri) => {
+                const price = parseFloat(row.shopify_price || 0);
+                return `<div class="search-result" data-ssr="${ri}" style="display:flex; gap:10px; align-items:center; padding:8px 12px; border:1px solid var(--border); border-radius:6px; margin-bottom:4px; cursor:pointer;" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-weight:600; font-size:0.9rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${row.title || '?'}</div>
+                        ${row.variant_label ? '<div style="font-size:0.82rem; font-weight:700; color:var(--accent);">' + row.variant_label + '</div>' : ''}
+                        <div style="font-size:0.75rem; color:var(--text-dim);">qty ${row.shopify_qty ?? '?'}${row.tcgplayer_id ? ' · TCG#' + row.tcgplayer_id : ''}${row.barcode ? ' · ' + row.barcode : ''}</div>
+                    </div>
+                    <div style="text-align:right; flex-shrink:0;">
+                        <div style="font-weight:700;">$${price.toFixed(2)}</div>
+                        <div style="font-size:0.7rem; color:var(--text-dim);">${qty > 1 ? 'x' + qty : ''}</div>
+                    </div>
+                </div>`;
+            }).join('');
+        resultsDiv.querySelectorAll('[data-ssr]').forEach(el => {
+            el.addEventListener('click', () => addStoreItemToSession(sessionId, window._sessionStoreRows[parseInt(el.dataset.ssr)], qty, offerPct));
+        });
+    } catch(err) {
+        resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
+    }
+}
+
+async function addStoreItemToSession(sessionId, row, qty, offerPct) {
+    const resultsDiv = document.getElementById('session-sealed-results');
+    resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Adding &amp; linking…</div>';
+    const name = (row.title || '') + (row.variant_label ? ' · ' + row.variant_label : '');
+    const price = parseFloat(row.shopify_price || 0);
+    try {
+        const r = await fetch('/api/intake/add-sealed-item', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                session_id: sessionId,
+                product_name: name,
+                set_name: '',
+                tcgplayer_id: row.tcgplayer_id ? parseInt(row.tcgplayer_id) : null,
+                market_price: price,
+                quantity: qty,
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) { resultsDiv.innerHTML = `<div class="alert alert-error">${d.error || 'Failed to add'}</div>`; return; }
+
+        // Link the new item to the exact store variant so it lands mapped.
+        if (d.item && d.item.id) {
+            const lr = await fetch('/api/intake/item/' + d.item.id + '/accept-price', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    store_product_id: String(row.shopify_product_id || ''),
+                    store_variant_id: row.shopify_variant_id ? String(row.shopify_variant_id) : undefined,
+                    store_product_name: name,
+                    tcgplayer_id: row.tcgplayer_id ? parseInt(row.tcgplayer_id) : undefined,
+                }),
+            });
+            if (!lr.ok) {
+                const ld = await lr.json().catch(() => ({}));
+                resultsDiv.innerHTML = `<div class="alert alert-warning">Added, but store link failed: ${ld.error || 'unknown error'}</div>`;
+                setTimeout(() => viewSession(sessionId, true), 900);
+                return;
+            }
+        }
+        document.getElementById('session-sealed-search').value = '';
+        document.getElementById('session-sealed-qty').value = '1';
+        resultsDiv.innerHTML = '<div class="alert alert-success">Added &amp; linked to store ✓</div>';
         setTimeout(() => viewSession(sessionId, true), 500);
     } catch(err) {
         resultsDiv.innerHTML = `<div class="alert alert-error">${err.message}</div>`;
