@@ -41,6 +41,12 @@ CARD_TYPE_MAP = {
 }
 
 
+# A bin row auto-grows its partitions on demand up to this many (A-1 .. A-100).
+# Each partition holds DEFAULT_BIN_CAPACITY cards, so a full row = 100 × 50 = 5000.
+MAX_PARTITIONS_PER_ROW = 100
+DEFAULT_BIN_CAPACITY = 50
+
+
 def _canonical_card_type(card_type: str) -> str:
     return CARD_TYPE_MAP.get((card_type or "pokemon").lower().strip(), "other")
 
@@ -125,6 +131,57 @@ def _best_fit_assign(bins: list[dict], count: int) -> list[dict]:
     return assignments
 
 
+def _auto_expand_bins(ctype: str, needed: int, db) -> int:
+    """Seed new partitions on the active 'bin' row for `ctype` so storage grows
+    on demand instead of erroring out when it fills up.
+
+    Adds 50-card partitions (e.g. A-51, A-52, ...) until the new free capacity
+    covers `needed` or the row hits MAX_PARTITIONS_PER_ROW. Returns the number
+    of partitions created (0 if there is no expandable row or it is already at
+    the cap).
+
+    Targets the single active location_type='bin' row for the card_type — the
+    physical aisle (A=pokemon, B=magic, C=onepiece). Bulk/binder/display rows
+    and inactive (seeded-but-not-built) rows are never auto-expanded.
+    """
+    row = db.query_one("""
+        SELECT id, row_label
+        FROM storage_rows
+        WHERE card_type = %s
+          AND COALESCE(active, TRUE) = TRUE
+          AND COALESCE(location_type, 'bin') = 'bin'
+        ORDER BY row_label ASC
+        LIMIT 1
+    """, (ctype,))
+    if not row:
+        return 0
+
+    last = db.query_one("""
+        SELECT MAX(partition_num) AS max_part
+        FROM storage_locations WHERE row_id = %s
+    """, (row["id"],))
+    next_part = (last["max_part"] or 0) + 1
+
+    added = 0
+    gained = 0
+    while gained < needed and next_part <= MAX_PARTITIONS_PER_ROW:
+        bin_label = f"{row['row_label']}-{next_part}"
+        db.execute("""
+            INSERT INTO storage_locations
+                (bin_label, row_id, partition_num, card_type, capacity)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (bin_label) DO NOTHING
+        """, (bin_label, str(row["id"]), next_part, ctype, DEFAULT_BIN_CAPACITY))
+        added += 1
+        gained += DEFAULT_BIN_CAPACITY
+        next_part += 1
+
+    if added:
+        logger.info(f"Auto-expanded row {row['row_label']} ({ctype}): "
+                    f"+{added} bin(s), +{gained} card capacity.")
+    return added
+
+
 def assign_bins(card_type: str, count: int, db) -> list[dict]:
     """
     Assign bins for `count` cards of `card_type`. Best-fit single-bin if
@@ -143,7 +200,7 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
     # storage_rows.active = FALSE excludes seeded-but-physically-absent rows
     # (e.g. C/D were seeded by the original migration but Sean only built A
     # and B in the warehouse).
-    bins = db.query("""
+    bin_query = """
         SELECT sl.id, sl.bin_label, sl.partition_num, sl.capacity,
                sl.current_count,
                (sl.capacity - sl.current_count) AS available
@@ -153,17 +210,26 @@ def assign_bins(card_type: str, count: int, db) -> list[dict]:
           AND sl.current_count < sl.capacity
           AND COALESCE(sr.active, TRUE) = TRUE
           AND COALESCE(sr.location_type, 'bin') = 'bin'
-    """, (ctype,))
+    """
+    bins = db.query(bin_query, (ctype,))
+    total_available = sum(b["available"] for b in bins)
+
+    # Grow the row on demand when it can't hold the batch, rather than erroring
+    # out and making someone add a row by hand mid-intake.
+    if total_available < count:
+        if _auto_expand_bins(ctype, count - total_available, db):
+            bins = db.query(bin_query, (ctype,))
+            total_available = sum(b["available"] for b in bins)
 
     if not bins:
         raise ValueError(f"No available bins for card_type='{ctype}'. "
                          f"Add a new storage row via the admin UI.")
 
-    total_available = sum(b["available"] for b in bins)
     if total_available < count:
         raise ValueError(
             f"Not enough bin capacity for {count} cards of type '{ctype}'. "
-            f"Available: {total_available}. Add more storage rows."
+            f"Available: {total_available} (row at max {MAX_PARTITIONS_PER_ROW} "
+            f"bins). Add more storage rows."
         )
 
     assignments = _best_fit_assign(bins, count)
@@ -326,8 +392,8 @@ def get_or_add_bin_for_row(row_label: str, db) -> Optional[dict]:
     """, (row["id"],))
 
     next_part = (last["max_part"] or 0) + 1
-    if next_part > 50:
-        return None  # row is full (50 bins × 50 = 2500 cards)
+    if next_part > MAX_PARTITIONS_PER_ROW:
+        return None  # row is full (100 bins × 50 = 5000 cards)
 
     bin_label = f"{row_label}-{next_part}"
     db.execute("""
