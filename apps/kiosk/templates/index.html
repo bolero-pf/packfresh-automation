@@ -1037,6 +1037,10 @@ body.modal-open { overflow: hidden; touch-action: none; }
           <span class="adv-chev">›</span>
         </div>
         <div class="adv-body" id="adv-body">
+          <div class="sheet-section" id="sheet-domain-section" style="display:none;">
+            <div class="sheet-section-title" id="sheet-domain-label">Domain</div>
+            <div class="chip-row" id="sheet-domains"></div>
+          </div>
           <div class="sheet-section" id="sheet-cardtype-section" style="display:none;">
             <div class="sheet-section-title" id="sheet-cardtype-label">Card type</div>
             <div class="chip-row" id="sheet-cardtypes"></div>
@@ -1261,6 +1265,7 @@ let _filters = {
   colors:    new Set(),   // MTG: W/U/B/R/G/C — OP: Red/Blue/...
   colorMode: 'any',       // 'any' | 'within' | 'exactly' (MTG/OP only)
   cardTypes: new Set(),   // MTG: Sorcery/Instant/... — Pokemon: Fire/Water/... — OP: Leader/...
+  domains:   new Set(),   // Riftbound: Fury/Calm/Mind/... (the game's "color" axis)
   rarities:  new Set(),   // raw_cards.rarity values (game-specific)
   artist:    '',          // single illustrator (MTG/Pokemon) — Advanced filter
 };
@@ -1295,6 +1300,7 @@ function _activeFilterCount() {
   if (_filters.maxP)   n++;
   if (_filters.colors && _filters.colors.size)       n++;
   if (_filters.cardTypes && _filters.cardTypes.size) n++;
+  if (_filters.domains && _filters.domains.size)     n++;
   if (_filters.rarities && _filters.rarities.size)   n++;
   if (_filters.artist)                               n++;
   return n;
@@ -1399,6 +1405,7 @@ function _gameCountParams() {
     if (f.colorMode && f.colorMode !== 'any') p.set('color_mode', f.colorMode);
   }
   if (f.game && f.cardTypes && f.cardTypes.size) p.set('card_type',   [...f.cardTypes].join(','));
+  if (f.game && f.domains   && f.domains.size)   p.set('domain',      [...f.domains].join(','));
   if (f.game && f.rarities  && f.rarities.size)  p.set('card_rarity', [...f.rarities].join(','));
   if (f.game && f.artist) p.set('artist', f.artist);
   if (f.game && f.era) p.set('era', f.era);
@@ -1438,6 +1445,7 @@ async function loadGames() {
         _filters.era = '';
         _filters.colors    = new Set();
         _filters.cardTypes = new Set();
+        _filters.domains   = new Set();
         _filters.rarities  = new Set();
         _filters.colorMode = 'any';
         _filters.artist    = '';
@@ -1478,6 +1486,7 @@ function openFilterSheet() {
     colors:    new Set(_filters.colors),
     colorMode: _filters.colorMode || 'any',
     cardTypes: new Set(_filters.cardTypes),
+    domains:   new Set(_filters.domains),
     rarities:  new Set(_filters.rarities),
     artist:    _filters.artist || '',
   };
@@ -1547,7 +1556,7 @@ function clearAllFilters() {
     conds: new Set(['NM','LP','MP','HP','DMG']),
     minP: '', maxP: '', addedDays: 0,
     colors: new Set(), colorMode: 'any',
-    cardTypes: new Set(), rarities: new Set(), artist: '',
+    cardTypes: new Set(), domains: new Set(), rarities: new Set(), artist: '',
   };
   document.querySelectorAll('#sheet-conds .chip').forEach(el => el.classList.add('on'));
   document.querySelectorAll('#sheet-added .chip').forEach(el => {
@@ -1621,6 +1630,7 @@ function renderGameChips() {
       // OP, and 'Holo Rare' from Pokemon shouldn't carry over. Wipe them.
       _draft.colors    = new Set();
       _draft.cardTypes = new Set();
+      _draft.domains   = new Set();
       _draft.rarities  = new Set();
       _draft.colorMode = 'any';
       _draft.artist    = '';
@@ -1672,6 +1682,9 @@ async function loadFilterMetaForDraft() {
     }
     if (_draft.cardTypes && _draft.cardTypes.size) {
       p.set('card_type', Array.from(_draft.cardTypes).join(','));
+    }
+    if (_draft.domains && _draft.domains.size) {
+      p.set('domain', Array.from(_draft.domains).join(','));
     }
     if (_draft.rarities && _draft.rarities.size) {
       p.set('card_rarity', Array.from(_draft.rarities).join(','));
@@ -1725,13 +1738,15 @@ function refreshFacetCounts() {
 
 function renderAdvancedFilterSections() {
   const colorsSec = document.getElementById('sheet-colors-section');
+  const domainSec = document.getElementById('sheet-domain-section');
   const typeSec   = document.getElementById('sheet-cardtype-section');
   const raritySec = document.getElementById('sheet-rarity-section');
-  if (!colorsSec || !typeSec || !raritySec) return;
+  if (!colorsSec || !domainSec || !typeSec || !raritySec) return;
 
   // Hide everything when no game selected (filters are game-scoped)
   if (!_draft || !_draft.game || !_filterMeta || !_filterMeta.filters) {
     colorsSec.style.display = 'none';
+    domainSec.style.display = 'none';
     typeSec.style.display = 'none';
     raritySec.style.display = 'none';
     return;
@@ -1770,6 +1785,32 @@ function renderAdvancedFilterSections() {
     colorsSec.style.display = '';
   } else {
     colorsSec.style.display = 'none';
+  }
+
+  // Domain (Riftbound's "color" axis — scalar text chips)
+  if (F.domain) {
+    document.getElementById('sheet-domain-label').textContent = F.domain.label || 'Domain';
+    const wrap = document.getElementById('sheet-domains');
+    wrap.innerHTML = (F.domain.options || []).map(o => {
+      const on = _draft.domains.has(o.value);
+      if (!o.qty) return '';
+      return `<span class="chip${on ? ' on' : ''}" data-domain="${esc(o.value)}">
+        ${esc(o.label)} <span class="qty">${o.qty}</span>
+      </span>`;
+    }).join('') || '<div style="color:var(--dim);font-size:0.8rem;">No cards in stock yet for this game.</div>';
+    wrap.querySelectorAll('.chip').forEach(el => {
+      el.addEventListener('click', () => {
+        if (!_draft) return;
+        const v = el.getAttribute('data-domain');
+        if (_draft.domains.has(v)) _draft.domains.delete(v); else _draft.domains.add(v);
+        el.classList.toggle('on');
+        _refreshAdvCount();
+        refreshFacetCounts();
+      });
+    });
+    domainSec.style.display = '';
+  } else {
+    domainSec.style.display = 'none';
   }
 
   // Card type / Energy
@@ -1867,6 +1908,9 @@ function _renderActiveChips() {
   if (_filters.cardTypes && _filters.cardTypes.size) {
     chip('cardTypes', [..._filters.cardTypes].join(', '));
   }
+  if (_filters.domains && _filters.domains.size) {
+    chip('domains', [..._filters.domains].join(', '));
+  }
   if (_filters.rarities && _filters.rarities.size) {
     chip('rarities', [..._filters.rarities].join(', '));
   }
@@ -1900,11 +1944,13 @@ function _removeActive(key) {
   switch (key) {
     case 'game':      _filters.game = ''; _filters.era = ''; _filters.set = '';
                       _filters.colors = new Set(); _filters.cardTypes = new Set();
+                      _filters.domains = new Set();
                       _filters.rarities = new Set(); break;
     case 'era':       _filters.era = ''; break;
     case 'set':       _filters.set = ''; break;
     case 'colors':    _filters.colors = new Set(); _filters.colorMode = 'any'; break;
     case 'cardTypes': _filters.cardTypes = new Set(); break;
+    case 'domains':   _filters.domains = new Set(); break;
     case 'rarities':  _filters.rarities = new Set(); break;
     case 'artist':    _filters.artist = ''; break;
     case 'price':     _filters.minP = ''; _filters.maxP = ''; break;
@@ -1920,7 +1966,8 @@ function _removeActive(key) {
 
 function _clearAllActive() {
   _filters.game = ''; _filters.era = ''; _filters.set = '';
-  _filters.colors = new Set(); _filters.cardTypes = new Set(); _filters.rarities = new Set();
+  _filters.colors = new Set(); _filters.cardTypes = new Set(); _filters.domains = new Set();
+  _filters.rarities = new Set();
   _filters.colorMode = 'any';
   _filters.artist = '';
   _filters.minP = ''; _filters.maxP = '';
@@ -1947,6 +1994,7 @@ function _writeUrlState() {
     if (_filters.colorMode && _filters.colorMode !== 'any') p.set('color_mode', _filters.colorMode);
   }
   if (_filters.cardTypes && _filters.cardTypes.size) p.set('card_type',   [..._filters.cardTypes].join(','));
+  if (_filters.domains   && _filters.domains.size)   p.set('domain',      [..._filters.domains].join(','));
   if (_filters.rarities  && _filters.rarities.size)  p.set('card_rarity', [..._filters.rarities].join(','));
   if (_filters.artist)    p.set('artist', _filters.artist);
   if (_filters.addedDays) p.set('added_days', String(_filters.addedDays));
@@ -1969,6 +2017,7 @@ function _readUrlState() {
   if (p.has('colors')) _filters.colors = new Set(p.get('colors').split(',').filter(Boolean));
   if (['within', 'exactly'].includes(p.get('color_mode'))) _filters.colorMode = p.get('color_mode');
   if (p.has('card_type'))   _filters.cardTypes = new Set(p.get('card_type').split(',').filter(Boolean));
+  if (p.has('domain'))      _filters.domains   = new Set(p.get('domain').split(',').filter(Boolean));
   if (p.has('card_rarity')) _filters.rarities  = new Set(p.get('card_rarity').split(',').filter(Boolean));
   if (p.has('artist'))      _filters.artist    = p.get('artist') || '';
   if (p.has('added_days'))  { const d = parseInt(p.get('added_days'), 10); if (d > 0) _filters.addedDays = d; }
@@ -2074,6 +2123,7 @@ function _advActiveCount() {
   if (!_draft) return 0;
   let n = 0;
   if (_draft.cardTypes && _draft.cardTypes.size) n++;
+  if (_draft.domains   && _draft.domains.size)   n++;
   if (_draft.rarities  && _draft.rarities.size)  n++;
   if (_draft.set)    n++;
   if (_draft.artist) n++;
@@ -2335,6 +2385,7 @@ function _hasResettableState() {
     if (_filters.colors    && _filters.colors.size)    return true;
     if (_filters.colorMode && _filters.colorMode !== 'any') return true;
     if (_filters.cardTypes && _filters.cardTypes.size) return true;
+    if (_filters.domains   && _filters.domains.size)   return true;
     if (_filters.rarities  && _filters.rarities.size)  return true;
     if (_filters.artist)                               return true;
     if (_filters.addedDays)                            return true;
@@ -2504,6 +2555,7 @@ async function loadEras() {
     if (f.colorMode && f.colorMode !== 'any') p.set('color_mode', f.colorMode);
   }
   if (f.cardTypes && f.cardTypes.size) p.set('card_type',   Array.from(f.cardTypes).join(','));
+  if (f.domains   && f.domains.size)   p.set('domain',      Array.from(f.domains).join(','));
   if (f.rarities  && f.rarities.size)  p.set('card_rarity', Array.from(f.rarities).join(','));
   if (f.artist)    p.set('artist', f.artist);
   if (f.addedDays) p.set('added_days', String(f.addedDays));
@@ -2571,6 +2623,9 @@ async function doSearch(page) {
   }
   if (_filters.game && _filters.cardTypes && _filters.cardTypes.size) {
     params.set('card_type', [..._filters.cardTypes].join(','));
+  }
+  if (_filters.game && _filters.domains && _filters.domains.size) {
+    params.set('domain', [..._filters.domains].join(','));
   }
   if (_filters.game && _filters.rarities && _filters.rarities.size) {
     params.set('card_rarity', [..._filters.rarities].join(','));

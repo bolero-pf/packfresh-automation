@@ -305,6 +305,27 @@ GAME_FILTER_SCHEMA = {
             "options": ["Leader", "Character", "Event", "Stage"],
         },
     },
+    "riftbound": {
+        # Riftbound's normalized columns (colors/card_type) aren't populated by
+        # the Scrydex normalizer, so both facets read scalar strings out of the
+        # raw JSON. Domain is the game's "color" axis but it's a single scalar
+        # (not an array like MTG/OP), so it rides the text card_type machinery
+        # rather than the array-based colors slot.
+        #
+        # No fixed `options`: a text facet without an options list discovers its
+        # values from the nightly-cached scrydex_card_meta, so new Riftbound
+        # sets / card types surface automatically with no code change.
+        "domain": {
+            "label": "Domain",
+            "field": "raw->>'domain'",
+            "type":  "text",
+        },
+        "card_type": {
+            "label": "Type",
+            "field": "raw->>'type'",
+            "type":  "text",
+        },
+    },
 }
 
 
@@ -618,7 +639,8 @@ def _build_meta_filter_subquery(game: str,
                                 colors: list[str], color_mode: str,
                                 card_types: list[str],
                                 rarities: list[str],
-                                artist: str = "") -> tuple[str, list]:
+                                artist: str = "",
+                                domains: list[str] | None = None) -> tuple[str, list]:
     """Build a `rc.id IN (subquery)` fragment that narrows raw_cards to those
     matching the per-game advanced filters.
 
@@ -634,9 +656,11 @@ def _build_meta_filter_subquery(game: str,
     if not schema:
         return "", []
 
+    domains = domains or []
+
     # Rarity goes in the outer query — it's a column on raw_cards directly
     # and doesn't require a meta join.
-    needs_join = bool(colors or card_types or artist)
+    needs_join = bool(colors or card_types or artist or domains)
     if not needs_join:
         return "", []
 
@@ -709,6 +733,19 @@ def _build_meta_filter_subquery(game: str,
             parts.append(f"{field} IN ({ph})")
             p.extend(card_types)
 
+    # Domain (Riftbound's "color" axis — scalar text, so it uses the same
+    # IN-list shape as a text card_type).
+    if domains and "domain" in schema:
+        spec = schema["domain"]
+        field = spec["field"]
+        if spec["type"] == "jsonb":
+            parts.append(f"{field} ?| %s::text[]")
+            p.append(domains)
+        else:
+            ph = ",".join(["%s"] * len(domains))
+            parts.append(f"{field} IN ({ph})")
+            p.extend(domains)
+
     # Illustrator (exact match on the Scrydex artist string)
     if artist and "artist" in schema:
         parts.append(f"{schema['artist']['field']} = %s")
@@ -780,6 +817,7 @@ def browse():
     if color_mode not in ("any", "within", "exactly"):
         color_mode = "any"
     card_types = _multi_param("card_type")
+    domains    = _multi_param("domain")
     rarities   = _multi_param("card_rarity")
     artist     = (request.args.get("artist") or "").strip()
     # "Added in the last X days" — a recency filter so returning customers can
@@ -863,7 +901,7 @@ def browse():
     # so it doesn't blow up rows for the count/aggregation logic that follows.
     if game:
         meta_clause, meta_params = _build_meta_filter_subquery(
-            game, colors, color_mode, card_types, rarities, artist,
+            game, colors, color_mode, card_types, rarities, artist, domains,
         )
         if meta_clause:
             filters.append(meta_clause)
@@ -1070,6 +1108,7 @@ GAME_TAG_BUCKETS = {
     "mtg":       ["mtg", "magic: the gathering (mtg)"],
     "lorcana":   ["lorcana"],
     "one_piece": ["one piece"],
+    "riftbound": ["riftbound"],
 }
 
 # Sealed-only product format buckets
@@ -1427,7 +1466,8 @@ def products_filter_meta():
         return out
 
     GAME_LABELS  = {"pokemon": "Pokémon", "mtg": "Magic: the Gathering",
-                    "lorcana": "Lorcana", "one_piece": "One Piece"}
+                    "lorcana": "Lorcana", "one_piece": "One Piece",
+                    "riftbound": "Riftbound"}
     FMT_LABELS   = {"booster_box": "Booster Box", "booster_pack": "Booster Pack",
                     "etb": "ETB", "collection_box": "Collection Box",
                     "blister": "Blister", "tin": "Tin", "sleeved": "Sleeved"}
@@ -1768,6 +1808,7 @@ def filter_meta():
     if sel_color_mode not in ("any", "within", "exactly"):
         sel_color_mode = "any"
     sel_card_types = _multi_param("card_type")
+    sel_domains    = _multi_param("domain")
     sel_rarities   = _multi_param("card_rarity")
     sel_era        = (request.args.get("era") or "").strip()
     sel_set        = (request.args.get("set") or "").strip()
@@ -1839,6 +1880,16 @@ def filter_meta():
         ph = ",".join(["%s"] * len(sel_card_types))
         return f"{field} IN ({ph})", list(sel_card_types)
 
+    def domain_clause() -> tuple[str, list]:
+        if not sel_domains or "domain" not in schema:
+            return "", []
+        spec = schema["domain"]
+        field = "m." + spec["field"]
+        if spec["type"] == "jsonb":
+            return f"{field} ?| %s::text[]", [list(sel_domains)]
+        ph = ",".join(["%s"] * len(sel_domains))
+        return f"{field} IN ({ph})", list(sel_domains)
+
     def rarity_clause() -> tuple[str, list]:
         if not sel_rarities:
             return "", []
@@ -1884,6 +1935,7 @@ def filter_meta():
 
     color_w,  color_p  = colors_clause()
     cardt_w,  cardt_p  = card_type_clause()
+    domain_w, domain_p = domain_clause()
     rarity_w, rarity_p = rarity_clause()
     era_w,    era_p    = era_clause()
     set_w,    set_p    = set_clause()
@@ -2000,13 +2052,14 @@ def filter_meta():
             ],
         }
 
-    # ── Card type facet ─────────────────────────────────────────────────────
-    if "card_type" in schema:
-        spec = schema["card_type"]
-        # Other filters ⇒ colors + rarity + era + set + artist + recency.
-        extra_w, extra_p = merged_extra((color_w, color_p), (rarity_w, rarity_p),
-                                        (era_w, era_p), (set_w, set_p),
-                                        (artist_w, artist_p), (added_w, added_p))
+    # ── Card type + Domain facets (both text/jsonb chip groups over meta) ────
+    # Each facet's counts apply every OTHER selected filter and exclude its own
+    # selection, so toggling within a group doesn't collapse that group.
+    def _meta_chip_facet(key: str, *self_excluded: tuple[str, list]) -> None:
+        if key not in schema:
+            return
+        spec = schema[key]
+        extra_w, extra_p = merged_extra(*self_excluded)
         field = "m." + spec["field"]
         if spec["type"] == "jsonb":
             rows = db.query(f"""
@@ -2041,22 +2094,35 @@ def filter_meta():
                  GROUP BY {field}
             """, (sx_game, sx_game, game, *extra_p))
         counts = {r["k"]: int(r["n"]) for r in rows}
-        out["filters"]["card_type"] = {
-            "label":   spec["label"],
-            "options": [
-                {"value": v, "label": v, "qty": counts.get(v, 0)}
-                for v in spec["options"]
-            ],
-        }
+        if spec.get("options"):
+            # Curated list (MTG/Pokemon/OP) — keep fixed order, show 0-qty too.
+            options = [{"value": v, "label": v, "qty": counts.get(v, 0)}
+                       for v in spec["options"]]
+        else:
+            # Data-driven (Riftbound): discover values from the nightly cache,
+            # busiest first. New sets / types appear with no code change.
+            options = [{"value": k, "label": k, "qty": counts[k]}
+                       for k in sorted(counts, key=lambda x: (-counts[x], x)) if k]
+        out["filters"][key] = {"label": spec["label"], "options": options}
+
+    # card_type excludes its own selection; domain excludes its own.
+    _meta_chip_facet("card_type",
+                     (color_w, color_p), (domain_w, domain_p), (rarity_w, rarity_p),
+                     (era_w, era_p), (set_w, set_p), (artist_w, artist_p),
+                     (added_w, added_p))
+    _meta_chip_facet("domain",
+                     (color_w, color_p), (cardt_w, cardt_p), (rarity_w, rarity_p),
+                     (era_w, era_p), (set_w, set_p), (artist_w, artist_p),
+                     (added_w, added_p))
 
     # ── Rarity facet (lives on raw_cards directly, no meta join needed for
     # the rarity column itself — but we may still need meta JOIN if colors
     # or card_type filters are active). Era/set live on raw_cards too, so
     # they slot into either path without a meta JOIN. ──────────────────────
-    # Artist needs the meta join, so it rides with color/card_type, not the
-    # rc-only (era/set/recency) group that can skip the join.
+    # Artist needs the meta join, so it rides with color/card_type/domain, not
+    # the rc-only (era/set/recency) group that can skip the join.
     extra_w, extra_p = merged_extra((color_w, color_p), (cardt_w, cardt_p),
-                                    (artist_w, artist_p))
+                                    (domain_w, domain_p), (artist_w, artist_p))
     rc_only_w, rc_only_p = merged_extra((era_w, era_p), (set_w, set_p),
                                         (added_w, added_p))
     if extra_w:
