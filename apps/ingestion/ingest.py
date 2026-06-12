@@ -179,16 +179,23 @@ _SEALED_KEYWORDS = ['booster pack', 'booster box', 'etb', 'elite trainer box',
 def _looks_like_single_card(name: str) -> bool:
     """
     Detect if a breakdown component name is a single card vs sealed product.
-    Logic: if the name contains a sealed keyword, it's sealed. Otherwise it's a card.
-    Breakdown children are either packs/boxes/tins (sealed) or individual cards (raw).
+
+    A single card is identified by a POSITIVE card-number signal — a card-number
+    suffix like "- 073", "- 153/214", "SWSH136", or "TG15". Anything without that
+    signal is treated as sealed, including novel sealed names that match no keyword
+    (e.g. "Surprise Box", "Bloodmoon Ursaluna ex Box", "X Collection").
+
+    Previously this returned True whenever the name lacked a hardcoded sealed
+    keyword, which silently routed every unrecognized sealed product to raw — the
+    keyword list can never keep up with new sealed SKUs. A sealed keyword still
+    wins outright (so a card-number coincidence inside a keyworded sealed name
+    can't flip it to raw).
     """
     if not name:
         return False
-    n = name.lower()
-    if any(kw in n for kw in _SEALED_KEYWORDS):
+    if any(kw in name.lower() for kw in _SEALED_KEYWORDS):
         return False
-    # No sealed keywords → it's a single card
-    return True
+    return bool(_CARD_NUMBER_RE.search(name))
 
 
 def break_down_item(item_id: str, components: list[dict]) -> dict:
@@ -258,20 +265,16 @@ def break_down_item(item_id: str, components: list[dict]) -> dict:
 
         child_id = str(uuid4())
         # Determine if child is a raw card or sealed product.
-        # Promos are always raw. For "sealed" components, detect single cards
-        # by card number patterns (e.g. "- 073", "- 153/214", "SWSH136").
+        # Trust the operator's explicit promo/raw tab choice. For everything
+        # else ('sealed' tab, or a legacy recipe with no component_type), default
+        # to sealed and only route raw when the NAME is unmistakably a single
+        # card (card-number suffix) — that means a card was mis-tagged in the
+        # recipe, and we must not spawn a phantom sealed product from one card.
         comp_type = comp.get("component_type")  # None if not set in recipe
         comp_name = comp.get("product_name", "")
         if comp_type in ("promo", "raw"):
             child_product_type = "raw"
-        elif comp_type == "sealed":
-            # A 'sealed'-typed component whose name is clearly a single card
-            # (no sealed keyword — e.g. a promo "Eevee VMAX") was mis-tagged in
-            # the recipe. Route it as raw so breakdown never spawns a phantom
-            # sealed product from a single card.
-            child_product_type = "sealed" if not _looks_like_single_card(comp_name) else "raw"
         else:
-            # component_type not set — detect from name
             child_product_type = "raw" if _looks_like_single_card(comp_name) else "sealed"
         # Inherit parent's verified state — opening a verified sealed product
         # doesn't require re-verifying its known contents. Without this, children
