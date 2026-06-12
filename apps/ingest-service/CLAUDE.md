@@ -14,10 +14,15 @@ hand-picks genuine judgment calls. Lives in `blueprints/items_bp.py`
 `static/intake_dashboard.js` ("✨ Auto-link obvious" button on the session,
 preview → apply). Conservative like `heal_raw_card_bindings` — links only when
 BOTH resolve to one option:
-- **Identity:** Tier A exact `expansion_name`+number (name-independent, beats
-  Collectr↔Scrydex name drift like "Mew (Delta Species)" vs "Mew δ"); Tier B
-  fuzzy `search_cards` gated by matching card number **and** a shared name token.
-  Abstains if >1 scrydex_id survives.
+- **Identity:** Tier A exact `expansion_name`+number **plus** ≥1 shared name
+  token — mostly name-independent (one overlap is enough, so it still beats
+  Collectr↔Scrydex drift like "Mew (Delta Species)" vs "Mew δ") but refuses a
+  number-only match. The token guard is mandatory: a card number is NOT a stable
+  cross-catalog key — MTG renumbers variant cards between the TCGplayer/Collectr
+  export and Scrydex, so expansion+number alone linked "Chrome Mox (Borderless)
+  Aetherdrift #92" to Scrydex "Intimidation Tactics #92". Tier B fuzzy
+  `search_cards` gated by matching card number **and** every shared name token,
+  game-scoped. Abstains if >1 scrydex_id survives. No name token → skip.
 - **Variant:** the item's Collectr `variance` (native-matched) or the lone
   priced printing; abstains when multiple printings exist and variance names
   none. No number → skip; graded-only printing (no raw price) → skip.
