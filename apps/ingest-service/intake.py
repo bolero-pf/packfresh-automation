@@ -418,11 +418,11 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
     sql = """
         INSERT INTO intake_items
             (session_id, product_name, tcgplayer_id, scrydex_id, product_type,
-             set_name, card_number, condition, rarity, variance,
+             set_name, card_number, condition, rarity, variance, game,
              quantity, market_price, offer_price, unit_cost_basis, is_mapped,
              is_graded, grade_company, grade_value, slab_uuid,
              shopify_product_id, shopify_product_name, shopify_variant_id, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params_list = [
         (
@@ -436,6 +436,7 @@ def add_items_to_session(session_id: str, items: list[dict]) -> int:
             item.get("condition"),
             item.get("rarity"),
             item.get("variance") or "",
+            (item.get("game") or "").strip().lower() or None,
             item["quantity"],
             item["market_price"],
             item["offer_price"],

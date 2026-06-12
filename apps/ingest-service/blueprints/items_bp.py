@@ -237,6 +237,7 @@ def _autolink_match(item):
     with no card number (no anchor) or a graded-only printing (no raw price).
     """
     game = (item.get("game") or "pokemon").lower()
+    item_game = (item.get("game") or "").strip().lower() or None  # known game, no pokemon default
     set_name = item.get("set_name") or ""
     num_forms = _autolink_cardnum_forms(item.get("card_number"))
     if not num_forms:
@@ -281,14 +282,16 @@ def _autolink_match(item):
     name_overlap = "(" + " OR ".join(name_ors) + ")"
 
     if set_name:
+        game_clause = "AND game = %s " if item_game else ""
         rows = db.query(
             "SELECT DISTINCT scrydex_id FROM scrydex_price_cache "
             "WHERE product_type='card' AND price_type='raw' AND market_price IS NOT NULL "
             "AND COALESCE(language_code, 'EN') = 'EN' "
+            + game_clause +
             "AND lower(expansion_name) = lower(%s) "
             "AND (card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[])) "
             "AND " + name_overlap,
-            tuple([set_name, num_forms, num_forms] + name_params),
+            tuple(([item_game] if item_game else []) + [set_name, num_forms, num_forms] + name_params),
         )
         if len(rows) == 1:
             sid, tier = rows[0]["scrydex_id"], "set+number"

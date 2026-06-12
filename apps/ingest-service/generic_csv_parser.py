@@ -27,6 +27,7 @@ from typing import NamedTuple
 class GenericParsedItem(NamedTuple):
     product_name: str
     product_type: str  # 'sealed' or 'raw'
+    game: str  # scrydex slug: magicthegathering / pokemon / onepiece / lorcana / riftbound / ''
     set_name: str
     card_number: str
     rarity: str
@@ -87,6 +88,10 @@ COLUMN_PATTERNS = {
         r"^variance$", r"^variant$", r"^printing$", r"^finish$",
         r"^foil$", r"^foiling$", r"^holo$", r"^holofoil$",
     ],
+    "game": [
+        r"^game$", r"^category$", r"^product[_ ]?line$", r"^tcg$",
+        r"^tcg[_ ]?game$", r"^franchise$",
+    ],
     "grade_company": [
         r"^grade[_ ]?company$", r"^grading[_ ]?company$",
         r"^grading[_ ]?service$", r"^grader$",
@@ -100,8 +105,7 @@ COLUMN_PATTERNS = {
         r"^tcg$", r"^tcgid$",
     ],
     "product_type": [
-        r"^type$", r"^product[_ ]?type$", r"^category$",
-        r"^product[_ ]?line$",
+        r"^type$", r"^product[_ ]?type$",
     ],
     "photo_url": [
         r"^photo[_ ]?url$", r"^image[_ ]?url$", r"^image$", r"^photo$",
@@ -191,6 +195,26 @@ _RAW_CONDITION_VALUES = {
     "moderately played", "mp", "good", "heavily played", "hp", "played",
     "damaged", "dmg", "poor",
 }
+
+
+# Maps a CSV "Category"/"Product Line"/"Game" value to the Scrydex game slug the
+# price cache (and auto-link) keys on. Returns "" for unknown → game stays NULL,
+# preserving the prior (game-agnostic) behavior.
+def _normalize_game(raw: str) -> str:
+    v = (raw or "").strip().lower()
+    if not v:
+        return ""
+    if "magic" in v or v == "mtg":
+        return "magicthegathering"
+    if "pok" in v:  # pokemon / pokémon
+        return "pokemon"
+    if "one piece" in v or "onepiece" in v:
+        return "onepiece"
+    if "lorcana" in v:
+        return "lorcana"
+    if "riftbound" in v:
+        return "riftbound"
+    return ""
 
 
 def _normalize_variance(raw: str) -> str:
@@ -327,6 +351,7 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
     rarity_col = mapping.get("rarity")
     cond_col = mapping.get("condition")
     var_col = mapping.get("variance")
+    game_col = mapping.get("game")
     tcg_col = mapping.get("tcgplayer_id")
     photo_col = mapping.get("photo_url")
     gc_col = mapping.get("grade_company")
@@ -392,6 +417,7 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
             item = GenericParsedItem(
                 product_name=product_name,
                 product_type=product_type,
+                game=_normalize_game(row.get(game_col, "")) if game_col else "",
                 set_name=(row.get(set_col) or "").strip() if set_col else "",
                 card_number=(row.get(card_col) or "").strip() if card_col else "",
                 rarity=(row.get(rarity_col) or "").strip() if rarity_col else "",
@@ -447,6 +473,6 @@ def detect_csv_columns(file_content: str) -> dict:
         "preview_rows": preview,
         "required_fields": ["name", "quantity", "price"],
         "optional_fields": ["set_name", "card_number", "rarity", "condition",
-                            "variance", "grade_company", "grade_value",
+                            "variance", "game", "grade_company", "grade_value",
                             "tcgplayer_id", "product_type", "photo_url"],
     }

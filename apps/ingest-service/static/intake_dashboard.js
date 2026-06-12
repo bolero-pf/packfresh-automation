@@ -302,7 +302,7 @@ document.getElementById('generic-csv-form').addEventListener('submit', async (e)
         const headers = d.headers || [];
         const required = ['name', 'quantity', 'price'];
         const optional = ['set_name', 'card_number', 'rarity', 'condition',
-                          'variance', 'grade_company', 'grade_value',
+                          'variance', 'game', 'grade_company', 'grade_value',
                           'tcgplayer_id', 'product_type', 'photo_url'];
         const allFields = [...required, ...optional];
         const fieldLabels = {
@@ -310,6 +310,7 @@ document.getElementById('generic-csv-form').addEventListener('submit', async (e)
             set_name: 'Set Name', card_number: 'Card Number', rarity: 'Rarity',
             condition: 'Condition',
             variance: 'Printing / Foil (Normal, Foil, Holofoil…)',
+            game: 'Game / Category (Magic, Pokemon…)',
             grade_company: 'Grading Co (PSA/BGS/CGC/SGC/TAG)',
             grade_value: 'Grade (10, 9.5, …)',
             tcgplayer_id: 'TCGPlayer ID', product_type: 'Type',

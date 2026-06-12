@@ -19,6 +19,7 @@ import hashlib
 import re
 from decimal import Decimal, InvalidOperation
 from collectr_html_parser import _normalize_set_name, _is_card_number
+from generic_csv_parser import _normalize_game
 from io import StringIO
 from typing import NamedTuple
 
@@ -39,6 +40,7 @@ class ParsedItem(NamedTuple):
     is_graded: bool = False
     grade_company: str = ""   # PSA, BGS, CGC, SGC
     grade_value: str = ""     # 10, 9.5, 9, 8, ...
+    game: str = ""            # scrydex slug from Collectr "Category" (magicthegathering, pokemon, …)
 
 
 class ParseResult(NamedTuple):
@@ -219,6 +221,7 @@ def parse_collectr_csv(file_content: str) -> ParseResult:
                 is_graded=is_graded,
                 grade_company=grade_company,
                 grade_value=grade_value,
+                game=_normalize_game(row.get("Category") or ""),
             )
             items.append(item)
 
