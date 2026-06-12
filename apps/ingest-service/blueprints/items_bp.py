@@ -242,6 +242,16 @@ def _autolink_match(item):
     if not num_forms:
         return None
 
+    # A card number is NOT a stable cross-catalog key. Collector numbers are
+    # unique-and-stable within a Pokemon set, but MTG renumbers variant cards
+    # between TCGplayer/Collectr exports and Scrydex (a Collectr "Aetherdrift #92"
+    # borderless is Scrydex "Intimidation Tactics #92"). So every tier now also
+    # requires a name-token overlap — without it, expansion+number alone links
+    # confidently to whatever unrelated card sits at that number in Scrydex.
+    tokens = sorted(_autolink_name_tokens(item.get("product_name")), key=len, reverse=True)[:3]
+    if not tokens:
+        return None
+
     sid = None
     tier = None
 
@@ -252,53 +262,59 @@ def _autolink_match(item):
     # only the manual picker applies. So auto-link sticks to English printings
     # and leaves Japanese cards for manual.
 
-    # Tier A — exact expansion name + number. Name-independent, so it catches
-    # the Collectr-vs-Scrydex name drift ("Mew (Delta Species)" vs "Mew δ")
-    # that makes the manual picker so tedious. Drives off the partial index
-    # idx_spc_lower_expansion_name — do NOT add `OR lower(expansion_name_en)`
-    # here: that column is unindexed and the OR forces a seq scan of the whole
-    # 1M-row cache per item (the bug that timed the worker out). The number OR
-    # is fine: it filters the few hundred rows the expansion index already
-    # narrowed to.
+    # Tier A — exact expansion name + number + a shared name token. Still mostly
+    # name-INdependent (one overlapping token is enough), so it catches the
+    # Collectr-vs-Scrydex drift ("Mew (Delta Species)" vs "Mew δ" share "mew";
+    # "Charizard VMAX (Rainbow)" vs "Charizard VMAX" share "charizard") while
+    # refusing a number-only match to a totally different card. Drives off the
+    # partial index idx_spc_lower_expansion_name — do NOT add
+    # `OR lower(expansion_name_en)` here: that column is unindexed and the OR
+    # forces a seq scan of the whole 1M-row cache per item (the bug that timed
+    # the worker out). The number/name filters run on the few hundred rows the
+    # expansion index already narrowed to.
+    name_ors = []
+    name_params: list = []
+    for t in tokens:
+        name_ors.append("product_name ILIKE %s")
+        name_ors.append("product_name_en ILIKE %s")
+        name_params.extend([f"%{t}%", f"%{t}%"])
+    name_overlap = "(" + " OR ".join(name_ors) + ")"
+
     if set_name:
         rows = db.query(
-            """
-            SELECT DISTINCT scrydex_id
-            FROM scrydex_price_cache
-            WHERE product_type='card' AND price_type='raw' AND market_price IS NOT NULL
-              AND COALESCE(language_code, 'EN') = 'EN'
-              AND lower(expansion_name) = lower(%s)
-              AND (card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[]))
-            """,
-            (set_name, num_forms, num_forms),
+            "SELECT DISTINCT scrydex_id FROM scrydex_price_cache "
+            "WHERE product_type='card' AND price_type='raw' AND market_price IS NOT NULL "
+            "AND COALESCE(language_code, 'EN') = 'EN' "
+            "AND lower(expansion_name) = lower(%s) "
+            "AND (card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[])) "
+            "AND " + name_overlap,
+            tuple([set_name, num_forms, num_forms] + name_params),
         )
         if len(rows) == 1:
             sid, tier = rows[0]["scrydex_id"], "set+number"
 
-    # Tier B — same number + every significant name token, game-scoped. Catches
+    # Tier B — same number + EVERY significant name token, game-scoped. Catches
     # sets whose Collectr name differs from Scrydex's ("Sword & Shield Promo" →
     # "SWSH Black Star Promos") while still abstaining if the number+name match
     # points at more than one card. Direct indexed query (product_name trigram +
     # number) instead of the heavy scored search_cards — same exactly-one
     # confidence, a fraction of the cost.
     if not sid:
-        tokens = sorted(_autolink_name_tokens(item.get("product_name")), key=len, reverse=True)[:3]
-        if tokens:
-            where = ["product_type='card'", "price_type='raw'", "market_price IS NOT NULL",
-                     "COALESCE(language_code, 'EN') = 'EN'",
-                     "game = %s",
-                     "(card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[]))"]
-            params = [game, num_forms, num_forms]
-            for t in tokens:
-                where.append("(product_name ILIKE %s OR product_name_en ILIKE %s)")
-                params.extend([f"%{t}%", f"%{t}%"])
-            rows = db.query(
-                "SELECT DISTINCT scrydex_id FROM scrydex_price_cache WHERE "
-                + " AND ".join(where) + " LIMIT 5",
-                tuple(params),
-            )
-            if len(rows) == 1:
-                sid, tier = rows[0]["scrydex_id"], "name+number"
+        where = ["product_type='card'", "price_type='raw'", "market_price IS NOT NULL",
+                 "COALESCE(language_code, 'EN') = 'EN'",
+                 "game = %s",
+                 "(card_number = ANY(%s::text[]) OR printed_number = ANY(%s::text[]))"]
+        params = [game, num_forms, num_forms]
+        for t in tokens:
+            where.append("(product_name ILIKE %s OR product_name_en ILIKE %s)")
+            params.extend([f"%{t}%", f"%{t}%"])
+        rows = db.query(
+            "SELECT DISTINCT scrydex_id FROM scrydex_price_cache WHERE "
+            + " AND ".join(where) + " LIMIT 5",
+            tuple(params),
+        )
+        if len(rows) == 1:
+            sid, tier = rows[0]["scrydex_id"], "name+number"
 
     if not sid:
         return None
