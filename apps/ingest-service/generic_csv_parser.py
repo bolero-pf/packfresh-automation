@@ -31,6 +31,7 @@ class GenericParsedItem(NamedTuple):
     card_number: str
     rarity: str
     condition: str
+    variance: str  # printing/foil: Normal, Foil, Holofoil, Reverse Holofoil, etc.
     quantity: int
     market_price: Decimal  # per-unit
     tcgplayer_id: int | None
@@ -81,6 +82,10 @@ COLUMN_PATTERNS = {
     ],
     "condition": [
         r"^condition$", r"^card[_ ]?condition$", r"^cond$",
+    ],
+    "variance": [
+        r"^variance$", r"^variant$", r"^printing$", r"^finish$",
+        r"^foil$", r"^foiling$", r"^holo$", r"^holofoil$",
     ],
     "grade_company": [
         r"^grade[_ ]?company$", r"^grading[_ ]?company$",
@@ -179,6 +184,44 @@ def _normalize_condition(raw: str) -> str:
     return mapping.get(raw.strip().lower(), "NM")
 
 
+# Condition values that only make sense for a single card (sealed product has
+# no card condition). Used as a raw signal when no card number is present.
+_RAW_CONDITION_VALUES = {
+    "near mint", "nm", "mint", "m", "lightly played", "lp", "excellent",
+    "moderately played", "mp", "good", "heavily played", "hp", "played",
+    "damaged", "dmg", "poor",
+}
+
+
+def _normalize_variance(raw: str) -> str:
+    """Normalize a printing/foil column value to a display variant name that
+    round-trips through shared.price_cache._to_native_variant.
+
+    MTG/Manabox-style 'Foil' columns carry normal/foil/etched (or true/false);
+    real printing names ('Reverse Holofoil', 'Alt Art', 'Holofoil') already in
+    display form pass through unchanged. Empty cell → 'Normal' (matches the
+    Collectr parser default), so a mapped-but-blank printing column behaves the
+    same as Collectr.
+    """
+    v = (raw or "").strip()
+    if not v:
+        return "Normal"
+    low = v.lower()
+    if low in ("normal", "nonfoil", "non-foil", "non foil", "regular",
+               "none", "false", "no", "0"):
+        return "Normal"
+    if low in ("foil", "true", "yes", "1"):
+        return "Foil"
+    if low in ("holo", "holofoil"):
+        return "Holofoil"
+    if low in ("etched", "etched foil", "foil etched", "etchedfoil"):
+        return "Etched Foil"
+    if low in ("reverse", "reverse holo", "reverse foil", "reverse holofoil",
+               "reverse holo foil"):
+        return "Reverse Holofoil"
+    return v
+
+
 def _guess_type(row: dict, mapping: dict) -> str:
     """Guess if an item is raw or sealed based on available data."""
     # If explicitly provided
@@ -190,15 +233,32 @@ def _guess_type(row: dict, mapping: dict) -> str:
         if val in ("sealed", "box", "pack", "etb", "bundle"):
             return "sealed"
 
-    # If card number + rarity present, it's raw
-    # Card numbers can be numeric (26/83), alphanumeric promos (SWSH039, SM102),
-    # or special subsets (GG28/GG70, RC8/RC32, TG15/TG30, XY123)
     card_col = mapping.get("card_number")
     rarity_col = mapping.get("rarity")
-    if card_col and rarity_col:
-        card_num = (row.get(card_col) or "").strip()
-        rarity = (row.get(rarity_col) or "").strip()
-        if card_num and rarity:
+    cond_col = mapping.get("condition")
+    var_col = mapping.get("variance")
+
+    # Card numbers can be numeric (26/83), alphanumeric promos (SWSH039, SM102),
+    # or special subsets (GG28/GG70, RC8/RC32, TG15/TG30, XY123).
+    card_num = (row.get(card_col) or "").strip() if card_col else ""
+    rarity = (row.get(rarity_col) or "").strip() if rarity_col else ""
+
+    # Strongest signal: card number + rarity together.
+    if card_num and rarity:
+        return "raw"
+
+    # Many singles carry no collector number in a CSV — MTG tokens
+    # ("Shrike Token"), Secret Lair drops, promos. A real card condition, a
+    # rarity, or a printing/foil value each mean "single", not sealed product.
+    if cond_col:
+        cond = (row.get(cond_col) or "").strip().lower()
+        if cond in _RAW_CONDITION_VALUES:
+            return "raw"
+    if rarity:
+        return "raw"
+    if var_col:
+        var = (row.get(var_col) or "").strip().lower()
+        if var and var not in ("none", "n/a", "-"):
             return "raw"
 
     return "sealed"
@@ -266,6 +326,7 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
     card_col = mapping.get("card_number")
     rarity_col = mapping.get("rarity")
     cond_col = mapping.get("condition")
+    var_col = mapping.get("variance")
     tcg_col = mapping.get("tcgplayer_id")
     photo_col = mapping.get("photo_url")
     gc_col = mapping.get("grade_company")
@@ -335,6 +396,7 @@ def parse_generic_csv(file_content: str, column_overrides: dict = None) -> Gener
                 card_number=(row.get(card_col) or "").strip() if card_col else "",
                 rarity=(row.get(rarity_col) or "").strip() if rarity_col else "",
                 condition=_normalize_condition(row.get(cond_col, "NM")) if cond_col else "NM",
+                variance=_normalize_variance(row.get(var_col, "")) if var_col else "",
                 quantity=quantity,
                 market_price=market_price,
                 tcgplayer_id=tcgplayer_id,
@@ -385,6 +447,6 @@ def detect_csv_columns(file_content: str) -> dict:
         "preview_rows": preview,
         "required_fields": ["name", "quantity", "price"],
         "optional_fields": ["set_name", "card_number", "rarity", "condition",
-                            "grade_company", "grade_value",
+                            "variance", "grade_company", "grade_value",
                             "tcgplayer_id", "product_type", "photo_url"],
     }
