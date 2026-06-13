@@ -264,6 +264,7 @@ class ShopifyClient:
                 id title handle status tags
                 featuredImage { url }
                 variants(first: 10) {
+                  pageInfo { hasNextPage endCursor }
                   edges { node { id title price sku barcode inventoryQuantity
                     inventoryItem { id
                       unitCost { amount }
@@ -315,8 +316,7 @@ class ShopifyClient:
                     or "[DAMAGED]" in node.get("title", "").upper()
                 )
 
-                for var_edge in node["variants"]["edges"]:
-                    variant = var_edge["node"]
+                def _variant_row(variant):
                     # Shopify variant.title is the joined option values
                     # ("Crimson", "Crimson / Small"). It's "Default Title" for
                     # single-variant products — treat that as no label so the
@@ -333,7 +333,7 @@ class ShopifyClient:
                                 unit_cost = float(cost_data["amount"])
                             except (ValueError, TypeError):
                                 pass
-                    page_products.append({
+                    return {
                         "product_gid":        node["id"],
                         "shopify_product_id": int(node["id"].split("/")[-1]),
                         "title":              node["title"],
@@ -353,12 +353,57 @@ class ShopifyClient:
                         "unit_cost":          unit_cost,
                         "image_url":          image_url,
                         "era":                era,
-                    })
+                    }
+
+                for var_edge in node["variants"]["edges"]:
+                    page_products.append(_variant_row(var_edge["node"]))
+
+                # Products with more variants than the inline page (e.g. dice
+                # with 30+ colors) would otherwise be truncated to the first 10,
+                # so those variants never reach inventory_product_cache and are
+                # unselectable in the store-link picker. Page through the rest.
+                v_pageinfo = node["variants"].get("pageInfo") or {}
+                if v_pageinfo.get("hasNextPage"):
+                    for variant in self._iter_remaining_variants(
+                            node["id"], v_pageinfo.get("endCursor")):
+                        page_products.append(_variant_row(variant))
 
             has_next = data["products"]["pageInfo"]["hasNextPage"]
             cursor = data["products"]["pageInfo"].get("endCursor") if has_next else None
             yield page_products, has_next
             if has_next:
+                time.sleep(0.3)
+
+    def _iter_remaining_variants(self, product_gid: str, after_cursor: str):
+        """Page through a single product's variants beyond the inline first
+        page. Used by iter_products_pages for products with >10 variants so the
+        cache holds every variant (a single-product variants(first:100) query is
+        cheap, well under the cost limit). Yields raw variant nodes."""
+        query = """
+        query($id: ID!, $after: String) {
+          product(id: $id) {
+            variants(first: 100, after: $after) {
+              pageInfo { hasNextPage endCursor }
+              edges { node { id title price sku barcode inventoryQuantity
+                inventoryItem { id
+                  unitCost { amount }
+                  inventoryLevels(first: 1) {
+                    edges { node { quantities(names: ["committed"]) { name quantity } } }
+                  }
+                }
+              } }
+            }
+          }
+        }
+        """
+        while after_cursor:
+            data = self._gql(query, {"id": product_gid, "after": after_cursor})
+            vconn = ((data.get("product") or {}).get("variants") or {})
+            for edge in vconn.get("edges", []):
+                yield edge["node"]
+            pinfo = vconn.get("pageInfo") or {}
+            after_cursor = pinfo.get("endCursor") if pinfo.get("hasNextPage") else None
+            if after_cursor:
                 time.sleep(0.3)
 
     def get_all_products(self, batch_size: int = 100) -> list[dict]:
