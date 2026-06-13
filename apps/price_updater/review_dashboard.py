@@ -1161,10 +1161,21 @@ def api_raw_rebind_apply():
     except (ValueError, TypeError):
         tcg_int = None
     if tcg_int:
+        # Match the exact (tcgplayer_id, variant) first: one tcgplayer_id can
+        # hold multiple variants with different art (Base Set 1st-Ed vs
+        # Unlimited Shadowless), so tcg alone is ambiguous there. Normalize the
+        # variant string so the chip's display value lines up with the cache.
         img = shared_db.query_one(
             "SELECT image_large FROM scrydex_price_cache "
-            "WHERE tcgplayer_id = %s AND image_large IS NOT NULL LIMIT 1",
-            (tcg_int,))
+            "WHERE tcgplayer_id = %s AND image_large IS NOT NULL "
+            "AND regexp_replace(lower(coalesce(variant,'')),'[^a-z0-9]','','g') "
+            "= regexp_replace(lower(coalesce(%s,'')),'[^a-z0-9]','','g') LIMIT 1",
+            (tcg_int, variant))
+        if not img:
+            img = shared_db.query_one(
+                "SELECT image_large FROM scrydex_price_cache "
+                "WHERE tcgplayer_id = %s AND image_large IS NOT NULL LIMIT 1",
+                (tcg_int,))
         if img:
             image_url = img.get("image_large")
 

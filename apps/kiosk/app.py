@@ -329,6 +329,50 @@ GAME_FILTER_SCHEMA = {
 }
 
 
+def _resolve_cache_image(tcg, variant, sid):
+    """Resolve the correct cache image for a card, variant-aware.
+
+    The image is variant-specific, but the right key depends on the game:
+      - One Piece (and most TCGs) give every variant its own tcgplayer_id, so
+        tcgplayer_id alone pins the art; scrydex_id is shared across all
+        printings, so MAX(image_large) by scrydex_id returns the wrong variant.
+      - Pokemon Base Set 1st-Ed vs Unlimited Shadowless (and MTG prerelease
+        stamps) share ONE tcgplayer_id but have different art — there the
+        variant disambiguates.
+    So: exact (tcgplayer_id, normalized variant) first, then any image for the
+    tcgplayer_id, then scrydex_id as a last resort. Returns a dict with
+    img_l/img_m/img_s or None. Variant strings are normalized (lowercase, strip
+    non-alphanumerics) so raw_cards "Unlimitedshadowless" matches cache
+    "unlimitedShadowless".
+    """
+    sx = None
+    if tcg:
+        sx = db.query_one("""
+            SELECT image_large AS img_l, image_medium AS img_m,
+                   image_small AS img_s
+            FROM scrydex_price_cache
+            WHERE tcgplayer_id = %s AND image_large IS NOT NULL
+              AND regexp_replace(lower(coalesce(variant,'')),'[^a-z0-9]','','g')
+                  = regexp_replace(lower(coalesce(%s,'')),'[^a-z0-9]','','g')
+            LIMIT 1
+        """, (tcg, variant))
+        if not sx:
+            sx = db.query_one("""
+                SELECT image_large AS img_l, image_medium AS img_m,
+                       image_small AS img_s
+                FROM scrydex_price_cache
+                WHERE tcgplayer_id = %s AND image_large IS NOT NULL
+                LIMIT 1
+            """, (tcg,))
+    if not sx and sid:
+        sx = db.query_one("""
+            SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
+                   MAX(image_small) AS img_s
+            FROM scrydex_price_cache WHERE scrydex_id = %s
+        """, (sid,))
+    return sx
+
+
 def _classify_era(set_name: str) -> str:
     """Map a set_name to an era using case-insensitive prefix match.
     Anything unmatched (Base Set, Jungle, Fossil, Team Rocket, Gym, Neo,
@@ -1037,21 +1081,7 @@ def browse():
             if nrow and nrow.get("n"):
                 n_variants = int(nrow["n"])
         if not image_url and (tcg or sid):
-            sx = None
-            if tcg:
-                sx = db.query_one("""
-                    SELECT image_large AS img_l, image_medium AS img_m,
-                           image_small AS img_s
-                    FROM scrydex_price_cache
-                    WHERE tcgplayer_id = %s AND image_large IS NOT NULL
-                    LIMIT 1
-                """, (tcg,))
-            if not sx and sid:
-                sx = db.query_one("""
-                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
-                           MAX(image_small) AS img_s
-                    FROM scrydex_price_cache WHERE scrydex_id = %s
-                """, (sid,))
+            sx = _resolve_cache_image(tcg, r.get("variant_raw"), sid)
             if sx:
                 image_url = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
 
@@ -2257,24 +2287,8 @@ def card_detail():
     for c in copies:
         d = dict(c)
         if not d.get("image_url") and (d.get("scrydex_id") or d.get("tcgplayer_id")):
-            sx = None
-            # Prefer the variant-unique tcgplayer_id: scrydex_id is shared
-            # across all printings of a One Piece card, so MAX(image_large)
-            # by scrydex_id returns an arbitrary (wrong) variant's art.
-            if d.get("tcgplayer_id"):
-                sx = db.query_one("""
-                    SELECT image_large AS img_l, image_medium AS img_m,
-                           image_small AS img_s
-                    FROM scrydex_price_cache
-                    WHERE tcgplayer_id = %s AND image_large IS NOT NULL
-                    LIMIT 1
-                """, (d["tcgplayer_id"],))
-            if not sx and d.get("scrydex_id"):
-                sx = db.query_one("""
-                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
-                           MAX(image_small) AS img_s
-                    FROM scrydex_price_cache WHERE scrydex_id = %s
-                """, (d["scrydex_id"],))
+            sx = _resolve_cache_image(d.get("tcgplayer_id"), d.get("variant"),
+                                      d.get("scrydex_id"))
             if sx:
                 d["image_url"] = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
         out.append(d)
