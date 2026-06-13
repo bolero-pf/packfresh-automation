@@ -693,12 +693,16 @@ def shopify_session_store_check(session_id):
 
 @bp.route("/api/store/search", methods=["GET"])
 def store_search():
-    """Search inventory_product_cache by title. Matching is space- and
-    punctuation-insensitive so a query typed as one word ('dragonisles') still
-    hits a multi-word title ('Dragon Isles'). Results are ranked exact →
-    exact-ignoring-spaces → prefix → substring, shortest title first, so a
-    short query ('dragon', 'ink') surfaces the actual product instead of
-    burying it under long card titles that happen to contain the substring."""
+    """Search inventory_product_cache by title + variant_label. Matching is
+    space- and punctuation-insensitive so a query typed as one word
+    ('dragonisles') still hits a multi-word title ('Dragon Isles'). The query is
+    matched against title AND variant_label combined, so a product with many
+    same-title variants (e.g. dice colors — 'Chessex Opaque' with 30+ colors)
+    can be narrowed by typing the variant ('chessex opaque grey'). Results are
+    ranked exact → exact-ignoring-spaces → prefix → substring, shortest title
+    first, so a short query ('dragon', 'ink') surfaces the actual product
+    instead of burying it under long card titles that happen to contain the
+    substring. The LIMIT is high enough to show every variant of a product."""
     import re as _re
     try:
         q = request.args.get("q", "").strip()
@@ -718,6 +722,11 @@ def store_search():
             tokens = [t.lower() for t in q_stripped.split() if len(t) > 1]
 
         TITLE_NORM = "regexp_replace(lower(title), '[^a-z0-9]', '', 'g')"
+        # Combined haystack: title + variant_label. Lets a query that names the
+        # variant ('chessex opaque grey') narrow a multi-variant product down to
+        # the matching color, instead of returning every variant identically.
+        SEARCH_TXT = "(coalesce(title, '') || ' ' || coalesce(variant_label, ''))"
+        SEARCH_NORM = f"regexp_replace(lower({SEARCH_TXT}), '[^a-z0-9]', '', 'g')"
 
         def ranked(conditions_sql, where_params):
             return db.query(
@@ -731,18 +740,19 @@ def store_search():
                             (title ILIKE %s) DESC,
                             ({TITLE_NORM} LIKE %s) DESC,
                             length(title) ASC, title ASC, variant_label ASC NULLS FIRST
-                   LIMIT 25""",
+                   LIMIT 200""",
                 tuple(where_params) + (q_stripped.lower(), q_norm, f"{q_stripped}%", f"{q_norm}%")
             )
 
         # Primary: raw substring OR space-insensitive substring OR all tokens present.
-        conds = ["title ILIKE %s"]
+        # All matched against title+variant_label so the variant text is searchable.
+        conds = [f"{SEARCH_TXT} ILIKE %s"]
         params = [f"%{q_stripped}%"]
         if len(q_norm) >= 2:
-            conds.append(f"{TITLE_NORM} LIKE %s")
+            conds.append(f"{SEARCH_NORM} LIKE %s")
             params.append(f"%{q_norm}%")
         if tokens:
-            conds.append("(" + " AND ".join(["title ILIKE %s"] * len(tokens)) + ")")
+            conds.append("(" + " AND ".join([f"{SEARCH_TXT} ILIKE %s"] * len(tokens)) + ")")
             params.extend(f"%{t}%" for t in tokens)
 
         rows = ranked(" OR ".join(conds), params)
@@ -751,7 +761,7 @@ def store_search():
         # still finds the base product via its most distinctive tokens.
         if not rows and len(tokens) > 2:
             majority = sorted(tokens, key=len, reverse=True)[:max(2, len(tokens) - 1)]
-            mc = " AND ".join(["title ILIKE %s"] * len(majority))
+            mc = " AND ".join([f"{SEARCH_TXT} ILIKE %s"] * len(majority))
             rows = ranked(mc, [f"%{t}%" for t in majority])
 
         results = [_serialize(dict(r)) for r in rows]
