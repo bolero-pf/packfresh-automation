@@ -928,16 +928,22 @@ def update_item_price(item_id: str, new_market_price: Decimal, session_id: str) 
     if not item:
         raise ValueError("Item not found")
 
-    offer_price, _ = calc_offer_price(
+    offer_price, unit_cost_basis = calc_offer_price(
         new_market_price, item["quantity"], offer_pct,
         product_type=item.get("product_type", "raw"),
         bulk_tiers=tiers)
 
+    # unit_cost_basis MUST move with the price. Recalculating offer_price but
+    # leaving the old unit_cost_basis stranded the per-unit COGS at the prior
+    # (typically higher, NM-priced) value — e.g. a card mapped at the NM price
+    # then corrected down to its LP/MP market kept the NM cost basis, which
+    # ingestion copies verbatim to raw_cards.cost_basis. The nightly reprice
+    # then refused to price the card below that inflated COGS.
     execute("""
         UPDATE intake_items
-        SET market_price = %s, offer_price = %s
+        SET market_price = %s, offer_price = %s, unit_cost_basis = %s
         WHERE id = %s
-    """, (new_market_price, offer_price, item_id))
+    """, (new_market_price, offer_price, unit_cost_basis, item_id))
 
     _recalculate_session_totals(session_id)
     return query_one("SELECT * FROM intake_items WHERE id = %s", (item_id,))
