@@ -1020,31 +1020,40 @@ def browse():
         tcg = r["tcgplayer_id"]
         image_url = r["image_url"]
         n_variants = 1
-        if sid or tcg:
+        # n_variants is a CARD-level count (how many printings exist for this
+        # card) so it keys on scrydex_id. The image, however, is
+        # VARIANT-specific: in One Piece every variant (base foil, alt art,
+        # manga alt, wanted poster…) shares ONE scrydex_id but has its own
+        # tcgplayer_id and its own art. Keying the image off scrydex_id with
+        # MAX() returned the lexicographically-greatest URL — the alt-art
+        # "…A/B/C/D" suffix always beat the base "…/large" — so a base foil
+        # showed the alt-art image. Resolve the image by the variant-unique
+        # tcgplayer_id first; fall back to scrydex_id only when tcg is null.
+        if sid:
+            nrow = db.query_one("""
+                SELECT COUNT(DISTINCT variant) AS n
+                FROM scrydex_price_cache WHERE scrydex_id = %s
+            """, (sid,))
+            if nrow and nrow.get("n"):
+                n_variants = int(nrow["n"])
+        if not image_url and (tcg or sid):
             sx = None
-            if sid:
+            if tcg:
                 sx = db.query_one("""
-                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
-                           MAX(image_small) AS img_s,
-                           COUNT(DISTINCT variant) AS n
+                    SELECT image_large AS img_l, image_medium AS img_m,
+                           image_small AS img_s
                     FROM scrydex_price_cache
-                    WHERE scrydex_id = %s
-                """, (sid,))
-            elif tcg:
-                # Multiple scrydex products can share a tcgplayer_id (reprints,
-                # cross-set promos). For image purposes any of them is fine.
-                sx = db.query_one("""
-                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
-                           MAX(image_small) AS img_s,
-                           COUNT(DISTINCT variant) AS n
-                    FROM scrydex_price_cache
-                    WHERE tcgplayer_id = %s
+                    WHERE tcgplayer_id = %s AND image_large IS NOT NULL
+                    LIMIT 1
                 """, (tcg,))
+            if not sx and sid:
+                sx = db.query_one("""
+                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
+                           MAX(image_small) AS img_s
+                    FROM scrydex_price_cache WHERE scrydex_id = %s
+                """, (sid,))
             if sx:
-                if not image_url:
-                    image_url = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
-                if sx.get("n"):
-                    n_variants = int(sx["n"])
+                image_url = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
 
         # variant_key is the bucket value used for filtering & cart matching
         # (NULL/normal/holofoil all fold to ''). variant_label is the badge
@@ -2249,18 +2258,23 @@ def card_detail():
         d = dict(c)
         if not d.get("image_url") and (d.get("scrydex_id") or d.get("tcgplayer_id")):
             sx = None
-            if d.get("scrydex_id"):
+            # Prefer the variant-unique tcgplayer_id: scrydex_id is shared
+            # across all printings of a One Piece card, so MAX(image_large)
+            # by scrydex_id returns an arbitrary (wrong) variant's art.
+            if d.get("tcgplayer_id"):
+                sx = db.query_one("""
+                    SELECT image_large AS img_l, image_medium AS img_m,
+                           image_small AS img_s
+                    FROM scrydex_price_cache
+                    WHERE tcgplayer_id = %s AND image_large IS NOT NULL
+                    LIMIT 1
+                """, (d["tcgplayer_id"],))
+            if not sx and d.get("scrydex_id"):
                 sx = db.query_one("""
                     SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
                            MAX(image_small) AS img_s
                     FROM scrydex_price_cache WHERE scrydex_id = %s
                 """, (d["scrydex_id"],))
-            else:
-                sx = db.query_one("""
-                    SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
-                           MAX(image_small) AS img_s
-                    FROM scrydex_price_cache WHERE tcgplayer_id = %s
-                """, (d["tcgplayer_id"],))
             if sx:
                 d["image_url"] = sx.get("img_l") or sx.get("img_m") or sx.get("img_s")
         out.append(d)

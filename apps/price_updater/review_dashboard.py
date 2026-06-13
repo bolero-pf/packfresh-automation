@@ -1140,6 +1140,7 @@ def api_raw_rebind_apply():
     raw_card_ids = body.get("raw_card_ids") or []
     scrydex_id   = (body.get("scrydex_id") or "").strip()
     variant      = (body.get("variant") or "").strip()
+    tcgplayer_id = body.get("tcgplayer_id")
     auto_block   = bool(body.get("auto_block"))
     block_label  = (body.get("block_label") or "").strip() or None
 
@@ -1148,13 +1149,37 @@ def api_raw_rebind_apply():
     if not scrydex_id or not variant:
         return jsonify({"ok": False, "error": "scrydex_id and variant required"}), 400
 
+    # tcgplayer_id is the variant-unique key — in One Piece every variant
+    # shares one scrydex_id, so binding scrydex_id + variant alone left the
+    # stale image_url in place and the kiosk (which renders raw_cards.image_url
+    # directly) kept showing the old art. Pin the exact printing's image by
+    # resolving it from the cache via tcgplayer_id, and persist both columns.
+    image_url = None
+    tcg_int = None
     try:
+        tcg_int = int(tcgplayer_id) if tcgplayer_id not in (None, "") else None
+    except (ValueError, TypeError):
+        tcg_int = None
+    if tcg_int:
+        img = shared_db.query_one(
+            "SELECT image_large FROM scrydex_price_cache "
+            "WHERE tcgplayer_id = %s AND image_large IS NOT NULL LIMIT 1",
+            (tcg_int,))
+        if img:
+            image_url = img.get("image_large")
+
+    try:
+        # COALESCE so a chip that lacks a tcg/image (rare graded-only printings)
+        # never wipes an existing value — it just leaves those columns as-is.
         updated = shared_db.execute(
             """UPDATE raw_cards
-                  SET scrydex_id = %s, variant = %s
+                  SET scrydex_id = %s,
+                      variant = %s,
+                      tcgplayer_id = COALESCE(%s, tcgplayer_id),
+                      image_url = COALESCE(%s, image_url)
                 WHERE id = ANY(%s::uuid[])
                   AND state IN ('STORED','DISPLAY')""",
-            (scrydex_id, variant, raw_card_ids),
+            (scrydex_id, variant, tcg_int, image_url, raw_card_ids),
         )
     except Exception as e:
         return jsonify({"ok": False, "error": f"DB update failed: {e}"}), 502

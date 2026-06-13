@@ -1107,6 +1107,11 @@ class PriceCache:
                             "top_grade": key,
                             "top_price": market_f,
                             "_pref": cur_pref,
+                            # Variant-unique key + image so the rebind chip can
+                            # pin the right printing's art on bind (see kiosk
+                            # One Piece alt-art image fix).
+                            "_tcgplayer_id": r.get("tcgplayer_id"),
+                            "_image_large": r.get("image_large"),
                         }
 
         # Determine primary variant and market price
@@ -1128,7 +1133,9 @@ class PriceCache:
         # a "graded only — bind + auto-block" affordance, distinct from
         # bindable raw chips.
         graded_only = {
-            v: {"top_grade": info["top_grade"], "top_price": info["top_price"]}
+            v: {"top_grade": info["top_grade"], "top_price": info["top_price"],
+                "_tcgplayer_id": info.get("_tcgplayer_id"),
+                "_image_large": info.get("_image_large")}
             for v, info in graded_variants_seen.items()
             if v not in variants_data
         }

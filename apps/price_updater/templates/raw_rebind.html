@@ -278,7 +278,10 @@
                     const conds = variantsMap[v] || {};
                     const nm = (conds['Near Mint'] || conds['NM'] || {});
                     const price = nm.price != null ? `$${Number(nm.price).toFixed(2)}` : '—';
-                    return `<span class="chip" data-variant="${esc(v)}" data-scrydex="${esc(scrydexId)}">
+                    // _tcgplayer_id is the variant-unique key the bind needs to
+                    // pin the correct printing's image (alt arts share scrydex_id).
+                    const vtcg = conds._tcgplayer_id != null ? String(conds._tcgplayer_id) : '';
+                    return `<span class="chip" data-variant="${esc(v)}" data-scrydex="${esc(scrydexId)}" data-tcg="${esc(vtcg)}">
                         <span class="vname">${esc(v)}</span>
                         <span class="vprice">${price}</span>
                     </span>`;
@@ -297,9 +300,11 @@
                 const info = gradedOnly[v] || {};
                 const top = info.top_grade ? info.top_grade.toUpperCase().replace(/(\D+)(\d.*)/, '$1 $2') : '';
                 const price = info.top_price != null ? `$${Number(info.top_price).toFixed(2)}` : '';
+                const gtcg = info._tcgplayer_id != null ? String(info._tcgplayer_id) : '';
                 return `<span class="chip chip-graded-only"
                               data-variant="${esc(v)}"
                               data-scrydex="${esc(scrydexId)}"
+                              data-tcg="${esc(gtcg)}"
                               data-block="1"
                               title="No raw market in Scrydex for this printing (typical for shinies / promos). Click to bind anyway and auto-block from the nightly run — you'll manage price by hand.">
                     <span class="vname">${esc(v)}</span>
@@ -361,11 +366,12 @@
             showToast('Missing scrydex_id or variant on chip', 'err');
             return;
         }
+        const tcg = chip.dataset.tcg || '';
         const autoBlock = chip.dataset.block === '1';
-        applyBind(scrydexId, variant, autoBlock);
+        applyBind(scrydexId, variant, tcg, autoBlock);
     });
 
-    async function applyBind(scrydexId, variant, autoBlock) {
+    async function applyBind(scrydexId, variant, tcg, autoBlock) {
         const prompt = autoBlock
             ? `Bind ${activeIds.length} copy(ies) to ${scrydexId} / ${variant} AND auto-block from nightly pricing? Use this for graded-only printings (no raw market in Scrydex). You'll set current_price by hand via the raw editor.`
             : `Bind ${activeIds.length} copy(ies) to ${scrydexId} / ${variant}?`;
@@ -379,6 +385,7 @@
                     raw_card_ids: activeIds,
                     scrydex_id:   scrydexId,
                     variant:      variant,
+                    tcgplayer_id: tcg || null,
                     auto_block:   !!autoBlock,
                 }),
             });
