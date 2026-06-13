@@ -346,7 +346,9 @@ def _resolve_cache_image(tcg, variant, sid):
     "unlimitedShadowless".
     """
     sx = None
+    nvar = "".join(ch for ch in (variant or "").lower() if ch.isalnum())
     if tcg:
+        # 1) exact (tcgplayer_id, normalized variant)
         sx = db.query_one("""
             SELECT image_large AS img_l, image_medium AS img_m,
                    image_small AS img_s
@@ -356,13 +358,46 @@ def _resolve_cache_image(tcg, variant, sid):
                   = regexp_replace(lower(coalesce(%s,'')),'[^a-z0-9]','','g')
             LIMIT 1
         """, (tcg, variant))
+        # 2) Base Set shadowless tiebreak. "1st Edition" and "Shadowless" share
+        #    one tcgplayer_id with different art (1st Ed = stamped no-shadow,
+        #    Shadowless = no-stamp no-shadow "2nd run"; true Unlimited has its
+        #    own tcg_id). Operator labels ("Shadowless", "Shadowless Holofoil")
+        #    don't string-match the cache's clunky "unlimitedShadowless" /
+        #    "firstEditionShadowless" names, so resolve by edition signal:
+        #    1st Ed is always explicitly labeled, so a 1st-ed label takes the
+        #    firstEdition image; any other shadowless takes the non-1st-ed one.
+        if not sx and "shadowless" in nvar:
+            if "firstedition" in nvar or nvar.startswith(("1st", "first")):
+                sx = db.query_one("""
+                    SELECT image_large AS img_l, image_medium AS img_m,
+                           image_small AS img_s
+                    FROM scrydex_price_cache
+                    WHERE tcgplayer_id = %s AND image_large IS NOT NULL
+                      AND regexp_replace(lower(variant),'[^a-z0-9]','','g')
+                          LIKE '%%firstedition%%'
+                    LIMIT 1
+                """, (tcg,))
+            else:
+                sx = db.query_one("""
+                    SELECT image_large AS img_l, image_medium AS img_m,
+                           image_small AS img_s
+                    FROM scrydex_price_cache
+                    WHERE tcgplayer_id = %s AND image_large IS NOT NULL
+                      AND regexp_replace(lower(variant),'[^a-z0-9]','','g')
+                          LIKE '%%shadowless%%'
+                      AND regexp_replace(lower(variant),'[^a-z0-9]','','g')
+                          NOT LIKE '%%firstedition%%'
+                    LIMIT 1
+                """, (tcg,))
+        # 3) tcg-level image, but ONLY when the tcg_id is unambiguous (one
+        #    distinct image) — never pick arbitrarily among differing art.
         if not sx:
             sx = db.query_one("""
-                SELECT image_large AS img_l, image_medium AS img_m,
-                       image_small AS img_s
+                SELECT MIN(image_large) AS img_l, MIN(image_medium) AS img_m,
+                       MIN(image_small) AS img_s
                 FROM scrydex_price_cache
                 WHERE tcgplayer_id = %s AND image_large IS NOT NULL
-                LIMIT 1
+                HAVING COUNT(DISTINCT image_large) = 1
             """, (tcg,))
     if not sx and sid:
         sx = db.query_one("""

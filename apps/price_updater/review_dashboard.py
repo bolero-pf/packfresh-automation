@@ -1163,18 +1163,42 @@ def api_raw_rebind_apply():
     if tcg_int:
         # Match the exact (tcgplayer_id, variant) first: one tcgplayer_id can
         # hold multiple variants with different art (Base Set 1st-Ed vs
-        # Unlimited Shadowless), so tcg alone is ambiguous there. Normalize the
-        # variant string so the chip's display value lines up with the cache.
+        # Shadowless share a tcg_id), so tcg alone is ambiguous there. Normalize
+        # the variant string so the chip's display value lines up with the cache.
+        nvar = "".join(ch for ch in (variant or "").lower() if ch.isalnum())
         img = shared_db.query_one(
             "SELECT image_large FROM scrydex_price_cache "
             "WHERE tcgplayer_id = %s AND image_large IS NOT NULL "
             "AND regexp_replace(lower(coalesce(variant,'')),'[^a-z0-9]','','g') "
             "= regexp_replace(lower(coalesce(%s,'')),'[^a-z0-9]','','g') LIMIT 1",
             (tcg_int, variant))
+        # Shadowless tiebreak: operator labels ("Shadowless") don't string-match
+        # the cache's "unlimitedShadowless"/"firstEditionShadowless". 1st Ed is
+        # always explicitly labeled, so a 1st-ed label takes the firstEdition
+        # image; any other shadowless takes the non-1st-ed (Shadowless) image.
+        if not img and "shadowless" in nvar:
+            if "firstedition" in nvar or nvar.startswith(("1st", "first")):
+                img = shared_db.query_one(
+                    "SELECT image_large FROM scrydex_price_cache "
+                    "WHERE tcgplayer_id = %s AND image_large IS NOT NULL "
+                    "AND regexp_replace(lower(variant),'[^a-z0-9]','','g') "
+                    "LIKE '%%firstedition%%' LIMIT 1",
+                    (tcg_int,))
+            else:
+                img = shared_db.query_one(
+                    "SELECT image_large FROM scrydex_price_cache "
+                    "WHERE tcgplayer_id = %s AND image_large IS NOT NULL "
+                    "AND regexp_replace(lower(variant),'[^a-z0-9]','','g') "
+                    "LIKE '%%shadowless%%' "
+                    "AND regexp_replace(lower(variant),'[^a-z0-9]','','g') "
+                    "NOT LIKE '%%firstedition%%' LIMIT 1",
+                    (tcg_int,))
+        # tcg-level image only when the tcg_id is unambiguous (one distinct image)
         if not img:
             img = shared_db.query_one(
-                "SELECT image_large FROM scrydex_price_cache "
-                "WHERE tcgplayer_id = %s AND image_large IS NOT NULL LIMIT 1",
+                "SELECT MIN(image_large) AS image_large FROM scrydex_price_cache "
+                "WHERE tcgplayer_id = %s AND image_large IS NOT NULL "
+                "HAVING COUNT(DISTINCT image_large) = 1",
                 (tcg_int,))
         if img:
             image_url = img.get("image_large")
