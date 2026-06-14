@@ -665,9 +665,13 @@ let _pollTimer = null;
 // purely a visual aid for staff, not persisted.
 let _sealedTicks = new Set();
 
-function toggleSealedTick(holdItemId) {
-  if (_sealedTicks.has(holdItemId)) _sealedTicks.delete(holdItemId);
-  else _sealedTicks.add(holdItemId);
+function toggleSealedTick(holdItemIds) {
+  // Accepts a single id or a comma-joined list (a grouped "× N" sealed row
+  // covers every underlying hold_item). Tick all when any is unticked,
+  // otherwise untick all — so the group checkmark is all-or-nothing.
+  const ids = String(holdItemIds).split(',').filter(Boolean);
+  const allTicked = ids.every(id => _sealedTicks.has(id));
+  ids.forEach(id => { if (allTicked) _sealedTicks.delete(id); else _sealedTicks.add(id); });
   if (_holdData) renderHoldDetail(_holdData);
 }
 
@@ -875,23 +879,42 @@ function renderHoldDetail(d) {
       <div style="font-size:0.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;">${sectionLabel}</div>
       <div style="font-size:0.72rem;color:var(--dim);margin-top:2px;">No scanning required. Shopify decrements inventory at POS.</div>
     </div>`;
-    html += products.map(item => {
+    // Collapse identical sealed/slab items (same SKU/variant) into one
+    // "× N" line — a 5-pack order shows "Chaos Rising × 5" instead of five
+    // rows. The group's tick covers every underlying hold_item.
+    const prodGroups = new Map();
+    const prodOrder  = [];
+    products.forEach(item => {
+      const k = _slipItemKey(item);
+      if (!prodGroups.has(k)) {
+        const g = Object.assign({ qty: 0, _ids: [] }, item);
+        prodGroups.set(k, g);
+        prodOrder.push(g);
+      }
+      const g = prodGroups.get(k);
+      g.qty += 1;
+      if (item.hold_item_id) g._ids.push(item.hold_item_id);
+    });
+    html += prodOrder.map(item => {
       const kindLabel = (item.item_kind === 'slab') ? 'Slab' : 'Sealed';
       const price = parseFloat(item.current_price || 0);
-      const ticked = _sealedTicks.has(item.hold_item_id);
+      const ticked = item._ids.length > 0 && item._ids.every(id => _sealedTicks.has(id));
       const isItemClosed = ['ACCEPTED','REJECTED','CANCELLED'].includes(item.item_status);
+      const qtyBadge = item.qty > 1
+        ? ` <span style="color:var(--accent);font-weight:800;">× ${item.qty}</span>`
+        : '';
       return `
       <div class="scan-item no-hover" style="margin-bottom:6px;padding:10px 14px;border-radius:8px;${ticked||isItemClosed?'background:rgba(74,222,128,0.06);border-color:var(--green);':''}">
-        <div class="scan-check" style="cursor:pointer;" onclick="toggleSealedTick('${item.hold_item_id}')" title="${ticked?'Untick':'Tick when grabbed'}">${(ticked||isItemClosed) ? '✓' : '○'}</div>
+        <div class="scan-check" style="cursor:pointer;" onclick="toggleSealedTick('${item._ids.join(',')}')" title="${ticked?'Untick':'Tick when grabbed'}">${(ticked||isItemClosed) ? '✓' : '○'}</div>
         ${item.image_url ? `<img src="${esc(item.image_url)}" style="width:38px;height:38px;object-fit:contain;border-radius:4px;background:var(--surface2);">` : ''}
         <div style="flex:1;min-width:0;">
           <div style="font-weight:600;font-size:0.88rem;">
             <span class="badge" style="background:rgba(232,197,71,0.18);color:var(--accent);font-size:0.62rem;padding:1px 6px;border-radius:4px;margin-right:6px;">${kindLabel}</span>
-            ${esc(item.card_name)}
+            ${esc(item.card_name)}${qtyBadge}
           </div>
           <div style="font-size:0.75rem;color:var(--dim);">
             ${item.prod_barcode ? `Barcode: <code style="font-family:var(--mono);">${esc(item.prod_barcode)}</code>` : item.sku ? `SKU: <code style="font-family:var(--mono);">${esc(item.sku)}</code>` : ''}
-            ${price ? ` · $${price.toFixed(2)}` : ''}
+            ${price ? ` · $${price.toFixed(2)}${item.qty>1?` ea · $${(price*item.qty).toFixed(2)} total`:''}` : ''}
           </div>
         </div>
       </div>`;
