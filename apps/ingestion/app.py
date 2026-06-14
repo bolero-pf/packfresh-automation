@@ -1834,8 +1834,9 @@ def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
     cost      = _unit_cost_basis(item, qty)
     item_id   = item.get("id")
 
+    raw_variant = _resolve_raw_variant(item)
     card_name, set_name, image_url, ppt_card_number = _resolve_raw_card_display_data(
-        tcg_id, card_name, set_name, scrydex_id=sx_id
+        tcg_id, card_name, set_name, scrydex_id=sx_id, variant=raw_variant
     )
     card_type, _ = _resolve_storage_card_type(item, tcg_id, sx_id)
 
@@ -1864,7 +1865,7 @@ def _barcode_raw_item(item: dict, destination: str = "storage") -> dict:
             ppt_card_number or item.get("card_number"), condition, canonicalize_rarity(item.get("rarity")),
             state, cost, charm_ceil_raw(item.get("market_price", cost)),
             image_url,
-            _resolve_raw_variant(item), card_type,
+            raw_variant, card_type,
             item.get("session_id"),
             str(item_id) if item_id else None,
         ))
@@ -2062,7 +2063,7 @@ def _push_raw_item(item: dict) -> dict:
 
     # Scrydex image fallback for JP / Scrydex-only cards (no TCG image, or no tcg_id at all)
     if not image_url:
-        image_url = _scrydex_image_fallback(sx_id, tcg_id)
+        image_url = _scrydex_image_fallback(sx_id, tcg_id, variant=_resolve_raw_variant(item))
 
     # Last-resort game lookup if cache miss + PPT lookup failed: hit
     # scrydex_price_cache directly by tcgplayer_id (cross-game).
@@ -2160,32 +2161,52 @@ def _push_raw_item(item: dict) -> dict:
     }
 
 
-def _scrydex_image_fallback(scrydex_id, tcg_id):
-    """Pull image_large/medium/small from scrydex_price_cache for JP/Scrydex-only
-    cards that PPT can't serve (no tcgplayer_id, or PPT lookup returned no image)."""
-    if not (scrydex_id or tcg_id):
-        return None
-    try:
-        if scrydex_id:
-            row = db.query_one("""
-                SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
-                       MAX(image_small) AS img_s
-                FROM scrydex_price_cache WHERE scrydex_id = %s
-            """, (scrydex_id,))
-        else:
-            row = db.query_one("""
-                SELECT MAX(image_large) AS img_l, MAX(image_medium) AS img_m,
-                       MAX(image_small) AS img_s
-                FROM scrydex_price_cache WHERE tcgplayer_id = %s
-            """, (int(tcg_id),))
-        if row:
-            return row.get("img_l") or row.get("img_m") or row.get("img_s")
-    except Exception as e:
-        logger.debug(f"Scrydex image fallback failed (sid={scrydex_id}, tcg={tcg_id}): {e}")
+def _variant_cache_image(tcg_id, scrydex_id, variant):
+    """Resolve the variant-correct cache image, mirroring kiosk _resolve_cache_image.
+
+    The image is variant-specific. One Piece (and most TCGs) share ONE scrydex_id
+    across every printing (base foil, alt art, manga, ...) but give each its own
+    tcgplayer_id + image — so a plain scrydex_id lookup (MAX / arbitrary row)
+    returns the wrong art for alt-arts. Priority: exact tcgplayer_id (variant-
+    unique for OP) with a normalized-variant tiebreak for the rarer case where
+    one tcg_id holds multiple arts (Pokemon Base Set 1st-Ed vs Unlimited), then
+    scrydex_id last with the same variant tiebreak. Returns a URL or None.
+    """
+    nvar = "".join(ch for ch in (variant or "").lower() if ch.isalnum())
+    for key_col, key_val in (("tcgplayer_id", int(tcg_id) if tcg_id else None),
+                             ("scrydex_id", scrydex_id)):
+        if not key_val:
+            continue
+        try:
+            row = db.query_one(f"""
+                SELECT image_large AS img_l, image_medium AS img_m,
+                       image_small AS img_s
+                FROM scrydex_price_cache
+                WHERE {key_col} = %s AND image_large IS NOT NULL
+                ORDER BY
+                    (regexp_replace(lower(coalesce(variant,'')),'[^a-z0-9]','','g') = %s) DESC,
+                    fetched_at DESC
+                LIMIT 1
+            """, (key_val, nvar))
+            if row:
+                img = row.get("img_l") or row.get("img_m") or row.get("img_s")
+                if img:
+                    return img
+        except Exception as e:
+            logger.debug(f"variant cache image lookup failed ({key_col}={key_val}): {e}")
     return None
 
 
-def _resolve_raw_card_display_data(tcg_id, card_name, set_name, scrydex_id=None):
+def _scrydex_image_fallback(scrydex_id, tcg_id, variant=None):
+    """Pull a variant-correct image from scrydex_price_cache for JP/Scrydex-only
+    cards that PPT can't serve (no tcgplayer_id, or PPT lookup returned no image).
+    Variant-aware so an alt-art doesn't fall back to the base foil image."""
+    if not (scrydex_id or tcg_id):
+        return None
+    return _variant_cache_image(tcg_id, scrydex_id, variant)
+
+
+def _resolve_raw_card_display_data(tcg_id, card_name, set_name, scrydex_id=None, variant=None):
     """Resolve card_name / set_name / image / card_number for raw_cards INSERT.
 
     Scrydex-first per repo rule (CLAUDE.md):
@@ -2236,7 +2257,12 @@ def _resolve_raw_card_display_data(tcg_id, card_name, set_name, scrydex_id=None)
         card_name = (scrydex_row.get("product_name") or card_name)
         set_name  = (scrydex_row.get("expansion_name") or set_name)
         ppt_card_number = scrydex_row.get("card_number") or ppt_card_number
-        image_url = (scrydex_row.get("image_large")
+        # Name/set/number are card-level (same across printings) so the
+        # arbitrary scrydex_row above is fine for them — but the IMAGE is
+        # variant-specific. Resolve it variant-aware so an OP alt-art doesn't
+        # inherit the base foil art that shares its scrydex_id.
+        image_url = (_variant_cache_image(tcg_id, scrydex_id, variant)
+                     or scrydex_row.get("image_large")
                      or scrydex_row.get("image_medium")
                      or scrydex_row.get("image_small"))
 
@@ -2315,7 +2341,8 @@ def _push_raw_to_display(item: dict) -> dict:
     qty       = item.get("quantity", 1)
     cost      = _unit_cost_basis(item, qty)
 
-    card_name, set_name, image_url, ppt_card_number = _resolve_raw_card_display_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
+    card_name, set_name, image_url, ppt_card_number = _resolve_raw_card_display_data(
+        tcg_id, card_name, set_name, scrydex_id=sx_id, variant=_resolve_raw_variant(item))
 
     # Game-aware: Magic cards only land in Magic binders, etc.
     card_type = _canonical_card_type(item.get("game") or "pokemon")
@@ -2454,7 +2481,8 @@ def _push_raw_to_grade(item: dict) -> dict:
     qty       = item.get("quantity", 1)
     cost      = _unit_cost_basis(item, qty)
 
-    card_name, set_name, image_url, ppt_card_number = _resolve_raw_card_display_data(tcg_id, card_name, set_name, scrydex_id=sx_id)
+    card_name, set_name, image_url, ppt_card_number = _resolve_raw_card_display_data(
+        tcg_id, card_name, set_name, scrydex_id=sx_id, variant=_resolve_raw_variant(item))
 
     for _ in range(qty):
         barcode_id = generate_barcode_id() if generate_barcode_id else str(_uuid.uuid4())[:20]
@@ -3699,7 +3727,17 @@ def route_summary(session_id):
             FROM scrydex_price_cache
             WHERE (i.tcgplayer_id IS NOT NULL AND tcgplayer_id = i.tcgplayer_id)
                OR (i.scrydex_id IS NOT NULL AND scrydex_id = i.scrydex_id)
-            ORDER BY fetched_at DESC
+            -- Image is variant-specific. One Piece (and most TCGs) give every
+            -- printing its own tcgplayer_id but share ONE scrydex_id, so the
+            -- scrydex_id branch of the OR pulls in every variant's row. Without
+            -- this priority an alt-art item (correct per-variant tcg_id) would
+            -- still grab the base foil image when fetched_at ties. Prefer the
+            -- exact tcg_id match, then a normalized variant match, then recency.
+            ORDER BY
+                (i.tcgplayer_id IS NOT NULL AND tcgplayer_id = i.tcgplayer_id) DESC,
+                (regexp_replace(lower(coalesce(variant,'')),'[^a-z0-9]','','g')
+                   = regexp_replace(lower(coalesce(i.variant, i.variance, '')),'[^a-z0-9]','','g')) DESC,
+                fetched_at DESC
             LIMIT 1
         ) img ON true
         WHERE i.session_id = %s
@@ -3885,7 +3923,17 @@ def route_enriched(session_id):
             FROM scrydex_price_cache
             WHERE (i.tcgplayer_id IS NOT NULL AND tcgplayer_id = i.tcgplayer_id)
                OR (i.scrydex_id IS NOT NULL AND scrydex_id = i.scrydex_id)
-            ORDER BY fetched_at DESC
+            -- Image is variant-specific. One Piece (and most TCGs) give every
+            -- printing its own tcgplayer_id but share ONE scrydex_id, so the
+            -- scrydex_id branch of the OR pulls in every variant's row. Without
+            -- this priority an alt-art item (correct per-variant tcg_id) would
+            -- still grab the base foil image when fetched_at ties. Prefer the
+            -- exact tcg_id match, then a normalized variant match, then recency.
+            ORDER BY
+                (i.tcgplayer_id IS NOT NULL AND tcgplayer_id = i.tcgplayer_id) DESC,
+                (regexp_replace(lower(coalesce(variant,'')),'[^a-z0-9]','','g')
+                   = regexp_replace(lower(coalesce(i.variant, i.variance, '')),'[^a-z0-9]','','g')) DESC,
+                fetched_at DESC
             LIMIT 1
         ) img ON true
         WHERE i.session_id = %s

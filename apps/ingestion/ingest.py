@@ -148,7 +148,17 @@ def get_session_items(session_id: str, include_missing: bool = False) -> list[di
             FROM scrydex_price_cache
             WHERE (i.tcgplayer_id IS NOT NULL AND tcgplayer_id = i.tcgplayer_id)
                OR (i.scrydex_id IS NOT NULL AND scrydex_id = i.scrydex_id)
-            ORDER BY fetched_at DESC
+            -- Image is variant-specific. One Piece (and most TCGs) give every
+            -- printing its own tcgplayer_id but share ONE scrydex_id, so the
+            -- scrydex_id branch of the OR pulls in every variant's row. Without
+            -- this priority an alt-art item (correct per-variant tcg_id) would
+            -- still grab the base foil image when fetched_at ties. Prefer the
+            -- exact tcg_id match, then a normalized variant match, then recency.
+            ORDER BY
+                (i.tcgplayer_id IS NOT NULL AND tcgplayer_id = i.tcgplayer_id) DESC,
+                (regexp_replace(lower(coalesce(variant,'')),'[^a-z0-9]','','g')
+                   = regexp_replace(lower(coalesce(i.variant, i.variance, '')),'[^a-z0-9]','','g')) DESC,
+                fetched_at DESC
             LIMIT 1
         ) img ON true
         WHERE i.session_id = %s
